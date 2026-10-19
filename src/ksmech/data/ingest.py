@@ -25,6 +25,7 @@ class IngestResult:
     steps: list[ElementaryStep] = field(default_factory=list)
     rejections: list[Rejection] = field(default_factory=list)
     notes: Counter[str] = field(default_factory=Counter)  # non-fatal normalizations, counted
+    sections: dict[str, dict] = field(default_factory=dict)  # extra report blocks, by name
     _seen: set[str] = field(default_factory=set, repr=False)
 
     def add(self, step_id: str, raw: str, make: Callable[[], ElementaryStep]) -> None:
@@ -62,6 +63,7 @@ class IngestResult:
             "rejected_fraction": self.rejected_fraction,
             "rejections_by_reason": dict(self.reason_counts().most_common()),
             "notes": dict(self.notes.most_common()),
+            **self.sections,
         }
 
 

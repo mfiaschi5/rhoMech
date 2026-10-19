@@ -70,7 +70,8 @@ Running log. One entry per non-obvious choice, newest last, each with a date.
   despite the brief. The fields are `None`, and `step_index` is `None` when `pathway_id` is
   `None`. Consequences:
   - "Random by pathway" degenerates to a per-step random split. Consecutive steps of one
-    reaction may land in different sets.
+    reaction may land in different sets. (Superseded the same day: pathways are rebuilt by
+    chaining. See "Rebuilding PMechDB pathways" below.)
   - Leave-one-class-out cannot run on PMechDB, and raises a clear error instead.
 - **Bare metals**: 55 records write a metal as a bare bracket atom (`[K]`, `[CuH2]`). RDKit
   gives it radical electrons. These are left untouched: they are spectators that no arrow
@@ -171,3 +172,91 @@ balance were not requested. They cost nothing, and 0 real records fail them.
 - **Changed packing.** `_assign_groups` now puts a group larger than the whole train target into
   train, with a warning, instead of letting it fall through to test. The 78% group would have
   fallen through with fractions such as (0.7, 0.15, 0.15).
+
+## 2026-10-19 — Rebuilding PMechDB pathways
+
+This section ends "Proceeding without PMechDB pathway grouping" above. It fills `pathway_id` and
+`step_index` and changes no metric or split code. The pathway metrics start reporting numbers, and
+`split_by_molecule`, the PMechDB default, also joins steps that share a pathway id.
+
+### No grouping column exists
+
+Every file variant in `data/raw/pmechrp/` was checked:
+
+- `raw/` and `scaffold_split/` hold the reaction and the arrow code.
+- `reformatted/` adds the source and sink molecules.
+- The Chemformer, Graph2SMILES, Molecular Transformer and T5Chem copies hold tokenized source and
+  target only.
+
+None of them has a reaction id, reference, DOI, textbook page or upload batch. Line order carries
+no grouping either, because the files are shuffled: only 45 of 10,522 chain links (below) join
+adjacent lines.
+
+### Chaining rule (`ksmech.data.pathways`, called from `pmechdb.load`)
+
+- **Link** i → j when the *non-trivial* products of i equal the non-trivial reactants of j.
+  - Both sides are compared as multisets of map-free canonical SMILES, with stereo kept.
+  - A species is trivial when it has at most 3 heavy atoms (`chem.nontrivial_species`): water,
+    H3O+, OH-, halides, metal ions, MeOH, NH3 and the like. Curators add or drop these between
+    consecutive steps, so they would break true links.
+  - Empty keys never link. 378 steps have only trivial reactants and 342 only trivial products.
+    Linking empty keys would join all of them into one pathway.
+- **Pathway**: a weakly connected component of these links with at least 2 steps. Unlinked steps
+  keep `pathway_id = None`.
+- **Size cap of 15 steps.** An oversize component is cut at its shared intermediates.
+  - A shared intermediate is a product key that more than one step makes or more than one step
+    consumes.
+  - Each cut removes every link through one such key: the one with the fewest heavy atoms, ties
+    going to the most producer × consumer pairs. Cuts repeat until every piece is within the cap.
+  - The cut is needed because a common substrate (made at the end of one reaction, used at the
+    start of others) glues unrelated reactions together. The raw components reach 219 steps.
+  - A piece with no shared intermediate is a plain chain, with in- and out-degree at most 1. It
+    is **kept whole, however long** (user decision, 2026-10-19), because the cap exists to catch
+    hub merges and these have none. Four such chains exist: 16, 18, 20 and 36 steps. The 36-step
+    one is three Paal–Knorr pyrrole formations on a single tris(1,4-diketone).
+- **`pathway_id`** is `<source>-path-` + sha1(id of the first step)[:16]. The first step has
+  the smallest `(step_index, step_id)`.
+- **`step_index`** is the BFS depth from the pathway's start steps. Start steps are found in this
+  order:
+  1. the steps that no other step of the pathway leads to;
+  2. if every step has a predecessor (the release curates reverse steps, so 2-cycles are
+     common), the steps that start a forward chain once reverse pairs are ignored;
+  3. if there are none of those either, the smallest step_id.
+
+  Branches share an index: 205 pathways have more than one step at index 0.
+- The gate set before filling ids was "median component size ≥ 2 and no component over 15". The
+  median is taken over pathways only, which gives 3. Counting the 3,820 unlinked steps as size-1
+  components would give 1. The only steps over 15 are the four plain chains above.
+
+Measured on the 13,091 accepted steps:
+
+| Quantity | Value |
+|---|---|
+| links / reverse pairs | 10,522 / 829 |
+| steps with >1 successor / >1 predecessor (reverse links ignored, before cuts) | 847 / 802 |
+| raw components with ≥2 steps / largest | 2,168 / 219 |
+| components that needed cutting / intermediates cut | 25 / 78 |
+| **pathways / steps in them** | **2,379 / 9,271 (70.8%)** |
+| median / max pathway size | 3 / 36 (15 without the plain chains) |
+
+Size distribution: 2:1039, 3:388, 4:290, 5:143, 6:192, 7:124, 8:51, 9:31, 10:35, 11:15, 12:41,
+13:17, 14:6, 15:3, 16:1, 18:1, 20:1, 36:1.
+
+Alternatives that were measured:
+
+- **Exact multiset of all species, spectators included.** 6,459 links, 2,589 pathways holding
+  60.6% of steps, largest 23, no cutting needed. It is cleaner, but it misses steps where the
+  curator added or dropped a small species. The rule above covers 10 points more.
+- **Next step's arrow-touched fragments contained in the previous step's products.** This
+  produces a 1,484-step component held together by common small molecules. Rejected.
+
+Ingest now takes about 30 s instead of 14 s, because both sides of every step are re-parsed to
+build the keys.
+
+### Effect on splits (seed 0, 80/10/10)
+
+| Split | chain links crossing sets | molecules in >1 set |
+|---|---|---|
+| `split_by_pathway`, no ids (before) | 3,505 / 10,522 | 3,458 / 14,072 |
+| `split_by_pathway` with rebuilt ids | 689 (the cut links) | 1,241 |
+| `split_by_molecule` (default, unchanged) | 0 | 0 |

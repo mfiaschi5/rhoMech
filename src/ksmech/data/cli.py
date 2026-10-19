@@ -81,6 +81,9 @@ def print_ingest_report(result: IngestResult, console: Console) -> None:
         for note, count in result.notes.most_common():
             notes.add_row(note, str(count))
         console.print(notes)
+    for name, section in result.sections.items():
+        rows = [(k, v) for k, v in section.items() if not isinstance(v, dict)]
+        console.print(_kv_table(name.capitalize(), rows))
 
 
 def cmd_stats(source: Source, processed: Path, console: Console) -> int:

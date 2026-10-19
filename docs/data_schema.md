@@ -128,8 +128,8 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 |---|---|---|
 | `step_id` | string | `pmechdb-` + first 16 hex chars of SHA-1 of the raw record (the text inside the quotes) |
 | `source` | string | `pmechdb`, `rmechdb`, `reactmech`, `mech_uspto`, `flower` |
-| `pathway_id` | string, nullable | null for PMechDB (not in the release) |
-| `step_index` | int32, nullable | null when `pathway_id` is null |
+| `pathway_id` | string, nullable | PMechDB: not in the release, rebuilt by chaining steps (`ksmech.data.pathways`, see `docs/decisions.md`); null for the 3,820 unlinked steps |
+| `step_index` | int32, nullable | BFS depth in the pathway (branches can share one); null when `pathway_id` is null |
 | `reactants_smiles` | string | canonical atom-mapped SMILES (see `docs/decisions.md`) |
 | `products_smiles` | string | same canonicalization |
 | `arrows` | list<struct<source_kind, source_atoms: list<int32>, sink_kind, sink_atoms: list<int32>>> | in written order |
@@ -138,3 +138,6 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`.
+
+`ingest_report.json` has a `pathways` block for PMechDB, the `PathwayReport` counts from
+`ksmech.data.pathways`: links, reverse pairs, cuts, pathway sizes and coverage.

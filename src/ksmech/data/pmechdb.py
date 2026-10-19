@@ -15,6 +15,7 @@ from functools import partial
 from pathlib import Path
 
 from ksmech.data.ingest import IngestResult
+from ksmech.data.pathways import assign_pathways
 from ksmech.data.schema import Arrow, ElementaryStep, SinkKind, Source, SourceKind
 from ksmech.data.validation import RejectReason, StepRejected, build_step, make_step_id
 
@@ -111,6 +112,14 @@ def load(raw: Path | None = None) -> IngestResult:
                 result.add(step_id, text, partial(parse_record, text, step_id))
             else:
                 result.add(step_id, text, partial(_malformed, len(row)))
+    result.steps, report = assign_pathways(result.steps)  # the release has no pathway ids
+    pathways = result.sections["pathways"] = report.as_dict()
+    log.info(
+        "pathways: %d groups hold %d of %d steps",
+        pathways["n_pathways"],
+        pathways["n_steps_in_pathways"],
+        pathways["n_steps"],
+    )
     return result
 
 

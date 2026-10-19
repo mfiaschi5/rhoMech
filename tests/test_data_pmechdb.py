@@ -131,9 +131,26 @@ def test_missing_raw_dir(tmp_path):
 # --- real data --------------------------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def real_result():
+    if not REAL_RAW.is_dir():
+        pytest.skip("PMechRP raw files not in data/raw/pmechrp")
+    return pmechdb.load(REAL_RAW)
+
+
 @pytest.mark.realdata
-@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="PMechRP raw files not in data/raw/pmechrp")
-def test_real_pmechdb_rejection_rate_below_2_percent():
-    result = pmechdb.load(REAL_RAW)
-    assert result.n_records == 13104
-    assert result.rejected_fraction < 0.02
+def test_real_pmechdb_rejection_rate_below_2_percent(real_result):
+    assert real_result.n_records == 13104
+    assert real_result.rejected_fraction < 0.02
+
+
+@pytest.mark.realdata
+def test_real_pmechdb_pathways(real_result):
+    """Measured 2026-10-19: 2,379 pathways hold 70.8% of steps (docs/decisions.md)."""
+    report = real_result.report()["pathways"]
+    assert report["fraction_in_pathways"] > 0.5 and report["median_pathway_size"] >= 2
+    over_cap = sum(v for k, v in report["pathway_sizes"].items() if int(k) > 15)
+    assert over_cap == report["n_long_chains_kept"]  # only plain chains may exceed the cap
+    steps = [s for s in real_result.steps if s.pathway_id is not None]
+    assert len(steps) == report["n_steps_in_pathways"]
+    assert all(s.step_index is not None and s.pathway_id.startswith("pmechdb-path-") for s in steps)
