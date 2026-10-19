@@ -108,3 +108,20 @@ def unmapped_canonical(mol: Chem.Mol) -> str:
     if std is None:
         raise SanitizeError(f"cannot standardize unmapped SMILES {smi!r}")
     return Chem.MolToSmiles(std)
+
+
+TRIVIAL_MAX_HEAVY_ATOMS = 3
+
+
+def nontrivial_species(smiles: str) -> list[str]:
+    """Sorted map-free canonical SMILES (stereo kept) of every fragment with more than 3 heavy
+    atoms, as a multiset.
+
+    Water, hydronium, hydroxide, halide and metal ions, methanol, ammonia and every other species
+    of at most 3 heavy atoms are dropped. They recur across unrelated reactions, and curators add
+    or drop them between consecutive steps, so they say nothing about which reaction a step
+    belongs to.
+    """
+    frags = fragments(parse_mapped(smiles))
+    keep = (f for f in frags if heavy_atom_count(f) > TRIVIAL_MAX_HEAVY_ATOMS)
+    return sorted(unmapped_canonical(f) for f in keep)
