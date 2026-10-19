@@ -1,12 +1,16 @@
+from dataclasses import replace
+
 import pytest
 
-from ksmech.data.stats import NO_CLASS, compute_stats, distribution
+from ksmech.data.stats import NO_CLASS, compute_stats, distribution, pathway_stats
 
 
 def test_stats_on_mini_fixture(mini_steps):
     stats = compute_stats(list(mini_steps.values()))
     assert stats["n_steps"] == 5
-    assert stats["n_pathways"] == 0 and stats["n_steps_without_pathway"] == 5
+    # no pathway ids (as in PMechDB): pathway metrics are skipped, not zero
+    assert stats["n_pathways"] is None and stats["steps_per_pathway"] is None
+    assert stats["n_steps_without_pathway"] == 5
     assert stats["steps_per_class"] == {NO_CLASS: 5}
     assert stats["arrows_per_step"] == {"2": 4, "3": 1}
     # resonance is the only intramolecular step
@@ -26,3 +30,16 @@ def test_distribution():
     assert d["n"] == 4 and d["min"] == 1 and d["max"] == 12
     assert d["hist"] == {"0-9": 3, "10-19": 1}
     assert distribution([]) == {"n": 0}
+
+
+def test_pathway_stats_skip_steps_without_a_pathway(mini_steps):
+    ids = ["p1", "p1", "p2", None, None]
+    steps = [replace(s, pathway_id=p) for s, p in zip(mini_steps.values(), ids, strict=True)]
+    stats = pathway_stats(steps)
+    assert stats["n_pathways"] == 2 and stats["n_steps_without_pathway"] == 2
+    assert stats["steps_per_pathway"]["min"] == 1 and stats["steps_per_pathway"]["max"] == 2
+    assert pathway_stats([]) == {
+        "n_pathways": None,
+        "n_steps_without_pathway": 0,
+        "steps_per_pathway": None,
+    }

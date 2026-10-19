@@ -24,8 +24,9 @@ def test_ingest_then_stats(tmp_path, capsys):
     out = capsys.readouterr().out
     for title in ("Arrows per step", "Heavy atoms per step", "Steps per mechanism class"):
         assert title in out
+    assert "Steps per pathway" not in out  # no pathway ids: the table is skipped
     stats = json.loads((out_dir / "stats.json").read_text())
-    assert stats["n_steps"] == 5
+    assert stats["n_steps"] == 5 and stats["n_pathways"] is None
 
 
 def test_stats_without_ingest_fails_cleanly(tmp_path, capsys):

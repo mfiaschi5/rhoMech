@@ -62,6 +62,14 @@ def test_pathway_split_never_breaks_a_pathway():
         assert all(len(v) == 1 for v in by_pathway.values())
 
 
+def test_pathway_split_without_any_pathway_id_is_per_step():
+    bare = [replace(s, pathway_id=None, step_index=None) for s in STEPS]
+    sp = splits.split_by_pathway(bare, seed=0)
+    _check_partition(sp)
+    assert (len(sp.train), len(sp.val), len(sp.test)) == (48, 6, 6)  # 60 one-step groups
+    _check_partition(splits.split_by_scaffold(bare, seed=0))
+
+
 def test_pathway_split_fractions():
     sp = splits.split_by_pathway(STEPS, (0.5, 0.25, 0.25), seed=3)
     # greedy group packing never overshoots a target and misses it by less than one group (3)

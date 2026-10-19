@@ -101,14 +101,16 @@ def _kv_table(title: str, rows: list[tuple[str, object]]) -> Table:
     table.add_column("key")
     table.add_column("value", justify="right")
     for k, v in rows:
-        table.add_row(k, f"{v:.3f}" if isinstance(v, float) else str(v))
+        table.add_row(k, "n/a" if v is None else f"{v:.3f}" if isinstance(v, float) else str(v))
     return table
 
 
-def _hist_table(title: str, hist: dict[str, int], label: str, limit: int = 25) -> Table:
+def _hist_table(
+    title: str, hist: dict[str, int], label: str, limit: int = 25, counted: str = "steps"
+) -> Table:
     table = Table(title=title)
     table.add_column(label)
-    table.add_column("steps", justify="right")
+    table.add_column(counted, justify="right")
     table.add_column("", no_wrap=True)
     top = max(hist.values(), default=1)
     for i, (k, v) in enumerate(hist.items()):
@@ -137,6 +139,9 @@ def print_stats(stats: dict, console: Console) -> None:
             ],
         )
     )
+    if stats["steps_per_pathway"] is not None:
+        hist = stats["steps_per_pathway"]["hist"]
+        console.print(_hist_table("Steps per pathway", hist, "steps", counted="pathways"))
     console.print(_hist_table("Steps per mechanism class", stats["steps_per_class"], "class"))
     console.print(_hist_table("Arrows per step", stats["arrows_per_step"], "arrows"))
     heavy = stats["heavy_atoms_per_step"]

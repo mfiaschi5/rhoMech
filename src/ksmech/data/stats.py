@@ -68,6 +68,18 @@ def distribution(values: Sequence[int], bin_width: int = 10) -> dict:
     }
 
 
+def pathway_stats(steps: Sequence[ElementaryStep]) -> dict:
+    """Pathway-level metrics over the steps that carry a `pathway_id`. Steps without one are
+    counted and skipped. With no pathway id at all (PMechDB today), every pathway metric is None,
+    so filling the ids later changes the numbers, not the code."""
+    sizes = Counter(s.pathway_id for s in steps if s.pathway_id is not None)
+    return {
+        "n_pathways": len(sizes) if sizes else None,
+        "n_steps_without_pathway": len(steps) - sum(sizes.values()),
+        "steps_per_pathway": distribution(list(sizes.values()), bin_width=5) if sizes else None,
+    }
+
+
 def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
     facts = [step_facts(s) for s in steps]
     n = len(steps)
@@ -82,8 +94,7 @@ def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
     return {
         "sources": sorted({str(s.source) for s in steps}),
         "n_steps": n,
-        "n_pathways": len({s.pathway_id for s in steps if s.pathway_id is not None}),
-        "n_steps_without_pathway": sum(s.pathway_id is None for s in steps),
+        **pathway_stats(steps),
         "steps_per_class": dict(classes.most_common()),
         "arrows_per_step": {
             str(k): v for k, v in sorted(Counter(f.n_arrows for f in facts).items())
@@ -115,6 +126,8 @@ def _frac(num: int, den: int) -> float | None:
 
 
 DEFINITIONS = {
+    "n_pathways": "distinct pathway_id values; null when no step has one",
+    "steps_per_pathway": "steps per pathway_id, over steps that have one; null when none do",
     "reactant_molecules": "connected fragments on the reactant side, incl. spectators and "
     "counter-ions; 'unique' compares map-free canonical SMILES",
     "heavy_atoms_per_step": "heavy atoms summed over all reactant fragments of a step",

@@ -118,3 +118,22 @@ balance were not requested. They cost nothing, and 0 real records fail them.
   produced fake "elementary" steps.
 - Both modules carry `untested_on_real_data=True` and must be checked against the real file (and
   `docs/data_schema.md` filled in) before use.
+
+## 2026-10-19 — Proceeding without PMechDB pathway grouping
+
+- PMechDB steps keep `pathway_id = None` and `step_index = None`. Both stay nullable in
+  `STEP_SCHEMA`. Rebuilding pathways by chaining steps is deferred to the
+  `claude/adoring-edison-6a4f37` branch.
+- **Pathway-level metrics skip missing ids instead of reporting zero.**
+  - When no step has an id, `stats.pathway_stats` returns `n_pathways = None` and
+    `steps_per_pathway = None`, and counts the id-less steps in `n_steps_without_pathway`.
+  - `ksmech-data stats` then prints `n/a` and leaves out the steps-per-pathway table.
+  - When only some steps have ids, the metrics cover those steps only.
+- **Splits already fall back.** `split_by_pathway` makes every id-less step its own group. A
+  test now checks that an all-`None` set gives an exact per-step 48/6/6 split. The scaffold split
+  anchors an id-less step on itself.
+- **Accepted cost while this holds.** On PMechDB, "random by pathway" is a per-step random split,
+  so consecutive steps of one reaction can land in different sets. Measured on the grouping
+  branch: 3,505 of 10,522 chain links cross sets at seed 0.
+- **Why.** Merging the grouping later only fills the two columns, and no metric or split code has
+  to change for it.
