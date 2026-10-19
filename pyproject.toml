@@ -20,6 +20,8 @@ dependencies = [
 
 [project.scripts]
 ksmech-data = "ksmech.data.cli:main"
+ksmech-qm = "ksmech.qm.cli:main"
+ksmech-orbitals = "ksmech.orbitals.cli:main"
 
 [dependency-groups]
 dev = [
@@ -43,4 +45,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "NPY"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-markers = ["realdata: runs on the real raw files in data/raw (skipped when absent)"]
+markers = [
+    "realdata: runs on the real raw files in data/raw (skipped when absent)",
+    "slow: runs GFN2 geometry optimizations (deselect with -m \"not slow\")",
+]

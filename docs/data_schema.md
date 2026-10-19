@@ -138,3 +138,39 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`.
+
+## QM cache: `data/cache/qm/<sha256>.npz`
+
+Written by `ksmech.qm` (one file per molecule and conformer). Fields were listed from a real
+cached file (acetone, 10 atoms, 22 AOs). `n` = atoms, `nao` = AOs, `nmo` = MOs (= `nao`). The file
+is a plain `.npz` (no pickle). `ksmech.qm.records.load_record` returns a `QMRecord`.
+
+The key is `sha256(f"{smiles}|{conformer_id}|{method}")`, where `smiles` is the map-free canonical
+SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
+`GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key).
+
+| Field | dtype, shape | Notes |
+|---|---|---|
+| `smiles`, `atom_order_smiles` | str, () | the second one defines the atom order: `Chem.AddHs(Chem.MolFromSmiles(atom_order_smiles))` |
+| `conformer_id`, `charge`, `unpaired` | int, () | charge = sum of formal charges, unpaired = sum of radical electrons |
+| `method`, `schema_version` | str / int, () | |
+| `atomic_numbers` | int32, (n,) | |
+| `coords_ang` | float64, (n, 3) | optimized geometry, Angstrom |
+| `energy_ha` | float64, () | total energy, Hartree (includes the ALPB term) |
+| `orbital_energies_ev` | float64, (nmo,) | eV |
+| `occupations` | float64, (nmo,) | restricted; radicals have a fractional SOMO (1.0) |
+| `C` | float64, (nao, nmo) | AO x MO, S-orthonormal: `C.T @ S @ C = 1` |
+| `S`, `H_core`, `fock` | float64, (nao, nao) | Hartree for the last two. `H_core` is tblite's core Hamiltonian; `fock = S C diag(eps) C.T S` is rebuilt from the converged MOs |
+| `charges` | float64, (n,) | Mulliken, positive = electron-poor |
+| `ao_atom`, `ao_l` | int32, (nao,) | atom index and angular momentum (0 s, 1 p, 2 d) of every AO; order per atom is s, p x3, d x5 |
+| `fukui_plus`, `fukui_minus`, `fukui_zero`, `fukui_dual` | float64, (n,) | finite difference N+-1 on Mulliken charges, NaN if unavailable |
+| `fukui_fmo_plus`, `fukui_fmo_minus` | float64, (n,) | frozen-orbital: Mulliken population of LUMO / HOMO |
+| `homo_ev`, `lumo_ev`, `chemical_potential_ev`, `hardness_ev`, `electrophilicity_ev` | float64, () | NaN without a frontier pair |
+| `buried_volume` | float64, (n,) | %Vbur, radius 3.5 A, hydrogens included, each atom as centre |
+| `warnings` | str, () | comma-separated codes: `FUKUI_SCF_FAIL`, `VBUR_FAIL`, `NO_FRONTIER`, `RESTRAINED_GEOM`, `EMBED_UFF_FALLBACK`, `EMBED_RANDOM_COORDS` |
+
+### Manifest: `data/processed/<source>/qm_manifest.parquet`
+
+One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cache_path`,
+`status` (`ok` / `failed`), `reason` (a `ReasonCode`, empty when ok), `detail`, `warnings`,
+`seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`.

@@ -10,6 +10,7 @@ from enum import StrEnum
 from rdkit import Chem
 
 from ksmech.data import chem
+from ksmech.data.resonance import is_resonance_step
 from ksmech.data.schema import Arrow, ElementaryStep, Source, SourceKind
 
 
@@ -146,6 +147,7 @@ def build_step(
     r_smi, p_smi = split_reaction(rxn_smiles)
     reactants, products = parse_side(r_smi, "reactants"), parse_side(p_smi, "products")
     validate(reactants, products, arrows, require_arrows)
+    resonance, _ = is_resonance_step(reactants, products)
     return ElementaryStep(
         step_id=step_id,
         source=source,
@@ -156,4 +158,5 @@ def build_step(
         arrows=list(arrows),
         mechanism_class=mechanism_class,
         conditions=conditions,
+        resonance_step=resonance,
     )

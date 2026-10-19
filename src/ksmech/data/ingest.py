@@ -58,6 +58,7 @@ class IngestResult:
             "inputs": self.inputs,
             "n_records": self.n_records,
             "n_accepted": len(self.steps),
+            "n_resonance_steps": sum(s.resonance_step for s in self.steps),
             "n_rejected": len(self.rejections),
             "rejected_fraction": self.rejected_fraction,
             "rejections_by_reason": dict(self.reason_counts().most_common()),

@@ -8,6 +8,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from ksmech.data.resonance import training_steps
 from ksmech.data.schema import STEP_SCHEMA, ElementaryStep, Source
 
 DEFAULT_PROCESSED_DIR = Path("data/processed")
@@ -33,5 +34,11 @@ def write_steps(steps: Iterable[ElementaryStep], path: Path) -> Path:
 
 
 def read_steps(path: Path) -> list[ElementaryStep]:
+    """Every accepted step, resonance steps included (flagged `resonance_step`)."""
     table = pq.read_table(path, schema=STEP_SCHEMA)
     return [ElementaryStep.from_dict(row) for row in table.to_pylist()]
+
+
+def read_training_steps(path: Path) -> list[ElementaryStep]:
+    """The training target: resonance steps dropped, `step_index` renumbered per pathway."""
+    return training_steps(read_steps(path))

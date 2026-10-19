@@ -117,6 +117,7 @@ class ElementaryStep:
     arrows: list[Arrow] = field(default_factory=list)
     mechanism_class: str | None = None
     conditions: str | None = None
+    resonance_step: bool = False  # reactants and products are resonance structures
 
     def __post_init__(self) -> None:
         self.source = Source(self.source)
@@ -132,6 +133,7 @@ class ElementaryStep:
             "arrows": [a.to_dict() for a in self.arrows],
             "mechanism_class": self.mechanism_class,
             "conditions": self.conditions,
+            "resonance_step": bool(self.resonance_step),
         }
 
     @classmethod
@@ -146,6 +148,7 @@ class ElementaryStep:
             arrows=[Arrow.from_dict(a) for a in d["arrows"]],
             mechanism_class=d["mechanism_class"],
             conditions=d["conditions"],
+            resonance_step=bool(d.get("resonance_step") or False),
         )
 
 
@@ -169,5 +172,6 @@ STEP_SCHEMA = pa.schema(
         pa.field("arrows", pa.list_(ARROW_TYPE), nullable=False),
         pa.field("mechanism_class", pa.string()),
         pa.field("conditions", pa.string()),
+        pa.field("resonance_step", pa.bool_()),
     ]
 )

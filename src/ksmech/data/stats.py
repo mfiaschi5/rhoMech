@@ -82,6 +82,8 @@ def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
     return {
         "sources": sorted({str(s.source) for s in steps}),
         "n_steps": n,
+        "n_resonance_steps": sum(s.resonance_step for s in steps),
+        "n_training_steps": n - sum(s.resonance_step for s in steps),
         "n_pathways": len({s.pathway_id for s in steps if s.pathway_id is not None}),
         "n_steps_without_pathway": sum(s.pathway_id is None for s in steps),
         "steps_per_class": dict(classes.most_common()),

@@ -18,12 +18,18 @@ next step, until the model emits a stop token.
 
 Two token levels share one sequence: atom tokens and localized orbital tokens.
 
-- Occupied orbitals: lone pair, sigma bond, pi bond.
-- Virtual orbitals: sigma*, pi*, empty p.
+An orbital token is a Pipek-Mezey localized orbital (occupied or virtual) described only by
+continuous physical descriptors: occupation; the number of centres and the weights and s/p/d
+composition of its main centres; for the two main centres the p-vector alignment with the
+axis, the sign and size of the overlap population and the distance; the spatial extent; and
+its spectral decomposition over the canonical MOs of its block (energies and weights). These
+descriptors are the model input, so orbital character is learned in a form that transfers
+across elements.
 
-Each orbital token carries its type, energy, 3D centroid, parent atoms, and AO composition.
-Functional-group labels are only an auxiliary embedding added to tokens. They are never the
-primary input and never decide which arrows are legal.
+Chemical labels (lone pair, sigma, pi, sigma*, pi*, empty p, ...) are still computed by a
+classifier and stored on each token, but only as diagnostics and as masks for arrow
+candidates. They are never model inputs. Functional-group labels are likewise only an
+auxiliary embedding added to atom tokens; they never decide which arrows are legal.
 
 ## Physics
 
@@ -76,8 +82,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
 
 - Data: `uv run ksmech-data ingest --source pmechdb` (parquet + rejections + report under
   `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
-- QM featurization: _not yet_
-- Orbital tokens: _not yet_
+- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`)
+- Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
+  and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
+  without a QM record are skipped and counted, so re-run after the QM batch), `uv run
+  ksmech-orbitals show --smiles 'CC(=O)C'` (token table of one cached molecule),
+  `uv run ksmech-orbitals fg-vocab --source pmechdb` (regenerate the functional-group vocabulary)
 - Arrow alignment: _not yet_
 - Physics baseline: _not yet_
 - Training: _not yet_
