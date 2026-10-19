@@ -74,7 +74,8 @@ uv run pre-commit install     # enable the ruff + pytest -x commit hook
 
 Main CLI entry points are added phase by phase and listed here as they land:
 
-- Data: _not yet_
+- Data: `uv run ksmech-data ingest --source pmechdb` (parquet + rejections + report under
+  `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
 - QM featurization: _not yet_
 - Orbital tokens: _not yet_
 - Arrow alignment: _not yet_

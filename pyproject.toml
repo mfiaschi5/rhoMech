@@ -18,6 +18,9 @@ dependencies = [
     "rich",
 ]
 
+[project.scripts]
+ksmech-data = "ksmech.data.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest",
@@ -40,3 +43,4 @@ select = ["E", "F", "I", "UP", "B", "SIM", "NPY"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = ["realdata: runs on the real raw files in data/raw (skipped when absent)"]
