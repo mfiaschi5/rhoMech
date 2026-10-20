@@ -87,7 +87,8 @@ Running log. One entry per non-obvious choice, newest last, each with a date.
 
 Parse → heavy-atom balance (`UNBALANCED`) → H balance → charge balance → map uniqueness and
 bijection → arrow atoms mapped → bond-source atoms bonded in the reactants (`BOND_NOT_FOUND`) →
-`apply_arrows_stub` (no-op until `ksmech.arrows` lands).
+the arrows, applied to the reactants, give the products (`ARROWS_MISMATCH`; a no-op stub until
+the arrow layer landed, see "Arrow replay in ingest validation", 2026-10-20).
 
 Balance runs first, so a step broken in several ways reports the most basic fault. H and charge
 balance were not requested. They cost nothing, and 0 real records fail them.
@@ -870,3 +871,205 @@ Supersedes "too few to act on now" in the schema-6 rebuild note above.
   - The build summary reports all of this (`fermi_smeared`, `masks.fractional_band`,
     `masks.fractional_band_removed`).
   - Contact table regenerated, unchanged (352,990 / 352,820 samples).
+
+## 2026-10-20 — Arrows: application, alignment, samples (`ksmech.arrows`, Prompt 4)
+
+`ksmech-arrows roundtrip | align | samples`; reports in `data/processed/<source>/`
+(`arrows_roundtrip.json`, `alignment_report.json`, `samples_report.json`).
+
+### Charge bookkeeping (`apply.apply_arrows`)
+
+- **One bond-electron-matrix edit per step.** Each arrow is one electron-pair move, from a
+  lone pair (N -= 2) or a bond (order -= 1) to a lone pair (N += 2) or a bond (order += 1).
+  All moves of a step are summed before the molecule is touched, and every touched atom's
+  charge changes by `dq = -(dN + dB)` (from `q = V - N - B`). Results:
+  - lone pair a -> atom b: a +1, b -1;
+  - heterolysis (a, c) -> c: a +1, c -1;
+  - bond (a, c) -> bond (a, b): c +1, b -1, a unchanged.
+
+  There is no per-arrow charge rule. A sink that also loses its leaving group in the same step
+  (SN2 carbon, E2 hydrogen) nets to 0 by the sum. The arrow order does not matter (tested on
+  the E2 fixture).
+- **Hydrogens and stereo.**
+  - Touched atoms have their H count frozen before the edit, so RDKit never refills a valence.
+  - A changed bond loses its E/Z flag.
+  - An atom whose neighbour set changes loses its chiral tag. Stereo is not tracked through a
+    step; PMechDB has stereo in 2 steps.
+- **Reason codes.**
+  - VALENCE: a lone-pair source on an atom with N < 2, a bond order outside 0..3, or an RDKit
+    valence error.
+  - SANITIZE: any other RDKit sanitization error.
+  - UNKNOWN_ARROW: an unknown shape, an atom missing from the molecule, or a bond from an atom
+    to itself.
+  - Radical arrows raise `NotImplementedError`.
+- **Lone pair -> bond (b, d) with the donor outside the bond** is the separate
+  `Displacement(donor, attacked, leaving)`. `schema.Arrow` stores bond tuples sorted, so the
+  attacked atom would be lost. PMechDB never writes this shape (0 ARROW_INVALID rejections).
+- **Round trip (all 12,944 PMechDB training steps, 11 s): 12,943 = 99.99%.**
+  - 12,942 steps reproduce the exact Kekulé SMILES. 1 matches only modulo resonance: the product
+    writes a phenyl ring in the other Kekulé form.
+  - With the 147 resonance steps included: 13,090 / 13,091.
+  - The single failure (MISMATCH, bond>atom, pmechdb-9946a45b6a5d6f2e): the product drops the
+    dative bond `[Na+]<-[C-:20]` without an arrow for it. It is left failing, not special-cased.
+  - This measurement predates the ingest check below. Since "Arrow replay in ingest
+    validation" the ingest rejects that step, and the round trip is 12,943 / 12,943.
+
+### Site-based alignment policy (`align`)
+
+- **Arrow roles.** An arrow that forms a bond (lone pair -> atom, lone pair -> own bond,
+  bond -> bond) has:
+  - a donor site a: the lone-pair atom, or the shared atom of bond -> bond;
+  - a partner c for a bond source;
+  - a sink b.
+
+  A heterolysis (bond (p, q) -> lone pair on q) forms no bond. When another arrow of the step
+  forms a bond at p, the heterolysis is that arrow's sink bond (b, d) = (p, q) and is absorbed
+  into its acceptor set. A bond -> bond arrow whose new bond forms at q is a sink bond at p in
+  the same way (the E2 relay). An unabsorbed heterolysis is unaligned (HETEROLYSIS_ONLY).
+- **Sets**, with every type-sounding test read from descriptors:
+  - "on an atom": the atom is a centre, i.e. weight >= tau_atom;
+  - "one-centre": `n_centers == 1`;
+  - "antibonding": overlap population < 0;
+  - "d-type": `is_d_type`, the main centre mostly d on an element without a valence d shell.
+
+  The rules themselves:
+  - Donors: every donor-candidate token on a. For a bond source, only those also on c;
+    SOURCE_RELAXED when none is.
+  - Acceptors: every acceptor-candidate token on b. With sink bonds, only those also on some
+    d; SINK_RELAXED when none is. SINK_RELAXED is not in the brief; it is the symmetric case.
+  - A test changing every token's `type` leaves all labels unchanged.
+- **Antibonding exclusion only for the arrow's own source bond (a, c).** A lone pair has no
+  bond, so nothing is excluded for it. The first version excluded the partner of every token
+  in the donor set, and a lone-pair set contains the sigma bonds of a, e.g. sigma(O-C) of a
+  tetrahedral C(O-)Cl. That intermediate's acceptor, at its restrained, stretched C-Cl, is a
+  three-centre token (C 0.60, O 0.20, Cl 0.15) whose leading centres are C and O. 5 arrows
+  lost their only acceptor that way.
+- **RESONANCE_FORM** (lone pair drawn on an atom with no one-centre occupied token).
+  - "The multi-centre tokens on that atom" cannot be read literally: C-H sigma tokens have two
+    centres too.
+  - The donors are therefore the tokens the drawing has no bond for: tokens on a shared with a
+    partner x by more tokens than the drawn order a-x (an implicit H counts as order 1), plus
+    tokens with three or more centres.
+  - Acetaldehyde enolate, GFN2: the carbanion pair is a two-centre C=C pi token (0.68 / 0.31),
+    not a lone pair. The carbanion drawing (lone pair on CH2) and the enolate drawing (C=C
+    bond source) both give donor site CH2 and donor set {sigma(C-C), pi(C=C)} on the same
+    tokens (tested).
+- **ALIGN_FALLBACK**: the nearest candidate tokens of the site's fragment by centroid
+  distance, within 0.25 Angstrom of the nearest.
+- **Sinks on only-d atoms** (the 2026-10-19 follow-up): flagged SINK_ONLY_D and counted
+  (`n_sinks_on_only_d_atoms`) whether they align by fallback or not. A bare halide sink has no
+  acceptor candidate in its fragment, so it is unaligned NO_ACCEPTOR.
+- **Teacher representatives** (r*, s*): the member with the largest weight on its site. Ties go
+  to the higher-energy donor and the lower-energy acceptor.
+- **Measured.** Only 539 of the 12,944 training steps have every reactant fragment tokenized;
+  12,405 were skipped as MISSING_TOKENS, because the QM batch is stopped at 2,001 of 14,383
+  molecules.
+  - Arrows: 1,092 in total. 580 labels and 440 absorbed heterolyses = **93.4% aligned**; 100%
+    of the bond-forming arrows have a label.
+  - **ALIGN_FALLBACK 0%.** SOURCE_RELAXED, SINK_RELAXED and RESONANCE_FORM 1.55% each (9 labels
+    each: beta-silicate C-Si pairs held on C, stretched C-Cl in restrained tetrahedral
+    intermediates, ylides and diazo/diazonium N).
+  - Mean set size: donor 3.15, acceptor 1.67.
+  - Sinks on only-d atoms: 0.
+  - 467 of the 539 steps are complete.
+- **Open spec point: a lone heterolysis has no 4-tuple.** All 72 unaligned arrows are
+  unimolecular ionizations (Si-O, C-O, P-Br, I-O, B-O, Si-Cl, Si-F, C-N, ... bonds breaking with
+  no bond forming). Over the whole training set, without tokens: 805 of 12,944 steps (6.2%),
+  805 of 25,782 arrows (3.1%). The tokenized subset over-represents them (13% of its steps),
+  because small molecules were featurized first. They need a decoder action the spec does not
+  have, for example "ionize: donor r on (p, q), site q, no acceptor". Until then these steps
+  are skipped as UNALIGNED_ARROW.
+
+### Kekulization and sink rules in `apply_predicted_arrows`
+
+The spec rule taken literally reproduced 421 / 467 = 90.1% of the completely aligned steps
+(VALENCE 23, MISMATCH 23). The rule was fixed, not the steps. Arrows are applied in order;
+each electron pair moves once per step (a bond decremented earlier in the step is not
+decremented again).
+
+- **Source.**
+  - Lone pair when the site is negative in the current state, or carries a one-centre occupied
+    token, **and** has at least 2 nonbonding electrons in the current Lewis structure.
+  - Otherwise a bond a-c, chosen in this order:
+    1. a multiple bond to a centre of the donor token;
+    2. the same after a Kekulé switch (`ResonanceMolSupplier(KEKULE_ALL)`, same formal charges,
+       every accumulated bond change still in 0..3, at most 64 structures);
+    3. a single bond to a donor-token centre (sigma donors: C-H of an E2, hydride shifts);
+    4. a drawn bond that no occupied token spans (8 beta-silicates whose C-Si pair is a
+       one-centre token on C, while the drawing gives that C no lone pair);
+    5. a multiple bond to any neighbour.
+
+    c is never the acceptor site. With no such c, a lone pair of the Lewis structure is used
+    (an NH drawn neutral but delocalized, so it has no one-centre token).
+- **Sink.**
+  - A sink with an open valence shell before the new bond (fewer than 8 electrons, 2 for H)
+    keeps all its bonds.
+  - A full-shell sink breaks one bond b-d: d is a centre of the antibonding acceptor bonded to
+    b, multiple bonds first, then by weight, never the donor site.
+  - When the acceptor names no such centre, d is the neighbour whose bond pair already sits
+    mostly off b: the smallest weight on b over the occupied tokens spanning b-d.
+
+  The spec's "two-centre antibonding token" test failed both ways:
+  - It broke a C-C single bond when a carbocation's empty p is conjugated onto a neighbour, a
+    two-centre token C 0.60 / C 0.25 with overlap -0.19 (10 steps).
+  - It broke nothing for a protonated carbonyl pi* or a tetrahedral collapse whose acceptor
+    has three centres (10 VALENCE).
+- **Measured: 462 / 467 = 98.9%** (460 exact, 2 modulo resonance). The 5 failures:
+  - three hypervalent additions (O -> Si twice, O- -> P+ once): the same antibonding acceptors
+    describe substitution at Si / P, and the 4-tuple cannot say whether the sink keeps all
+    its bonds;
+  - a magnesium alkoxide whose O-Mg pair the site rule takes as a lone pair, since O carries
+    lone pairs;
+  - a restrained sulfur intermediate where no acceptor token reaches the leaving O.
+- **Set members.** Swapping one non-representative member into a reproduced step still
+  reproduces the product for 1,233 / 1,236 donor and 364 / 380 acceptor swaps.
+
+### Samples (`steps`)
+
+- A `MechanismSample` holds the model inputs of all reactant fragments in one index space, the
+  masks, the sparse token-to-centre incidence, the labels and the product resonance key.
+- The full `MoleculeTokens` (C_loc, S, F) are not copied: about 1 MB per molecule, repeated
+  across steps. `fragment_keys` reloads them.
+- The token cache keeps the 1,024 most recently used molecules (LRU).
+- A step becomes a sample only when it is completely aligned. Skip reasons:
+  MISSING_TOKENS, CORRESPONDENCE, UNALIGNED_ARROW.
+- **PMechDB, 2026-10-20: 467 samples** from the 12,944 training steps (12,405 MISSING_TOKENS,
+  72 UNALIGNED_ARROW), about 21 KB each.
+  - random: 370 / 47 / 50 (369 / 49 / 49 after the re-ingest below: removing one step
+    reshuffles the random split);
+  - scaffold: 431 / 17 / 19 (unchanged after the re-ingest);
+  - leave-one-class-out does not apply to PMechDB (no classes) and is reported as such; it is
+    tested on the mini fixture with classes added.
+- Re-run `ksmech-arrows align` and `ksmech-arrows samples` after the QM batch and the token
+  rebuild. Every number in this entry covers only the tokenized 4%.
+
+## 2026-10-20 — Arrow replay in ingest validation (user decision)
+
+- **`validation.check_arrows_reproduce_products` replaces `apply_arrows_stub`** as the last
+  validation step. The step's arrows are applied to the reactants with
+  `ksmech.arrows.apply.apply_arrows`, and the result must have the products' canonical Kekulé
+  SMILES or their resonance key (`ksmech.arrows.compare.match_products`, shared with the
+  round-trip report). Otherwise the step is rejected as **`ARROWS_MISMATCH`**. The detail is the
+  edit's reason code and message (`VALENCE: ...`), or `MISMATCH` plus the properties that differ
+  (`MISMATCH bond:C-O;charge:O`).
+- Not checked:
+  - steps without arrows (ReactMech, `require_arrows=False`): nothing to replay;
+  - steps with radical arrows: replay is not implemented yet, so the check is logged and
+    skipped. No source with radical arrows is ingested yet.
+- `ksmech.arrows.compare` imports only RDKit, `ksmech.arrows.apply` and `ksmech.data`, so the
+  data layer does not pull in the token or QM stack.
+- **PMechDB re-ingested.**
+  - 13,104 records: 13,090 accepted, 14 rejected (SANITIZE_FAILED 12, MAP_NOT_BIJECTIVE 1,
+    ARROWS_MISMATCH 1).
+  - The new rejection is pmechdb-9946a45b6a5d6f2e. Its product drops the dative bond
+    `[Na+]<-[C-:20]` without an arrow.
+  - Every other step is unchanged, compared row by row with the previous `steps.parquet`.
+  - 147 resonance steps, so 12,943 training steps.
+  - `stats.json` regenerated. The ingest took 27 s.
+- **Arrow outputs regenerated.**
+  - Round trip: 12,943 / 12,943 (12,942 exact, 1 modulo resonance).
+  - Alignment and predicted-arrow round trip unchanged: 539 tokenized steps, 93.4% of arrows
+    aligned, 462 / 467 = 98.9%. The removed step was not tokenized; MISSING_TOKENS is now
+    12,404.
+  - Samples rebuilt because the random split depends on the full step set: 467 samples,
+    random 369 / 49 / 49, scaffold 431 / 17 / 19.

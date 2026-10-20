@@ -90,6 +90,7 @@ Measured facts about the grammar:
 | total H count differs | 0 |
 | total formal charge differs | 0 |
 | RDKit sanitization fails (valence) | 12 (hypervalent ate complexes such as `Br[Br-:20][Br:10]`) |
+| the arrows applied to the reactants do not give the products (`ARROWS_MISMATCH`) | 1 (pmechdb-9946a45b6a5d6f2e: the product drops the dative bond `[Na+]<-[C-:20]` without an arrow) |
 
 Other notes:
 
@@ -138,6 +139,43 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`.
+
+## Processed: `data/processed/<source>/samples_<split>.pt`
+
+Written by `ksmech-arrows samples` (`ksmech.arrows.steps`). `<split>` is `<strategy>_<part>`:
+strategy `random` (by pathway), `scaffold` or `loco-<class>`; part `train`, `val`, `test`.
+A `torch.save` dict, loadable with `weights_only=True` (tensors, lists, strings, numbers only).
+Fields listed from a real file (`samples_random_val.pt`, PMechDB, 2026-10-20):
+
+- top level: `version` (1), `split`, `n_steps` (steps in the split), `n_samples`, `skipped`
+  (reason code -> count: `MISSING_TOKENS`, `CORRESPONDENCE`, `UNALIGNED_ARROW`), `n_labels`,
+  `n_fermi_smeared`, `samples` (list). The same counts are in `samples_<split>.json`.
+- one sample (`MechanismSample.to_dict`), `A` atoms and `O` orbitals over all reactant
+  fragments; global token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
+
+| Field | dtype, shape | Notes |
+|---|---|---|
+| `step_id`, `source` | str | |
+| `fragment_keys` | list[str] | token-cache key (map-free canonical SMILES) of each fragment, in fragment order |
+| `atom_categorical` | int64, (A, 2) | atomic number, formal charge (record values) |
+| `atom_features`, `atom_missing` | float32 / bool, (A, 10) | `atom_feature_names()`; missing values are 0 and flagged |
+| `atom_fragment`, `orbital_fragment` | int64, (A,) / (O,) | fragment index |
+| `atom_map` | int64, (A,) | atom-map number of the drawn atom, 0 when unmapped or an implicit H |
+| `atom_positions`, `orbital_centroids` | float32, (A, 3) / (O, 3) | Angstrom, record geometries; for distances only |
+| `orbital_features` | float32, (O, 23) | `feature_names()` |
+| `orbital_spectra` | float32, (O, 8, 2) | (E eV, p) spectral set |
+| `orbital_occupied`, `donor_mask`, `acceptor_mask` | bool, (O,) | candidate masks (`CandidateConfig`); the donor-partner exclusion is per label |
+| `incidence` | float32, (E, 3) | rows (orbital index, atom index, weight) for every centre of every orbital |
+| `labels` | list[dict] | `ArrowLabel.to_dict`: `donor_ids`, `acceptor_ids` (global token ids), `donor_site`, `acceptor_site` (atom indices), `flags`, `arrow_index`, `source_kind`, `donor_partner`, `sink_partners`, `absorbed` |
+| `product_key`, `product_key_flag` | str | products' canonical resonance key and its `ResonanceFlag` |
+| `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` |
+
+`ksmech.arrows.steps.collate_samples` pads a batch to `A_max` atoms and `O_max` orbitals,
+lays tokens out as atoms `[0, A_max)` then orbitals `[A_max, A_max + O_max)`, and returns
+`token_mask`, `is_atom`, `is_orbital`, `occupied`, `virtual`, `donor_mask`, `acceptor_mask`,
+`fragment` (-1 padding), `same_fragment` (B, N, N), `incidence` (B, N, A_max; atom rows
+one-hot), `donor_sets` / `acceptor_sets` (B, K, N multi-hot), `donor_site` / `acceptor_site`
+(B, K; -1 padding) and `label_mask`, plus the padded input arrays.
 
 ## QM cache: `data/cache/qm/<sha256>.npz`
 

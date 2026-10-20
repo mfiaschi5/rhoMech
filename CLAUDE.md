@@ -135,7 +135,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `uv run ksmech-orbitals fg-vocab --source pmechdb` (regenerate the functional-group vocabulary),
   `uv run ksmech-orbitals contact-table --source pmechdb` (the contact overlap table of the KS
   terms, `data/cache/contact_table.json`, from the token cache; re-run after a token rebuild)
-- Arrow alignment: _not yet_
+- Arrows: `uv run ksmech-arrows roundtrip --source pmechdb` (dataset arrows applied as one
+  BE-matrix edit per step vs. the annotated products, `arrows_roundtrip.json`), `uv run
+  ksmech-arrows align --source pmechdb` (arrow-to-orbital labels by atom, unaligned groups,
+  predicted-arrow round trip, `alignment_report.json`), `uv run ksmech-arrows samples --source
+  pmechdb` (`samples_<strategy>_<part>.pt` for every split strategy; re-run both after a token
+  rebuild)
 - Physics baseline: _not yet_
 - Training: _not yet_
 - Evaluation: _not yet_

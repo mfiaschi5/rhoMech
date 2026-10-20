@@ -1,0 +1,129 @@
+"""`ksmech-arrows`: arrow application, arrow-to-orbital alignment and training samples."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+
+from rich.console import Console
+from rich.table import Table
+
+from ksmech.arrows.reactants import TokenCache
+from ksmech.arrows.roundtrip import evaluate_alignment, run_round_trip
+from ksmech.arrows.steps import STRATEGIES, build_all_samples
+from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps, source_dir
+from ksmech.data.io import steps_path as _steps_path
+from ksmech.data.schema import Source
+from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ksmech-arrows", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    r = sub.add_parser("roundtrip", help="apply dataset arrows, compare with the products")
+    a = sub.add_parser("align", help="align arrows to tokens; predicted-arrow round trip")
+    s = sub.add_parser("samples", help="write samples_<split>.pt for every split strategy")
+    for p in (r, a, s):
+        p.add_argument("--source", required=True, choices=[str(x) for x in Source])
+        p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    r.add_argument("--include-resonance", action="store_true", help="also resonance steps")
+    for p in (a, s):
+        p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    a.add_argument("--no-member-check", action="store_true", help="skip the set-member swap")
+    s.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=STRATEGIES)
+    s.add_argument("--seed", type=int, default=0)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    console = Console()
+    path = _steps_path(args.source, args.processed_dir)
+    if not path.exists():
+        console.print(f"[red]{path} missing[/red]; run `ksmech-data ingest --source {args.source}`")
+        return 2
+    return {"roundtrip": cmd_roundtrip, "align": cmd_align, "samples": cmd_samples}[args.command](
+        args, path, console
+    )
+
+
+def _write(report: dict, args: argparse.Namespace, name: str, console: Console) -> Path:
+    out = source_dir(args.source, args.processed_dir) / name
+    out.write_text(json.dumps(report, indent=1) + "\n")
+    console.print(f"wrote {out}")
+    return out
+
+
+def print_failures(summary: dict, title: str, console: Console) -> None:
+    console.print(
+        f"{title}: {summary['n_match']}/{summary['n_steps']} = {summary['match_rate']:.2%} "
+        f"({', '.join(f'{k} {v}' for k, v in summary['status'].items())})"
+    )
+    table = Table(title=f"{title}: top failure patterns")
+    for col in ("count", "pattern", "example step_ids"):
+        table.add_column(col)
+    for row in summary["top_failures"]:
+        table.add_row(str(row["count"]), row["pattern"], "\n".join(row["examples"]))
+    console.print(table)
+
+
+def cmd_roundtrip(args: argparse.Namespace, path: Path, console: Console) -> int:
+    steps = read_steps(path) if args.include_resonance else read_training_steps(path)
+    _, summary = run_round_trip(steps)
+    print_failures(summary, "dataset-arrow round trip", console)
+    _write(summary, args, "arrows_roundtrip.json", console)
+    return 0 if summary["match_rate"] >= 0.95 else 1
+
+
+def print_alignment(report: dict, console: Console) -> None:
+    console.print(
+        f"aligned {report['n_steps_aligned_or_tried']} steps ({report['n_steps_complete']} "
+        f"complete), skipped {report['steps_skipped']}; arrows {report['n_arrows']}: "
+        f"{report['n_labels']} labels, {report['n_absorbed_heterolysis']} absorbed, "
+        f"{report['n_unaligned']} unaligned -> {report['arrows_aligned_fraction']:.2%} aligned; "
+        f"mean set sizes donor {report['mean_donor_set']:.2f}, "
+        f"acceptor {report['mean_acceptor_set']:.2f}"
+    )
+    console.print("flags: " + ", ".join(f"{k} {v:.2%}" for k, v in report["flag_fraction"].items()))
+    table = Table(title="unaligned arrows by (reason, source>sink kind, element pair)")
+    for col in ("count", "reason", "group"):
+        table.add_column(col)
+    for row in report["unaligned_groups"]:
+        table.add_row(str(row["count"]), row["reason"], row["group"])
+    console.print(table)
+
+
+def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
+    report = evaluate_alignment(
+        read_training_steps(path), TokenCache(args.tokens_dir), not args.no_member_check
+    )
+    print_alignment(report, console)
+    print_failures(report["predicted"], "predicted-arrow round trip", console)
+    console.print(f"set-member swaps: {report['predicted']['member_agreement']}")
+    _write(report, args, "alignment_report.json", console)
+    ok = report["arrows_aligned_fraction"] >= 0.90 and report["predicted"]["match_rate"] >= 0.95
+    return 0 if ok and report["flag_fraction"]["ALIGN_FALLBACK"] <= 0.10 else 1
+
+
+def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
+    report = build_all_samples(
+        args.source, args.strategy, args.processed_dir, TokenCache(args.tokens_dir), args.seed
+    )
+    console.print(
+        f"{report['n_samples']} samples from {report['n_training_steps']} training steps; "
+        f"skipped {report['skipped']}"
+    )
+    for split, r in report["splits"].items():
+        console.print(f"  {split}: {r['n_samples']}/{r['n_steps']} samples, skipped {r['skipped']}")
+    for strategy, why in report["strategies_not_applicable"].items():
+        console.print(f"  [yellow]{strategy}: not applicable ({why})[/yellow]")
+    _write(report, args, "samples_report.json", console)
+    return 0 if report["splits"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

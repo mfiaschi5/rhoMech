@@ -113,3 +113,19 @@ def contact_tables(sp_record):
 
     smiles = ["CCO", "CC(=O)C", "CCCl", "OCCCCCl", "CC(=O)OC", "C=CC=O", "CCN", "CC#N", "CCCC"]
     return tables_from_tokens([build_molecule_tokens(sp_record(s)) for s in smiles], min_count=3)
+
+
+@pytest.fixture(scope="session")
+def token_loader(sp_record):
+    """token_loader(key) -> MoleculeTokens from a gas-phase single point at the force-field
+    geometry (`sp_record`), memoized: a fast stand-in for the token cache in arrow tests."""
+    from ksmech.orbitals.tokens import build_molecule_tokens
+
+    memo: dict = {}
+
+    def get(key: str):
+        if key not in memo:
+            memo[key] = build_molecule_tokens(sp_record(key))
+        return memo[key]
+
+    return get

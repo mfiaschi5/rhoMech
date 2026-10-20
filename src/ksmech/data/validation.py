@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 
 from rdkit import Chem
 
+from ksmech.arrows.apply import apply_arrows
+from ksmech.arrows.compare import MATCH_STATUSES, match_products
 from ksmech.data import chem
 from ksmech.data.resonance import is_resonance_step
 from ksmech.data.schema import Arrow, ElementaryStep, Source, SourceKind
+
+log = logging.getLogger(__name__)
 
 
 class RejectReason(StrEnum):
@@ -27,6 +32,7 @@ class RejectReason(StrEnum):
     MAP_NOT_BIJECTIVE = "MAP_NOT_BIJECTIVE"  # reactant and product map sets differ
     ARROW_ATOM_UNMAPPED = "ARROW_ATOM_UNMAPPED"  # arrow names a map number absent from reactants
     BOND_NOT_FOUND = "BOND_NOT_FOUND"  # a bond-source arrow names two atoms that are not bonded
+    ARROWS_MISMATCH = "ARROWS_MISMATCH"  # the arrows applied to the reactants miss the products
     DUPLICATE_STEP = "DUPLICATE_STEP"  # same step_id seen before
 
 
@@ -107,13 +113,23 @@ def check_arrow_atoms(reactants: Chem.Mol, arrows: list[Arrow]) -> None:
                 raise StepRejected(RejectReason.BOND_NOT_FOUND, f"no bond {arrow.source_atoms}")
 
 
-def apply_arrows_stub(reactants: Chem.Mol, products: Chem.Mol, arrows: list[Arrow]) -> None:
-    """Placeholder for the check 'reactants + arrows == products'.
-
-    The bond-electron-matrix edit lands in the arrow phase (`ksmech.arrows`). Until then this
-    check does nothing and accepts every step.
-    """
-    return None
+def check_arrows_reproduce_products(
+    reactants: Chem.Mol, products: Chem.Mol, arrows: list[Arrow]
+) -> None:
+    """The arrows, applied to the reactants as one bond-electron-matrix edit
+    (`ksmech.arrows.apply`), must give the products: the same canonical Kekulé SMILES, or the
+    same resonance key. A step without arrows (ReactMech) has nothing to check. Radical arrows
+    are not implemented yet, so a step with one is logged and not checked."""
+    if not arrows:
+        return
+    if any(a.source_kind is SourceKind.RADICAL for a in arrows):
+        log.info("radical arrows are not replayed yet; arrow check skipped")
+        return
+    result = apply_arrows(reactants, arrows)
+    status, pattern = match_products(result, products)
+    if status not in MATCH_STATUSES:
+        detail = f"{pattern}: {result.detail}" if result.detail else pattern
+        raise StepRejected(RejectReason.ARROWS_MISMATCH, detail)
 
 
 def validate(
@@ -124,7 +140,7 @@ def validate(
     check_balance(reactants, products)
     check_maps(reactants, products)
     check_arrow_atoms(reactants, arrows)
-    apply_arrows_stub(reactants, products, arrows)
+    check_arrows_reproduce_products(reactants, products, arrows)
 
 
 def build_step(

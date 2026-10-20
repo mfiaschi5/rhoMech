@@ -107,6 +107,33 @@ def test_reject_reasons(record, reason):
     assert exc.value.reason is reason
 
 
+@pytest.mark.parametrize(
+    "record, detail",
+    [
+        # the leaving-group arrow is missing: carbon would take five bonds
+        (SN2 + " 10=20", "VALENCE"),
+        # hydroxide attacks the proton instead of the methyl cation the products show
+        ("[OH-:10].[H+:20].[CH3+:30]>>[OH:10][CH3:30].[H+:20] 10=20", "MISMATCH bond:"),
+    ],
+)
+def test_arrows_that_miss_the_products_are_rejected(record, detail):
+    with pytest.raises(StepRejected) as exc:
+        pmechdb.parse_record(record, "id")
+    assert exc.value.reason is RejectReason.ARROWS_MISMATCH
+    assert exc.value.detail.startswith(detail)
+
+
+def test_arrows_matching_only_modulo_resonance_are_accepted():
+    """Styrene + H+: the curator writes the product ring in the other Kekulé form than the
+    edit gives. Exact SMILES differ, resonance keys agree, so the step is accepted."""
+    record = (
+        "[CH2:1]=[CH:2][C:3]1=[CH:4][CH:5]=[CH:6][CH:7]=[CH:8]1.[H+:9]>>"
+        "[H:9][CH2:1][CH+:2][C:3]1=[CH:8][CH:7]=[CH:6][CH:5]=[CH:4]1 1,2=1,9"
+    )
+    step = pmechdb.parse_record(record, "id")
+    assert "[H:9]" in step.products_smiles and not step.resonance_step
+
+
 def test_duplicate_record_rejected(tmp_path):
     line = MINI_PMECHDB.read_text().splitlines()[0]
     path = tmp_path / "dup.txt"
