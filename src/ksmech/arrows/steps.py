@@ -3,9 +3,12 @@
 `MechanismSample` holds the model inputs of every reactant fragment in one global index space
 (atoms first, then orbitals; `ksmech.arrows.reactants`), the fragment of every token, the
 candidate masks, the token-to-centre incidence (orbital, atom, weight), the `ArrowLabel`s with
-their sites, and the products' resonance key. The full `MoleculeTokens` (coefficients, S, F)
-are not copied into every sample: `fragment_keys` names the token files, and
-`MechanismSample.tokens(loader)` reloads them for the physics pair features.
+their sites, and the products' resonance key. It also stores the Klopman-Salem pair vector
+z_ij of every ordered (occupied i, virtual j) pair, computed at K = eps = 1 (`physics.params.
+REDUCED`; multiply by `params.scale` for other values), its `defined` mask, the validity
+filter of those pairs, and the symmetric atom-atom Coulomb matrix (also at eps = 1). The full
+`MoleculeTokens` (coefficients, S, F) are not copied into every sample: `fragment_keys` names
+the token files, and `MechanismSample.tokens(loader)` reloads them.
 
 A step becomes a sample only when every reactant fragment has tokens and every arrow is
 aligned or absorbed; every other step is skipped with a reason code and counted.
@@ -43,8 +46,16 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_di
 from ksmech.data.resonance import canonical_resonance_key
 from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import MoleculeTokens
+from ksmech.physics.contact_kernel import ContactKernel
+from ksmech.physics.pairs import (
+    atom_coulomb_matrix,
+    donor_acceptor_block,
+    pair_features,
+    valid_pairs,
+)
+from ksmech.physics.params import REDUCED
 
-SAMPLE_VERSION = 1
+SAMPLE_VERSION = 3
 PARTS = ("train", "val", "test")
 STRATEGIES = ("random", "scaffold", "loco")
 
@@ -74,6 +85,13 @@ class MechanismSample:
     acceptor_mask: np.ndarray  # (O,) bool: acceptor candidates (before the partner rule)
     orbital_centroids: np.ndarray  # (O, 3) float32
     incidence: np.ndarray  # (E, 3) float32 rows (orbital j, atom g, weight w_g of token j)
+    pair_z: np.ndarray  # (n_occ, n_virt, 7) float32 z_ij at K = eps = 1, PAIR_FEATURES order
+    pair_defined: np.ndarray  # (n_occ, n_virt, 7) bool
+    pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, no shared centre
+    pair_contact_sites: np.ndarray  # (n_occ, n_virt, 2) int64 global atoms of the contact
+    #   amplitude's argmax (donor site, acceptor site), oriented kernel; -1 for other kernels
+    pair_clash: np.ndarray  # (n_occ, n_virt) bool: every placement of that site pair clashed
+    atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric
     labels: list[ArrowLabel] = field(default_factory=list)
     product_key: str = ""
     product_key_flag: str = ""
@@ -121,13 +139,45 @@ def _atom_maps(rt: ReactantTokens) -> np.ndarray:
     return out
 
 
-def make_sample(step: ElementaryStep, rt: ReactantTokens, labels: list[ArrowLabel]):
-    """The sample of an aligned step (the product key is computed here)."""
+def _contact_details(rt: ReactantTokens, kernel: ContactKernel) -> dict[str, np.ndarray]:
+    """The oriented kernel's argmax site pairs (global atom indices) and CLASH flags of every
+    (occupied, virtual) pair; -1 / False for the other kernels."""
     tok = [f.tokens for f in rt.fragments]
+    n_occ, n_virt = (sum(len(getattr(t, k)()) for t in tok) for k in ("occupied", "virtual"))
+    sites = np.full((n_occ, n_virt, 2), -1, dtype=np.int64)
+    clash = np.zeros((n_occ, n_virt), dtype=bool)
+    if kernel.config.kernel == "oriented":
+        r0 = 0
+        for f, t_f in enumerate(tok):
+            c0 = 0
+            for g, t_g in enumerate(tok):
+                s, c = kernel.oriented_details(t_f.occupied(), t_f, t_g.virtual(), t_g)
+                cell = np.s_[r0 : r0 + len(t_f.occupied()), c0 : c0 + len(t_g.virtual())]
+                sites[cell] = s + [rt.atom_offsets[f], rt.atom_offsets[g]]
+                clash[cell] = c
+                c0 += len(t_g.virtual())
+            r0 += len(t_f.occupied())
+    return {"pair_contact_sites": sites, "pair_clash": clash}
+
+
+def make_sample(
+    step: ElementaryStep, rt: ReactantTokens, labels: list[ArrowLabel], kernel: ContactKernel
+):
+    """The sample of an aligned step (the product key and pair features are computed here)."""
     key = canonical_resonance_key(chem.parse_mapped(step.products_smiles))
+    sample = reactant_sample(step.step_id, str(step.source), rt, kernel)
+    sample.labels, sample.product_key, sample.product_key_flag = labels, key.key, str(key.flag)
+    return sample
+
+
+def reactant_sample(step_id: str, source: str, rt: ReactantTokens, kernel: ContactKernel):
+    """The model inputs of a reactant side, without labels or products (also used for
+    hand-built reactant sets, e.g. the textbook selectivity checks)."""
+    tok = [f.tokens for f in rt.fragments]
+    pair_z, pair_defined = donor_acceptor_block(pair_features(tok, kernel, REDUCED))
     return MechanismSample(
-        step_id=step.step_id,
-        source=str(step.source),
+        step_id=step_id,
+        source=source,
         fragment_keys=[f.key for f in rt.fragments],
         atom_categorical=np.concatenate([t.atom_categorical() for t in tok]),
         atom_features=np.concatenate([t.atom_features() for t in tok]).astype(np.float32),
@@ -143,14 +193,18 @@ def make_sample(step: ElementaryStep, rt: ReactantTokens, labels: list[ArrowLabe
         acceptor_mask=rt.acceptor_ok.copy(),
         orbital_centroids=rt.centroids.astype(np.float32),
         incidence=_incidence(rt),
-        labels=labels,
-        product_key=key.key,
-        product_key_flag=str(key.flag),
+        pair_z=pair_z.astype(np.float32),
+        pair_defined=pair_defined,
+        pair_valid=valid_pairs(tok, rt.candidate),
+        **_contact_details(rt, kernel),
+        atom_coulomb=atom_coulomb_matrix(tok, REDUCED).astype(np.float32),
         fermi_smeared=any(t.fermi_smeared for t in tok),
     )
 
 
-def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
+def sample_for_step(
+    step: ElementaryStep, loader: TokenLoader, kernel: ContactKernel
+) -> MechanismSample | SkipReason:
     try:
         rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
     except MissingTokens:
@@ -160,16 +214,16 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
     alignment = align_step(step, rt)
     if not alignment.complete:
         return SkipReason.UNALIGNED_ARROW
-    return make_sample(step, rt, alignment.labels)
+    return make_sample(step, rt, alignment.labels, kernel)
 
 
 def build_step_samples(
-    steps: Iterable[ElementaryStep], loader: TokenLoader
+    steps: Iterable[ElementaryStep], loader: TokenLoader, kernel: ContactKernel
 ) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
     """Samples of every step that has one, and the skip reason of every other step."""
     samples, skipped = {}, {}
     for step in steps:
-        out = sample_for_step(step, loader)
+        out = sample_for_step(step, loader, kernel)
         if isinstance(out, MechanismSample):
             samples[step.step_id] = out
         else:
@@ -226,6 +280,7 @@ def write_samples(path: Path, split: str, ids: list[str], samples: dict, skipped
 def build_samples(
     source: str,
     split: str,
+    kernel: ContactKernel,
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
     loader: TokenLoader | None = None,
     seed: int = 0,
@@ -238,7 +293,7 @@ def build_samples(
         raise ValueError(f"split {split!r} not produced by strategy {strategy!r}: {sorted(ids)}")
     wanted = set(ids[split])
     samples, skipped = build_step_samples(
-        (s for s in steps if s.step_id in wanted), loader or TokenCache()
+        (s for s in steps if s.step_id in wanted), loader or TokenCache(), kernel
     )
     path = samples_path(source, split, processed_dir)
     write_samples(path, split, ids[split], samples, skipped)
@@ -247,6 +302,7 @@ def build_samples(
 
 def build_all_samples(
     source: str,
+    kernel: ContactKernel,
     strategies: Iterable[str] = STRATEGIES,
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
     loader: TokenLoader | None = None,
@@ -257,7 +313,7 @@ def build_all_samples(
     A strategy that cannot run on the source is reported, not raised."""
     console = console or Console()
     steps = read_training_steps(steps_path(source, processed_dir))
-    samples, skipped = build_step_samples(steps, loader or TokenCache())
+    samples, skipped = build_step_samples(steps, loader or TokenCache(), kernel)
     report = {
         "n_training_steps": len(steps),
         "n_samples": len(samples),

@@ -3,13 +3,13 @@
 import numpy as np
 
 from ksmech.orbitals.tokens import build_molecule_tokens
+from ksmech.physics.ks_terms import resonance_integral, wolfsberg_helmholz
 from ksmech.physics.params import (
     REDUCED,
     SCALING,
     KSParams,
     scale,
     shell_fock_ev,
-    wolfsberg_helmholz,
 )
 from ksmech.qm.fukui import HARTREE_TO_EV
 
@@ -20,6 +20,13 @@ def test_defaults_are_the_textbook_values():
     p = KSParams(K=2.0, eps=8.0)
     assert scale(p, "ks3") == 4.0 and scale(p, "ks1") == 2.0 and scale(p, "ks2") == 0.125
     assert scale(p, "gap_kernel") == 1.0 and set(SCALING) >= {"ks3", "ks2", "ks1", "coupling_sq"}
+
+
+def test_resonance_integral_is_wolfsberg_helmholz():
+    assert resonance_integral(0.2, -10.0, -14.0) == 1.75 * 0.2 * -12.0
+    assert resonance_integral(0.2, -10.0, -14.0, K=1.0) == 0.2 * -12.0
+    S = np.array([[0.1, 0.3]])
+    assert np.allclose(resonance_integral(S, -10.0, np.array([-12.0, -8.0])), [[-1.925, -4.725]])
 
 
 def test_wolfsberg_helmholz_is_zero_within_an_atom_and_linear_in_k(sp_record):

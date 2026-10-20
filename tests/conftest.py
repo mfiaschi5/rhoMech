@@ -116,6 +116,22 @@ def contact_tables(sp_record):
 
 
 @pytest.fixture(scope="session")
+def contact_kernel():
+    """The default (oriented) contact kernel, without a disk cache."""
+    from ksmech.physics.contact_kernel import ContactKernel
+
+    return ContactKernel()
+
+
+@pytest.fixture(scope="session")
+def table_kernel(contact_tables):
+    """The vdW-contact table kernel over the fixture tables (an ablation baseline)."""
+    from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
+
+    return ContactKernel(contact_tables, ContactConfig(kernel="table"))
+
+
+@pytest.fixture(scope="session")
 def token_loader(sp_record):
     """token_loader(key) -> MoleculeTokens from a gas-phase single point at the force-field
     geometry (`sp_record`), memoized: a fast stand-in for the token cache in arrow tests."""

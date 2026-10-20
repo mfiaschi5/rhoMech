@@ -18,7 +18,7 @@ from ksmech.physics.repulsion import (
     repulsion_matrix,
 )
 from ksmech.qm.sterics import buried_volume_per_atom
-from tests.token_select import highest_lone_pair, sigma_star
+from tests.token_select import highest_lone_pair, leading, sigma_star
 
 F = {name: k for k, name in enumerate(PAIR_FEATURES)}
 
@@ -34,7 +34,7 @@ def with_sterics(rec):
 def pair(sp_record, contact_tables):
     methanol = build_molecule_tokens(with_sterics(sp_record("CO")))
     chloromethane = build_molecule_tokens(with_sterics(sp_record("CCl")))
-    kernel = ContactKernel(contact_tables)
+    kernel = ContactKernel()  # the default oriented kernel
     return methanol, chloromethane, kernel, pair_features([methanol, chloromethane], kernel)
 
 
@@ -128,8 +128,80 @@ def test_non_finite_entries_are_counted_and_left_undefined(sp_record, contact_ta
     """Without %Vbur (NaN) the contact repulsion cannot be formed: counted, never silent."""
     methanol = build_molecule_tokens(sp_record("CO"))
     chloromethane = build_molecule_tokens(sp_record("CCl"))
-    pf = pair_features([methanol, chloromethane], ContactKernel(contact_tables))
+    pf = pair_features([methanol, chloromethane], ContactKernel())
     assert pf.n_non_finite > 0 and np.isfinite(pf.z).all()
     n_m = len(methanol.atoms) + len(methanol.orbitals)
     assert not pf.defined[:n_m, n_m:, F["ks1"]].any()  # every intermolecular KS1
     assert pf.defined[:n_m, :n_m, F["ks1"]].any()  # intramolecular KS1 needs no %Vbur
+
+
+def test_donor_acceptor_block_is_in_sample_orbital_order(pair):
+    from ksmech.physics.pairs import donor_acceptor_block
+
+    methanol, chloromethane, _, pf = pair
+    z, defined = donor_acceptor_block(pf)
+    n_occ = len(methanol.occupied()) + len(chloromethane.occupied())
+    n_virt = len(methanol.virtual()) + len(chloromethane.virtual())
+    assert z.shape == defined.shape == (n_occ, n_virt, 7)
+    n_m = len(methanol.atoms) + len(methanol.orbitals)
+    lone = highest_lone_pair(methanol, "O")
+    c_cl = sigma_star(chloromethane, {"C", "Cl"})
+    i = methanol.occupied().index(lone)  # fragment 0 occupied come first
+    j = len(methanol.virtual()) + chloromethane.virtual().index(c_cl)
+    assert np.array_equal(z[i, j], pf.z[lone.token_id, n_m + c_cl.token_id])
+    assert defined[..., F["ks3"]].all() and defined[..., F["gap_kernel"]].all()
+    intra = np.zeros((n_occ, n_virt), bool)
+    intra[: len(methanol.occupied()), : len(methanol.virtual())] = True
+    intra[len(methanol.occupied()) :, len(methanol.virtual()) :] = True
+    assert np.array_equal(defined[..., F["coupling_sq"]], intra)
+    assert np.array_equal(z[..., F["inter"]] == 1, ~intra)
+
+
+def _at(seq: list, x) -> int:
+    """Position of `x` in `seq` by identity (tokens of two molecules may compare unequal-ly)."""
+    return next(k for k, y in enumerate(seq) if y is x)
+
+
+def test_valid_pairs_filter(sp_record):
+    from ksmech.physics.pairs import valid_pairs
+
+    methanol = build_molecule_tokens(sp_record("CO"))
+    chloromethane = build_molecule_tokens(sp_record("CCl"))
+    frags = [methanol, chloromethane]
+    valid = valid_pairs(frags)
+    occ = [o for t in frags for o in t.occupied()]
+    virt = [o for t in frags for o in t.virtual()]
+    assert valid.shape == (len(occ), len(virt))
+    d_type = [_at(virt, o) for o in chloromethane.virtual() if chloromethane.is_d_type(o)]
+    assert d_type and not valid[:, d_type].any()  # chlorine d functions are never acceptors
+    star = sigma_star(chloromethane, {"C", "Cl"})
+    bond = next(o for o in chloromethane.occupied() if set(leading(o)) == set(leading(star)))
+    assert bond.descriptors.overlap_population > 0 > star.descriptors.overlap_population
+    assert not valid[_at(occ, bond), _at(virt, star)]  # the donor's own antibond
+    lone = highest_lone_pair(methanol, "O")
+    assert valid[_at(occ, lone), _at(virt, star)]
+    assert valid.sum() == sum(len(t.donor_candidates()) for t in frags) * sum(
+        len(t.acceptor_candidates()) for t in frags
+    ) - sum(
+        len(t.acceptor_candidates()) - len(t.acceptor_candidates(donor=d))
+        for t in frags
+        for d in t.donor_candidates()
+    )
+
+
+def test_atom_coulomb_matrix(pair):
+    from ksmech.physics.pairs import atom_coulomb_matrix
+
+    methanol, chloromethane, _, _ = pair
+    M = atom_coulomb_matrix([methanol, chloromethane])
+    atoms = methanol.atoms + chloromethane.atoms
+    assert M.shape == (len(atoms),) * 2 and np.allclose(M, M.T) and not np.diag(M).any()
+    a, b = 0, 1  # two atoms of methanol: the geometric distance
+    r = np.linalg.norm(atoms[a].position - atoms[b].position)
+    q = atoms[a].mulliken_charge * atoms[b].mulliken_charge
+    assert M[a, b] == pytest.approx(COULOMB_EV_ANG * q / (4.0 * r))
+    c = len(methanol.atoms)  # first atom of chloromethane: the van der Waals contact
+    q = atoms[a].mulliken_charge * atoms[c].mulliken_charge
+    r = vdw_sum(atoms[a].atomic_number, atoms[c].atomic_number)
+    assert M[a, c] == pytest.approx(COULOMB_EV_ANG * q / (4.0 * r))
+    assert np.allclose(atom_coulomb_matrix([methanol, chloromethane], REDUCED), 4.0 * M)

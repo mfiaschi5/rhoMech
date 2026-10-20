@@ -1,6 +1,7 @@
 """The two empirical constants of the Klopman-Salem terms, and the resonance integral.
 
-    beta_mu,nu = K S_mu,nu (F_mu,mu + F_nu,nu) / 2   (Wolfsberg-Helmholz, GFN2 Fock diagonal)
+    beta_mu,nu = K S_mu,nu (F_mu,mu + F_nu,nu) / 2   (Wolfsberg-Helmholz, GFN2 Fock diagonal;
+                                                       `ks_terms.resonance_integral`)
     KS2        = q_k q_l / (eps R_kl)
 
 K and eps are shared learnable scalars initialized at their textbook values (1.75 and 4.0):
@@ -46,17 +47,6 @@ def scale(params: KSParams, name: str) -> float:
     """Factor that turns a feature computed at `REDUCED` into its value at `params`."""
     param, power = SCALING[name]
     return float(getattr(params, param)) ** power
-
-
-def wolfsberg_helmholz(S: np.ndarray, F: np.ndarray, ao_atom: np.ndarray, K: float) -> np.ndarray:
-    """B_mu,nu = beta_mu,nu (eV) for AOs on different atoms, 0 within an atom.
-
-    `F` is the converged Fock matrix in Hartree; only its diagonal enters.
-    """
-    f = np.diag(F) * HARTREE_TO_EV
-    B = K * S * 0.5 * (f[:, None] + f[None, :])
-    B[ao_atom[:, None] == ao_atom[None, :]] = 0.0
-    return B
 
 
 def shell_fock_ev(F: np.ndarray, ao_atom: np.ndarray, ao_l: np.ndarray, atom: int, ell: int):

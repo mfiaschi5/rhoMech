@@ -59,16 +59,17 @@ def test_round_trip(contact_tables, tmp_path):
 
 def test_kernel_configuration(contact_tables, sp_record):
     with pytest.raises(ValueError, match="needs contact tables"):
-        ContactKernel(None)
-    with pytest.raises(NotImplementedError):
+        ContactKernel(None, ContactConfig(kernel="table"))
+    with pytest.raises(ValueError, match="fitted ContactMLP"):
         ContactKernel(contact_tables, ContactConfig(kernel="mlp"))
+    assert ContactKernel().config.kernel == "oriented"  # the default needs no table
     with pytest.raises(ValueError, match="unknown"):
         ContactKernel(contact_tables, ContactConfig(kernel="nope"))
     analytic = ContactKernel(None, ContactConfig(kernel="analytic"))  # needs no table
     t = build_molecule_tokens(sp_record("CO"))
     occ = [o for o in t.orbitals if o.kind == OrbitalKind.OCCUPIED]
     assert analytic.amplitude(occ[0], t, t.virtual()[0], t) >= 0
-    table = ContactKernel(contact_tables)
+    table = ContactKernel(contact_tables, ContactConfig(kernel="table"))
     assert table.amplitude(occ[0], t, occ[1], t) >= 0  # occupied-occupied uses its own table
 
 

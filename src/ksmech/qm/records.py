@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 DEFAULT_CACHE_DIR = Path("data/cache/qm")
@@ -147,4 +150,23 @@ def load_record(path: Path) -> QMRecord:
             kwargs[f.name] = (
                 arr if arr.ndim else _SCALAR_TYPES.get(str(f.type), lambda x: x)(arr.item())
             )
-    return QMRecord(**kwargs)
+    return _current_ao_layout(QMRecord(**kwargs), Path(path))
+
+
+def _current_ao_layout(rec: QMRecord, path: Path) -> QMRecord:
+    """The AO map is a function of the atomic numbers: recompute it with the current layout.
+    Records written before 2026-10-20 carry an s, p, d order on transition-metal atoms that
+    tblite does not use (`ksmech.qm.ao`); the matrices themselves were always right. A record
+    whose AO count does not match the layout (a synthetic test record) is left as stored."""
+    from ksmech.qm.ao import ao_layout
+
+    try:
+        ao_atom, ao_l = ao_layout(rec.atomic_numbers)
+    except QMError:
+        return rec
+    if len(ao_l) != len(rec.ao_l):
+        return rec
+    if not (np.array_equal(ao_l, rec.ao_l) and np.array_equal(ao_atom, rec.ao_atom)):
+        log.warning("%s: stored AO layout differs from tblite's shell order; recomputed", path)
+        rec.ao_atom, rec.ao_l = ao_atom, ao_l
+    return rec

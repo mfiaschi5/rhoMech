@@ -18,10 +18,10 @@ from ksmech.orbitals.tokens import (
     OrbitalKind,
     atom_feature_names,
     build_molecule_tokens,
-    is_antibonding_partner,
     is_d_type,
     load_tokens,
     save_tokens,
+    shares_centres,
     token_table,
 )
 from ksmech.qm.fukui import HARTREE_TO_EV, homo_index
@@ -188,9 +188,11 @@ def test_acceptor_candidates_exclude_d_type_by_default(sp_record):
     assert len(acceptors) == 4 and chloromethane.atoms_with_only_d_virtuals() == []
     assert all(len(leading(o)) == 2 for o in acceptors)  # C-Cl and 3 C-H sigma*
     c_cl = next(o for o in chloromethane.occupied() if set(leading(o)) == {0, 1})
-    without_partner = chloromethane.acceptor_candidates(donor=c_cl)
-    assert len(without_partner) == 3 and all(set(leading(o)) != {0, 1} for o in without_partner)
-    assert all(is_antibonding_partner(c_cl, o) for o in acceptors if o not in without_partner)
+    # sigma(C-Cl) shares C with every C-H sigma* and C, Cl with sigma*(C-Cl): none is left
+    assert chloromethane.acceptor_candidates(donor=c_cl) == []
+    lone_cl = next(o for o in chloromethane.occupied() if leading(o) == (1,) and one_centre(o))
+    kept = chloromethane.acceptor_candidates(donor=lone_cl)  # Cl is a centre of sigma*(C-Cl)
+    assert len(kept) == 3 and all(1 not in leading(o) for o in kept)
 
 
 def smeared(rec, shift: float):
@@ -280,3 +282,28 @@ def test_metal_bound_lone_pair_round_trip(sp_record, tmp_path):
     text = Console(record=True, width=120)
     text.print(token_table(back))
     assert "Mg1-bound]" in text.export_text() or "-bound]" in text.export_text()
+
+
+def test_shared_centres_exclude_a_pair(sp_record):
+    """The validity rule: donor and acceptor of one molecule may not share a centre atom."""
+    acetone = build_molecule_tokens(sp_record("CC(C)=O"))
+    oxygen = next(a.atom_index for a in acetone.atoms if a.atomic_number == 8)
+    n_o = max(
+        (o for o in acetone.occupied() if leading(o) == (oxygen,) and one_centre(o)),
+        key=lambda o: o.energy_ev,
+    )
+    pi_star = min(acetone.virtual(), key=lambda o: o.energy_ev)
+    assert oxygen in leading(pi_star) and shares_centres(n_o, pi_star)  # n -> pi*(C=O): out
+    assert pi_star not in acetone.acceptor_candidates(donor=n_o)
+    cation = build_molecule_tokens(sp_record("C[CH+]C"))  # 1,2-hydride shift: allowed
+    empty_p = min(cation.virtual(), key=lambda o: o.energy_ev)
+    c2 = leading(empty_p)[0]
+    sigma_ch = next(
+        o
+        for o in cation.occupied()
+        if two_centre(o)
+        and {cation.symbol(a) for a in leading(o)} == {"C", "H"}
+        and c2 not in leading(o)
+    )
+    assert not shares_centres(sigma_ch, empty_p)
+    assert empty_p in cation.acceptor_candidates(donor=sigma_ch)

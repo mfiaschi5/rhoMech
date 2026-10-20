@@ -18,6 +18,11 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_step
 from ksmech.data.io import steps_path as _steps_path
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
+from ksmech.physics.contact_kernel import KERNELS, ContactConfig, ContactKernel
+from ksmech.physics.contact_mlp import DEFAULT_MLP_PATH, load_contact_mlp
+from ksmech.physics.contact_table import DEFAULT_TABLE_PATH, load_tables
+from ksmech.physics.oriented import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
+from ksmech.physics.oriented import OrientedConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--include-resonance", action="store_true", help="also resonance steps")
     for p in (a, s):
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    s.add_argument("--kernel", choices=KERNELS, default="oriented", help="contact kernel")
+    s.add_argument("--distance", type=float, default=OrientedConfig().distance)
+    s.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
+    s.add_argument("--contact-table", type=Path, default=DEFAULT_TABLE_PATH)
+    s.add_argument("--contact-mlp", type=Path, default=DEFAULT_MLP_PATH)
     a.add_argument("--no-member-check", action="store_true", help="skip the set-member swap")
     s.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=STRATEGIES)
     s.add_argument("--seed", type=int, default=0)
@@ -109,9 +119,28 @@ def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
     return 0 if ok and report["flag_fraction"]["ALIGN_FALLBACK"] <= 0.10 else 1
 
 
+def samples_kernel(args: argparse.Namespace) -> ContactKernel:
+    """The contact kernel the samples' pair features are computed with (oriented by default;
+    the table and the MLP need their files)."""
+    tables = load_tables(args.contact_table) if args.kernel == "table" else None
+    mlp = load_contact_mlp(args.contact_mlp) if args.kernel == "mlp" else None
+    oriented = OrientedConfig(distance=args.distance, cache_dir=args.oriented_cache)
+    return ContactKernel(tables, ContactConfig(kernel=args.kernel, oriented=oriented), mlp)
+
+
 def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
+    try:
+        kernel = samples_kernel(args)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
     report = build_all_samples(
-        args.source, args.strategy, args.processed_dir, TokenCache(args.tokens_dir), args.seed
+        args.source,
+        kernel,
+        args.strategy,
+        args.processed_dir,
+        TokenCache(args.tokens_dir),
+        args.seed,
     )
     console.print(
         f"{report['n_samples']} samples from {report['n_training_steps']} training steps; "

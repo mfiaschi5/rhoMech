@@ -156,10 +156,11 @@ class CandidateConfig:
     """Which orbital tokens may be arrow donors / acceptors, decided on descriptors alone.
 
     Donor: a doubly occupied token. Acceptor: an empty token that is not a d-type polarization
-    function (unless `allow_d_acceptors`) and, for a given donor, not the antibonding partner
-    of the donor's own bond. Until the radical extension, a token whose occupation lies in
-    `fractional_band` (a SOMO at 1, a Fermi-smeared level of a small-gap molecule) is neither
-    (`exclude_fractional`); its occupation stays the continuous model input either way.
+    function (unless `allow_d_acceptors`) and, for a given donor of the same molecule, not a
+    token sharing a centre with it (`shares_centres`). Until the radical extension, a token
+    whose occupation lies in `fractional_band` (a SOMO at 1, a Fermi-smeared level of a
+    small-gap molecule) is neither (`exclude_fractional`); its occupation stays the continuous
+    model input either way.
     """
 
     allow_d_acceptors: bool = False  # GFN2 d polarization functions are basis artefacts
@@ -183,11 +184,14 @@ def is_d_type(d: OrbitalDescriptors, z_main: int) -> bool:
     return int(np.argmax(d.center_spd[0])) == 2 and int(z_main) not in VALENCE_D
 
 
-def is_antibonding_partner(donor: OrbitalToken, acceptor: OrbitalToken) -> bool:
-    """`acceptor` is an antibonding orbital of the donor's own bond: both have at least two
-    centres and the same two leading centres (pi* is the partner of pi, sigma* of sigma)."""
-    a, b = donor.descriptors.all_center_atoms, acceptor.descriptors.all_center_atoms
-    return len(a) >= 2 and len(b) >= 2 and set(a[:2]) == set(b[:2])
+def shares_centres(donor: OrbitalToken, acceptor: OrbitalToken) -> bool:
+    """The two tokens of one molecule have a centre atom in common (weight >= tau_atom on the
+    same atom). Such a pair is never an arrow candidate: it generalizes the own-antibond rule
+    (pi -> pi*, sigma -> sigma* of one bond) to every donor-acceptor pair that overlaps on an
+    atom, e.g. a carbonyl's own n -> pi*. Centre indices are atoms of one molecule: only
+    compare tokens of the same fragment."""
+    a = {int(x) for x in donor.descriptors.all_center_atoms}
+    return not a.isdisjoint(int(x) for x in acceptor.descriptors.all_center_atoms)
 
 
 @dataclass
@@ -287,7 +291,7 @@ class MoleculeTokens:
         self, config: CandidateConfig | None = None, donor: OrbitalToken | None = None
     ) -> list[OrbitalToken]:
         """Empty tokens an arrow may end on: d-type tokens only with `allow_d_acceptors`, and
-        never the antibonding partner of `donor`'s own bond when a donor is given."""
+        never a token sharing a centre with `donor` (of this molecule) when one is given."""
         config = config or CandidateConfig()
         return [
             o
@@ -295,7 +299,7 @@ class MoleculeTokens:
             if o.descriptors.occupation < config.empty
             and not config.is_fractional(o.descriptors.occupation)
             and (config.allow_d_acceptors or not self.is_d_type(o))
-            and (donor is None or not is_antibonding_partner(donor, o))
+            and (donor is None or not shares_centres(donor, o))
         ]
 
     def atoms_with_only_d_virtuals(self) -> list[int]:

@@ -1073,3 +1073,636 @@ decremented again).
     12,404.
   - Samples rebuilt because the random split depends on the full step set: 467 samples,
     random 369 / 49 / 49, scaffold 431 / 17 / 19.
+
+## 2026-10-20 — Physics module and the untrained-KS gate (Prompt 5)
+
+`ksmech-physics ks-rank | contact-mlp`; reports in `data/processed/<source>/`
+(`ks_rank_report[_<kernel>].json`).
+
+**The gate failed.** Untrained KS3 puts a labeled pair in the top 5 for 8.2% of the
+PMechDB test steps (bar: 50%). As the brief asks for that case, this step stops at the
+diagnosis. Not built: the logistic regression, the gradient-boosting ranker
+(`physics/baseline.py` holds only the evaluation and the untrained scorers) and the textbook
+suite. They wait for a decision on the contact amplitude (below).
+
+### Constants and the resonance integral
+
+- **K = 1.75, eps = 4.0** (`KSParams`): the physical initialization. They stay parameters
+  for Prompt 6. Every pair feature is a fixed power of them (`SCALING`). The samples store z
+  at K = eps = 1 (`REDUCED`), and `baseline.physical_pair_z` applies the fixed physical
+  values.
+- **`ks_terms.resonance_integral(S_ab, H_aa, H_bb, K)`** is Wolfsberg-Helmholz:
+  `K S_ab (H_aa + H_bb) / 2`. `wolfsberg_helmholz` moved from `params` to `ks_terms` and is
+  built on it.
+- **H_aa is the diagonal of the converged GFN2 Fock matrix**, the self-consistent GFN2
+  Hamiltonian, not tblite's core `H_core`. Reasons:
+  - the token files store S and F only;
+  - the diagonal of F carries the charge shift that separates an anion's lone pair from a
+    neutral one, which matters for ions;
+  - H_core would need a token schema bump and a rebuild.
+
+### The three amendments
+
+- **(a) KS3 from the contact kernel for every pair** (as D1). The two intramolecular extras:
+  - the centroid distance, in the `distance` entry;
+  - the cross-centre coupling `l_r^T B l_s`, now **restricted to the AO blocks between the
+    donor's centres A_r and the acceptor's centres A_s**. `coupling_sq` is its square.
+
+  This reverts the spec-v3 choice of full vectors. Measured values:
+  - 4-chlorobutanol, extended conformer: 3.6e-4 eV restricted, against 0.016 eV with full
+    vectors;
+  - a sigma / sigma* pair of one bond: above 0.1 eV, and over 100x the through-space pair
+    (tested).
+- **(b) G from the full spectral vectors**: unchanged since the 3b follow-ups. **G > 0 is
+  kept signed**: no labeled first-arrow pair of the 467 samples has G > 0.
+- **(c) K and eps** stay fixed in the baseline (above).
+
+### Validity filters (all read from descriptors)
+
+- **Donor:** occupation > 1.5 and outside the fractional band, so n >= 1.8.
+- **Acceptor:**
+  - occupation < 0.5 and outside the band, so n <= 0.2;
+  - not d-type (the main centre's dominant shell is d on an element without a valence d
+    shell) unless `allow_d_acceptors`;
+  - not the donor's antibonding partner.
+- **Partner rule, now with signs:** the same two leading centres, **plus** a positive overlap
+  population on the donor and a negative one on the acceptor.
+- **The rule applies only within one fragment.** Centre indices are per molecule. The first
+  `valid_pairs` compared them across fragments and dropped 8 of the 117 methanol +
+  chloromethane candidates (a C-H sigma of one molecule against a C-H sigma* of the other).
+  A test caught it.
+- The alignment keeps its own source-bond exclusion, so no label changes.
+
+### Contact kernels
+
+- **table** (default): the construction of D2.
+  - Samples: non-bonded pairs beyond 1.3x the covalent-radii sum, within +-0.3 Angstrom of
+    the vdW sum, value |l_r,a^T S_ab l_s,b|.
+  - Median per (Z, l, Z, l); backoff (Z, Z) -> (l, l) -> global, at >= 5 samples per level.
+  - Two tables, saved as JSON.
+  - Lookups are now vectorized: one per distinct key pair, counted once per token pair.
+- **mlp** (`contact_mlp.py`):
+  - Input: the two tokens' 23 continuous descriptors (no element, no type).
+  - Target: log of the same samples, floored at 1e-7.
+  - Network: 2 x 64 SiLU, Adam 2e-3 with cosine decay, 20 epochs, batch 4096, seed 0; one
+    network per kind.
+  - Its output replaces S[kappa] in a = S w_m(r) w_m(s). Weights are saved as npz and
+    evaluated in numpy.
+  - Held-out molecules (10%, split by molecule), PMechDB 2,001 molecules:
+
+    | kind | R2 of log, MLP / table | median abs log10 error, MLP / table |
+    |---|---|---|
+    | occupied-virtual | 0.459 / 0.412 | 0.289 / 0.253 |
+    | occupied-occupied | 0.163 / 0.081 | 0.362 / 0.347 |
+
+    Both predict a contact overlap poorly: they summarize contacts at whatever orientation
+    the conformers happen to have.
+- **oriented** (Phase 5b, stub): `contact.oriented_contact_overlap` and
+  `ContactConfig(kernel="oriented")` raise NotImplementedError. It is the overlap of the two
+  LMOs themselves at vdW contact, main lobes turned toward each other, evaluated with GFN2
+  overlap integrals of the joint geometry: the long-term replacement for table and mlp.
+- **analytic**: the existing tblite two-atom probe, unchanged.
+
+### Pair features in the samples (`MechanismSample` version 2)
+
+- New fields:
+  - `pair_z` (n_occ, n_virt, 7), float32, at K = eps = 1;
+  - `pair_defined`;
+  - `pair_valid`;
+  - `atom_coulomb` (A, A), at eps = 1.
+
+  `docs/data_schema.md` lists them, from a real file.
+- How the brief's entries are read:
+  - **ks2** is between the two main centres;
+  - **ks1** ("proxy for the donor's neighbourhood") is read as the repulsion the donor meets:
+    the donor against the occupied tokens whose main centre lies within 3.5 Angstrom of the
+    acceptor's main centre. Within a fragment it has the WH form; across fragments the
+    contact form `-(N + N) beta_c a %Vbur %Vbur / 100^2`;
+  - **distance** is the centroid distance within a fragment and the vdW contact of the main
+    centres across fragments.
+- About 95 KB per sample (21 KB before). The 467 samples rebuild in 61 s, and the splits are
+  unchanged (random 369 / 49 / 49, scaffold 431 / 17 / 19).
+- `ksmech-arrows samples` refuses to run without a contact table (exit 2).
+- `collate_samples` does not batch the pair block yet. Prompt 6 chooses that layout.
+
+### The gate: untrained ranking of the first arrow (467 samples, 2,001 molecules tokenized)
+
+Setup:
+- The candidates are the `pair_valid` pairs: median 746 per test step, 831 per training
+  step, up to 16,509.
+- Multi-label marginalized top-k, ties counted against the label.
+- Leave-one-class-out cannot run on PMechDB (no classes).
+- The pure scores need no training, so all 467 samples are reported next to the 49 test
+  steps.
+
+| scorer (kernel) | test top-1 / 3 / 5 | all top-1 / 3 / 5 | median rank, all |
+|---|---|---|---|
+| KS3 (table) | 0.0 / 8.2 / **8.2%** | 0.2 / 2.4 / 3.6% | 288 |
+| KS3 + KS2 (table) | 4.1 / 4.1 / 18.4% | 8.1 / 10.1 / 12.8% | 66 |
+| KS3 (mlp) | 4.1 / 10.2 / 12.2% | 1.5 / 5.6 / 9.4% | 256 |
+| KS3 (analytic) | 12.2 / 20.4 / 28.6% | 9.6 / 16.1 / 19.1% | 38 |
+| KS3 + KS2 (analytic) | 12.2 / 20.4 / 30.6% | 9.9 / 16.3 / 19.5% | 37 |
+| G alone (diagnostic) | 30.6 / 42.9 / 44.9% | 29.3 / 38.1 / 43.7% | 9 |
+| KS2 alone (diagnostic) | 0.0 / 0.0 / 4.1% | 1.5 / 2.4 / 4.3% | 66 |
+
+At eps = 4, KS2 is about two orders of magnitude above KS3 over the candidates: median
+|KS2| 5.2e-3 eV (p95 0.11), median |KS3| 6.8e-5 eV (p95 1.5e-3). KS3 + KS2 therefore ranks
+almost by KS2.
+
+**The amplitude is the failing factor.** KS3 = (K a Fbar)^2 G, ablated on the table kernel
+(top-5, test / all):
+
+| score | top-5 |
+|---|---|
+| G | 44.9 / 43.7% |
+| Fbar^2 G | 46.9 / 42.2% |
+| a^2 G | 8.2 / 6.0% |
+| KS3 | 8.2 / 3.6% |
+
+The Wolfsberg-Helmholz energy factor is harmless; the contact amplitude a^2 is what destroys
+the ranking.
+
+### Failure classes (KS3, table; 450 of 467 miss the top 5)
+
+Diagnostic labels describe the pairs; they are never input.
+
+- **The pair ranked first instead:**
+  - its acceptor is on H in 90.9% of the misses;
+  - its donor's main centre is s-rich in 81.1%, and the donor lies below -15 eV in 68.0%;
+  - the most frequent such pairs: lone_pair(O) -> sigma*(H-O) 69, sigma(H-C) -> sigma*(H-C)
+    59 (two C-H bonds of one carbon), lone_pair(O) -> sigma*(H-C) 48,
+    lone_pair(Br) -> sigma*(H-Br) 34, lone_pair(Br) -> sigma*(H-C) 29,
+    pi(N-C) -> sigma*(H-C) 27.
+- **Labeled pairs that never reach the top 5:**
+
+  | labeled pair | samples |
+  |---|---|
+  | lone_pair(O) -> sigma*(C-O) (tetrahedral collapse) | 46 |
+  | lone_pair(O) -> delocalized pi*(C-O) | 43 |
+  | pi(C=C) -> pi*(C=O) | 42 |
+  | pi(C=C) -> pi*(C=N) | 32 |
+  | pi(C=C) -> sigma*(H-Br) | 22 |
+  | lone_pair(O) -> pi*(C=O) | 20 |
+  | pi(C=C) -> pi*(C=C) | 18 |
+  | pi(C=C) -> sigma*(Br-Br) | 11 |
+  | pi(C=C) -> sigma*(C-O) | 11 |
+  | pi(C=C) -> sigma*(C-Br) | 10 |
+
+  Even proton transfers do poorly: lone_pair(O) -> sigma*(H-O) hits 36% (n 25).
+  48.4% of the missed labels are intramolecular.
+- **Root cause: the contact overlap is biased toward H 1s and s shells.** Table medians:
+
+  | key | median |
+  |---|---|
+  | (Cl p, H s) | 0.0165 |
+  | (Cl s, H s) | 0.0145 |
+  | (O p, H s) | 0.0116 |
+  | (C p, H s) | 0.0111 |
+  | (O s, H s) | 0.0101 |
+  | (O p, C p) | 0.0017 |
+  | (C p, C p) | 0.0013 |
+  | (N p, C p) | 0.0013 |
+
+  So beta^2 is 50-100x larger for any pair that touches H, which G (0.06 vs 0.3-0.8 1/eV for
+  the labeled pi*) cannot compensate. There are two reasons:
+  - the vdW contact distance with H is about 0.5 Angstrom shorter;
+  - an s function has no angular factor, while a p lobe at a random conformer orientation
+    mostly points elsewhere.
+
+  The deep s-rich lone pairs on top come from the same s-shell keys, not from Fbar.
+  **No code error was found**: the table measures what it was specified to measure.
+  Contacts at van der Waals distance and random orientation are not the overlap of a reactive
+  approach. The MLP (top acceptor on H in 87% of misses) and the analytic probe (82%) show
+  the same pattern.
+- **G alone (44.9%) fails the other way.** It ranks the lowest pi* first:
+  - 40% of its misses have an H acceptor: proton transfers, whose sigma*(X-H) lie high;
+  - the sigma*(C-O) leaving-group steps miss too;
+  - intermolecular labels hit 48.0%, intramolecular 38.8%.
+
+**Open (user decision):** the contact amplitude. Options include the Phase 5b oriented
+overlap; overlaps at a reactive distance rather than vdW; a kernel conditioned on
+orientation; and dropping the amplitude from the untrained score.
+
+## 2026-10-20 — Oriented contact kernel (Phase 5b brought forward), baselines, textbook suite
+
+User decision: the analytic oriented overlap becomes the default contact kernel. The
+vdW-contact table and the descriptor MLP stay as ablation baselines only. Gate: the full KS3
+product must beat F^2 G alone at some contact distance d.
+
+**It does not, at any d.** As instructed, the kernel work stops here with the per-class table
+below, and **F^2 G is the untrained score** (`ksmech-physics textbook --untrained fbar2_g` is
+the default). The baselines and the textbook suite were built on that basis.
+
+### Why the vdW-contact table fails (recorded at the user's request)
+
+- The table medians come from intramolecular contacts at van der Waals distance, at whatever
+  orientation the conformers happen to have.
+- Two effects favour H and s shells systematically:
+  - a contact with H is about 0.5 Angstrom shorter;
+  - an s function has no angular factor, while a p lobe at random orientation mostly points
+    elsewhere.
+- Result: keys with H 1s or an s shell have median overlaps 0.010-0.017, heavy-atom p-p keys
+  0.0013-0.0017 (entry above).
+- Such contacts anticorrelate with a reactive approach. a^2 G ranked the first arrow worse
+  than G alone: 8.2 vs 44.9% top-5 on the test split.
+
+### The GFN2 basis in numpy (`ksmech.physics.gto`)
+
+- **Shells:** Slater exponents, principal quantum numbers and primitive counts come from the
+  GFN2 parametrization tblite itself exports (`tblite.library.export_gfn2_param` ->
+  `ksmech.qm.ao.gfn2_shells`). Nothing is copied by hand.
+- **STO-nG expansions:** Stewart's tables as tblite ships them.
+  - Extracted, numbers only, from tblite v0.7.0 `src/tblite/basis/slater.f90`; sha256 8a3df2db...
+    is recorded in `physics/data/sto_ng.json`.
+  - Fetched from the tblite GitHub repository at the installed version's tag; the file is
+    identical at v0.4.0.
+  - tblite's normalization: (2a/pi)^(3/4) (4a)^(l/2) / sqrt((2l-1)!!) per primitive, no
+    renormalization of the contraction.
+- **Component order** as in tblite's `lx` table and `dtrafo`:
+  - p is (y, z, x);
+  - d is (xy, yz, z2, xz, x2-y2), built from (xx, yy, zz, xy, xz, yz).
+- **Overlaps:** Gaussian product rule with the Obara-Saika 1-D recursion, vectorized over
+  primitive pairs and centre pairs.
+- **Checks:**
+  - the analytic S equals tblite's stored S to <= 4e-10 for every element in the token cache
+    (51 records, 24 elements, Ti / Cu / Fe / Sc included);
+  - the brief's test: H 1s - C 2pz at 1.09 Angstrom gives 0.44731, against 0.44654 for the
+    methane record's C-H at its own 1.0922 Angstrom (|diff| 7.7e-4 < 1e-3). At the record's
+    exact bond length the two agree to 1e-8.
+
+### AO layout bug found and fixed (QM layer)
+
+- **The bug:** `ksmech.qm.ao` assumed s, p, d on every atom. tblite orders shells per element,
+  and for Sc-Cu, Y-Ag and La-Au the d shell comes first (Ti: 3d, 4s, 4p). The matrices were
+  always right; the `ao_l` labels were wrong on those atoms.
+- **What it affected:** 22 cached molecules (Ti 16, Cu 4, Fe 1, Sc 1). Their s/p/d shares,
+  hence the dominant-shell keys and the d-type rule on Ti and Cu, were mislabelled. The earlier
+  "52 one-centre Ti / Cu d orbitals that are now acceptors" count was made with wrong labels.
+- **The fix:**
+  - `ao_layout` now reads tblite's shell list;
+  - `records.load_record` recomputes the AO map from the atomic numbers and logs any stored
+    map that differs, so no QM cache file was rewritten;
+  - the 22 token files were rebuilt;
+  - tests: `tests/test_qm_ao.py`.
+
+### The oriented kernel (`ksmech.physics.oriented`, `ContactConfig(kernel="oriented")`)
+
+- **Lobe direction:** sample 200 Fibonacci directions on a 1.5 Angstrom sphere around the main
+  centre and take the argmax of |amplitude|.
+  - An s-dominated token instead points away from its bonded neighbours, weighted by its
+    Mulliken population on each.
+  - An antibonding acceptor takes the largest lobe in the hemisphere away from its bond
+    partner.
+  - **Deviation from the brief:** the amplitude is that of the LMO's part on the main centre
+    (its AO block there), not of the whole LMO. With the whole LMO, a neighbour on or inside
+    the 1.5 Angstrom sphere wins: the LMO's small tail coefficient on it times its AO values
+    near its nucleus. Acetone's pi* then pointed 9 deg off a methyl carbon, acetyl chloride's
+    sigma*(C-Cl) 18 deg off the oxygen, acrolein's C=C pi along the C-C bond.
+  - With the main-centre part, as the brief's "larger lobe on the main centre" describes:
+    - sigma*(C-Cl): 173-175 deg from Cl;
+    - carbonyl pi*: 93 deg from O, with a 98-100 deg tilt away from O in acrolein / acetyl
+      chloride;
+    - pi donors and p-type lone pairs: perpendicular;
+    - H-centred sigma*: 180 deg from the partner.
+- **Placement:** the smallest rotation makes the acceptor lobe antiparallel to the donor lobe,
+  and the acceptor's main centre goes to distance d along the donor lobe. An intramolecular
+  pair uses a copy of the molecule.
+- **Overlap:** S_rs = l_r^T S l_s over every AO pair of the two placed fragments.
+  - Each atom pair is evaluated in its local frame, where a shell-pair block is diagonal in
+    sigma / pi / delta. Those radial functions are the analytic integrals on a 0.005 bohr grid
+    to 30 bohr, splined; atom-pair blocks reproduce the direct integrals to <= 9e-12.
+  - Coefficients are rotated with exact real-harmonic rotations (checked against AO values on
+    rotated points to 3e-16).
+  - Atom pairs whose coefficient-norm x envelope bound is below 1e-9 are skipped (|change|
+    <= 3e-9).
+  - A whole S_rs matches a brute-force contraction over directly computed blocks to 2e-13.
+- **Coupling:** beta = K |S_rs| (F_rr + F_ss) / 2 with the LMO Fock diagonals E_r, E_s;
+  KS3 = beta^2 G. The ablation kernels keep their AO-shell Fock mean.
+- **Caching:** blocks per (molecule, molecule, occ_virt | occ_occ, d, tol) in memory and as npz
+  under `data/cache/oriented/`. The CLIs enable the disk cache; library calls use only the
+  memory cache unless given a `cache_dir`.
+- **Cost:** about 0.5 ms per pair. One distance over the 869,163 occupied x virtual pairs of
+  the 467 samples takes about 13 minutes on one core; cached re-runs take a few minutes.
+
+### The d sweep and the gate (467 samples; test = random_test, 49 steps)
+
+Top-5, test / all:
+
+| d (Angstrom) | KS3 full product | F^2 G | KS3 + KS2 | S^2 | S^2 G |
+|---|---|---|---|---|---|
+| 2.0 | 10.2 / 7.5 | 44.9 / 39.0 | 12.2 / 8.8 | 2.0 / 0.9 | 6.1 / 7.3 |
+| 2.3 | 4.1 / 5.1 | 44.9 / 39.0 | 6.1 / 6.2 | 6.1 / 3.4 | 4.1 / 5.8 |
+| 2.6 | 2.0 / 1.7 | 44.9 / 39.0 | 4.1 / 3.6 | 0.0 / 0.2 | 4.1 / 2.6 |
+| 3.0 | 4.1 / 5.1 | 44.9 / 39.0 | 12.2 / 13.1 | 2.0 / 3.6 | 2.0 / 4.9 |
+
+- For reference (all on the Ti/Cu-corrected tokens), KS3 top-5 with the ablation kernels:
+  table 8.2 / 3.6, MLP 12.2 / 9.9, analytic two-atom probe 28.6 / 19.1. G alone: 44.9 / 43.7.
+  The analytic probe (|s| and p-norm per centre, covalent distance, best centre pair) is the
+  least harmful amplitude, but it still trails G.
+- The stored sample features use d = 2.0, the best KS3 on train + val (30 / 418 hits, against
+  22, 7, 22 at the other distances).
+
+**Root cause: the donor lobe rule places the acceptor inside the donor's own bond.**
+- A two-centre bond orbital's largest lobe points at its bond partner.
+- At d = 2.0 the placed acceptor's main centre lies a median 0.49 Angstrom from another donor
+  atom for the top-ranked pairs (under 1 Angstrom in 96%), against 0.70 Angstrom for the
+  labeled pairs. The overlap then measures the clash with the partner atom: median |S| 0.31,
+  against 0.19 for the labeled pair.
+- 97% of the top-ranked donors have two or more centres. The pairs ranked first in the 432
+  misses: sigma(C-C) -> pi*(C-O) 101, sigma(C-C) -> pi*(C-C) 63, sigma(C-C) ->
+  delocalized pi*(C-O) 45, sigma(C-C) -> pi*(C-N) 38, sigma(C-Si) -> pi*(C-O) 24.
+- The H and s-shell bias of the table is gone (an H acceptor ranks first in 0.5% of the
+  misses), but the amplitude is still anti-informative: S^2 alone is at or near 0% in every
+  class.
+
+**Per-class top-5 (d = 2.0, all 467 samples).** A class is named by the first arrow's teacher
+pair (`ranking.teacher_cell`, the set members with the largest weight on their sites);
+diagnostic labels only.
+
+| labeled pair | n | KS3 | F^2 G | S^2 G | S^2 | G |
+|---|---|---|---|---|---|---|
+| lone_pair(O) -> sigma*(C-O) | 50 | 0% | 6% | 0% | 0% | 12% |
+| pi(C-C) -> pi*(C-O) | 42 | 17% | 90% | 19% | 0% | 90% |
+| lone_pair(O) -> delocalized pi*(C-O) | 40 | 8% | 18% | 22% | 0% | 18% |
+| pi(C-C) -> pi*(C-N) | 31 | 0% | 100% | 3% | 0% | 100% |
+| lone_pair(O) -> sigma*(H-O) | 25 | 0% | 0% | 0% | 0% | 0% |
+| lone_pair(O) -> pi*(C-O) | 20 | 0% | 100% | 0% | 0% | 100% |
+| pi(C-C) -> sigma*(C-O) | 19 | 0% | 21% | 0% | 0% | 26% |
+| pi(C-C) -> pi*(C-C) | 14 | 14% | 93% | 21% | 0% | 93% |
+| sigma(C-C) -> sigma*(H-Br) | 11 | 0% | 0% | 0% | 0% | 0% |
+| pi(C-C) -> sigma*(H-Br) | 11 | 0% | 0% | 0% | 0% | 0% |
+| lone_pair(N) -> pi*(C-O) | 10 | 30% | 100% | 20% | 0% | 100% |
+| pi(C-C) -> sigma*(C-Br) | 10 | 20% | 30% | 10% | 0% | 90% |
+| sigma(C-H) -> pi*(C-C) | 9 | 0% | 22% | 0% | 0% | 33% |
+| lone_pair(O) -> sigma*(H-N) | 8 | 0% | 0% | 0% | 0% | 0% |
+| lone_pair(N) -> sigma*(H-O) | 8 | 0% | 0% | 0% | 0% | 0% |
+| lone_pair(O) -> pi*(C-C) | 7 | 0% | 86% | 0% | 0% | 100% |
+| pi(C-C) -> sigma*(Br-Br) | 7 | 29% | 86% | 29% | 14% | 86% |
+
+- **F^2 G (and G) works for pi -> pi* and n -> pi*** (86-100%).
+- **It fails on proton transfers** (every sigma*(X-H) class 0%), on O(-) -> sigma*(C-O)
+  leaving-group collapse (6%) and on alkene -> sigma*(C-O / C-Br) (21-30%). For these the
+  lowest-gap pi* of the reactant set ranks first: the F^2 G misses put lone_pair(O) -> pi*(C-O)
+  39, -> pi*(C-C) 22 on top.
+- With LMO energies, F^2 G is not better than G (39.0 vs 43.7% on all samples).
+
+**Open (user decision):** the donor lobe of a bond orbital. Options include:
+- its back lobe, away from the partner, as for the acceptor;
+- a steric exclusion of placements within ~1.5 Angstrom of donor atoms;
+- the overlap restricted to the donor's main-centre AOs;
+- the maximum over a set of approach directions.
+
+### Requested records
+
+- **K = 1.75** (Wolfsberg-Helmholz) and **eps = 4.0**: parameters with that initialization,
+  fixed in every untrained score and baseline (`KSParams`, `SCALING`). The samples store z at
+  K = eps = 1.
+- **Contact-overlap construction and backoff** (now ablation only): non-bonded pairs beyond
+  1.3x the covalent-radii sum and within +-0.3 Angstrom of the vdW sum; |l_r,a^T S_ab l_s,b|;
+  median per (Z, l, Z, l), backoff (Z, Z) -> (l, l) -> global at >= 5 samples; separate
+  occupied-virtual and occupied-occupied tables.
+  - Rebuilt after the Ti/Cu token fix: 352,990 / 352,820 samples, global medians 0.0042 /
+    0.0007.
+  - The MLP refit is unchanged: held-out R2 of log 0.459 vs table 0.412.
+- **Validity filters** (all from descriptors):
+  - donor: occupation >= 1.8;
+  - acceptor: occupation <= 0.2, and not d-type (dominant d share on the main centre of an
+    element without a valence d shell) unless allowed;
+  - not the donor's own antibond: same two leading centres, donor overlap population > 0,
+    acceptor < 0, same fragment.
+
+### Baselines (`ksmech-physics baseline`, `physics/baseline.py`)
+
+- **Features (57 per candidate pair, no type one-hot):**
+  - the 7 KS pair features at the physical K and eps (oriented kernel, d = 2.0);
+  - the 23 continuous descriptors of donor and of acceptor;
+  - frozen-orbital f- on the donor's main centre and f+ on the acceptor's;
+  - the LMO energies E_r, E_s.
+- **Targets:** the positives are the first arrow's labeled pairs. The other arrows' labeled
+  pairs are left out of training, never out of the evaluation.
+- **(a) Logistic regression:** pointwise, on asinh-scaled and standardized features, each step
+  weighted equally, L2 picked on validation top-5 from 0.01-10 (0.01 on random, 0.1 on
+  scaffold), L-BFGS.
+- **(b) GBDT ranker:** numpy histogram trees.
+  - 64 quantile bins, depth 4, Newton leaves with L2 1.0, shrinkage 0.1, half the rows per
+    tree;
+  - listwise loss -log sum_P softmax of each step, multi-label marginalized;
+  - early stopping on validation top-5: 170 trees on random.
+  - No new dependency.
+- **Results** (top-1 / 3 / 5 on the test split, multi-label marginalized, ties counted against
+  the label):
+
+  | scorer | random_test (49) | scaffold_test (19) |
+  |---|---|---|
+  | untrained KS3 (oriented, d = 2.0) | 2.0 / 6.1 / 10.2 | 0.0 / 0.0 / 10.5 |
+  | untrained F^2 G (the untrained score) | 26.5 / 38.8 / 44.9 | 21.1 / 31.6 / 36.8 |
+  | untrained G | 30.6 / 42.9 / 44.9 | 15.8 / 31.6 / 36.8 |
+  | logistic regression | 36.7 / 53.1 / 61.2 | 36.8 / 47.4 / 57.9 |
+  | GBDT ranker | **71.4 / 89.8 / 91.8** | **57.9 / 68.4 / 78.9** |
+
+- Leave-one-class-out does not apply to PMechDB (no mechanism classes); the CLI reports it.
+- Training takes about 7 minutes on 2 threads (617,712 training candidate pairs).
+- The test splits are small (49 and 19 steps), so one step is 2.0 or 5.3 points.
+
+### Textbook suite (`ksmech-physics textbook`, `physics/textbook.py`)
+
+- **Setup:**
+  - five atom-mapped reactant sets;
+  - every valid pair, within and across molecules, is scored;
+  - a token's site is its main centre;
+  - expected atoms are matched up to graph symmetry (`CanonicalRankAtoms`, no tie breaking).
+- **Molecules:** the 4 that had no token file (C[O-], CCBr, [C-]#N, [OH3+]) got GFN2 records
+  in the QM cache, with the dataset's method, and token files.
+- **Results:**
+
+  | case | untrained F^2 G | GBDT |
+  |---|---|---|
+  | MeO(-) + MeCl: O -> C | rank 1, top 3 | rank 0 |
+  | MeO(-) + EtBr: SN2 O -> C(Br) | rank 1, top 3; SN2 13.8 vs E2 2.16 (rank 95) | rank 0; SN2 5.49 vs E2 1.22 (rank 3) |
+  | CN(-) + acrolein: 1,4 C -> beta C | rank 23, miss; 1,4 23.8 vs 1,2 17.1 | rank 6, miss; 1,4 4.33 vs 1,2 4.29 |
+  | MeNH2 + AcCl: N -> carbonyl C | rank 0 | rank 0 |
+  | H3O(+) + acetone: O -> H | rank 14, miss | rank 0 |
+  | **expected pair in the top 3** | **3 / 5** | **4 / 5** |
+
+- **The untrained score misses** cyanide (its top pairs are the nitrile pi -> pi*(C=O)) and
+  the protonation (acetone's own n -> pi*(C=O) ranks first), the two classes the per-class
+  table already shows.
+- **The GBDT misses** only cyanide. Its top pair is pi(C-N) -> pi*(C=C) at the beta carbon,
+  i.e. the 1,4 acceptor, but with the pi(C-N) token as donor, whose main centre is N.
+  - The alignment's convention would count it, since the donor set of an arrow from C holds
+    every donor token on C.
+  - The main-centre site definition does not count it.
+- **In both scores** SN2 outranks E2 and 1,4 outranks 1,2.
+
+## 2026-10-20 — Site-based lobe placement, clash guard, shared-centre filter (user decisions)
+
+The user's five decisions after the first oriented sweep, and the re-run of the sweep.
+
+**Outcome:** the full product still loses to F^2 G on train + val at every d. Per the
+instruction, **F^2 G + KS2 is the untrained score**, and the amplitude moves to Prompt 6 as a
+learnable pair feature rather than a fixed factor.
+
+### Lobes at the site atom (`oriented.site_candidates`)
+
+- **Site, not main centre.** The lobe of token r is evaluated at a site atom a, one of its
+  centres. Only a's AO part of the LMO is used (the earlier deviation, kept).
+- **Hemisphere rule.** A direction n on the 1.5 Angstrom sphere is admissible only if
+  n . (x_c - x_a) <= 0 for every other centre c of r. A one-centre token uses the hemisphere
+  away from a's bonded neighbours, weighted by the token's Mulliken population on each. When
+  no sampled direction satisfies every centre (a site between other centres), the
+  least-violating directions within 0.05 are used.
+- **Ties.** Candidates are local maxima of |amplitude| over the admissible directions, using 6
+  nearest neighbours on the 200-point sphere. Neighbouring points of one lobe also lie within
+  5% (they are 14 deg apart), so a tie is a second *local maximum* within 5%: the two faces of
+  a pi.
+- **s functions.** A site whose AO part has no direction (max/min amplitude below 1.05: an H
+  1s) points away from the other centres, weighted, or from the weighted neighbours. That is
+  how sigma(C-H) at H points out beyond H.
+- **Checked on chloromethane, acetone and acrolein:**
+  - sigma bonds and sigma* at either centre: 172-180 deg from the partner;
+  - sigma(C-H) at H: 180 deg;
+  - pi / pi* and p-type lone pairs: 83-99 deg, two tied faces;
+  - s-rich lone pairs: 173-176 deg from the neighbour.
+
+### Clash guard
+
+- A placement clashes when any acceptor-fragment atom lies within 1.5 Angstrom of a
+  donor-fragment atom. An intramolecular pair is placed against a copy of the molecule.
+- **Order of tries per site pair:**
+  1. every combination of the two tokens' tied lobes; the largest |S| among the clash-free
+     placements is kept;
+  2. if all clash: the opposite face of the first lobe on either side;
+  3. if those clash too: the smallest |S| found over both tiers, flagged CLASH.
+- **The pair-track value** is the maximum over the donor's centres x the acceptor's centres.
+  A clash-free site pair always wins over a CLASH one.
+- **CLASH shares at d = 2.3** (576 samples, valid pairs):
+  - 55.1% of the intramolecular pairs and 35.1% of the intermolecular ones;
+  - 25.6% of the first arrows' teacher pairs;
+  - 11.1% of the pairs KS3 ranks first.
+
+  The shares fall with d: 59.9 / 40.2% at 2.0, 37.5 / 19.0% at 3.0.
+
+### Site-resolved value and the stored diagnostics
+
+- `oriented.site_contact(t_F, r, a, t_G, s, b)` returns (|S|, CLASH) for known sites: the form
+  for labels, the decoder's acceptor step and applying an arrow.
+- The samples store the argmax site pair of the pair-track value as `pair_contact_sites`
+  (global atoms) and its flag as `pair_clash`. Sample version 3.
+- Tests:
+  - the pair value equals the best `site_contact`;
+  - an explicit placement equals a brute-force contraction to 1e-9;
+  - with every placement clashing, every pair is flagged and its value is at most the
+    clash-free one.
+
+### Shared-centre validity filter
+
+- **Rule:** a donor-acceptor pair of one fragment whose centre sets intersect is not a
+  candidate (`tokens.shares_centres`, also in `acceptor_candidates(donor=...)`). It replaces
+  the own-antibond rule, which it contains.
+- **Tests:** acetone n -> pi*(C=O) is excluded; a 1,2-hydride shift sigma(C1-H) -> p(C2) in the
+  isopropyl cation is kept.
+- **Effect:**
+  - 10.7% of the donor x acceptor pairs are excluded (the own-antibond rule removed about 1%),
+    leaving a median of 640 candidates per step;
+  - 10 of the 576 steps lose every labeled pair and count as misses.
+
+### Cost and caching
+
+- **Exact rewrites:**
+  - shell coefficients are rotated directly (p: index permutation and a 3 x 3 product; d:
+    M C M^T), instead of building rotation matrices per atom pair;
+  - `rotation_to` is vectorized.
+  - Together these make a block about 2x faster.
+- **Screening tolerance 1e-9 -> 1e-6.** On 1,370 pairs of 6 blocks: |dS| <= 1.3e-5, 99th
+  percentile relative change 4e-4, no argmax site changed; 1.5x faster.
+- **Time per distance on one core:**
+  - all 946 occupied x virtual molecule-pair blocks of the samples: 59-73 minutes;
+  - the 516-732 inter-fragment occupied x occupied blocks: 6-9 minutes.
+- **Cache:** the blocks were pre-computed per d in parallel (four single-threaded processes),
+  so the sample builds and reports read the cache. `data/cache/oriented/` holds 7,561 blocks,
+  123 MB. Blocks of earlier versions were deleted.
+
+### More samples
+
+- The textbook suite tokenized C[O-], CCBr, [C-]#N and [OH3+], which completes 109 more
+  PMechDB steps.
+- **Samples: 576** (random 454 / 56 / 66, scaffold 533 / 23 / 20), against 467 before.
+- **Alignment refreshed:** 648 tokenized steps, 94.6% of arrows aligned; predicted-arrow round
+  trip 569 / 576 = 98.8%.
+- Every number below is on the 576 samples.
+
+### The re-run sweep and the gate (train + val = 510 samples; test = 66)
+
+Top-5, train + val (test):
+
+| d | KS3 | F^2 G | F^2 G + KS2 | KS3 + KS2 | S^2 | S^2 G | G |
+|---|---|---|---|---|---|---|---|
+| 2.0 | 29.0 (36.4) | 35.1 (39.4) | 35.3 (39.4) | 39.6 (43.9) | 12.4 | 35.1 | 40.0 (42.4) |
+| 2.3 | 29.4 (34.8) | 35.1 (39.4) | 35.3 (39.4) | **44.9 (47.0)** | 10.6 | 34.9 | 40.0 (42.4) |
+| 2.6 | 2.5 (1.5) | 35.1 (39.4) | 35.3 (39.4) | 6.7 (6.1) | 2.4 | 3.7 | 40.0 (42.4) |
+| 3.0 | 2.9 (3.0) | 35.1 (39.4) | 35.3 (39.4) | 20.0 (19.7) | 3.3 | 4.5 | 40.0 (42.4) |
+
+- **The gate fails at every d.** The full product (KS3) never beats F^2 G on train + val:
+  29.4% at best, against 35.1%.
+- **Untrained score: F^2 G + KS2** (`ksmech-physics textbook` default).
+- **Stored features:** d = 2.3, the best KS3 on train + val.
+- **Site placement fixed the bond-clash artefact at short d.** KS3 top-5 at d = 2.0 rose from
+  7.5% (all 467 samples, main-centre rules) to 29.0% (train + val of the 576).
+- **Collapse above 2.3 Angstrom:** the H-site placements of sigma(C-H) stop clashing and win.
+  The pairs ranked first in the KS3 misses at 2.6 are sigma(C-H) -> pi*(C-O) 115,
+  sigma(C-H) -> pi*(C-C) 79, lone_pair(Br) -> sigma*(H-C) 73.
+- **Recorded for the Prompt 6 decision:** KS3 + KS2 at d = 2.3 reaches 44.9% on train + val,
+  ahead of G (40.0%) and of the untrained score (35.3%). The amplitude carries signal once it
+  is combined with the Coulomb term. It is not the gate's criterion, so it was not adopted.
+
+**Per-class top-5 at d = 2.3** (all 576; classes by the teacher pair; diagnostic labels).
+Proton transfers are the ones to watch.
+
+| labeled pair | n | KS3 | F^2 G | F^2 G + KS2 | KS3 + KS2 | S^2 G | G |
+|---|---|---|---|---|---|---|---|
+| lone_pair(O) -> sigma*(H-O) | 57 | 7% | 0% | 0% | 39% | 23% | 4% |
+| lone_pair(O) -> sigma*(C-O) | 51 | 8% | 8% | 10% | 63% | 8% | 12% |
+| pi(C-C) -> pi*(C-O) | 42 | 79% | 90% | 90% | 71% | 69% | 90% |
+| pi(C-C) -> pi*(C-N) | 31 | 100% | 100% | 100% | 100% | 100% | 100% |
+| lone_pair(N) -> sigma*(H-O) | 27 | 4% | 0% | 0% | 37% | 41% | 4% |
+| lone_pair(O) -> delocalized pi*(C-O) | 24 | 21% | 21% | 21% | 96% | 21% | 25% |
+| lone_pair(O) -> pi*(C-O) | 23 | 96% | 100% | 100% | 87% | 87% | 100% |
+| pi(C-C) -> sigma*(H-O) | 22 | 9% | 0% | 0% | 32% | 77% | 0% |
+| pi(C-C) -> sigma*(C-O) | 19 | 16% | 26% | 26% | 16% | 16% | 32% |
+| pi(C-C) -> pi*(C-C) | 14 | 93% | 93% | 93% | 86% | 93% | 93% |
+| pi(C-C) -> sigma*(C-Br) | 13 | 0% | 31% | 31% | 0% | 15% | 92% |
+| sigma(C-C) / pi(C-C) / lone_pair(O) -> sigma*(H-Br) | 29 | 0% | 0% | 0% | 0% | 0% | 0-14% |
+| lone_pair(N) -> pi*(C-O) | 10 | 60% | 100% | 100% | 70% | 60% | 100% |
+| lone_pair(O) -> sigma*(H-N) | 8 | 12% | 0% | 0% | 12% | 0% | 0% |
+| lone_pair(N) -> sigma*(H-N) | 6 | 0% | 0% | 0% | 0% | 33% | 0% |
+
+- **F^2 G + KS2 scores 0% on every proton-transfer class.** KS2 adds nothing measurable
+  (35.3 vs 35.1%).
+- **The oriented amplitude carries the proton-transfer signal** (S^2 G 23-77% on the
+  sigma*(O-H) classes) and the leaving-group signal (KS3 + KS2 63% on O(-) -> sigma*(C-O)).
+- **It hurts where G is already right:** pi -> pi*, and pi -> sigma*(C-Br) (G 92%, KS3 0%).
+- **The HBr protonations** (sigma*(H-Br), 29 steps) are missed by every untrained score.
+
+### Baselines and textbook suite on the 576 samples (features at d = 2.3)
+
+Top-1 / 3 / 5 on the test split:
+
+| scorer | random_test (66) | scaffold_test (20) |
+|---|---|---|
+| untrained F^2 G + KS2 (the untrained score) | 22.7 / 31.8 / 39.4 | 20.0 / 30.0 / 35.0 |
+| untrained KS3 | 25.8 / 30.3 / 34.8 | 5.0 / 10.0 / 10.0 |
+| untrained KS3 + KS2 | 27.3 / 40.9 / 47.0 | 0.0 / 20.0 / 20.0 |
+| untrained G | 25.8 / 39.4 / 42.4 | 15.0 / 30.0 / 35.0 |
+| logistic regression | 22.7 / 50.0 / 63.6 | 35.0 / 40.0 / 50.0 |
+| GBDT ranker | **68.2 / 84.8 / 95.5** | **55.0 / 75.0 / 75.0** |
+
+- Model choices: logistic regression L2 0.01 on random, 1.0 on scaffold; GBDT 200 and 160
+  trees.
+- Leave-one-class-out does not apply to PMechDB.
+- **Textbook** (expected pair in the top 3):
+  - **F^2 G + KS2: 3 / 5.** It misses cyanide + acrolein (rank 15) and H3O(+) + acetone
+    (rank 10).
+  - **GBDT: 4 / 5.** It misses cyanide (rank 4).
+  - In both, SN2 outranks E2 (F^2 G + KS2: 13.8 vs 2.24; GBDT: 3.99 vs 1.43) and 1,4 outranks
+    1,2 (23.7 vs 17.1; 3.26 vs 2.41).
+- These supersede the 467-sample numbers of the previous entry.

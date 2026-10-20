@@ -1,0 +1,436 @@
+"""`ksmech-physics`: the untrained Klopman-Salem ranking and the descriptor contact kernel."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+
+import numpy as np
+from rich.console import Console
+from rich.table import Table
+
+from ksmech.arrows.reactants import TokenCache
+from ksmech.arrows.steps import PARTS, load_samples, samples_path
+from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir
+from ksmech.data.schema import Source
+from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
+from ksmech.physics.contact_kernel import KERNELS
+from ksmech.physics.contact_mlp import DEFAULT_MLP_PATH
+from ksmech.physics.contact_table import DEFAULT_TABLE_PATH
+from ksmech.physics.oriented import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
+from ksmech.physics.oriented import OrientedConfig
+
+# the untrained score: the full KS3 product failed its gate (beat F^2 G on train + val) at
+# every d, also with site-based placement, so F^2 G + KS2 stands in (docs/decisions.md)
+UNTRAINED_SCORE = "fbar2_g+ks2"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ksmech-physics", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    r = sub.add_parser("ks-rank", help="rank first arrows by the untrained KS terms")
+    m = sub.add_parser("contact-mlp", help="fit the descriptor contact kernel (kernel=mlp)")
+    b = sub.add_parser("baseline", help="train the logistic-regression and GBDT rankers")
+    b.add_argument("--split", default="random", help="split strategy of the sample files")
+    t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
+    t.add_argument("--source", default="pmechdb", help="where the trained GBDT model lives")
+    t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    t.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    t.add_argument("--untrained", default=UNTRAINED_SCORE, help="untrained scorer name")
+    t.add_argument("--distance", type=float, default=OrientedConfig().distance)
+    t.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
+    t.add_argument("--gbdt", type=Path, default=None, help="GBDT model (default: random split)")
+    for p in (r, m, b):
+        p.add_argument("--source", required=True, choices=[str(x) for x in Source])
+        p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+        p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    r.add_argument("--split", default="random", help="split strategy of the sample files")
+    r.add_argument("--kernel", choices=KERNELS, default="oriented")
+    r.add_argument(
+        "--distance",
+        type=float,
+        nargs="+",
+        default=[OrientedConfig().distance],
+        help="oriented kernel: main-centre distance(s) in Angstrom, one report each",
+    )
+    r.add_argument("--contact-table", type=Path, default=DEFAULT_TABLE_PATH)
+    r.add_argument("--contact-mlp", type=Path, default=DEFAULT_MLP_PATH)
+    r.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
+    m.add_argument("--epochs", type=int, default=20)
+    m.add_argument("--window", type=float, default=0.3)
+    m.add_argument("--out", type=Path, default=DEFAULT_MLP_PATH)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    console = Console()
+    commands = {
+        "ks-rank": cmd_ks_rank,
+        "contact-mlp": cmd_contact_mlp,
+        "baseline": cmd_baseline,
+        "textbook": cmd_textbook,
+    }
+    return commands[args.command](args, console)
+
+
+def make_kernel(args: argparse.Namespace, distance: float | None = None):
+    from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
+    from ksmech.physics.contact_mlp import load_contact_mlp
+    from ksmech.physics.contact_table import load_tables
+
+    tables = load_tables(args.contact_table) if args.kernel == "table" else None
+    mlp = load_contact_mlp(args.contact_mlp) if args.kernel == "mlp" else None
+    oriented = OrientedConfig(
+        distance=distance or OrientedConfig().distance, cache_dir=args.oriented_cache
+    )
+    return ContactKernel(tables, ContactConfig(kernel=args.kernel, oriented=oriented), mlp)
+
+
+def _load_parts(args: argparse.Namespace, console: Console) -> dict[str, list] | None:
+    parts = {}
+    for part in PARTS:
+        path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+        if not path.exists():
+            console.print(f"[red]{path} missing[/red]; run `ksmech-arrows samples`")
+            return None
+        try:
+            parts[part] = load_samples(path)
+        except ValueError as exc:  # an old sample version: rebuild, never reinterpret
+            console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows samples`")
+            return None
+    return parts
+
+
+def print_rank_table(report: dict, console: Console, title: str) -> None:
+    table = Table(title=title)
+    for col in ("scorer", "subset", "n", "top-1", "top-3", "top-5", "median rank", "no label"):
+        table.add_column(col)
+    for name, by_subset in report["scorers"].items():
+        for subset, r in by_subset.items():
+            table.add_row(
+                name,
+                subset,
+                str(r["n"]),
+                *(f"{r[f'top{k}']:.1%}" for k in (1, 3, 5)),
+                f"{r['median_rank']:.0f}",
+                str(r["n_no_valid_label"]),
+            )
+    console.print(table)
+
+
+def print_failures(fc: dict, console: Console, name: str) -> None:
+    console.print(f"{name} misses (rank >= 5): {fc['n_miss']} of {fc['n']} samples")
+    console.print("  facts: " + ", ".join(f"{k} {v:.1%}" for k, v in fc["miss_facts"].items()))
+    for key, title in (
+        ("miss_label_classes", f"{name}: labeled pair of the misses (diagnostic labels)"),
+        ("miss_top_classes", f"{name}: pair ranked first instead"),
+    ):
+        table = Table(title=title)
+        table.add_column("count")
+        table.add_column("donor -> acceptor")
+        for cls, n in fc[key][:10]:
+            table.add_row(str(n), cls)
+        console.print(table)
+
+
+def print_class_table(classes: dict, console: Console, min_n: int = 5) -> None:
+    names = [k for k in next(iter(classes.values())) if k != "n"] if classes else []
+    table = Table(title=f"top-5 hit rate by labeled-pair class (classes with >= {min_n} samples)")
+    for col in ("class", "n", *names):
+        table.add_column(col)
+    for cls, r in classes.items():
+        if r["n"] >= min_n:
+            table.add_row(cls, str(r["n"]), *(f"{r[n]:.0%}" for n in names))
+    console.print(table)
+
+
+FLOORS = ("ks3", "fbar2_g", "fbar2_g+ks2")  # scorers whose misses are broken down by class
+
+
+def _subsets(parts: dict, comps: dict) -> dict[str, tuple[list, list]]:
+    """(samples, components) of the test split, train + val (the gate) and everything."""
+
+    def join(names):
+        return [s for p in names for s in parts[p]], [c for p in names for c in comps[p]]
+
+    return {"test": join(["test"]), "trainval": join(["train", "val"]), "all": join(PARTS)}
+
+
+def clash_summary(samples, comps, ranks) -> dict:
+    """CLASH shares: over the valid pairs (within / across fragments), over the pairs ranked
+    first by KS3, and over the first arrows' teacher pairs."""
+    from ksmech.physics.ranking import SCORERS, teacher_cell
+
+    intra, inter, top, teacher = [], [], [], []
+    for s, c in zip(samples, comps, strict=True):
+        v = s.pair_valid
+        intra.append(c["clash"][v & ~c["inter"]])
+        inter.append(c["clash"][v & c["inter"]])
+        sc = np.where(v, SCORERS["ks3"](c), -np.inf)
+        top.append(bool(c["clash"][np.unravel_index(np.argmax(sc), sc.shape)]))
+        cell = teacher_cell(s)
+        if cell is not None:
+            teacher.append(bool(c["clash"][cell]))
+
+    def share(x) -> float:
+        x = np.concatenate(x) if x and isinstance(x[0], np.ndarray) else np.array(x)
+        return float(x.mean()) if x.size else float("nan")
+
+    return {
+        "valid_intramolecular": share(intra),
+        "valid_intermolecular": share(inter),
+        "ks3_top_ranked": share(top),
+        "teacher_pair": share(teacher),
+    }
+
+
+def _rank_report(parts: dict, loader, kernel) -> dict:
+    from ksmech.physics.ranking import (
+        ALL_SCORERS,
+        SCORERS,
+        class_table,
+        evaluate,
+        failure_classes,
+        pair_components,
+        refresh_validity,
+    )
+
+    parts = {p: [refresh_validity(s, loader) for s in xs] for p, xs in parts.items()}
+    comps = {p: [pair_components(s, loader, kernel) for s in xs] for p, xs in parts.items()}
+    subsets = _subsets(parts, comps)
+    results = {sub: evaluate(*subsets[sub], ALL_SCORERS) for sub in subsets}
+    report = {"scorers": {}, "failure_classes": {}}
+    for name in ALL_SCORERS:
+        report["scorers"][name] = {
+            sub: {k: v for k, v in res[name].items() if k != "ranks"}
+            for sub, res in results.items()
+        }
+    everything, all_comps = subsets["all"]
+    for name in FLOORS:
+        ranks = results["all"][name]["ranks"]
+        fc = failure_classes(everything, all_comps, ranks, loader, SCORERS[name])
+        report["failure_classes"][name] = fc
+    rows = report["failure_classes"]["ks3"]["rows"]
+    ranks_all = {n: results["all"][n]["ranks"] for n in ALL_SCORERS}
+    report["class_table"] = class_table(rows, ranks_all)
+    if kernel.config.kernel == "oriented":
+        report["clash"] = clash_summary(everything, all_comps, ranks_all["ks3"])
+    sc = report["scorers"]
+    report["gate"] = {
+        f"{n}_{sub}_top5": sc[n][sub]["top5"] for n in FLOORS for sub in ("trainval", "test")
+    }
+    report["gate"]["pass"] = sc["ks3"]["trainval"]["top5"] > sc["fbar2_g"]["trainval"]["top5"]
+    return report
+
+
+def cmd_ks_rank(args: argparse.Namespace, console: Console) -> int:
+    parts = _load_parts(args, console)
+    if parts is None:
+        return 2
+    loader = TokenCache(args.tokens_dir)
+    distances = args.distance if args.kernel == "oriented" else [None]
+    passed = False
+    for d in distances:
+        kernel = make_kernel(args, d)
+        tag = args.kernel if d is None else f"{args.kernel}_d{d:g}"
+        report = {"split": args.split, "kernel": args.kernel, "distance": d}
+        report |= _rank_report(parts, loader, kernel)
+        print_rank_table(report, console, f"first-arrow ranking, untrained KS, {tag}")
+        for name in FLOORS:
+            print_failures(report["failure_classes"][name], console, name)
+        print_class_table(report["class_table"], console)
+        if "clash" in report:
+            console.print(
+                "CLASH shares: " + ", ".join(f"{k} {v:.1%}" for k, v in report["clash"].items())
+            )
+        gate = report["gate"]
+        verdict = "[green]pass[/green]" if gate["pass"] else "[red]FAIL[/red]"
+        console.print(
+            f"gate ({tag}, train + val): KS3 top-5 {gate['ks3_trainval_top5']:.1%} vs F^2 G "
+            f"{gate['fbar2_g_trainval_top5']:.1%} {verdict}"
+        )
+        passed |= gate["pass"]
+        out = source_dir(args.source, args.processed_dir) / f"ks_rank_report_{tag}.json"
+        out.write_text(json.dumps(report, indent=1, default=str) + "\n")
+        console.print(f"wrote {out}")
+    return 0 if passed else 1
+
+
+def _baseline_table(results: dict, console: Console, title: str) -> None:
+    table = Table(title=title)
+    for col in ("scorer", "test top-1", "test top-3", "test top-5", "test median", "val top-5"):
+        table.add_column(col)
+    for name, r in results.items():
+        t, v = r["test"], r["val"]
+        table.add_row(
+            name,
+            *(f"{t[f'top{k}']:.1%}" for k in (1, 3, 5)),
+            f"{t['median_rank']:.0f}",
+            f"{v['top5']:.1%}",
+        )
+    console.print(table)
+
+
+def _loco_note(args: argparse.Namespace) -> str:
+    found = sorted(source_dir(args.source, args.processed_dir).glob("samples_loco-*_test.pt"))
+    if found:
+        return f"{len(found)} leave-one-class-out splits found (evaluate with --split loco-<class>)"
+    return "leave-one-class-out: not applicable (the source has no mechanism classes)"
+
+
+def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
+    from ksmech.physics import baseline as bl
+
+    parts = _load_parts(args, console)
+    if parts is None:
+        return 2
+    loader = TokenCache(args.tokens_dir)
+    sets = {p: [bl.candidate_set(s, loader) for s in xs] for p, xs in parts.items()}
+    n_rows = {p: int(sum(len(cs.X) for cs in v)) for p, v in sets.items()}
+    console.print(f"candidate pairs per part: {n_rows}")
+    results, scores = {}, {}
+    for name in ("ks3", "fbar2_g", "fbar2_g+ks2", "ks3+ks2", "gap_kernel"):
+        scores[f"untrained {name}"] = lambda X, n=name: bl.untrained_scores(X)[n]
+    lr, scan = bl.select_logistic(sets["train"], sets["val"])
+    console.print(f"logistic regression: L2 {lr.l2} (validation scan {scan})")
+    gbdt = bl.fit_gbdt(sets["train"], sets["val"], bl.TreeConfig())
+    console.print(f"GBDT: {len(gbdt.trees)} trees (validation history {gbdt.history[-3:]})")
+    scores["logistic regression"] = lr.score
+    scores["GBDT ranker"] = gbdt.score
+    for name, fn in scores.items():
+        results[name] = {
+            part: {
+                k: v
+                for k, v in bl.evaluate_scores(sets[part], [fn(cs.X) for cs in sets[part]]).items()
+                if k != "ranks"
+            }
+            for part in ("val", "test")
+        }
+    _baseline_table(
+        results, console, f"first-arrow ranking on {args.split}_test (n {len(sets['test'])})"
+    )
+    note = _loco_note(args)
+    console.print(note)
+    out_dir = source_dir(args.source, args.processed_dir)
+    bl.save_gbdt(gbdt, out_dir / f"baseline_gbdt_{args.split}.npz")
+    np.savez(
+        out_dir / f"baseline_lr_{args.split}.npz",
+        scale=lr.scale,
+        mean=lr.mean,
+        std=lr.std,
+        weights=lr.weights,
+        l2=lr.l2,
+    )
+    report = {
+        "split": args.split,
+        "results": results,
+        "loco": note,
+        "lr_scan": scan,
+        "gbdt_history": gbdt.history,
+        "n_candidates": n_rows,
+        "features": bl.FEATURE_NAMES,
+    }
+    (out_dir / f"baseline_report_{args.split}.json").write_text(
+        json.dumps(report, indent=1, default=str) + "\n"
+    )
+    best_untrained = max(results[f"untrained {n}"]["test"]["top5"] for n in FLOORS)
+    return 0 if results["GBDT ranker"]["test"]["top5"] > best_untrained else 1
+
+
+def print_textbook(results, console: Console, title: str) -> int:
+    table = Table(title=title, show_lines=True)
+    for col in ("case", "expected", "rank", "top-3 predicted (donor @ site -> acceptor @ site)"):
+        table.add_column(col)
+    for res in results:
+        lines = [
+            f"{p['donor']} @ {p['donor_site']} -> {p['acceptor']} @ {p['acceptor_site']}"
+            f"  {p['score']:.3g}"
+            for p in res.top
+        ]
+        expected = f"{res.case.expected.label}  {res.expected_score:.3g}"
+        for alt, rank, score in res.alternatives:
+            better = "below" if score < res.expected_score else "ABOVE"
+            expected += f"\nvs {alt.label}: rank {rank}, {score:.3g} ({better} expected)"
+        mark = "[green]top-3[/green]" if res.passed else "[red]miss[/red]"
+        table.add_row(res.case.name, expected, f"{res.expected_rank} {mark}", "\n".join(lines))
+    console.print(table)
+    n = sum(r.passed for r in results)
+    console.print(f"{title}: {n}/{len(results)} expected pairs in the top 3")
+    return n
+
+
+def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
+    from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
+    from ksmech.physics.ranking import ALL_SCORERS, pair_components
+    from ksmech.physics.textbook import CASES, ensure_tokens, fragment_keys, run_suite
+
+    keys = sorted({k for case in CASES for k in fragment_keys(case.smiles)})
+    built = ensure_tokens(keys, args.tokens_dir)
+    if built:
+        console.print(f"built tokens for {built}")
+    loader = TokenCache(args.tokens_dir)
+    oriented = OrientedConfig(distance=args.distance, cache_dir=args.oriented_cache)
+    kernel = ContactKernel(config=ContactConfig(oriented=oriented))
+    scorer = ALL_SCORERS[args.untrained]
+
+    def untrained(sample, loader):
+        return scorer(pair_components(sample, loader, kernel))
+
+    results = {f"untrained {args.untrained}": run_suite(untrained, loader, kernel)}
+    gbdt_path = (
+        args.gbdt or source_dir(args.source, args.processed_dir) / "baseline_gbdt_random.npz"
+    )
+    if gbdt_path.exists():
+        from ksmech.physics import baseline as bl
+
+        gbdt = bl.load_gbdt(gbdt_path)
+
+        def trained(sample, loader):
+            cs = bl.candidate_set(sample, loader)
+            out = np.full(sample.pair_valid.shape, -np.inf)
+            out[cs.rows, cs.cols] = gbdt.score(cs.X)
+            return out
+
+        results["GBDT ranker"] = run_suite(trained, loader, kernel)
+    else:
+        console.print(f"[yellow]{gbdt_path} missing: run `ksmech-physics baseline` first[/yellow]")
+    passes = {name: print_textbook(res, console, name) for name, res in results.items()}
+    return 0 if max(passes.values()) >= 4 else 1
+
+
+def cmd_contact_mlp(args: argparse.Namespace, console: Console) -> int:
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.physics.contact_mlp import fit_contact_mlp, samples_from_paths, save_contact_mlp
+    from ksmech.qm.batch import collect_molecules
+    from ksmech.qm.xtb_calc import QMConfig
+
+    method = QMConfig().method
+    smiles_list, _ = collect_molecules(args.source, args.processed_dir)
+    paths = [tokens_path(args.tokens_dir, s, 0, method) for s in smiles_list]
+    samples, skipped = samples_from_paths(paths, method, args.window)
+    n_used = len(paths) - sum(skipped.values())
+    console.print(
+        f"contact samples from {n_used}/{len(paths)} molecules (skipped: {skipped or 'none'})"
+    )
+    model = fit_contact_mlp(samples, epochs=args.epochs, method=method)
+    for kind in ("occ_virt", "occ_occ"):
+        meta = model.meta[kind]
+        console.print(f"  {kind}: {meta['n_train']} training samples, {meta['n_molecules']} mols")
+        for which in ("mlp_held_out", "table_held_out"):
+            if which in meta:
+                r = meta[which]
+                console.print(
+                    f"    {which}: R2(log) {r['r2_log']:.3f}, "
+                    f"median |log10 err| {r['median_abs_log10_error']:.3f} (n {r['n']})"
+                )
+    console.print(f"wrote {save_contact_mlp(model, args.out)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

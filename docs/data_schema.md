@@ -142,12 +142,16 @@ Rejected records go to `data/processed/<source>/rejections.csv`, with columns `s
 
 ## Processed: `data/processed/<source>/samples_<split>.pt`
 
-Written by `ksmech-arrows samples` (`ksmech.arrows.steps`). `<split>` is `<strategy>_<part>`:
+Written by `ksmech-arrows samples` (`ksmech.arrows.steps`). The pair features use the contact
+kernel given by `--kernel`: `oriented` by default (d = 2.3 Angstrom, blocks cached under
+`data/cache/oriented/`, site-based lobes and clash guard since version 3); `table` needs `data/cache/contact_table.json` and `mlp`
+`data/cache/contact_mlp.npz`. `<split>` is `<strategy>_<part>`:
 strategy `random` (by pathway), `scaffold` or `loco-<class>`; part `train`, `val`, `test`.
 A `torch.save` dict, loadable with `weights_only=True` (tensors, lists, strings, numbers only).
-Fields listed from a real file (`samples_random_val.pt`, PMechDB, 2026-10-20):
+Fields listed from a real file (`samples_random_val.pt`, PMechDB, version 3, 2026-10-20);
+`load_samples` refuses any other version:
 
-- top level: `version` (1), `split`, `n_steps` (steps in the split), `n_samples`, `skipped`
+- top level: `version` (3), `split`, `n_steps` (steps in the split), `n_samples`, `skipped`
   (reason code -> count: `MISSING_TOKENS`, `CORRESPONDENCE`, `UNALIGNED_ARROW`), `n_labels`,
   `n_fermi_smeared`, `samples` (list). The same counts are in `samples_<split>.json`.
 - one sample (`MechanismSample.to_dict`), `A` atoms and `O` orbitals over all reactant
@@ -164,8 +168,14 @@ Fields listed from a real file (`samples_random_val.pt`, PMechDB, 2026-10-20):
 | `atom_positions`, `orbital_centroids` | float32, (A, 3) / (O, 3) | Angstrom, record geometries; for distances only |
 | `orbital_features` | float32, (O, 23) | `feature_names()` |
 | `orbital_spectra` | float32, (O, 8, 2) | (E eV, p) spectral set |
-| `orbital_occupied`, `donor_mask`, `acceptor_mask` | bool, (O,) | candidate masks (`CandidateConfig`); the donor-partner exclusion is per label |
+| `orbital_occupied`, `donor_mask`, `acceptor_mask` | bool, (O,) | candidate masks (`CandidateConfig`); the donor-partner exclusion is in `pair_valid` |
 | `incidence` | float32, (E, 3) | rows (orbital index, atom index, weight) for every centre of every orbital |
+| `pair_z` | float32, (O_occ, O_virt, 7) | Klopman-Salem pair vector of every (occupied, virtual) pair, rows and columns in orbital order within each block; entries `PAIR_FEATURES` = ks3, coupling_sq, gap_kernel, ks2, ks1, inter, distance, computed at K = eps = 1 (multiply by `physics.params.scale`; `physics.ranking.physical_pair_z`). With the oriented kernel ks3 = (K S_rs (E_r + E_s) / 2)^2 G |
+| `pair_defined` | bool, (O_occ, O_virt, 7) | where the entry exists (coupling_sq only within a fragment, ks2 not on one site, ks1 not when %Vbur is missing); undefined entries are 0 |
+| `pair_valid` | bool, (O_occ, O_virt) | arrow candidates: donor and acceptor masks, minus every pair sharing a centre atom within a fragment |
+| `pair_contact_sites` | int64, (O_occ, O_virt, 2) | oriented kernel: the (donor site, acceptor site) atoms (global indices) whose placement gave the pair's contact amplitude, the maximum over the two tokens' centres; -1 with another kernel |
+| `pair_clash` | bool, (O_occ, O_virt) | oriented kernel: every placement of that site pair clashed (atoms closer than 1.5 Angstrom); the amplitude is then the smallest found |
+| `atom_coulomb` | float32, (A, A) | symmetric KS2 between atoms at eps = 1: geometric distance within a fragment, van der Waals contact across; 0 diagonal |
 | `labels` | list[dict] | `ArrowLabel.to_dict`: `donor_ids`, `acceptor_ids` (global token ids), `donor_site`, `acceptor_site` (atom indices), `flags`, `arrow_index`, `source_kind`, `donor_partner`, `sink_partners`, `absorbed` |
 | `product_key`, `product_key_flag` | str | products' canonical resonance key and its `ResonanceFlag` |
 | `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` |

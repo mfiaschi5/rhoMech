@@ -141,6 +141,16 @@ Main CLI entry points are added phase by phase and listed here as they land:
   predicted-arrow round trip, `alignment_report.json`), `uv run ksmech-arrows samples --source
   pmechdb` (`samples_<strategy>_<part>.pt` for every split strategy; re-run both after a token
   rebuild)
-- Physics baseline: _not yet_
+- Physics: `uv run ksmech-physics ks-rank --source pmechdb [--kernel oriented|table|mlp|analytic]
+  [--distance 2.0 2.3 ...]` (untrained KS ranking of each step's first arrow: scorer table,
+  failure classes, per-class table, `ks_rank_report_<kernel>[_d<d>].json`; oriented blocks are
+  cached under `data/cache/oriented/`), `uv run ksmech-physics baseline --source pmechdb
+  [--split random|scaffold]` (logistic regression + GBDT ranker, `baseline_report_<split>.json`
+  and the models), `uv run ksmech-physics textbook` (five textbook selectivity cases, expected vs
+  top-3; builds missing QM records and tokens), `uv run ksmech-physics contact-mlp --source
+  pmechdb` (the MLP ablation kernel, `data/cache/contact_mlp.npz`). After a token rebuild:
+  `ksmech-arrows samples` (stores the KS pair features, oriented kernel by default), then
+  `ksmech-orbitals contact-table` and `contact-mlp` for the ablations, then `ks-rank`,
+  `baseline`, `textbook`.
 - Training: _not yet_
 - Evaluation: _not yet_

@@ -23,6 +23,7 @@ ksmech-data = "ksmech.data.cli:main"
 ksmech-qm = "ksmech.qm.cli:main"
 ksmech-orbitals = "ksmech.orbitals.cli:main"
 ksmech-arrows = "ksmech.arrows.cli:main"
+ksmech-physics = "ksmech.physics.cli:main"
 
 [dependency-groups]
 dev = [

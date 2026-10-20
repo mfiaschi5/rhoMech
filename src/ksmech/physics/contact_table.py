@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,7 @@ def contact_key(o: OrbitalToken, atomic_numbers: np.ndarray) -> tuple[int, int]:
     return int(atomic_numbers[d.center_atoms[0]]), int(np.argmax(d.center_spd[0]))
 
 
+@cache
 def vdw_sum(za: int, zb: int) -> float:
     table = Chem.GetPeriodicTable()
     return table.GetRvdw(int(za)) + table.GetRvdw(int(zb))
@@ -57,12 +59,11 @@ def _contact_pairs(t: MoleculeTokens, window: float) -> list[tuple[int, int]]:
     return out
 
 
-def collect_contacts(t: MoleculeTokens, window: float = 0.3) -> list[tuple[str, tuple, float]]:
-    """(kind, kappa, |l_r,a^T S_ab l_s,b|) for every contact sample of one molecule."""
-    z = np.array([a.atomic_number for a in t.atoms])
+def contact_rows(t: MoleculeTokens, window: float = 0.3) -> list[tuple[str, int, int, float]]:
+    """(kind, r, s, |l_r,a^T S_ab l_s,b|) for every contact sample of one molecule, with r and s
+    positions in `t.orbitals`: the samples of the table and of the descriptor MLP."""
     main = np.array([int(o.descriptors.center_atoms[0]) for o in t.orbitals])
     occ = np.array([o.kind == OrbitalKind.OCCUPIED for o in t.orbitals])
-    keys = [contact_key(o, z) for o in t.orbitals]
     L = t.C_loc
     out = []
     for a, b in _contact_pairs(t, window):
@@ -75,8 +76,15 @@ def collect_contacts(t: MoleculeTokens, window: float = 0.3) -> list[tuple[str, 
         for i, r in enumerate(rs):
             for j, s in enumerate(ss):
                 kind = "occ_occ" if occ[s] else "occ_virt"
-                out.append((kind, (*keys[r], *keys[s]), float(block[i, j])))
+                out.append((kind, int(r), int(s), float(block[i, j])))
     return out
+
+
+def collect_contacts(t: MoleculeTokens, window: float = 0.3) -> list[tuple[str, tuple, float]]:
+    """(kind, kappa, |l_r,a^T S_ab l_s,b|) for every contact sample of one molecule."""
+    z = np.array([a.atomic_number for a in t.atoms])
+    keys = [contact_key(o, z) for o in t.orbitals]
+    return [(kind, (*keys[r], *keys[s]), v) for kind, r, s, v in contact_rows(t, window)]
 
 
 def _level_keys(kappa: tuple[int, int, int, int]) -> tuple[tuple, ...]:
@@ -96,11 +104,12 @@ class ContactTable:
     method: str = ""
     lookups: dict[str, int] = field(default_factory=lambda: dict.fromkeys(LEVELS, 0))
 
-    def lookup(self, kappa: tuple[int, int, int, int]) -> tuple[float, str]:
-        """(S[kappa], the backoff level that supplied it); counts every lookup by level."""
+    def lookup(self, kappa: tuple[int, int, int, int], n: int = 1) -> tuple[float, str]:
+        """(S[kappa], the backoff level that supplied it); counts `n` lookups at that level
+        (a vectorized caller resolves each distinct key once for `n` token pairs)."""
         for level, key in zip(LEVELS, _level_keys(kappa), strict=True):
             if self.counts[level].get(key, 0) >= self.min_count or level == "global":
-                self.lookups[level] += 1
+                self.lookups[level] += n
                 return self.medians[level].get(key, float("nan")), level
         raise AssertionError("unreachable")
 

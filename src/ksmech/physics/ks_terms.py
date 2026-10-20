@@ -14,10 +14,13 @@ the denominator. `beta` couples the two localized orbitals:
   occupied and virtual LMOs of one converged molecule it is identically zero with the
   molecule's own `S` or `F` (they are S-orthogonal and F-decoupled).
 - For intramolecular pairs two extra pair features: the centroid distance and the
-  cross-centre coupling `l_r^T B l_s` with the spec's B: the Wolfsberg-Helmholz resonance
-  integral on AO pairs of different atoms, 0 within an atom (`ksmech.physics.params`). Unlike
-  S or F it does not vanish between converged occupied and virtual LMOs; it measures how much
-  the two orbitals share atoms and bonds in the computed geometry, not whether they can meet.
+  cross-centre coupling `l_r^T B l_s` restricted to the AO blocks between the donor's centres
+  and the acceptor's centres, with the spec's B: the Wolfsberg-Helmholz resonance integral
+  `resonance_integral(S, H_aa, H_bb, K)` on AO pairs of different atoms, 0 within an atom.
+  H is the diagonal of the converged GFN2 Hamiltonian (the Fock matrix the token files store).
+  Unlike S or F the restricted coupling does not vanish between converged occupied and
+  virtual LMOs; it measures how much the two orbitals share atoms and bonds in the computed
+  geometry, not whether they can meet.
 
 For an occupied r and a virtual s of one molecule every E_k - E_m is negative, so G < 0, and
 the more negative G the stronger the stabilizing interaction. Between two molecules a donor
@@ -32,9 +35,26 @@ import numpy as np
 
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
 from ksmech.physics.contact_kernel import ContactKernel
-from ksmech.physics.params import KSParams, wolfsberg_helmholz
+from ksmech.physics.params import KSParams
+from ksmech.qm.fukui import HARTREE_TO_EV
 
 MIN_GAP_EV = 1e-3  # a canonical pair closer than this is clamped (same-block degeneracies)
+
+
+def resonance_integral(S_ab, H_aa, H_bb, K: float = 1.75):
+    """Wolfsberg-Helmholz: beta_ab = K S_ab (H_aa + H_bb) / 2 (broadcasts; eV in, eV out)."""
+    return K * np.asarray(S_ab) * 0.5 * (np.asarray(H_aa) + np.asarray(H_bb))
+
+
+def wolfsberg_helmholz(S: np.ndarray, F: np.ndarray, ao_atom: np.ndarray, K: float) -> np.ndarray:
+    """B_mu,nu = beta_mu,nu (eV) for AOs on different atoms, 0 within an atom.
+
+    `F` is the converged GFN2 Fock matrix in Hartree; only its diagonal enters.
+    """
+    h = np.diag(F) * HARTREE_TO_EV
+    B = resonance_integral(S, h[:, None], h[None, :], K)
+    B[ao_atom[:, None] == ao_atom[None, :]] = 0.0
+    return B
 
 
 def coupling(l_r: np.ndarray, B: np.ndarray, l_s: np.ndarray) -> float:
@@ -137,11 +157,7 @@ def ks3_contact(
 
 def contact_beta_matrix(rows, t_r, cols, t_s, kernel: ContactKernel, params=None) -> np.ndarray:
     """Contact resonance integral (eV) for every (row, col) token pair."""
-    out = np.empty((len(rows), len(cols)))
-    for i, r in enumerate(rows):
-        for j, s in enumerate(cols):
-            out[i, j] = kernel.beta(r, t_r, s, t_s, params)
-    return out
+    return kernel.beta_matrix(rows, t_r, cols, t_s, params)
 
 
 def ks3_contact_matrix(rows, t_r, cols, t_s, kernel: ContactKernel, params=None) -> np.ndarray:
@@ -159,9 +175,26 @@ def wh_matrix(t: MoleculeTokens, params: KSParams | None = None) -> np.ndarray:
     return wolfsberg_helmholz(t.S, t.F, t.ao_atom, (params or KSParams()).K)
 
 
-def cross_center_coupling(r: OrbitalToken, s: OrbitalToken, B: np.ndarray) -> float:
-    """l_r^T B l_s (eV) with B zero within an atom: the intramolecular coupling extra."""
-    return coupling(r.coeff_vector, B, s.coeff_vector)
+def centre_restricted(tokens: list[OrbitalToken], ao_atom: np.ndarray) -> np.ndarray:
+    """(nao, n) coefficient columns with every AO off the token's own centres A_r set to 0."""
+    L = np.column_stack([o.coeff_vector for o in tokens]).reshape(len(ao_atom), -1)
+    for k, o in enumerate(tokens):
+        L[~np.isin(ao_atom, o.descriptors.all_center_atoms), k] = 0.0
+    return L
+
+
+def cross_center_coupling_matrix(
+    rows: list[OrbitalToken], cols: list[OrbitalToken], ao_atom: np.ndarray, B: np.ndarray
+) -> np.ndarray:
+    """l_r^T B l_s (eV) over the AO blocks between r's centres and s's centres, every pair."""
+    return centre_restricted(rows, ao_atom).T @ B @ centre_restricted(cols, ao_atom)
+
+
+def cross_center_coupling(
+    r: OrbitalToken, s: OrbitalToken, B: np.ndarray, ao_atom: np.ndarray
+) -> float:
+    """The intramolecular coupling extra of one pair (B zero within an atom)."""
+    return float(cross_center_coupling_matrix([r], [s], ao_atom, B)[0, 0])
 
 
 def intramolecular_pair_features(
@@ -177,5 +210,5 @@ def intramolecular_pair_features(
         contact_beta=kernel.beta(r, t, s, t, params),
         ks3_contact=ks3_contact(r, t, s, t, kernel, params),
         centroid_distance=centroid_distance(r, s),
-        cross_center_coupling=cross_center_coupling(r, s, wh_matrix(t, params)),
+        cross_center_coupling=cross_center_coupling(r, s, wh_matrix(t, params), t.ao_atom),
     )

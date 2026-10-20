@@ -8,8 +8,8 @@ elsewhere (`defined` says which):
 
 - KS3 and G: occupied i, virtual j (donor first), within one fragment or across two; KS3 is the
   contact term for every pair.
-- (l^T B l)^2: occupied i, virtual j of one fragment: the Wolfsberg-Helmholz cross-centre
-  coupling, the intramolecular extra.
+- (l^T B l)^2: occupied i, virtual j of one fragment: the Wolfsberg-Helmholz coupling over
+  the AO blocks between i's centres and j's centres, the intramolecular extra.
 - KS2: any two tokens on different sites (an atom, or an orbital's main centre).
 - KS1: occupied i with occupied j (the pair repulsion), or with virtual j (the repulsion with
   the occupied tokens around j's main centre).
@@ -19,6 +19,10 @@ elsewhere (`defined` says which):
 
 Entries are standardized with statistics of defined entries computed at the initial K and eps
 (`fit_pair_stats`, `standardize`); a non-finite value is counted and left undefined.
+
+A training sample stores the donor-acceptor part of z (`donor_acceptor_block`: every ordered
+(occupied i, virtual j) pair, in the sample's orbital order), the validity filter of those pairs
+(`valid_pairs`) and the symmetric atom-atom Coulomb matrix (`atom_coulomb_matrix`).
 """
 
 from __future__ import annotations
@@ -27,11 +31,21 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ksmech.orbitals.tokens import MoleculeTokens, OrbitalKind
+from ksmech.orbitals.tokens import (
+    CandidateConfig,
+    MoleculeTokens,
+    OrbitalKind,
+    shares_centres,
+)
 from ksmech.physics.contact_kernel import ContactKernel
 from ksmech.physics.contact_table import vdw_sum
 from ksmech.physics.coulomb import coulomb_matrix
-from ksmech.physics.ks_terms import contact_beta_matrix, gap_kernel_matrix, wh_matrix
+from ksmech.physics.ks_terms import (
+    contact_beta_matrix,
+    cross_center_coupling_matrix,
+    gap_kernel_matrix,
+    wh_matrix,
+)
 from ksmech.physics.params import KSParams
 from ksmech.physics.repulsion import contact_repulsion_matrix, neighbourhood, repulsion_matrix
 
@@ -120,9 +134,8 @@ def _intra(pf, t: MoleculeTokens, f: int, params: KSParams) -> None:
     occ, virt = t.occupied(), t.virtual()
     rows, cols = pf.index.occ[f], pf.index.virt[f]
     if occ and virt:
-        L_o = np.column_stack([o.coeff_vector for o in occ])
-        L_v = np.column_stack([o.coeff_vector for o in virt])
-        _set(pf, "coupling_sq", rows, cols, (L_o.T @ wh_matrix(t, params) @ L_v) ** 2)
+        coupling = cross_center_coupling_matrix(occ, virt, t.ao_atom, wh_matrix(t, params))
+        _set(pf, "coupling_sq", rows, cols, coupling**2)
     if occ:
         M = repulsion_matrix(t, params)
         _set(pf, "ks1", rows, rows, M)
@@ -176,6 +189,56 @@ def pair_features(
     pf.n_non_finite = int(bad.sum())
     pf.z[bad], pf.defined[bad] = 0.0, False
     return pf
+
+
+def _joint_orbitals(pf: PairFeatures) -> tuple[np.ndarray, np.ndarray]:
+    """Joint indices of all occupied and all virtual tokens, fragment by fragment: the order
+    of the sample's occupied and virtual orbitals."""
+    frags = sorted(pf.index.occ)
+    return (
+        np.concatenate([pf.index.occ[f] for f in frags]).astype(int),
+        np.concatenate([pf.index.virt[f] for f in frags]).astype(int),
+    )
+
+
+def donor_acceptor_block(pf: PairFeatures) -> tuple[np.ndarray, np.ndarray]:
+    """(z, defined) of every ordered (occupied i, virtual j) pair, shape (n_occ, n_virt, 7)."""
+    occ, virt = _joint_orbitals(pf)
+    return pf.z[np.ix_(occ, virt)], pf.defined[np.ix_(occ, virt)]
+
+
+def valid_pairs(fragments: list[MoleculeTokens], config: CandidateConfig | None = None):
+    """(n_occ, n_virt) arrow-candidate filter: a doubly occupied donor, an empty acceptor that
+    is not d-type (unless allowed), and, within one fragment, no centre atom in common
+    (`shares_centres`, which contains the own-antibond rule). Every criterion is read from
+    descriptors (`ksmech.orbitals.tokens`)."""
+    config = config or CandidateConfig()
+    donors = {id(o) for t in fragments for o in t.donor_candidates(config)}
+    acceptors = {id(o) for t in fragments for o in t.acceptor_candidates(config)}
+    occ = [(f, o) for f, t in enumerate(fragments) for o in t.occupied()]
+    virt = [(f, o) for f, t in enumerate(fragments) for o in t.virtual()]
+    ok_d = np.array([id(o) in donors for _, o in occ], dtype=bool)
+    ok_a = np.array([id(o) in acceptors for _, o in virt], dtype=bool)
+    out = ok_d[:, None] & ok_a[None, :]
+    for i, j in np.argwhere(out):
+        (f, d), (g, a) = occ[i], virt[j]
+        out[i, j] = f != g or not shares_centres(d, a)  # centres are atoms of one fragment
+    return out
+
+
+def atom_coulomb_matrix(fragments: list[MoleculeTokens], params: KSParams | None = None):
+    """(A, A) symmetric KS2 between atoms, in the sample's atom order (fragment by fragment):
+    the geometric distance within a fragment, the van der Waals contact across fragments,
+    0 on the diagonal."""
+    atoms = [a for t in fragments for a in t.atoms]
+    frag = np.repeat(np.arange(len(fragments)), [len(t.atoms) for t in fragments])
+    pos = np.array([a.position for a in atoms], dtype=float).reshape(-1, 3)
+    z = [a.atomic_number for a in atoms]
+    q = np.array([a.mulliken_charge for a in atoms], dtype=float)
+    inter = frag[:, None] != frag[None, :]
+    vdw = np.array([[vdw_sum(a, b) for b in z] for a in z]).reshape(inter.shape)
+    distance = np.where(inter, vdw, _pairwise(pos, pos))
+    return coulomb_matrix(q, distance, ~np.eye(len(atoms), dtype=bool), params)
 
 
 @dataclass(frozen=True)

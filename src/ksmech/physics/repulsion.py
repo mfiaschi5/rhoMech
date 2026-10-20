@@ -26,7 +26,8 @@ import numpy as np
 from ksmech.orbitals.localize import valence_electrons
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
 from ksmech.physics.contact_kernel import ContactKernel
-from ksmech.physics.params import KSParams, wolfsberg_helmholz
+from ksmech.physics.ks_terms import wolfsberg_helmholz
+from ksmech.physics.params import KSParams
 
 NEIGHBOURHOOD_ANG = 3.5
 
@@ -68,14 +69,11 @@ def contact_repulsion_matrix(
     params: KSParams | None = None,
 ) -> np.ndarray:
     """(len(rows), len(cols)) contact KS1 between occupied tokens of two fragments."""
-    n_r, n_s = atom_populations(t_r), atom_populations(t_s)
-    out = np.zeros((len(rows), len(cols)))
-    for i, r in enumerate(rows):
-        a = int(r.descriptors.center_atoms[0])
-        for j, s in enumerate(cols):
-            b = int(s.descriptors.center_atoms[0])
-            beta = kernel.beta(r, t_r, s, t_s, params)
-            amp = kernel.amplitude(r, t_r, s, t_s)
-            vbur = t_r.atoms[a].vbur * t_s.atoms[b].vbur / 1e4
-            out[i, j] = -(n_r[a] + n_s[b]) * beta * amp * vbur
-    return out
+    a = np.array([int(r.descriptors.center_atoms[0]) for r in rows], dtype=int)
+    b = np.array([int(s.descriptors.center_atoms[0]) for s in cols], dtype=int)
+    n = atom_populations(t_r)[a][:, None] + atom_populations(t_s)[b][None, :]
+    v_r = np.array([t_r.atoms[i].vbur for i in a], dtype=float)
+    v_s = np.array([t_s.atoms[i].vbur for i in b], dtype=float)
+    beta = kernel.beta_matrix(rows, t_r, cols, t_s, params)
+    amp = kernel.amplitude_matrix(rows, t_r, cols, t_s)
+    return -n * beta * amp * np.outer(v_r, v_s) / 1e4
