@@ -67,7 +67,10 @@ They serve tests (`pytest -m diagnostic`), alignment diagnostics, the interface 
 "added back as input" ablations. They never decide which arrows are legal: the arrow
 candidate masks use descriptors. A donor is a doubly occupied token. An acceptor is an empty
 token that is not a d-type polarization function (unless configured) and not the
-antibonding partner of the donor's own bond.
+antibonding partner of the donor's own bond. Until the radical extension, a token with
+0.2 < n < 1.8 (a SOMO, or a Fermi-smeared level) is neither; its fractional occupation stays
+the continuous input. A molecule with an MO more than 0.05 from its aufbau occupation is
+flagged `fermi_smeared`: its GFN2 gap vanishes and it lies outside the closed-shell domain.
 
 The reason is that orbital character must generalize across elements: sigma*(C-Cl),
 sigma*(C-Br) and sigma*(C-I) should look to the model like the same kind of acceptor at

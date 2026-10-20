@@ -825,3 +825,48 @@ the 147 removed resonance steps are recorded in the 3b and spec-v3 entries above
   352,802, same medians).
 - The PMechDB truncation test runs again on the schema-6 files: G from the 8-entry spectra
   differs from the full-spectrum G by up to 21.8% over 50,323 pairs.
+
+## 2026-10-20 — Fermi-smeared molecules: flag and fractional-occupation mask (user decision)
+
+Supersedes "too few to act on now" in the schema-6 rebuild note above.
+
+- **Fractional occupations stay the continuous `occupation` input** (`sum_k p_rk n_k`). They
+  are not rounded or clipped.
+- **Per-molecule flag `MoleculeTokens.fermi_smeared`** (token schema 6 -> 7). It is True
+  when some canonical MO's occupation lies more than 0.05 from its aufbau value for the
+  record's spin state (`localize.aufbau_occupations` / `is_fermi_smeared`).
+  - The aufbau value is 2 on the (N - u) / 2 lowest MOs, 1 on the next u, 0 above.
+  - For a closed shell this is exactly "some MO has 0.05 < n < 1.95". A radical's SOMO at
+    n = 1 is its spin state, so it is not counted as smearing.
+  - Taken literally, the 0.05 < n < 1.95 rule would also flag the 6 tokenized radicals
+    (C=[O+][Sn], C=[O+][Sn-], Br[C]Br, two peroxyl radicals, one radical cation). Their gaps
+    are 0.39-6.1 eV, not vanishing. The rule uses canonical occupations, not token
+    occupations: the flagged silicate enedione has no token below 1.95 (canonical
+    1.934 / 0.066, spread over several LMOs).
+- **These molecules have a vanishing GFN2 gap and are outside the closed-shell domain.**
+  - At the electronic temperature tblite uses, a gap of a few kT spreads electrons over the
+    frontier levels, so the record is no longer a single closed-shell determinant.
+  - The flagged molecules have exactly the four smallest HOMO-LUMO gaps of the 2,001
+    tokenized molecules: C=[O+][Ti-] 0.046 eV (canonical n 1.271 / 0.457 / 0.272), two
+    resonance forms of one allyl cation, C=CCN1...[CH+]..., 0.135 eV (1.863 / 0.137), and a
+    pentacoordinate-silicate enedione 0.175 eV (1.934 / 0.066). The 1st percentile of the
+    gap is 0.74 eV and the median 3.17 eV. The next gaps (0.21, 0.26, 0.32 eV) are not
+    smeared beyond 0.05.
+  - Their tokens, and steps through them, are not closed-shell evidence. Read the flag
+    before training or evaluating on them.
+- **Candidate mask `CandidateConfig.exclude_fractional` (on by default).** A token with
+  0.2 < n < 1.8 (`fractional_band`) is neither donor nor acceptor until the radical
+  extension. On top of the 1.5 / 0.5 thresholds, this means donors need n >= 1.8 and
+  acceptors n <= 0.2. SOMOs (n = 1) were already excluded by the old thresholds.
+- **PMechDB (2,001 of 14,383 molecules tokenized, schema-7 rebuild 2026-10-20):**
+  - 4 molecules flagged.
+  - 8 of the 13,091 accepted steps have a flagged reactant or product; 7 of the 12,944
+    training steps.
+  - Only 103 accepted steps (102 training) have every molecule tokenized, and none of
+    those is affected. The counts are lower bounds until the QM batch finishes.
+  - Mask: 12 tokens in the band (10 SOMOs, the Ti 1.27 and 0.42 tokens). Only 1 candidate
+    is lost: the Ti 0.42 virtual, which had been an acceptor.
+  - Totals: 83,144 donors and 71,656 acceptors.
+  - The build summary reports all of this (`fermi_smeared`, `masks.fractional_band`,
+    `masks.fractional_band_removed`).
+  - Contact table regenerated, unchanged (352,990 / 352,820 samples).

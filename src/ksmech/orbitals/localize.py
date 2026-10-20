@@ -28,6 +28,7 @@ from ksmech.qm.records import QMRecord
 # AO index within a p shell -> Cartesian axis: tblite's (py, pz, px) order.
 P_AXIS_ORDER = (1, 2, 0)
 DOUBLE_THRESHOLD = 1.5  # an occupied MO at or above this is doubly occupied, below it a SOMO
+SMEAR_TOL = 0.05  # an MO further than this from its aufbau occupation is Fermi-smeared
 _N_VALENCE_AOS = frozenset({1, 4, 9})
 _MIN_GAIN = 1e-14
 
@@ -97,6 +98,26 @@ def assert_valence_only(rec: QMRecord) -> None:
             f"{n_elec} electrons in the record, {expected} valence electrons expected: "
             "the basis is not valence-only"
         )
+
+
+def aufbau_occupations(rec: QMRecord) -> np.ndarray:
+    """Integer occupations of the record's spin state: 2 on the (N - u) / 2 lowest MOs, 1 on
+    the next u (the SOMOs), 0 above; u = `rec.unpaired`."""
+    n_elec = int(round(float(rec.occupations.sum())))
+    n_double = (n_elec - rec.unpaired) // 2
+    order = np.argsort(rec.orbital_energies_ev, kind="stable")
+    ref = np.zeros(len(rec.occupations))
+    ref[order[:n_double]] = 2.0
+    ref[order[n_double : n_double + rec.unpaired]] = 1.0
+    return ref
+
+
+def is_fermi_smeared(rec: QMRecord, tol: float = SMEAR_TOL) -> bool:
+    """Some MO's occupation lies more than `tol` from its aufbau value: the GFN2 gap is small
+    enough for the electronic temperature to spread electrons over several levels. For a
+    closed shell this is exactly "some MO has 0.05 < n < 1.95"; a radical's SOMO at n = 1 is
+    its spin state, not smearing."""
+    return bool(np.any(np.abs(rec.occupations - aufbau_occupations(rec)) > tol))
 
 
 def _schedule(n: int) -> list[tuple[np.ndarray, np.ndarray]]:

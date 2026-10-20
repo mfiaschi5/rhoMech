@@ -1,6 +1,7 @@
 """Dataset build: missing QM records are skipped and counted, files load on re-run, summary."""
 
 import json
+from dataclasses import replace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -11,10 +12,17 @@ from ksmech.orbitals import build, cli
 from ksmech.orbitals.build import BuildConfig, BuildRow, build_dataset, worst_molecules
 from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.tokens import atom_feature_names
+from ksmech.qm.fukui import homo_index
 from ksmech.qm.records import cache_path, save_record
 
 MOLECULES = ["CO", "O", "c1ccccc1"]
 MISSING = "[Cl-]"
+
+
+def write_steps(path, steps):
+    reactants, products, resonance = zip(*steps, strict=True)
+    table = {"reactants_smiles": reactants, "products_smiles": products}
+    pq.write_table(pa.table({**table, "resonance_step": resonance}), path)
 
 
 @pytest.fixture
@@ -24,7 +32,7 @@ def dataset(tmp_path, sp_record):
     path = processed / "pmechdb" / "steps.parquet"
     path.parent.mkdir(parents=True)
     smiles = ".".join(MOLECULES + [MISSING])
-    pq.write_table(pa.table({"reactants_smiles": [smiles], "products_smiles": [smiles]}), path)
+    write_steps(path, [(smiles, smiles, False)])
     config = BuildConfig(qm_cache_dir=tmp_path / "qm", out_dir=tmp_path / "tokens")
     for smi in MOLECULES:
         rec = sp_record(smi)
@@ -61,7 +69,27 @@ def test_build_skips_missing_records_and_writes_summary(dataset):
     assert summary["masks"]["donors"] == summary["n_occupied"]
     assert summary["masks"]["d_type_label_mismatch"] == 0
     assert set(summary["chirality"]) == {"0"}
+    assert summary["fermi_smeared"]["n_molecules"] == 0
+    assert summary["fermi_smeared"]["steps"]["all"]["fully_tokenized"] == 0  # [Cl-] is missing
     json.dumps(summary)  # the whole summary is JSON
+
+
+def test_fermi_smeared_molecules_and_steps_are_counted(dataset, sp_record):
+    processed, config = dataset
+    rec = sp_record("CO")
+    occ = rec.occupations.copy()
+    h = homo_index(occ)
+    occ[h], occ[h + 1] = occ[h] - 0.3, occ[h + 1] + 0.3  # a vanishing gap, by hand
+    save_record(
+        replace(rec, occupations=occ), cache_path(config.qm_cache_dir, "CO", 0, config.method)
+    )
+    steps = [("CO.O", "CO.O", False), ("O", "O", False), ("c1ccccc1", "[Cl-]", True)]
+    write_steps(processed / "pmechdb" / "steps.parquet", steps)
+    fs = run(processed, config)["fermi_smeared"]
+    assert fs["n_molecules"] == 1 and fs["smiles"] == ["CO"]
+    keys = ("steps", "touching_smeared", "fully_tokenized", "fully_tokenized_touching_smeared")
+    assert [fs["steps"]["all"][k] for k in keys] == [3, 1, 2, 1]
+    assert [fs["steps"]["training"][k] for k in keys] == [2, 1, 2, 1]  # resonance step dropped
 
 
 def test_rerun_loads_existing_files_unless_forced(dataset, monkeypatch):

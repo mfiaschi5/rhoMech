@@ -18,15 +18,18 @@ from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
+import pyarrow.parquet as pq
 from rich.console import Console
 from rich.table import Table
 
-from ksmech.data.io import DEFAULT_PROCESSED_DIR
+from ksmech.data import chem
+from ksmech.data.io import DEFAULT_PROCESSED_DIR, steps_path
 from ksmech.orbitals.classify import UNRESOLVED_TYPES, ClassifyConfig, OrbitalType
 from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.fgroups import NONE_ID, UNK_ID
 from ksmech.orbitals.localize import PMConfig
 from ksmech.orbitals.tokens import (
+    CandidateConfig,
     MoleculeTokens,
     TokenSchemaError,
     atom_feature_names,
@@ -79,6 +82,7 @@ class BuildRow:
     pm_sweeps_occ: int = 0
     pm_sweeps_virt: int = 0
     pm_converged: bool = True
+    fermi_smeared: bool = False
     fg_unk: int = 0
     fg_none: int = 0
     n_metal_bound: int = 0
@@ -109,12 +113,19 @@ def _mask_counts(t: MoleculeTokens) -> dict[str, int]:
     occ, virt = t.occupied(), t.virtual()
     d_type = [t.is_d_type(o) for o in virt]
     labelled_d = [str(o.type) == "empty_d" for o in virt]
+    donors, acceptors = len(t.donor_candidates()), len(t.acceptor_candidates())
+    loose = CandidateConfig(exclude_fractional=False)
+    n_loose = len(t.donor_candidates(loose)) + len(t.acceptor_candidates(loose))
     return dict(
-        donors=len(t.donor_candidates()),
-        acceptors=len(t.acceptor_candidates()),
+        donors=donors,
+        acceptors=acceptors,
         d_type=sum(d_type),
         d_type_label_mismatch=sum(a != b for a, b in zip(d_type, labelled_d, strict=True)),
-        partially_occupied=len(occ) - len(t.donor_candidates()),
+        partially_occupied=len(occ) - donors,
+        fractional_band=sum(
+            CandidateConfig().is_fractional(o.descriptors.occupation) for o in t.orbitals
+        ),
+        fractional_band_removed=n_loose - donors - acceptors,  # candidates the band takes away
         more_than_4_centres=sum(o.descriptors.n_centers > 4 for o in t.orbitals),
     )
 
@@ -150,6 +161,7 @@ def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
         pm_sweeps_occ=t.pm_sweeps_occ,
         pm_sweeps_virt=t.pm_sweeps_virt,
         pm_converged=t.pm_converged,
+        fermi_smeared=t.fermi_smeared,
         fg_unk=sum(a.fg_id == UNK_ID for a in heavy),
         fg_none=sum(a.fg_id == NONE_ID for a in heavy),
         n_metal_bound=sum(o.metal_bound for o in occ),
@@ -341,7 +353,54 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
         inputs=input_distributions(ok),
         masks=_sum_counts(r.masks for r in ok),
         chirality=_sum_counts(r.chirality for r in ok),
+        fermi_smeared=dict(
+            n_molecules=sum(r.fermi_smeared for r in ok),
+            smiles=sorted(r.smiles for r in ok if r.fermi_smeared),
+        ),
     )
+
+
+_UNCANONICALIZABLE = "<uncanonicalizable>"  # never tokenized, so its step is never complete
+
+
+def _side_keys(side: str) -> frozenset[str]:
+    """Map-free canonical SMILES of the fragments of one reaction side, as `collect_molecules`
+    keys them."""
+    keys = set()
+    for frag in chem.fragments(chem.parse_mapped(side)):
+        try:
+            keys.add(chem.unmapped_canonical(frag))
+        except (chem.SanitizeError, ValueError):
+            keys.add(_UNCANONICALIZABLE)
+    return frozenset(keys)
+
+
+def smeared_steps(source: str, processed_dir: Path, rows: list[BuildRow]) -> dict:
+    """Steps with a Fermi-smeared reactant or product, over every accepted step ("all") and
+    over the training target ("training": resonance steps dropped). `fully_tokenized` counts
+    the steps whose molecules all have tokens, the denominator while the QM batch is partial."""
+    cols = ["reactants_smiles", "products_smiles", "resonance_step"]
+    table = pq.read_table(steps_path(source, processed_dir), columns=cols)
+    ok = {r.smiles for r in rows if r.status in ("built", "loaded")}
+    smeared = {r.smiles for r in rows if r.fermi_smeared}
+    names = ("steps", "touching_smeared", "fully_tokenized", "fully_tokenized_touching_smeared")
+    counts = {split: dict.fromkeys(names, 0) for split in ("all", "training")}
+    memo: dict[str, frozenset[str]] = {}
+    columns = [table.column(c).to_pylist() for c in cols]
+    for reactants, products, resonance in zip(*columns, strict=True):
+        keys = set()
+        for side in (reactants, products):
+            if side not in memo:
+                memo[side] = _side_keys(side)
+            keys |= memo[side]
+        hit, complete = bool(keys & smeared), keys <= ok
+        for split in ("all",) if resonance else ("all", "training"):
+            c = counts[split]
+            c["steps"] += 1
+            c["touching_smeared"] += hit
+            c["fully_tokenized"] += complete
+            c["fully_tokenized_touching_smeared"] += hit and complete
+    return counts
 
 
 def _sum_counts(dicts) -> dict[str, int]:
@@ -402,6 +461,20 @@ def _print_descriptor_distributions(summary: dict, console: Console) -> None:
         )
 
 
+def _print_fermi_smeared(summary: dict, console: Console) -> None:
+    fs = summary["fermi_smeared"]
+    console.print(
+        f"Fermi-smeared molecules (an MO > 0.05 from its aufbau occupation): "
+        f"{fs['n_molecules']} of {summary['n_ok']}"
+    )
+    for split, c in fs.get("steps", {}).items():
+        console.print(
+            f"  {split} steps: {c['touching_smeared']} of {c['steps']} touch one; "
+            f"{c['fully_tokenized_touching_smeared']} of the {c['fully_tokenized']} steps "
+            "whose molecules all have tokens"
+        )
+
+
 def print_summary(summary: dict, console: Console, show_worst: bool = False) -> None:
     s = summary
     console.print(
@@ -433,6 +506,7 @@ def print_summary(summary: dict, console: Console, show_worst: bool = False) -> 
     )
     _print_descriptor_distributions(s, console)
     _print_inputs(s, console)
+    _print_fermi_smeared(s, console)
     if s["failures"]:
         console.print(
             f"[red]{len(s['failures'])} failures[/red]; first: {next(iter(s['failures'].items()))}"
@@ -475,6 +549,7 @@ def build_dataset(
     )
     rows = run_build(smiles_list, config, n_workers)
     summary = summarize(rows, config, source)
+    summary["fermi_smeared"]["steps"] = smeared_steps(source, processed_dir, rows)
     out = Path(config.out_dir) / SUMMARY_NAME
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(summary, indent=1) + "\n")

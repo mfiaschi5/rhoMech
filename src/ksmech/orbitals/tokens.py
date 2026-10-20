@@ -47,11 +47,16 @@ from ksmech.orbitals.descriptors import (
 )
 from ksmech.orbitals.fgroups import FGVocab, default_vocab
 from ksmech.orbitals.frontier import LEVELS, frontier_weights
-from ksmech.orbitals.localize import LocalizedOrbitals, PMConfig, localize_record
+from ksmech.orbitals.localize import (
+    LocalizedOrbitals,
+    PMConfig,
+    is_fermi_smeared,
+    localize_record,
+)
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class OrbitalKind(StrEnum):
@@ -152,13 +157,20 @@ class CandidateConfig:
 
     Donor: a doubly occupied token. Acceptor: an empty token that is not a d-type polarization
     function (unless `allow_d_acceptors`) and, for a given donor, not the antibonding partner
-    of the donor's own bond. Partially occupied tokens (LMOs mixing a radical's SOMO) are
-    neither until the radical extension.
+    of the donor's own bond. Until the radical extension, a token whose occupation lies in
+    `fractional_band` (a SOMO at 1, a Fermi-smeared level of a small-gap molecule) is neither
+    (`exclude_fractional`); its occupation stays the continuous model input either way.
     """
 
     allow_d_acceptors: bool = False  # GFN2 d polarization functions are basis artefacts
     full: float = 1.5  # occupation above this: doubly occupied
     empty: float = 0.5  # occupation below this: empty
+    exclude_fractional: bool = True
+    fractional_band: tuple[float, float] = (0.2, 1.8)  # open interval
+
+    def is_fractional(self, occupation: float) -> bool:
+        lo, hi = self.fractional_band
+        return self.exclude_fractional and lo < occupation < hi
 
 
 # groups 3-11: the d shell is valence (Ti(IV) accepts into it), not a polarization function
@@ -195,6 +207,7 @@ class MoleculeTokens:
     qm_warnings: str = ""
     schema_version: int = SCHEMA_VERSION
     fg_vocab_size: int = 0
+    fermi_smeared: bool = False  # an MO is > 0.05 from its aufbau occupation (`is_fermi_smeared`)
 
     @property
     def C_loc(self) -> np.ndarray:
@@ -263,7 +276,12 @@ class MoleculeTokens:
     def donor_candidates(self, config: CandidateConfig | None = None) -> list[OrbitalToken]:
         """Doubly occupied tokens: where an arrow may start."""
         config = config or CandidateConfig()
-        return [o for o in self.occupied() if o.descriptors.occupation > config.full]
+        return [
+            o
+            for o in self.occupied()
+            if o.descriptors.occupation > config.full
+            and not config.is_fractional(o.descriptors.occupation)
+        ]
 
     def acceptor_candidates(
         self, config: CandidateConfig | None = None, donor: OrbitalToken | None = None
@@ -275,6 +293,7 @@ class MoleculeTokens:
             o
             for o in self.virtual()
             if o.descriptors.occupation < config.empty
+            and not config.is_fractional(o.descriptors.occupation)
             and (config.allow_d_acceptors or not self.is_d_type(o))
             and (donor is None or not is_antibonding_partner(donor, o))
         ]
@@ -446,6 +465,7 @@ def build_molecule_tokens(
         pm_converged=loc.converged,
         qm_warnings=rec.warnings,
         fg_vocab_size=len(vocab),
+        fermi_smeared=is_fermi_smeared(rec),
     )
 
 
@@ -482,6 +502,7 @@ _META = (
     "qm_warnings",
     "schema_version",
     "fg_vocab_size",
+    "fermi_smeared",
 )
 
 
@@ -621,6 +642,7 @@ def load_tokens(path: Path) -> MoleculeTokens:
     for k in ("conformer_id", "pm_sweeps_occ", "pm_sweeps_virt", "schema_version", "fg_vocab_size"):
         meta[k] = int(meta[k])
     meta["pm_converged"] = bool(meta["pm_converged"])
+    meta["fermi_smeared"] = bool(meta["fermi_smeared"])
     return MoleculeTokens(
         atoms=atoms,
         orbitals=_load_orbitals(z, len(atoms)),

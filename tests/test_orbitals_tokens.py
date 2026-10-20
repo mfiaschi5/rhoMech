@@ -1,6 +1,6 @@
 """Token building, the shared id sequence, atom features, and the .npz round trip."""
 
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import numpy as np
 import pytest
@@ -9,6 +9,7 @@ from rich.console import Console
 from ksmech.orbitals.classify import OrbitalType
 from ksmech.orbitals.descriptors import MODEL_INPUT
 from ksmech.orbitals.fgroups import NONE_ID, default_vocab
+from ksmech.orbitals.localize import aufbau_occupations, is_fermi_smeared
 from ksmech.orbitals.tokens import (
     ATOM_CATEGORICAL,
     VALENCE_D,
@@ -23,7 +24,8 @@ from ksmech.orbitals.tokens import (
     save_tokens,
     token_table,
 )
-from ksmech.qm.fukui import HARTREE_TO_EV
+from ksmech.qm.fukui import HARTREE_TO_EV, homo_index
+from tests.fixtures.molecules import MOLECULES
 from tests.token_select import leading, one_centre, two_centre
 
 
@@ -189,6 +191,59 @@ def test_acceptor_candidates_exclude_d_type_by_default(sp_record):
     without_partner = chloromethane.acceptor_candidates(donor=c_cl)
     assert len(without_partner) == 3 and all(set(leading(o)) != {0, 1} for o in without_partner)
     assert all(is_antibonding_partner(c_cl, o) for o in acceptors if o not in without_partner)
+
+
+def smeared(rec, shift: float):
+    """A copy of `rec` with `shift` electrons moved from the HOMO to the LUMO."""
+    occ = rec.occupations.copy()
+    h = homo_index(occ)
+    occ[h] -= shift
+    occ[h + 1] += shift
+    return replace(rec, occupations=occ)
+
+
+def test_fermi_smeared_flag(sp_record):
+    assert not any(is_fermi_smeared(sp_record(s)) for s in MOLECULES.values())
+    methyl = sp_record("[CH3]")
+    assert list(aufbau_occupations(methyl)) == [2, 2, 2, 1, 0, 0, 0]
+    assert not is_fermi_smeared(methyl)  # the SOMO at 1 is the spin state, not smearing
+    assert is_fermi_smeared(smeared(methyl, 0.1))
+    ethylene = sp_record("C=C")
+    assert is_fermi_smeared(smeared(ethylene, 0.3)) and not is_fermi_smeared(
+        smeared(ethylene, 0.04)
+    )
+
+
+def test_fractional_band_bounds():
+    config = CandidateConfig()
+    assert [config.is_fractional(n) for n in (0.2, 0.21, 1.0, 1.79, 1.8)] == [
+        False,
+        True,
+        True,
+        True,
+        False,
+    ]
+    assert not CandidateConfig(exclude_fractional=False).is_fractional(1.0)
+
+
+def test_fractional_tokens_keep_their_occupation_and_are_masked(sp_record, tmp_path):
+    t = build_molecule_tokens(smeared(sp_record("C=C"), 0.3))
+    assert t.fermi_smeared and not build_molecule_tokens(sp_record("C=C")).fermi_smeared
+    pi = [o for o in t.occupied() if abs(o.descriptors.occupation - 2.0) > 0.05]
+    pi_star = [o for o in t.virtual() if o.descriptors.occupation > 0.05]
+    assert len(pi) == len(pi_star) == 1
+    assert 1.6 < pi[0].descriptors.occupation < 1.8  # the continuous input stays fractional
+    assert 0.2 < pi_star[0].descriptors.occupation < 0.4
+
+    def ids(tokens):
+        return {o.token_id for o in tokens}
+
+    assert pi[0].token_id not in ids(t.donor_candidates())
+    assert pi_star[0].token_id not in ids(t.acceptor_candidates())
+    loose = CandidateConfig(exclude_fractional=False)
+    assert pi[0].token_id in ids(t.donor_candidates(loose))
+    assert pi_star[0].token_id in ids(t.acceptor_candidates(loose))
+    assert load_tokens(save_tokens(t, tmp_path / "smeared.npz")).fermi_smeared
 
 
 @pytest.mark.diagnostic
