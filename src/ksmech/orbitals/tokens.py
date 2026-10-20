@@ -3,9 +3,17 @@
 An orbital token is a localized orbital described by continuous physical descriptors
 (`OrbitalDescriptors`: occupation, centres and their weights and s/p/d composition, the
 geometry of the two main centres, spatial extent, spectral decomposition over the canonical
-MOs). Those descriptors are the model input: `MoleculeTokens.orbital_features()`. The
-classifier's `type` (sigma, pi, lone pair, ...) and its parents are kept on the token as
-diagnostics and as the mask for arrow candidates; they never enter the feature matrix.
+MOs). Those descriptors are the model input: `MoleculeTokens.orbital_features()` (continuous),
+`orbital_spectra()` (the spectral set) and `orbital_centres()` (the token-to-atom weights through
+which an orbital inherits its atoms' embeddings). The classifier's `type` (sigma, pi, lone
+pair, ...) and its parents are kept on the token for tests, alignment diagnostics and the
+interface; they never enter the model input and never decide which arrows are legal
+(`CandidateConfig` masks on descriptors).
+
+An atom token's model input is `MoleculeTokens.atom_categorical()` (atomic number, formal
+charge: embedded) and `atom_features()` (charge, frozen-orbital Fukui, dual descriptor,
+frontier weights, buried volume, chirality). Hybridization, aromaticity and the
+functional-group id are stored, tagged `model_input=False`, and never enter either matrix.
 
 Atoms and orbitals share one token-id sequence: atoms first (`token_id == atom_index`), then
 occupied orbitals by ascending diagnostic energy, then virtual orbitals likewise. Orbital
@@ -28,6 +36,7 @@ import numpy as np
 from rdkit import Chem
 from rich.table import Table
 
+from ksmech.orbitals.chirality import chirality_signs
 from ksmech.orbitals.classify import Classification, ClassifyConfig, OrbitalType, classify_block
 from ksmech.orbitals.descriptors import (
     MODEL_INPUT,
@@ -37,12 +46,12 @@ from ksmech.orbitals.descriptors import (
     feature_names,
 )
 from ksmech.orbitals.fgroups import FGVocab, default_vocab
-from ksmech.orbitals.frontier import frontier_weights
+from ksmech.orbitals.frontier import LEVELS, frontier_weights
 from ksmech.orbitals.localize import LocalizedOrbitals, PMConfig, localize_record
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class OrbitalKind(StrEnum):
@@ -54,9 +63,9 @@ class OrbitalKind(StrEnum):
 class OrbitalToken:
     token_id: int
     kind: OrbitalKind
-    descriptors: OrbitalDescriptors  # the model input (`descriptors.to_vector()`)
+    descriptors: OrbitalDescriptors  # the model input (`continuous_vector`, `spectral_set`)
     coeff_vector: np.ndarray  # (nao,) AO coefficients, for the KS coupling term
-    # diagnostics from the classifier: never model input, used for candidate masks and tables
+    # diagnostics from the classifier: never model input, never a mask; tests and tables
     type: OrbitalType = field(metadata={MODEL_INPUT: False})
     parent_atoms: tuple[int, ...] = ()  # record atom indices, by descending population
     parent_weights: tuple[float, ...] = ()
@@ -77,59 +86,96 @@ class OrbitalToken:
         return self.descriptors.centroid
 
 
+def _atom_in():
+    return field(metadata={MODEL_INPUT: True})
+
+
+def _atom_diag():
+    return field(metadata={MODEL_INPUT: False})
+
+
+# model-input atom fields that are embedded as categories, not fed to the continuous MLP
+ATOM_CATEGORICAL = ("atomic_number", "formal_charge")
+
+
 @dataclass
 class AtomToken:
-    token_id: int
-    atom_index: int
-    map_number: int  # 0 = not assigned
-    atomic_number: int
-    formal_charge: int
-    hybridization: str
-    aromatic: bool
-    mulliken_charge: float
-    f_plus: float  # finite-difference condensed Fukui (NaN when unavailable)
-    f_minus: float
-    dual: float
-    f_plus_fmo: float  # frozen-orbital (LUMO / HOMO population) variants
-    f_minus_fmo: float
-    vbur: float
-    position: np.ndarray  # (3,) Angstrom
-    fg_id: int  # functional-group vocabulary index (0 none, 1 unk)
-    fmo_weights: np.ndarray = field(default_factory=lambda: np.full(4, np.nan))  # (4,)
-    # HOMO-1, HOMO, LUMO, LUMO+1 frozen-orbital weights on this atom (f-, f+ generalized)
+    """Model-input fields carry `model_input=True` metadata, in the order of the spec's u_a.
+
+    Hybridization, the aromatic flag and the functional-group id are chemists' taxonomies:
+    stored for tests, the interface and ablations, never model input. So are the
+    finite-difference f+ / f- (relaxation-dominated) and the absolute position.
+    """
+
+    token_id: int = _atom_diag()
+    atom_index: int = _atom_diag()
+    map_number: int = _atom_diag()  # 0 = not assigned
+    atomic_number: int = _atom_in()
+    formal_charge: int = _atom_in()
+    mulliken_charge: float = _atom_in()
+    f_plus_fmo: float = _atom_in()  # frozen-orbital f+ (LUMO population)
+    f_minus_fmo: float = _atom_in()  # frozen-orbital f- (HOMO population)
+    dual: float = _atom_in()  # finite-difference dual descriptor f+ - f- (NaN when unavailable)
+    fmo_weights: np.ndarray = _atom_in()  # (4,) HOMO-1, HOMO, LUMO, LUMO+1 block weights
+    vbur: float = _atom_in()  # %Vbur, 3.5 Angstrom sphere
+    chirality: float = _atom_in()  # +1 / -1 on a specified stereocentre, else 0 (`chirality`)
+    f_plus: float = _atom_diag()  # finite-difference condensed Fukui (NaN when unavailable)
+    f_minus: float = _atom_diag()
+    hybridization: str = _atom_diag()
+    aromatic: bool = _atom_diag()
+    fg_id: int = _atom_diag()  # functional-group vocabulary index (0 none, 1 unk)
+    position: np.ndarray = _atom_diag()  # (3,) Angstrom; geometry enters through distances
 
 
-DONOR_TYPES = frozenset(
-    {OrbitalType.LONE_PAIR, OrbitalType.SIGMA, OrbitalType.PI, OrbitalType.DELOCALIZED_PI}
-)
-ACCEPTOR_TYPES = frozenset(
-    {
-        OrbitalType.SIGMA_STAR,
-        OrbitalType.PI_STAR,
-        OrbitalType.EMPTY_P,
-        OrbitalType.EMPTY_S,
-        OrbitalType.DELOCALIZED_PI_STAR,
-    }
-)
+def atom_feature_names() -> list[str]:
+    """Names of the continuous atom inputs, the columns of `MoleculeTokens.atom_features()`."""
+    names: list[str] = []
+    for f in fields(AtomToken):
+        if not f.metadata[MODEL_INPUT] or f.name in ATOM_CATEGORICAL:
+            continue
+        names += [f"fmo_{lv}" for lv in LEVELS] if f.name == "fmo_weights" else [f.name]
+    return names
+
+
+def _atom_row(a: AtomToken) -> np.ndarray:
+    parts = [
+        np.asarray(getattr(a, f.name), dtype=float).ravel()
+        for f in fields(AtomToken)
+        if f.metadata[MODEL_INPUT] and f.name not in ATOM_CATEGORICAL
+    ]
+    return np.concatenate(parts)
 
 
 @dataclass(frozen=True)
 class CandidateConfig:
-    """Which orbital tokens may be arrow donors / acceptors (a mask on the diagnostic type)."""
+    """Which orbital tokens may be arrow donors / acceptors, decided on descriptors alone.
 
-    allow_empty_d_acceptors: bool = False  # GFN2 d polarization functions are basis artefacts
-    allow_unknown: bool = False
+    Donor: a doubly occupied token. Acceptor: an empty token that is not a d-type polarization
+    function (unless `allow_d_acceptors`) and, for a given donor, not the antibonding partner
+    of the donor's own bond. Partially occupied tokens (LMOs mixing a radical's SOMO) are
+    neither until the radical extension.
+    """
 
-    def donor_types(self) -> frozenset[OrbitalType]:
-        return DONOR_TYPES | ({OrbitalType.UNKNOWN} if self.allow_unknown else frozenset())
+    allow_d_acceptors: bool = False  # GFN2 d polarization functions are basis artefacts
+    full: float = 1.5  # occupation above this: doubly occupied
+    empty: float = 0.5  # occupation below this: empty
 
-    def acceptor_types(self) -> frozenset[OrbitalType]:
-        extra = set()
-        if self.allow_empty_d_acceptors:
-            extra.add(OrbitalType.EMPTY_D)
-        if self.allow_unknown:
-            extra.add(OrbitalType.UNKNOWN)
-        return ACCEPTOR_TYPES | extra
+
+# groups 3-11: the d shell is valence (Ti(IV) accepts into it), not a polarization function
+VALENCE_D = frozenset([*range(21, 30), *range(39, 48), *range(57, 80)])
+
+
+def is_d_type(d: OrbitalDescriptors, z_main: int) -> bool:
+    """A d polarization function: the main centre is mostly d and its element (atomic number
+    `z_main`) has no valence d shell in GFN2 (Zn, Cd, Hg keep d10 in the core)."""
+    return int(np.argmax(d.center_spd[0])) == 2 and int(z_main) not in VALENCE_D
+
+
+def is_antibonding_partner(donor: OrbitalToken, acceptor: OrbitalToken) -> bool:
+    """`acceptor` is an antibonding orbital of the donor's own bond: both have at least two
+    centres and the same two leading centres (pi* is the partner of pi, sigma* of sigma)."""
+    a, b = donor.descriptors.all_center_atoms, acceptor.descriptors.all_center_atoms
+    return len(a) >= 2 and len(b) >= 2 and set(a[:2]) == set(b[:2])
 
 
 @dataclass
@@ -170,35 +216,80 @@ class MoleculeTokens:
             self.atoms[i].map_number = int(m)
 
     def orbital_features(self) -> np.ndarray:
-        """(n_orbitals, n_features) model-input matrix; see `feature_names()`."""
+        """(n_orbitals, n_features) continuous model input; see `feature_names()`."""
         n = len(feature_names())
-        return np.array([o.descriptors.to_vector() for o in self.orbitals]).reshape(-1, n)
+        return np.array([o.descriptors.continuous_vector() for o in self.orbitals]).reshape(-1, n)
+
+    def orbital_spectra(self) -> np.ndarray:
+        """(n_orbitals, spectral_max, 2) spectral sets (E_k eV, p_rk); padding rows have p = 0."""
+        rows = [o.descriptors.spectral_set() for o in self.orbitals]
+        return np.array(rows, dtype=float).reshape(-1, DescriptorConfig().spectral_max, 2)
+
+    def orbital_centres(self) -> np.ndarray:
+        """(n_orbitals, n_atoms) population w_a of each orbital on each of its centres, else 0."""
+        out = np.zeros((len(self.orbitals), len(self.atoms)))
+        for k, o in enumerate(self.orbitals):
+            out[k, o.descriptors.all_center_atoms] = o.descriptors.all_center_weights
+        return out
 
     @staticmethod
     def feature_names() -> list[str]:
         return feature_names()
 
+    def _atom_raw(self) -> np.ndarray:
+        n = len(atom_feature_names())
+        return np.array([_atom_row(a) for a in self.atoms], dtype=float).reshape(-1, n)
+
+    def atom_features(self) -> np.ndarray:
+        """(n_atoms, n) continuous atom inputs (`atom_feature_names()`), missing values as 0."""
+        return np.nan_to_num(self._atom_raw(), nan=0.0)
+
+    def atom_missing(self) -> np.ndarray:
+        """(n_atoms, n) True where `atom_features()` holds a 0 for an unavailable value
+        (finite-difference dual after FUKUI_SCF_FAIL, a frontier level that does not exist)."""
+        return np.isnan(self._atom_raw())
+
+    def atom_categorical(self) -> np.ndarray:
+        """(n_atoms, 2) integer inputs that are embedded: atomic number, formal charge."""
+        rows = [[getattr(a, f) for f in ATOM_CATEGORICAL] for a in self.atoms]
+        return np.array(rows, dtype=np.int64).reshape(-1, len(ATOM_CATEGORICAL))
+
+    def is_d_type(self, o: OrbitalToken) -> bool:
+        """`o` is a d polarization function (see the module-level `is_d_type`)."""
+        return is_d_type(
+            o.descriptors, self.atoms[int(o.descriptors.center_atoms[0])].atomic_number
+        )
+
     def donor_candidates(self, config: CandidateConfig | None = None) -> list[OrbitalToken]:
-        """Occupied tokens an arrow may start from."""
-        allowed = (config or CandidateConfig()).donor_types()
-        return [o for o in self.occupied() if o.type in allowed]
+        """Doubly occupied tokens: where an arrow may start."""
+        config = config or CandidateConfig()
+        return [o for o in self.occupied() if o.descriptors.occupation > config.full]
 
-    def acceptor_candidates(self, config: CandidateConfig | None = None) -> list[OrbitalToken]:
-        """Virtual tokens an arrow may end on; `empty_d` only with `allow_empty_d_acceptors`."""
-        allowed = (config or CandidateConfig()).acceptor_types()
-        return [o for o in self.virtual() if o.type in allowed]
+    def acceptor_candidates(
+        self, config: CandidateConfig | None = None, donor: OrbitalToken | None = None
+    ) -> list[OrbitalToken]:
+        """Empty tokens an arrow may end on: d-type tokens only with `allow_d_acceptors`, and
+        never the antibonding partner of `donor`'s own bond when a donor is given."""
+        config = config or CandidateConfig()
+        return [
+            o
+            for o in self.virtual()
+            if o.descriptors.occupation < config.empty
+            and (config.allow_d_acceptors or not self.is_d_type(o))
+            and (donor is None or not is_antibonding_partner(donor, o))
+        ]
 
-    def atoms_with_only_empty_d_virtuals(self) -> list[int]:
-        """Atoms that parent at least one virtual token, all of which are `empty_d`.
+    def atoms_with_only_d_virtuals(self) -> list[int]:
+        """Atoms that are a centre of at least one virtual token, all of which are d-type.
 
         An arrow sink on such an atom has no acceptor candidate by default; the alignment phase
         reports how many dataset sinks land there.
         """
-        parent_types: dict[int, set[OrbitalType]] = {}
+        d_type: dict[int, set[bool]] = {}
         for o in self.virtual():
-            for a in o.parent_atoms:
-                parent_types.setdefault(a, set()).add(o.type)
-        return sorted(a for a, ts in parent_types.items() if ts == {OrbitalType.EMPTY_D})
+            for a in o.descriptors.all_center_atoms:
+                d_type.setdefault(int(a), set()).add(self.is_d_type(o))
+        return sorted(a for a, flags in d_type.items() if flags == {True})
 
 
 def _check_mol_matches(mol: Chem.Mol, rec: QMRecord) -> None:
@@ -214,6 +305,7 @@ def _value(arr: np.ndarray, i: int) -> float:
 def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomToken]:
     out = []
     fmo = frontier_weights(rec)
+    chirality = chirality_signs(mol, rec.coords_ang)
     for i, atom in enumerate(mol.GetAtoms()):
         out.append(
             AtomToken(
@@ -231,6 +323,7 @@ def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomTo
                 f_plus_fmo=_value(rec.fukui_fmo_plus, i),
                 f_minus_fmo=_value(rec.fukui_fmo_minus, i),
                 vbur=_value(rec.buried_volume, i),
+                chirality=float(chirality[i]),
                 position=rec.coords_ang[i].copy(),
                 fg_id=int(fg_ids[i]),
                 fmo_weights=fmo[i].copy(),
@@ -370,6 +463,7 @@ _ATOM_FIELDS = (
     "f_plus_fmo",
     "f_minus_fmo",
     "vbur",
+    "chirality",
     "position",
     "fg_id",
     "fmo_weights",
@@ -377,6 +471,7 @@ _ATOM_FIELDS = (
 _ORB_DIAG_SCALARS = ("s_share", "p_share", "d_share", "overlap_population")
 _DESC_FIELDS = tuple(f.name for f in fields(OrbitalDescriptors))
 _RAGGED_DESC = ("full_energies", "full_weights")  # length = block size, padded on disk
+_RAGGED_CENTRES = {"all_center_atoms": (-1, np.int32), "all_center_weights": (np.nan, float)}
 _META = (
     "smiles",
     "method",
@@ -415,6 +510,9 @@ def _payload(t: MoleculeTokens) -> dict[str, np.ndarray]:
         if f in _RAGGED_DESC:
             values = [tuple(np.asarray(v, dtype=float)) for v in values]
             pay[f"desc_{f}"] = _padded(values, 0.0, float)
+        elif f in _RAGGED_CENTRES:
+            fill, dtype = _RAGGED_CENTRES[f]
+            pay[f"desc_{f}"] = _padded([tuple(v) for v in values], fill, dtype)
         else:
             pay[f"desc_{f}"] = np.asarray(values)
     pay["desc_n_block"] = np.asarray([len(o.descriptors.full_weights) for o in t.orbitals])
@@ -459,6 +557,7 @@ def _load_atoms(z: dict) -> list[AtomToken]:
             "f_plus_fmo",
             "f_minus_fmo",
             "vbur",
+            "chirality",
         ):
             kw[f] = float(kw[f])
         atoms.append(AtomToken(token_id=i, **kw))
@@ -471,6 +570,8 @@ def _load_descriptors(z: dict, k: int) -> OrbitalDescriptors:
         value = z[f"desc_{f.name}"][k]
         if f.name in _RAGGED_DESC:
             value = value[: int(z["desc_n_block"][k])]
+        elif f.name in _RAGGED_CENTRES:
+            value = value[: int((z["desc_all_center_atoms"][k] >= 0).sum())]
         if f.type == "int":
             kw[f.name] = int(value)
         elif f.type == "float":
@@ -567,7 +668,7 @@ def token_table(tokens: MoleculeTokens, title: str | None = None) -> Table:
             f"{d.occupation:.1f}",
             str(d.n_centers),
             f"{d.cos_character():.2f}",
-            f"{d.overlap_sign * d.overlap_magnitude:+.2f}",
+            f"{d.overlap_population:+.2f}",
             f"{d.radius_gyration:.2f}",
             str(d.n_spectral()),
             f"{d.energy_ev:8.2f}",

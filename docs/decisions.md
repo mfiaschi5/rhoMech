@@ -590,3 +590,159 @@ Rebuilt 2026-10-20 with the follow-up rules below, from `data/cache/tokens/summa
   occupied x virtual pairs of the first 20 rebuilt PMechDB molecules, G from the 8-entry
   model-input spectra differs from G from the full spectra by up to 21.8%; the test requires
   more than 5%. Rebuilt 2026-10-20 on 1,267 cached molecules, 0 failures.
+
+## 2026-10-20 — Reconciliation with spec v3
+
+`docs/ksmech_architecture.tex` (spec v3, copied into the repo) is now the source of truth.
+Two principles drive every change below: orbital character must generalize across elements,
+so a token is described by physical quantities; and no chemist's taxonomy (orbital type,
+hybridization, aromaticity, functional group) is a model input or decides which arrows are
+legal. Token schema 5; schema-4 files are rebuilt on load.
+
+### Model inputs
+- **Orbital tokens: exactly the spec's v_r.** 23 continuous inputs (`orbital_features`) plus
+  the 8 x (E, p) spectral set (`orbital_spectra`, for a set encoder) plus centre weights
+  (`orbital_centres`, for the sum of w_a h_a). Moved to bookkeeping: `spectral_mean` (= E_r,
+  which the spec keeps as a diagnostic; removed as a duplicate of `energy_ev`),
+  `spectral_variance`, `retained_fraction`, `n_axis_centers` (the s/p/d shares already say
+  whether a centre has p). `overlap_sign` + `overlap_magnitude` are now one signed
+  `overlap_population`. This supersedes the 41/44-float lists above.
+- **tau_atom 0.05 -> 0.15** (the spec value). Benzene's PM pi orbitals go from 4 centres to 3.
+  The full centre set A_r is stored (`all_center_atoms` / `all_center_weights`), because the
+  site softmax and the centre embedding run over all of A_r; the top 4 stay the input.
+- **Atom tokens.** Every field is tagged. `atom_categorical` holds Z and formal charge;
+  `atom_features` holds q, frozen-orbital f+ and f-, the finite-difference dual, the 4
+  frontier weights, %Vbur and chirality. Tagged `model_input=False`: hybridization,
+  aromaticity, fg_id, finite-difference f+/-, position. A missing value (dual after
+  FUKUI_SCF_FAIL, the weight of an absent level) is 0 in `atom_features`, flagged in
+  `atom_missing` and counted in the build summary.
+- **Chirality** = -sign det of the vectors to the three highest legacy-CIP-ranked
+  neighbours (+1 R-like). Only for stereocentres the SMILES specifies, because ETKDG picks an
+  arbitrary enantiomer otherwise; a geometry that inverts the tag is logged. RDKit's legacy R/S
+  labels are wrong for three-coordinate centres (sulfoxide, phosphine), so the test checks
+  against `rdCIPLabeler`. PMechDB has stereo in only 2 of 13,091 steps.
+
+### Candidate masks
+- **Masks use descriptors, not classifier types.** A donor has occupation > 1.5. An
+  acceptor has occupation < 0.5, is not d-type (its main centre's d share is the largest), and
+  is not the donor's antibonding partner (same two leading centres, both with >= 2 centres).
+  Renames and removals: `allow_empty_d_acceptors` -> `allow_d_acceptors`; `allow_unknown` is
+  removed; `atoms_with_only_empty_d_virtuals` -> `atoms_with_only_d_virtuals`, and the
+  alignment must still report the sinks that land there. The d-type rule picks exactly the
+  classifier's `empty_d` tokens on 7 test molecules; the build summary counts mismatches
+  (`d_type_label_mismatch`). Partially occupied radical tokens are neither donor nor acceptor,
+  and are counted.
+
+### Physics (`ksmech.physics`)
+- **K and eps are parameters.** `KSParams(K=1.75, eps=4.0)`. Each feature is a fixed power of
+  the parameters (`SCALING`), so the model applies learned values to features computed at
+  K = eps = 1. Standardization statistics must be frozen at the initial values, otherwise a
+  learned scale divides out.
+- **Wolfsberg-Helmholz B**, zero within an atom. The intramolecular cross-centre coupling is
+  now l_r^T B l_s over the full vectors. Before, it used S restricted to the centre blocks.
+  Measured with K = 1.75: an occupied/virtual pair on the same bond has a median of 0.45 eV
+  (up to 3 eV); 4-chlorobutanol's O lone pair -> sigma*(C-Cl) in the extended conformer
+  gives 0.016 eV.
+- **D1 (user decision): the contact kernel gives KS3 for every pair.** Spec section 5.4
+  says to use the xTB matrices within a fragment. The coupling above shows how close two
+  orbitals are through bonds in the computed conformer, not whether they can meet. The
+  coupling squared and the centroid distance are therefore the intramolecular extras in z_ij.
+  The first paragraph of section 5.4 needs a matching edit in the spec.
+- **D2 (user decision): the kappa table is the default kernel.** Key: element plus
+  dominant shell (by shell share) of each main centre. Samples come from non-bonded pairs
+  (beyond 1.3x the covalent-radii sum) within +-0.3 Angstrom of the vdW sum. There are two
+  tables (occupied-virtual, occupied-occupied); backoff is (Z,l,Z,l) -> (Z,Z) -> (l,l) ->
+  global, needing at least 5 samples per level. The table is built from every cached token
+  file of the source: it is a physical statistic, not derived from labels, so it cannot leak
+  across splits. The tblite probe sits behind `ContactConfig(kernel="analytic")`; `mlp`
+  raises NotImplementedError until the ablation phase.
+- **Interpretation of F_rr in the contact beta.** beta = K a (F_r + F_s)/2 uses the Fock
+  diagonal of the dominant shell on the main centre (WH at the AO level). An LMO's own Fock
+  diagonal is negative for occupied tokens and often positive for virtual ones (methanol
+  sigma*(C-O) +2.7 eV), so their mean can cross zero. The spec's S x w x w is kept as written,
+  although the median S already contains typical coefficients.
+- **KS2** = 14.3996 q q / (eps R) eV between sites (an atom, or an orbital's main centre);
+  undefined when both tokens sit on the same atom.
+- **KS1 uses electron populations** N_a = Z_val - q_a, not partial charges. Spec Eq. (ks)
+  writes term 1 with q and term 2 with Q, as Klopman and Salem do. Within a fragment: the
+  WH form, summed over occupied r' != r whose main centre is within 3.5 Angstrom of m(s).
+  Between fragments the spec leaves the form open; pinned here as
+  -(N + N) beta_c a %Vbur %Vbur / 100^2.
+- **z_ij** (7 entries) for every ordered token pair. Undefined entries are 0 and carry a
+  `defined` mask. Standardization uses defined entries only. A non-finite value (for
+  example NaN %Vbur) is counted and left undefined.
+
+### Tests
+- Physics tests pick tokens by descriptors (`tests/token_select.py`). Label tests carry the
+  `diagnostic` marker. `test_ks3_matrix_matches_the_scalar_form` was vacuous: it compared the
+  full-spectrum matrix with a truncated-spectrum scalar and passed only because the S
+  coupling is 0. It now uses a random symmetric B and full spectra.
+
+### Operational
+- The host hard-rebooted at 01:42, about 1.5 minutes after the token rebuild (3 workers)
+  started next to the QM batch (4 workers). This is the same instability as in the
+  2026-10-19 operational note.
+- **The cause is unpinned BLAS threads, not the worker count.** `ksmech-qm` sets
+  `OMP_NUM_THREADS=1` for its pool; `ksmech-orbitals build` did not. Each token worker's numpy
+  therefore fanned out over all cores: one orphaned worker ran at 528% CPU after the restart,
+  and the load average reached 21 with "3 + 4 workers". `run_build` now spawns its workers
+  with `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` set to 1
+  (`single_threaded_children`, tested), and each worker measures 100% CPU. This
+  probably explains part of the 2026-10-19 crashes too.
+- Keep the total number of busy cores at 4 or fewer anyway. The QM batch is resumable; it was
+  stopped at 02:03 and is not restarted by this work.
+
+### d-type rule refined after the PMechDB rebuild
+- The first d-type rule (main centre mostly d) flagged 104 more tokens than the classifier's
+  `empty_d`, and 53 + 4 of them sat on Ti and Cu. In groups 3-11 the d shell is valence, not
+  polarization, and d0 Ti(IV) is a Lewis acid that accepts into it. `is_d_type` now also
+  requires the main centre's element to have no valence d shell (`VALENCE_D`, Z 21-29, 39-47,
+  57-79; Zn, Cd and Hg keep d10 in the core). A TiCl4 test pins this.
+- 99 tokens remain where the rule and the label disagree, both on purpose:
+  - 47 are d-dominated sigma* / empty-p tokens on Al, I and Mg, 14-19 eV up. They are
+    masked; the hypervalent-iodine acceptors that react are the p-dominated I-O sigma*.
+  - 52 are one-centre Ti / Cu d orbitals that the classifier calls `empty_d` and that are
+    now acceptors.
+
+### PMechDB rebuild with the spec-v3 tokens (2,001 molecules cached by 2026-10-20 02:10)
+- **Build:** 2,001 of 14,383 molecules (12,382 still without a QM record, skipped and
+  counted), 0 failures, 35 molecules at the PM sweep cap. Tokens per molecule: min 11,
+  median 93, max 441. 83,155 occupied and 76,425 virtual tokens. Diagnostic types: occupied
+  unresolved 3.93% (delocalized 3.91%, unknown 0.02%).
+- **Centres per token at tau_atom = 0.15:** 1: 10.7%, 2: 86.6%, 3: 2.7%, 4: 2 tokens, none
+  above 4. At 0.05 they were 8.7 / 86.0 / 3.6 / 1.7%.
+- **cos-character** (tokens with >= 2 centres): 0.9-1.0: 89.6%, 0.0-0.1: 9.8%, in between
+  0.6%.
+- **Spectral set:** 87.7% of tokens hit the 8-entry cap, 0.4% are one canonical MO. The top
+  entry's weight has median 0.30 (p5 0.18, p95 0.73). The kept entries carry median 0.79 of
+  the weight before renormalization (p5 0.52).
+- **Orbital inputs** (median, p5-p95):
+  - main-centre weight 0.52 (0.50-1.00); second-centre weight 0.47 (0-0.50);
+  - signed overlap population 0.0 (-1.77 to +0.39): one-centre tokens are 0, virtuals
+    negative;
+  - distance_ab 1.10 Angstrom (p95 1.54);
+  - radius of gyration 0.55 Angstrom (0.01-0.78).
+- **Atom inputs** (63,601 atoms; median, p5-p95):
+  - Mulliken charge 0.04 (-0.36 to 0.24);
+  - frozen-orbital f+ 0.0003 (p95 0.24) and f- 0.0013 (p95 0.17);
+  - dual -0.002 (-0.064 to 0.076);
+  - %Vbur 50.2 (33.0-77.2);
+  - no missing values in this set;
+  - chirality is 0 on every atom: no cached molecule has a stereocentre specified in its
+    SMILES.
+- **Masks:** 83,148 donors (7 partially occupied radical tokens are neither donor nor
+  acceptor), 71,657 acceptors, 4,768 d-type tokens.
+- **Contact table** (`data/cache/contact_table.json`): 352,985 occupied-virtual and 352,802
+  occupied-occupied samples.
+  - Full (Z, l, Z, l) keys: 251 and 234, of which 200 and 191 have >= 5 samples.
+  - Global medians: 0.0042 and 0.0007.
+  - The samples are dominated by contacts with H: (C p, H s) has 112,370 samples, median
+    0.011; (C p, C p) has 90,650, median 0.0013.
+- **G > 0 across fragments:** over 245,698 occupied x virtual pairs of different reactant
+  fragments, on the 269 multi-fragment PMechDB reactant sides with all tokens cached, 90
+  pairs (0.037%) have G > 0. They fall on 15 sides, all strong donor / acceptor pairs
+  (enolate + Br2, propargylsilane + protonated formaldehyde, CBr3- + phosphonium), where a
+  canonical donor level lies above an acceptor level and second-order perturbation theory
+  no longer holds. Left as computed for now; the physics phase has to decide whether to
+  clamp G to a negative value there.
+- The truncation test now runs again on schema-5 files.

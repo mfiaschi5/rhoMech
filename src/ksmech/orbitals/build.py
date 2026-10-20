@@ -9,22 +9,27 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import statistics
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field, fields
 from multiprocessing import get_context
 from pathlib import Path
 
+import numpy as np
 from rich.console import Console
 from rich.table import Table
 
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.orbitals.classify import UNRESOLVED_TYPES, ClassifyConfig, OrbitalType
+from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.fgroups import NONE_ID, UNK_ID
 from ksmech.orbitals.localize import PMConfig
 from ksmech.orbitals.tokens import (
     MoleculeTokens,
     TokenSchemaError,
+    atom_feature_names,
     build_molecule_tokens,
     load_tokens,
     save_tokens,
@@ -45,6 +50,7 @@ DEFAULT_TOKENS_DIR = Path("data/cache/tokens")
 SUMMARY_NAME = "summary.json"
 N_WORST = 20
 _HIST_BIN = 10
+_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 
 
 @dataclass(frozen=True)
@@ -81,10 +87,47 @@ class BuildRow:
     centers_hist: dict[str, int] = field(default_factory=dict)  # n_centers -> tokens
     cos_hist: dict[str, int] = field(default_factory=dict)  # cos-character bin -> tokens
     spectral_hist: dict[str, int] = field(default_factory=dict)  # spectral entries -> tokens
+    masks: dict[str, int] = field(default_factory=dict)  # candidate-mask and d-type counts
+    chirality: dict[str, int] = field(default_factory=dict)  # "+1" / "-1" / "0" -> atoms
+    # model inputs of every token, float32, for the distributions in the summary
+    orbital_inputs: np.ndarray | None = field(default=None, repr=False)
+    spectral_inputs: np.ndarray | None = field(default=None, repr=False)  # top p, its E, kept
+    atom_inputs: np.ndarray | None = field(default=None, repr=False)  # NaN = missing
+
+
+ARRAY_FIELDS = ("orbital_inputs", "spectral_inputs", "atom_inputs")
+SPECTRAL_SUMMARY = ("spectral_top_weight", "spectral_top_energy", "retained_fraction")
+QUANTILES = (0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0)
 
 
 def tokens_path(out_dir: Path, smiles: str, conformer_id: int, method: str) -> Path:
     return Path(out_dir) / f"{cache_key(smiles, conformer_id, method)}.npz"
+
+
+def _mask_counts(t: MoleculeTokens) -> dict[str, int]:
+    occ, virt = t.occupied(), t.virtual()
+    d_type = [t.is_d_type(o) for o in virt]
+    labelled_d = [str(o.type) == "empty_d" for o in virt]
+    return dict(
+        donors=len(t.donor_candidates()),
+        acceptors=len(t.acceptor_candidates()),
+        d_type=sum(d_type),
+        d_type_label_mismatch=sum(a != b for a, b in zip(d_type, labelled_d, strict=True)),
+        partially_occupied=len(occ) - len(t.donor_candidates()),
+        more_than_4_centres=sum(o.descriptors.n_centers > 4 for o in t.orbitals),
+    )
+
+
+def _input_arrays(t: MoleculeTokens) -> dict[str, np.ndarray]:
+    spectral = [
+        (d.spectral_weights[0], d.spectral_energies[0], d.retained_fraction)
+        for d in (o.descriptors for o in t.orbitals)
+    ]
+    return dict(
+        orbital_inputs=t.orbital_features().astype(np.float32),
+        spectral_inputs=np.array(spectral, dtype=np.float32).reshape(-1, 3),
+        atom_inputs=np.where(t.atom_missing(), np.nan, t.atom_features()).astype(np.float32),
+    )
 
 
 def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
@@ -114,6 +157,9 @@ def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
         centers_hist=dict(Counter(str(o.descriptors.n_centers) for o in t.orbitals)),
         cos_hist=dict(Counter(_cos_bin(o) for o in t.orbitals if o.descriptors.n_centers >= 2)),
         spectral_hist=dict(Counter(str(o.descriptors.n_spectral()) for o in t.orbitals)),
+        masks=_mask_counts(t),
+        chirality=dict(Counter(f"{a.chirality:+.0f}" if a.chirality else "0" for a in t.atoms)),
+        **_input_arrays(t),
     )
 
 
@@ -149,11 +195,28 @@ def _worker(args: tuple[str, BuildConfig]) -> BuildRow:
     return process_molecule(*args)
 
 
+@contextmanager
+def single_threaded_children():
+    """Spawned workers start with one BLAS / OpenMP thread each. Without it every worker's
+    numpy fans out over all cores (a 3-worker build ran ~15 busy cores and, next to the QM
+    batch, hard-rebooted the host; see docs/decisions.md)."""
+    saved = {k: os.environ.get(k) for k in _THREAD_VARS}
+    os.environ.update(dict.fromkeys(_THREAD_VARS, "1"))
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def run_build(smiles_list: list[str], config: BuildConfig, n_workers: int = 1) -> list[BuildRow]:
     jobs = [(s, config) for s in smiles_list]
     if n_workers <= 1:
         return [process_molecule(*j) for j in jobs]
-    with get_context("spawn").Pool(n_workers) as pool:
+    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
         return list(pool.imap(_worker, jobs, chunksize=8))
 
 
@@ -187,6 +250,41 @@ def worst_molecules(rows: list[BuildRow], n: int = N_WORST) -> list[dict]:
         for r in ok[:n]
         if r.n_unresolved_occ
     ]
+
+
+def _quantiles(values: np.ndarray) -> dict:
+    v = values[np.isfinite(values)].astype(float)
+    if not v.size:
+        return dict(n=0)
+    q = np.quantile(v, QUANTILES)
+    out = {f"p{int(100 * p):d}": round(float(x), 4) for p, x in zip(QUANTILES, q, strict=True)}
+    return dict(n=int(v.size), mean=round(float(v.mean()), 4), **out)
+
+
+def input_distributions(rows: list[BuildRow]) -> dict:
+    """Quantiles of every model input over the tokens of the built molecules."""
+    blocks = {}
+    for name, cols in (
+        ("orbital_inputs", feature_names()),
+        ("spectral_inputs", list(SPECTRAL_SUMMARY)),
+        ("atom_inputs", atom_feature_names()),
+    ):
+        arrays = [getattr(r, name) for r in rows if getattr(r, name) is not None]
+        X = np.concatenate(arrays) if arrays else np.zeros((0, len(cols)), np.float32)
+        blocks[name] = {c: _quantiles(X[:, j]) for j, c in enumerate(cols)}
+        if name == "atom_inputs":
+            for j, c in enumerate(cols):
+                blocks[name][c]["n_missing"] = int(np.isnan(X[:, j]).sum())
+    return blocks
+
+
+def _pm_summary(ok: list[BuildRow]) -> dict:
+    occ, virt = [r.pm_sweeps_occ for r in ok], [r.pm_sweeps_virt for r in ok]
+    return dict(
+        n_not_converged=sum(not r.pm_converged for r in ok),
+        sweeps_occ=dict(**_stats(occ), hist=_hist(occ, 5)),
+        sweeps_virt=dict(**_stats(virt), hist=_hist(virt, 5)),
+    )
 
 
 def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> dict:
@@ -225,17 +323,7 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
             by_kind["occupied"].get("delocalized_pi", 0), n_occ
         ),
         occupied_unknown_fraction=_fraction(by_kind["occupied"].get("unknown", 0), n_occ),
-        pm=dict(
-            n_not_converged=sum(not r.pm_converged for r in ok),
-            sweeps_occ=dict(
-                **_stats([r.pm_sweeps_occ for r in ok]),
-                hist=_hist([r.pm_sweeps_occ for r in ok], 5),
-            ),
-            sweeps_virt=dict(
-                **_stats([r.pm_sweeps_virt for r in ok]),
-                hist=_hist([r.pm_sweeps_virt for r in ok], 5),
-            ),
-        ),
+        pm=_pm_summary(ok),
         fg=dict(
             heavy_atoms=n_heavy,
             unk_fraction=_fraction(sum(r.fg_unk for r in ok), n_heavy),
@@ -247,7 +335,19 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
             cos_character=_merge(r.cos_hist for r in ok),
             spectral_entries_per_token=_merge(r.spectral_hist for r in ok),
         ),
+        inputs=input_distributions(ok),
+        masks=_sum_counts(r.masks for r in ok),
+        chirality=_sum_counts(r.chirality for r in ok),
     )
+
+
+def _sum_counts(dicts) -> dict[str, int]:
+    """Key-wise sum that keeps zero counts (Counter addition drops them)."""
+    total: dict[str, int] = {}
+    for d in dicts:
+        for k, v in d.items():
+            total[k] = total.get(k, 0) + int(v)
+    return total
 
 
 def _merge(hists) -> dict[str, int]:
@@ -255,6 +355,24 @@ def _merge(hists) -> dict[str, int]:
     for h in hists:
         total.update(h)
     return {k: total[k] for k in sorted(total, key=lambda x: float(x.split("-")[0]))}
+
+
+def _print_inputs(summary: dict, console: Console) -> None:
+    """One row per model input: 5th percentile, median, 95th percentile (and missing)."""
+    for block, title in (
+        ("orbital_inputs", "Orbital token inputs (continuous)"),
+        ("spectral_inputs", "Spectral set (top entry) and retained weight"),
+        ("atom_inputs", "Atom token inputs (continuous)"),
+    ):
+        table = Table(title=title)
+        for col in ("input", "n", "p5", "median", "p95", "missing"):
+            table.add_column(col, justify="left" if col == "input" else "right")
+        for name, q in summary["inputs"][block].items():
+            cells = [str(q.get(k, "")) for k in ("n", "p5", "p50", "p95")]
+            table.add_row(name, *cells, str(q.get("n_missing", "")))
+        console.print(table)
+    console.print(f"masks: {summary['masks']}")
+    console.print(f"chirality (atoms): {summary['chirality']}")
 
 
 def _print_type_table(summary: dict, console: Console) -> None:
@@ -310,6 +428,7 @@ def print_summary(summary: dict, console: Console, show_worst: bool = False) -> 
         f"{s['fg']['none_fraction']:.2%} in no group"
     )
     _print_descriptor_distributions(s, console)
+    _print_inputs(s, console)
     if s["failures"]:
         console.print(
             f"[red]{len(s['failures'])} failures[/red]; first: {next(iter(s['failures'].items()))}"
@@ -361,4 +480,6 @@ def build_dataset(
 
 
 def rows_to_dicts(rows: list[BuildRow]) -> list[dict]:
-    return [asdict(r) for r in rows]
+    """Rows as plain dicts, without the per-token input arrays."""
+    keep = [f.name for f in fields(BuildRow) if f.name not in ARRAY_FIELDS]
+    return [{k: v for k, v in asdict(r).items() if k in keep} for r in rows]

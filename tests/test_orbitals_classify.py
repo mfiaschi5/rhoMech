@@ -3,6 +3,7 @@
 from collections import Counter
 
 import numpy as np
+import pytest
 
 from ksmech.orbitals.classify import (
     Classification,
@@ -16,6 +17,7 @@ from ksmech.orbitals.classify import (
 )
 from ksmech.orbitals.localize import localize_record
 
+pytestmark = pytest.mark.diagnostic
 T = OrbitalType
 
 

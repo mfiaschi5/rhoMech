@@ -4,10 +4,15 @@ Nothing here is categorical. An orbital is described by its occupation, how its 
 population spreads over atoms (centres), the s/p/d composition on each centre, the geometry of
 its two main centres (p-vector alignment with the axis, overlap population, distance), its
 spatial extent, and its spectral decomposition over the canonical MOs of its block:
-p_rk = U_kr^2, the weight of canonical MO k in localized orbital r. The model sees the 8
-largest spectral entries plus three scalars of the full spectrum (mean, variance, retained
-fraction); the full spectral vector is kept as bookkeeping for the gap kernel. sigma / pi /
-lone-pair labels are diagnostics computed elsewhere and never enter `to_vector`.
+p_rk = U_kr^2, the weight of canonical MO k in localized orbital r.
+
+The model input is exactly the spec's v_r (docs/ksmech_architecture.tex, section 4): the
+continuous descriptors (`continuous_vector`, embedded by an MLP) and the spectral set of the
+8 largest entries, renormalized (`spectral_set`, embedded by a permutation-invariant set
+encoder). The scalar E_r = sum_k p_rk E_k, the spectral variance and retained fraction, the
+full spectral vector (which the gap kernel uses), the centre atom indices and the centroid are
+bookkeeping. sigma / pi / lone-pair labels are diagnostics computed elsewhere and never enter
+either input.
 """
 
 from __future__ import annotations
@@ -19,11 +24,12 @@ import numpy as np
 from ksmech.orbitals.classify import ClassifyConfig, overlap_population, p_vector
 
 MODEL_INPUT = "model_input"  # dataclass field metadata key
+SPECTRAL_FIELDS = ("spectral_energies", "spectral_weights")  # the set-encoder input
 
 
 @dataclass(frozen=True)
 class DescriptorConfig:
-    tau_atom: float = 0.05  # an atom is a centre when it carries at least this population
+    tau_atom: float = 0.15  # an atom is a centre when it carries at least this population
     top_centers: int = 4  # centres kept in the feature vector (zero-padded)
     spectral_min: float = 0.01  # spectral entries below this weight are dropped
     spectral_max: int = 8  # at most this many spectral entries per token, renormalized
@@ -48,18 +54,18 @@ class OrbitalDescriptors:
     center_spd: np.ndarray = _in(None)  # (top_centers, 3) s/p/d composition on each centre
     cos_a: float = _in(0.0)  # |cos| between the p vector on centre a and the a-b axis
     cos_b: float = _in(0.0)  # the same on centre b; 0 for one-centre orbitals or no p
-    n_axis_centers: int = _in(0)  # how many of a, b carry p character (cos defined)
-    overlap_sign: float = _in(0.0)  # sign of the a-b Mulliken overlap population
-    overlap_magnitude: float = _in(0.0)
+    overlap_population: float = _in(0.0)  # 2 sum c_a S_ab c_b: > 0 bonding, < 0 antibonding
     distance_ab: float = _in(0.0)  # Angstrom
     radius_gyration: float = _in(0.0)  # population-weighted, centres about the centroid
     spectral_energies: np.ndarray = _in(None)  # (spectral_max,) eV, zero-padded
     spectral_weights: np.ndarray = _in(None)  # (spectral_max,) renormalized, zero-padded
-    spectral_mean: float = _in(0.0)  # sum_k p_rk E_k over the full spectrum (eV) = E_r
-    spectral_variance: float = _in(0.0)  # sum_k p_rk (E_k - mean)^2 (eV^2)
-    retained_fraction: float = _in(0.0)  # weight of the kept entries before renormalization
     # bookkeeping, not model input
+    n_axis_centers: int = _diag(0)  # how many of a, b carry p character (cos defined)
+    spectral_variance: float = _diag(0.0)  # sum_k p_rk (E_k - E_r)^2 over the full spectrum
+    retained_fraction: float = _diag(0.0)  # weight of the kept entries before renormalization
     center_atoms: np.ndarray = _diag(None)  # (top_centers,) atom indices, -1 padded
+    all_center_atoms: np.ndarray = _diag(None)  # (n_centers,) every centre A_r, by weight
+    all_center_weights: np.ndarray = _diag(None)  # (n_centers,) their populations w_a
     center_s_coeff: np.ndarray = _diag(None)  # (top_centers,) |s AO coefficient| per centre
     center_p_norm: np.ndarray = _diag(None)  # (top_centers,) norm of the p vector per centre
     spectral_indices: np.ndarray = _diag(None)  # (spectral_max,) canonical MO indices, -1
@@ -78,30 +84,36 @@ class OrbitalDescriptors:
     def n_spectral(self) -> int:
         return int(np.count_nonzero(self.spectral_weights))
 
-    def to_vector(self) -> np.ndarray:
-        """Flat float vector of the model-input fields, in `feature_names()` order."""
-        parts = []
-        for f in fields(self):
-            if not f.metadata.get(MODEL_INPUT):
-                continue
-            parts.append(np.asarray(getattr(self, f.name), dtype=float).ravel())
+    def continuous_vector(self) -> np.ndarray:
+        """The continuous model-input descriptors, in `feature_names()` order."""
+        parts = [
+            np.asarray(getattr(self, f.name), dtype=float).ravel()
+            for f in fields(self)
+            if f.metadata.get(MODEL_INPUT) and f.name not in SPECTRAL_FIELDS
+        ]
         return np.concatenate(parts)
+
+    def spectral_set(self) -> np.ndarray:
+        """(spectral_max, 2) model-input rows (E_k in eV, p_rk); padding rows have p = 0."""
+        return np.column_stack([self.spectral_energies, self.spectral_weights]).astype(float)
+
+    def to_vector(self) -> np.ndarray:
+        """Every model-input number of the token: the continuous vector, then the set rows."""
+        return np.concatenate([self.continuous_vector(), self.spectral_set().ravel()])
 
 
 def feature_names(config: DescriptorConfig | None = None) -> list[str]:
-    """One name per entry of `OrbitalDescriptors.to_vector()`."""
+    """One name per entry of `OrbitalDescriptors.continuous_vector()`."""
     config = config or DescriptorConfig()
-    k, m = config.top_centers, config.spectral_max
+    k = config.top_centers
     names: list[str] = []
     for f in fields(OrbitalDescriptors):
-        if not f.metadata.get(MODEL_INPUT):
+        if not f.metadata.get(MODEL_INPUT) or f.name in SPECTRAL_FIELDS:
             continue
         if f.name == "center_weights":
             names += [f"center_weight_{i}" for i in range(k)]
         elif f.name == "center_spd":
             names += [f"center_{i}_{ell}" for i in range(k) for ell in "spd"]
-        elif f.name in ("spectral_energies", "spectral_weights"):
-            names += [f"{f.name[:-1]}_{i}" for i in range(m)]
         else:
             names.append(f.name)
     return names
@@ -154,7 +166,7 @@ def center_coefficients(c, ao_atom, ao_l, atom: int) -> tuple[float, float]:
 
 
 def _axis_terms(c, S, ao_atom, ao_l, coords, a: int, b: int, config: DescriptorConfig):
-    """cos_a, cos_b, axis centres, overlap sign, overlap magnitude, distance for (a, b)."""
+    """cos_a, cos_b, axis centres, overlap population, distance for the centre pair (a, b)."""
     axis = coords[b] - coords[a]
     dist = float(np.linalg.norm(axis))
     axis = axis / dist
@@ -165,8 +177,7 @@ def _axis_terms(c, S, ao_atom, ao_l, coords, a: int, b: int, config: DescriptorC
         has_p = norm >= config.min_p_norm
         n_axis += has_p
         cos.append(abs(float(vec @ axis)) / norm if has_p else 0.0)
-    op = overlap_population(c, S, ao_atom, a, b)
-    return cos[0], cos[1], n_axis, float(np.sign(op)), abs(op), dist
+    return cos[0], cos[1], n_axis, overlap_population(c, S, ao_atom, a, b), dist
 
 
 def radius_of_gyration(weights: np.ndarray, coords: np.ndarray, centroid: np.ndarray) -> float:
@@ -212,7 +223,7 @@ def build_descriptors(
     center_w, spd, s_coeff, p_norm, atoms = _center_arrays(
         c, S, ao_atom, ao_l, populations, top, config.top_centers
     )
-    axis = (0.0, 0.0, 0, 0.0, 0.0, 0.0)
+    axis = (0.0, 0.0, 0, 0.0, 0.0)
     if len(centers) >= 2:
         axis = _axis_terms(c, S, ao_atom, ao_l, coords, centers[0], centers[1], config)
     idx, e, p, retained = spectral_entries(u_column, block_energies_ev, block_indices, config)
@@ -226,16 +237,16 @@ def build_descriptors(
         cos_a=axis[0],
         cos_b=axis[1],
         n_axis_centers=int(axis[2]),
-        overlap_sign=axis[3],
-        overlap_magnitude=axis[4],
-        distance_ab=axis[5],
+        overlap_population=float(axis[3]),
+        distance_ab=axis[4],
         radius_gyration=radius_of_gyration(populations[centers], coords[centers], centroid),
         spectral_energies=e,
         spectral_weights=p,
-        spectral_mean=mean,
         spectral_variance=float(full_p @ (block_energies_ev - mean) ** 2),
         retained_fraction=retained,
         center_atoms=atoms,
+        all_center_atoms=np.asarray(centers, dtype=np.int32),
+        all_center_weights=np.asarray(populations[centers], dtype=float),
         center_s_coeff=s_coeff,
         center_p_norm=p_norm,
         spectral_indices=idx,

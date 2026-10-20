@@ -12,6 +12,15 @@ from rich.console import Console
 from ksmech.orbitals.classify import OrbitalType
 from ksmech.orbitals.localize import localize_record, valence_electrons
 from ksmech.orbitals.tokens import build_molecule_tokens, token_table
+from tests.token_select import (
+    PERPENDICULAR,
+    bond_orbitals,
+    highest_lone_pair,
+    leading,
+    lone_pairs,
+    overlap,
+    sigma_star,
+)
 
 pytestmark = pytest.mark.slow
 T = OrbitalType
@@ -34,6 +43,7 @@ def atoms_of(t, symbol: str) -> set[int]:
     return {a.atom_index for a in t.atoms if t.symbol(a.atom_index) == symbol}
 
 
+@pytest.mark.diagnostic
 def test_ethane_is_seven_sigma_bonds(tokens):
     show(tokens, "ethane")
     t = tokens["ethane"]
@@ -43,26 +53,25 @@ def test_ethane_is_seven_sigma_bonds(tokens):
 def test_acetone_lone_pairs_pi_and_lowest_pi_star(tokens):
     show(tokens, "acetone")
     t = tokens["acetone"]
-    oxygen = atoms_of(t, "O")
-    lone_pairs = [o for o in t.occupied() if o.type == T.LONE_PAIR]
-    assert len(lone_pairs) == 2 and all(set(o.parent_atoms) == oxygen for o in lone_pairs)
-    pis = [o for o in t.occupied() if o.type == T.PI]
-    assert len(pis) == 1 and oxygen < set(pis[0].parent_atoms)
+    assert len(lone_pairs(t)) == 2 and len(lone_pairs(t, "O")) == 2
+    co = bond_orbitals(t, t.occupied(), {"C", "O"})
+    assert len(co) == 2  # one axial, one perpendicular C=O orbital
+    assert sorted(o.descriptors.cos_character() < PERPENDICULAR for o in co) == [False, True]
     lowest = t.virtual()[0]  # virtual tokens are sorted by energy
-    assert lowest.type == T.PI_STAR and oxygen < set(lowest.parent_atoms)
-    sigma_stars = [o.energy_ev for o in t.virtual() if o.type == T.SIGMA_STAR]
-    assert sigma_stars and lowest.energy_ev < min(sigma_stars)
+    assert {t.symbol(a) for a in leading(lowest)} == {"C", "O"} and overlap(lowest) < 0
+    assert lowest.descriptors.cos_character() < PERPENDICULAR
 
 
 def test_methylamine_lone_pair_is_the_highest_occupied(tokens):
     show(tokens, "methylamine")
     t = tokens["methylamine"]
-    lone_pairs = [o for o in t.occupied() if o.type == T.LONE_PAIR]
-    assert len(lone_pairs) == 1 and set(lone_pairs[0].parent_atoms) == atoms_of(t, "N")
-    sigmas = [o.energy_ev for o in t.occupied() if o.type == T.SIGMA]
-    assert len(sigmas) == 6 and lone_pairs[0].energy_ev > max(sigmas)
+    lone = lone_pairs(t)
+    assert len(lone) == 1 and set(leading(lone[0], 1)) == atoms_of(t, "N")
+    bonds = bond_orbitals(t, t.occupied())
+    assert len(bonds) == 6 and lone[0].energy_ev > max(o.energy_ev for o in bonds)
 
 
+@pytest.mark.diagnostic
 def test_benzene_pi_system(tokens):
     """PM with Mulliken populations gives three 3-centre pi orbitals (0.50/0.24/0.21), the same
     functional value from random orthogonal starts, so they are `delocalized_pi`, not `pi`."""
@@ -77,26 +86,21 @@ def test_benzene_pi_system(tokens):
 def test_acetonitrile_two_pi_and_two_pi_star_on_cn(tokens):
     show(tokens, "acetonitrile")
     t = tokens["acetonitrile"]
-    nitrogen = atoms_of(t, "N")
-    cn = {
-        o.parent_atoms
-        for o in t.orbitals
-        if nitrogen < set(o.parent_atoms) and len(o.parent_atoms) == 2
-    }
-    pis = [o for o in t.occupied() if o.type == T.PI]
-    pi_stars = [o for o in t.virtual() if o.type == T.PI_STAR]
-    assert len(pis) == 2 and len(pi_stars) == 2
-    assert all(o.parent_atoms in cn for o in pis + pi_stars)
+    for block in (t.occupied(), t.virtual()):
+        cn = bond_orbitals(t, block, {"C", "N"})
+        across = [o for o in cn if o.descriptors.cos_character() < PERPENDICULAR]
+        assert len(across) == 2, [o.descriptors.cos_character() for o in cn]
 
 
 def test_chloromethane_lowest_sigma_star_is_c_cl(tokens):
     show(tokens, "chloromethane")
     t = tokens["chloromethane"]
-    sigma_stars = [o for o in t.virtual() if o.type == T.SIGMA_STAR]
-    lowest = min(sigma_stars, key=lambda o: o.energy_ev)
-    assert set(lowest.parent_atoms) == atoms_of(t, "C") | atoms_of(t, "Cl")
+    antibonding = [o for o in bond_orbitals(t, t.virtual()) if overlap(o) < 0]
+    lowest = min(antibonding, key=lambda o: o.energy_ev)
+    assert set(leading(lowest)) == atoms_of(t, "C") | atoms_of(t, "Cl")
 
 
+@pytest.mark.diagnostic
 def test_every_fixture_is_resolved_and_converged(tokens):
     for name, t in tokens.items():
         assert t.pm_converged, name
@@ -118,14 +122,8 @@ PROTONATION_SHIFT_EV = 3.0  # sigma*(C-O) must drop by at least this much on pro
 
 
 def heavy_sigma_star(tokens, symbols: set[str]):
-    """The sigma* token whose two parents are exactly the given element symbols."""
-    found = [
-        o
-        for o in tokens.virtual()
-        if o.type == T.SIGMA_STAR and {tokens.symbol(a) for a in o.parent_atoms} == symbols
-    ]
-    assert len(found) == 1, (tokens.smiles, found)
-    return found[0]
+    """The sigma* token whose two leading centres are exactly the given element symbols."""
+    return sigma_star(tokens, symbols)
 
 
 @pytest.fixture(scope="module")
@@ -189,6 +187,7 @@ def test_canonical_lumo_orders_cl_br_i(qm_record):
     assert lumo["Cl"] > lumo["Br"] > lumo["I"], lumo
 
 
+@pytest.mark.diagnostic
 def test_grignard_carbanion_is_a_metal_bound_lone_pair(qm_record):
     tokens = build_molecule_tokens(qm_record("C[Mg]Br"))
     show({"CH3MgBr": tokens}, "CH3MgBr")
@@ -253,32 +252,26 @@ def test_localization_is_deterministic(fixture_records):
     assert [o.parent_atoms for o in first.orbitals] == [o.parent_atoms for o in second.orbitals]
 
 
+@pytest.mark.diagnostic
 def test_acetone_pi_star_descriptors(tokens):
     t = tokens["acetone"]
     pi_star = [o for o in t.virtual() if o.type == T.PI_STAR]
     assert len(pi_star) == 1
     d = pi_star[0].descriptors
-    assert d.cos_character() < 0.3 and d.overlap_sign < 0 and d.overlap_magnitude > 0
+    assert d.cos_character() < 0.3 and d.overlap_population < 0
     sigma_stars = [o.descriptors for o in t.virtual() if o.type == T.SIGMA_STAR]
     assert sigma_stars and all(s.cos_character() > 0.7 for s in sigma_stars)
-    assert all(s.overlap_sign < 0 for s in sigma_stars)
+    assert all(s.overlap_population < 0 for s in sigma_stars)
 
 
 def test_gap_kernel_prefers_the_c_cl_sigma_star(qm_record, tokens):
     from ksmech.physics.ks_terms import token_gap_kernel
 
     methanol = build_molecule_tokens(qm_record("CO"))
-    lone = max(
-        (
-            o
-            for o in methanol.occupied()
-            if o.type == T.LONE_PAIR and methanol.symbol(o.parent_atoms[0]) == "O"
-        ),
-        key=lambda o: o.energy_ev,
-    )
+    lone = highest_lone_pair(methanol, "O")
     t = tokens["chloromethane"]
     c_cl = heavy_sigma_star(t, {"C", "Cl"})
-    c_h = next(o for o in t.virtual() if o.type == T.SIGMA_STAR and o is not c_cl)
+    c_h = next(o for o in bond_orbitals(t, t.virtual(), {"C", "H"}) if overlap(o) < 0)
     g_cl, g_h = token_gap_kernel(lone, c_cl), token_gap_kernel(lone, c_h)
     print(f"G(O lone pair, sigma* C-Cl) = {g_cl:.4f} 1/eV, G(O lone pair, sigma* C-H) = {g_h:.4f}")
     assert g_cl < 0 and g_cl < g_h

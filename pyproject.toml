@@ -48,4 +48,5 @@ addopts = "-ra"
 markers = [
     "realdata: runs on the real raw files in data/raw (skipped when absent)",
     "slow: runs GFN2 geometry optimizations (deselect with -m \"not slow\")",
+    "diagnostic: checks the classifier's labels (lone pair, sigma, ...), which are never model input",
 ]

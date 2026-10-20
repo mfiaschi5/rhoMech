@@ -4,7 +4,9 @@ The label of a group is the IFG `atoms` string: the canonical SMILES of the grou
 without the neighbouring carbons (`C=O`, `O=CO`, `[O-]`, `n`). The packaged vocabulary
 `fg_vocab.json` is built from the unique PMechDB molecules (`ksmech-orbitals fg-vocab`). Index 0
 is "no group", index 1 is the UNK bucket for labels outside the vocabulary. Hydrogens never
-belong to a group. Labels are only an auxiliary embedding: nothing downstream decides on them.
+belong to a group. Labels are stored on the atom tokens for tests, the interface and the
+"functional groups added back as input" ablation; they are not a model input
+(`AtomToken.fg_id` is tagged `model_input=False`) and nothing downstream decides on them.
 """
 
 from __future__ import annotations

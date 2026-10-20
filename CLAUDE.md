@@ -16,20 +16,60 @@ next step, until the model emits a stop token.
 
 ## Representation
 
-Two token levels share one sequence: atom tokens and localized orbital tokens.
+`docs/ksmech_architecture.tex` (spec v3) is the source of truth for the representation and
+the model; this section summarizes it.
 
-An orbital token is a Pipek-Mezey localized orbital (occupied or virtual) described only by
-continuous physical descriptors: occupation; the number of centres and the weights and s/p/d
-composition of its main centres; for the two main centres the p-vector alignment with the
-axis, the sign and size of the overlap population and the distance; the spatial extent; and
-its spectral decomposition over the canonical MOs of its block (energies and weights). These
-descriptors are the model input, so orbital character is learned in a form that transfers
-across elements.
+Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are
+Pipek-Mezey localized in the occupied and the virtual block separately, started
+deterministically from the canonical MOs, so one QM record always gives the same tokens.
 
-Chemical labels (lone pair, sigma, pi, sigma*, pi*, empty p, ...) are still computed by a
-classifier and stored on each token, but only as diagnostics and as masks for arrow
-candidates. They are never model inputs. Functional-group labels are likewise only an
-auxiliary embedding added to atom tokens; they never decide which arrows are legal.
+An orbital token's model input is continuous physical descriptors only:
+
+- occupation;
+- the number of centres (atoms carrying at least `tau_atom = 0.15` of the population) and
+  the four largest centre weights;
+- the s/p/d shares on the four leading centres;
+- for the two leading centres: the |cos| of each p vector with the axis (sigma vs pi as a
+  number), the signed overlap population (positive bonding, negative antibonding) and the
+  distance;
+- the radius of gyration;
+- the spectral set: (energy, weight) over the canonical MOs of the block, weight >= 0.01, at
+  most 8 entries, renormalized. It is embedded by a set encoder.
+
+The LMO energy E_r, the full spectrum (which the gap kernel G uses), the centroid, the centre
+atoms and the coefficient vector are bookkeeping. An orbital inherits its atoms' embeddings
+through its centre weights.
+
+An atom token's model input:
+
+- atomic number and formal charge (embedded);
+- Mulliken charge;
+- frozen-orbital f+ and f-;
+- the finite-difference dual descriptor;
+- the frontier weights for HOMO-1, HOMO, LUMO and LUMO+1, with degenerate blocks within
+  0.05 eV summed;
+- %Vbur;
+- the chirality sign, set only where the SMILES specifies the stereocentre.
+
+No absolute coordinates are embedded: geometry enters only through distances.
+
+**No chemist's taxonomy as model input.** These are computed and stored with
+`model_input=False`:
+
+- orbital types (lone pair, sigma, pi, sigma*, pi*, empty p, ...);
+- hybridization;
+- aromaticity;
+- functional-group ids.
+
+They serve tests (`pytest -m diagnostic`), alignment diagnostics, the interface and the
+"added back as input" ablations. They never decide which arrows are legal: the arrow
+candidate masks use descriptors. A donor is a doubly occupied token. An acceptor is an empty
+token that is not a d-type polarization function (unless configured) and not the
+antibonding partner of the donor's own bond.
+
+The reason is that orbital character must generalize across elements: sigma*(C-Cl),
+sigma*(C-Br) and sigma*(C-I) should look to the model like the same kind of acceptor at
+different energies.
 
 ## Physics
 
@@ -87,7 +127,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
   without a QM record are skipped and counted, so re-run after the QM batch), `uv run
   ksmech-orbitals show --smiles 'CC(=O)C'` (token table of one cached molecule),
-  `uv run ksmech-orbitals fg-vocab --source pmechdb` (regenerate the functional-group vocabulary)
+  `uv run ksmech-orbitals fg-vocab --source pmechdb` (regenerate the functional-group vocabulary),
+  `uv run ksmech-orbitals contact-table --source pmechdb` (the contact overlap table of the KS
+  terms, `data/cache/contact_table.json`, from the token cache; re-run after a token rebuild)
 - Arrow alignment: _not yet_
 - Physics baseline: _not yet_
 - Training: _not yet_

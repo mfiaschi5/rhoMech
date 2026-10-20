@@ -102,3 +102,14 @@ def sp_record():
         return memo[canonical]
 
     return get
+
+
+@pytest.fixture(scope="session")
+def contact_tables(sp_record):
+    """Contact tables from a few small molecules at force-field geometries: enough to exercise
+    every backoff level. The real table is built from the token cache."""
+    from ksmech.orbitals.tokens import build_molecule_tokens
+    from ksmech.physics.contact_table import tables_from_tokens
+
+    smiles = ["CCO", "CC(=O)C", "CCCl", "OCCCCCl", "CC(=O)OC", "C=CC=O", "CCN", "CC#N", "CCCC"]
+    return tables_from_tokens([build_molecule_tokens(sp_record(s)) for s in smiles], min_count=3)

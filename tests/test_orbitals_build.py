@@ -9,6 +9,8 @@ from rich.console import Console
 
 from ksmech.orbitals import build, cli
 from ksmech.orbitals.build import BuildConfig, BuildRow, build_dataset, worst_molecules
+from ksmech.orbitals.descriptors import feature_names
+from ksmech.orbitals.tokens import atom_feature_names
 from ksmech.qm.records import cache_path, save_record
 
 MOLECULES = ["CO", "O", "c1ccccc1"]
@@ -49,6 +51,17 @@ def test_build_skips_missing_records_and_writes_summary(dataset):
     assert 0 < summary["occupied_unresolved_fraction"] < 0.5
     assert summary["pm"]["n_not_converged"] == 0 and summary["tokens_per_molecule"]["max"] > 30
     assert summary["worst_molecules"][0]["smiles"] == "c1ccccc1"
+    inputs = summary["inputs"]
+    assert list(inputs["orbital_inputs"]) == feature_names()
+    assert list(inputs["atom_inputs"]) == atom_feature_names()
+    n_orb = summary["n_occupied"] + summary["n_virtual"]
+    assert all(q["n"] == n_orb for q in inputs["orbital_inputs"].values())
+    assert inputs["orbital_inputs"]["occupation"]["p100"] == pytest.approx(2.0)
+    assert inputs["atom_inputs"]["dual"]["n_missing"] > 0  # sp records carry no Fukui N+-1
+    assert summary["masks"]["donors"] == summary["n_occupied"]
+    assert summary["masks"]["d_type_label_mismatch"] == 0
+    assert set(summary["chirality"]) == {"0"}
+    json.dumps(summary)  # the whole summary is JSON
 
 
 def test_rerun_loads_existing_files_unless_forced(dataset, monkeypatch):
@@ -80,6 +93,7 @@ def test_limit_and_workers(dataset):
     assert summary["n_molecules"] == 2 and summary["n_ok"] + summary["n_missing_qm"] == 2
 
 
+@pytest.mark.diagnostic
 def test_worst_molecules_ranks_by_unresolved_fraction():
     rows = [
         BuildRow("A", "built", n_occ=10, n_unresolved_occ=1, unresolved_types={"unknown": 1}),
@@ -106,3 +120,16 @@ def test_cli_build_and_show(dataset, capsys):
 def test_cli_build_without_processed_data(tmp_path):
     rc = cli.main(["build", "--source", "pmechdb", "--processed-dir", str(tmp_path)])
     assert rc == 2
+
+
+def test_workers_are_spawned_single_threaded(monkeypatch):
+    for var in build._THREAD_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("OMP_NUM_THREADS", "16")
+    with build.single_threaded_children():
+        import os
+
+        assert all(os.environ[v] == "1" for v in build._THREAD_VARS)
+    import os
+
+    assert os.environ["OMP_NUM_THREADS"] == "16" and "OPENBLAS_NUM_THREADS" not in os.environ

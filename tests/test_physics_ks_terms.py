@@ -2,7 +2,6 @@
 
 import numpy as np
 
-from ksmech.orbitals.classify import OrbitalType
 from ksmech.orbitals.tokens import build_molecule_tokens
 from ksmech.physics.ks_terms import (
     coupling,
@@ -12,8 +11,7 @@ from ksmech.physics.ks_terms import (
     ks3_matrix,
     token_gap_kernel,
 )
-
-T = OrbitalType
+from tests.token_select import highest_lone_pair, sigma_star, sigma_stars
 
 
 def test_gap_kernel_sign_and_ordering():
@@ -42,28 +40,29 @@ def test_gap_kernel_clamps_degenerate_pairs():
 def test_ks3_matrix_matches_the_scalar_form(sp_record):
     t = build_molecule_tokens(sp_record("CO"))
     occ, virt = t.occupied(), t.virtual()
-    M = ks3_matrix(occ, virt, t.S)
+    rng = np.random.default_rng(0)
+    B = rng.normal(size=t.S.shape)
+    B = B + B.T  # any coupling matrix: the identity must not rest on a vanishing coupling
+    M = ks3_matrix(occ, virt, B)
     G = gap_kernel_matrix(occ, virt)
-    assert M.shape == G.shape == (len(occ), len(virt)) and (G < 0).all()
+    assert M.shape == G.shape == (len(occ), len(virt)) and (G < 0).all() and (M < 0).all()
     for i, r in enumerate(occ):
         for j, s in enumerate(virt):
             d_r, d_s = r.descriptors, s.descriptors
             scalar = ks3(
                 r.coeff_vector,
                 s.coeff_vector,
-                t.S,
-                d_r.spectral_energies,
-                d_r.spectral_weights,
-                d_s.spectral_energies,
-                d_s.spectral_weights,
+                B,
+                d_r.full_energies,
+                d_r.full_weights,
+                d_s.full_energies,
+                d_s.full_weights,
             )
-            assert abs(M[i, j] - scalar) < 1e-12
+            assert abs(M[i, j] - scalar) < 1e-12 * max(1.0, abs(scalar))
             assert abs(G[i, j] - token_gap_kernel(r, s)) < 1e-12
-    # occupied and virtual LMOs of one converged molecule are S-orthogonal: the intramolecular
-    # coupling, and with it term 3, vanishes; the term lives between different molecules
-    L_occ = np.column_stack([o.coeff_vector for o in occ])
-    L_virt = np.column_stack([o.coeff_vector for o in virt])
-    assert np.abs(L_occ.T @ t.S @ L_virt).max() < 1e-8 and np.abs(M).max() < 1e-12
+    # occupied and virtual LMOs of one converged molecule are S-orthogonal: with the molecule's
+    # own S the converged coupling, and with it term 3, vanishes
+    assert np.abs(ks3_matrix(occ, virt, t.S)).max() < 1e-12
     a = coupling(occ[0].coeff_vector, t.F, occ[1].coeff_vector)
     b = coupling(occ[1].coeff_vector, t.F, occ[0].coeff_vector)
     assert abs(a - b) < 1e-12 and abs(a) > 1e-3  # symmetric; non-zero within one block
@@ -72,14 +71,8 @@ def test_ks3_matrix_matches_the_scalar_form(sp_record):
 def test_gap_kernel_across_molecules(sp_record):
     methanol = build_molecule_tokens(sp_record("CO"))
     chloromethane = build_molecule_tokens(sp_record("CCl"))
-    lone_pairs = [o for o in methanol.occupied() if o.type == T.LONE_PAIR]
-    lp = max(lone_pairs, key=lambda o: o.energy_ev)  # the highest O lone pair
-    sigma_stars = [o for o in chloromethane.virtual() if o.type == T.SIGMA_STAR]
-    c_cl = next(
-        o
-        for o in sigma_stars
-        if 17 in {chloromethane.atoms[a].atomic_number for a in o.parent_atoms}
-    )
-    c_h = next(o for o in sigma_stars if o is not c_cl)
+    lp = highest_lone_pair(methanol, "O")
+    c_cl = sigma_star(chloromethane, {"C", "Cl"})
+    c_h = sigma_stars(chloromethane, {"C", "H"})[0]
     g_cl, g_h = token_gap_kernel(lp, c_cl), token_gap_kernel(lp, c_h)
     assert g_cl < g_h < 0

@@ -1,20 +1,20 @@
-"""Contact coupling, unified KS3, and the intramolecular pair features."""
+"""The contact kernels (table and analytic probe), unified KS3, intramolecular extras."""
 
 import numpy as np
 import pytest
 
-from ksmech.orbitals.classify import OrbitalType
 from ksmech.orbitals.tokens import build_molecule_tokens
 from ksmech.physics import contact
+from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
 from ksmech.physics.ks_terms import (
     cross_center_coupling,
     intramolecular_pair_features,
     ks3_contact,
     ks3_contact_matrix,
-    token_contact_coupling,
+    wh_matrix,
 )
-
-T = OrbitalType
+from ksmech.physics.params import KSParams
+from tests.token_select import highest_lone_pair, sigma_star
 
 
 def test_contact_overlap_probe_is_symmetric_and_handles_hydrogen():
@@ -26,52 +26,47 @@ def test_contact_overlap_probe_is_symmetric_and_handles_hydrogen():
     assert contact.contact_overlap(6, 6) is contact.contact_overlap(6, 6)  # cached
 
 
-def test_contact_coupling_is_non_zero_within_and_across_molecules(sp_record):
+@pytest.fixture(params=["table", "analytic"])
+def kernel(request, contact_tables):
+    return ContactKernel(contact_tables, ContactConfig(kernel=request.param))
+
+
+def test_contact_term_is_non_zero_within_and_across_molecules(sp_record, kernel):
     methanol = build_molecule_tokens(sp_record("CO"))
     chloromethane = build_molecule_tokens(sp_record("CCl"))
-    lone = max((o for o in methanol.occupied() if o.type == T.LONE_PAIR), key=lambda o: o.energy_ev)
-    c_cl = next(
-        o
-        for o in chloromethane.virtual()
-        if o.type == T.SIGMA_STAR
-        and 17 in {chloromethane.atoms[a].atomic_number for a in o.parent_atoms}
-    )
-    kappa = token_contact_coupling(lone, methanol, c_cl, chloromethane)
-    assert 0.05 < kappa < 2.0
-    assert ks3_contact(lone, methanol, c_cl, chloromethane) < 0
-    co_sigma_star = next(
-        o
-        for o in methanol.virtual()
-        if o.type == T.SIGMA_STAR and 8 in {methanol.atoms[a].atomic_number for a in o.parent_atoms}
-    )
-    assert (
-        token_contact_coupling(lone, methanol, co_sigma_star, methanol) > 0.05
-    )  # intramolecular too
-    M = ks3_contact_matrix(methanol.occupied(), methanol, methanol.virtual(), methanol)
+    lone = highest_lone_pair(methanol, "O")
+    c_cl = sigma_star(chloromethane, {"C", "Cl"})
+    assert 0.001 < kernel.amplitude(lone, methanol, c_cl, chloromethane) < 2.0
+    assert kernel.beta(lone, methanol, c_cl, chloromethane) < 0  # Fock diagonals are negative
+    assert ks3_contact(lone, methanol, c_cl, chloromethane, kernel) < 0
+    co_sigma_star = sigma_star(methanol, {"C", "O"})
+    assert kernel.amplitude(lone, methanol, co_sigma_star, methanol) > 0.001  # intramolecular
+    M = ks3_contact_matrix(methanol.occupied(), methanol, methanol.virtual(), methanol, kernel)
     assert M.shape == (len(methanol.occupied()), len(methanol.virtual())) and (M < 0).all()
 
 
-def test_4_chlorobutanol_intramolecular_features(sp_record):
+def test_ks3_scales_as_k_squared(sp_record, kernel):
+    methanol = build_molecule_tokens(sp_record("CO"))
+    r, s = highest_lone_pair(methanol, "O"), sigma_star(methanol, {"C", "O"})
+    one = ks3_contact(r, methanol, s, methanol, kernel, KSParams(K=1.0))
+    two = ks3_contact(r, methanol, s, methanol, kernel, KSParams(K=2.0))
+    assert abs(two - 4.0 * one) < 1e-12 * abs(two)
+
+
+def test_4_chlorobutanol_intramolecular_features(sp_record, contact_tables):
     t = build_molecule_tokens(sp_record("OCCCCCl"))
-    oxygen = next(a.atom_index for a in t.atoms if a.atomic_number == 8)
-    chlorine = next(a.atom_index for a in t.atoms if a.atomic_number == 17)
-    lone = max(
-        (o for o in t.occupied() if o.type == T.LONE_PAIR and o.parent_atoms == (oxygen,)),
-        key=lambda o: o.energy_ev,
-    )
-    c_cl = next(o for o in t.virtual() if o.type == T.SIGMA_STAR and chlorine in o.parent_atoms)
-    feats = intramolecular_pair_features(lone, c_cl, t)
-    # the converged full coupling is 0 by orthogonality; the centre-block part is not, even in
-    # the extended MMFF conformer where O sits three bonds from the C-Cl bond (about 2e-5 with S)
-    assert abs(feats["cross_center_coupling"]) > 1e-6
-    print(f"4-chlorobutanol cross-centre coupling (S): {feats['cross_center_coupling']:.2e}")
+    lone = highest_lone_pair(t, "O")
+    c_cl = sigma_star(t, {"C", "Cl"})
+    feats = intramolecular_pair_features(lone, c_cl, t, ContactKernel(contact_tables))
+    # the converged S coupling is 0 by orthogonality; the Wolfsberg-Helmholz coupling with B zero
+    # within an atom is not, even in the extended conformer (about 0.016 eV at K = 1.75)
     assert abs(lone.coeff_vector @ t.S @ c_cl.coeff_vector) < 1e-8
-    assert feats["centroid_distance"] > 3.0 and feats["contact_coupling"] > 0.05
+    assert 1e-3 < abs(feats["cross_center_coupling"]) < 0.1
+    print(f"4-chlorobutanol cross-centre coupling (WH): {feats['cross_center_coupling']:.2e} eV")
+    assert feats["centroid_distance"] > 3.0 and feats["contact_beta"] < 0
     assert feats["gap_kernel"] < 0 and feats["ks3_contact"] < 0
-    assert (
-        abs(cross_center_coupling(lone, c_cl, t.S, t.ao_atom) - feats["cross_center_coupling"])
-        < 1e-12
-    )
+    B = wh_matrix(t, KSParams(K=1.0))
+    assert abs(cross_center_coupling(lone, c_cl, B) * 1.75 - feats["cross_center_coupling"]) < 1e-12
 
 
 def test_truncation_matters_on_pmechdb_pairs():
