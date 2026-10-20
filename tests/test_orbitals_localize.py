@@ -65,6 +65,17 @@ def test_localize_record_splits_occupied_and_virtual(sp_record):
     assert loc.converged and list(loc.occ_index) == [0, 1, 2, 3]
 
 
+def test_somos_are_never_mixed_with_doubly_occupied_mos(sp_record):
+    rec = sp_record("[CH2]")  # triplet methylene: two C-H bonds, two SOMOs
+    loc = L.localize_record(rec)
+    single = rec.occupations[loc.occ_index] < L.DOUBLE_THRESHOLD
+    assert single.sum() == 2 and loc.stats_occ.n_orbitals == 4
+    assert not loc.U_occ[np.ix_(single, ~single)].any()
+    assert not loc.U_occ[np.ix_(~single, single)].any()
+    assert np.allclose(loc.U_occ.T @ loc.U_occ, np.eye(4))
+    assert np.allclose(loc.C_occ, rec.C[:, loc.occ_index] @ loc.U_occ)
+
+
 def test_valence_only_guard_rejects_core_electrons(sp_record):
     rec = sp_record("O")
     L.assert_valence_only(rec)

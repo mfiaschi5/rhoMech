@@ -48,7 +48,7 @@ def _diag(default=None, **kw):
 class OrbitalDescriptors:
     """Model-input fields carry `model_input=True` metadata; the others are bookkeeping."""
 
-    occupation: float = _in(0.0)  # spectral average of the canonical occupations (2, 0, ~1)
+    occupation: float = _in(0.0)  # sum_k p_rk n_k: 2 doubly occupied, 1 a SOMO, 0 virtual
     n_centers: int = _in(0)  # atoms with population >= tau_atom
     center_weights: np.ndarray = _in(None)  # (top_centers,) sorted populations, zero-padded
     center_spd: np.ndarray = _in(None)  # (top_centers, 3) s/p/d composition on each centre

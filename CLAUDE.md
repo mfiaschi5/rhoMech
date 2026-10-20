@@ -20,12 +20,14 @@ next step, until the model emits a stop token.
 the model; this section summarizes it.
 
 Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are
-Pipek-Mezey localized in the occupied and the virtual block separately, started
-deterministically from the canonical MOs, so one QM record always gives the same tokens.
+Pipek-Mezey localized in the occupied and the virtual block separately (the singly occupied
+MOs of a radical apart from the doubly occupied ones), started deterministically from the
+canonical MOs, so one QM record always gives the same tokens.
 
-An orbital token's model input is continuous physical descriptors only:
+An orbital token carries only continuous physical descriptors; they are its whole model
+input:
 
-- occupation;
+- occupation: 2, 0, or 1 for a SOMO;
 - the number of centres (atoms carrying at least `tau_atom = 0.15` of the population) and
   the four largest centre weights;
 - the s/p/d shares on the four leading centres;
@@ -53,8 +55,8 @@ An atom token's model input:
 
 No absolute coordinates are embedded: geometry enters only through distances.
 
-**No chemist's taxonomy as model input.** These are computed and stored with
-`model_input=False`:
+**No chemist's taxonomy as model input.** Sigma / pi / lone-pair labels are diagnostics,
+never model inputs. These are computed and stored with `model_input=False`:
 
 - orbital types (lone pair, sigma, pi, sigma*, pi*, empty p, ...);
 - hybridization;

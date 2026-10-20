@@ -246,8 +246,14 @@ def test_benzene_occupied_tokens_carry_the_three_pi_mos(fixture_records):
 def test_localization_is_deterministic(fixture_records):
     rec = fixture_records["benzene"]
     first, second = build_molecule_tokens(rec), build_molecule_tokens(rec)
-    assert np.array_equal(first.orbital_features(), second.orbital_features())
+    for inputs in ("orbital_features", "orbital_spectra", "orbital_centres", "atom_features"):
+        assert np.array_equal(getattr(first, inputs)(), getattr(second, inputs)()), inputs
     assert np.array_equal(first.C_loc, second.C_loc)
+    full = [
+        np.array_equal(a.descriptors.full_weights, b.descriptors.full_weights)
+        for a, b in zip(first.orbitals, second.orbitals, strict=True)
+    ]
+    assert all(full)
     assert [o.type for o in first.orbitals] == [o.type for o in second.orbitals]
     assert [o.parent_atoms for o in first.orbitals] == [o.parent_atoms for o in second.orbitals]
 
@@ -301,11 +307,15 @@ def ring_roles(mol) -> dict[str, list[int]]:
 
 
 def test_anisole_homo_weight_is_ortho_para(qm_record):
-    """The ring pi tokens of anisole are centred on the ortho and para carbons, never on meta,
-    and the para-centred token carries the largest HOMO weight. The per-centre sum
-    sum_r p_r,HOMO w_r(c) is *not* the HOMO population (it drops the LMO cross terms: meta
-    0.157 vs exact 0.048 in GFN2), so the regiochemistry lives in where PM centres the tokens
-    and in their spectral weights, which is what is asserted here."""
+    """The occupied ring tokens' spectral weight on the pi HOMO, resolved per centre, is larger
+    at the ortho and para carbons than at meta. Each ring pi token gives its weight p_r,HOMO to
+    its main centre: PM centres the three ring pi LMOs on ortho, ortho and para, never on meta
+    or ipso, and the para-centred token carries the most.
+
+    Spreading p_r,HOMO over the centres by population instead, sum_r p_r,HOMO w_r(c), is
+    printed but not asserted: it is not the HOMO population, because it drops the cross terms
+    between LMOs, which are large for 3-centre ring orbitals (meta 0.157 vs exact 0.048 in
+    GFN2, docs/decisions.md)."""
     from ksmech.qm.embed import prepare_mol
     from ksmech.qm.fukui import homo_index
 
@@ -314,20 +324,31 @@ def test_anisole_homo_weight_is_ortho_para(qm_record):
     homo = homo_index(rec.occupations)
     roles = ring_roles(prepare_mol(rec.atom_order_smiles))
     role_of = {a: role for role, atoms in roles.items() for a in atoms}
-    ring_pi = []  # (dominant centre role, HOMO weight) of the occupied ring pi tokens
+    by_main, by_population = dict.fromkeys(role_of, 0.0), dict.fromkeys(role_of, 0.0)
+    ring_pi = []  # (main centre role, HOMO weight) of the occupied ring pi tokens
     for o in tokens.occupied():
         d = o.descriptors
         centre = int(d.center_atoms[0])
         if centre not in role_of or d.center_spd[0, 1] < 0.9 or d.n_centers < 2:
             continue
         hit = np.flatnonzero(d.spectral_indices == homo)
-        ring_pi.append((role_of[centre], float(d.spectral_weights[hit[0]]) if len(hit) else 0.0))
-    print("anisole ring pi tokens (dominant centre, HOMO weight): " + str(ring_pi))
+        w = float(d.spectral_weights[hit[0]]) if len(hit) else 0.0
+        ring_pi.append((role_of[centre], w))
+        by_main[centre] += w
+        for a, pop in zip(d.all_center_atoms, d.all_center_weights, strict=True):
+            by_population[int(a)] = by_population.get(int(a), 0.0) + w * pop
+
+    def per_role(m):
+        return {k: [round(m[a], 3) for a in v] for k, v in roles.items()}
+
+    print(f"anisole ring pi tokens (main centre, HOMO weight): {ring_pi}")
+    print(f"  HOMO weight by main centre: {per_role(by_main)}")
+    print(f"  HOMO weight spread by population: {per_role(by_population)}")
     assert len(ring_pi) == 3
-    assert {role for role, _ in ring_pi} <= {"ortho", "para"}  # none centred at meta or ipso
-    best_role = max(ring_pi, key=lambda rw: rw[1])[0]
-    assert best_role == "para"
-    assert min(w for role, w in ring_pi if role in ("ortho", "para")) > 0.1
+    ortho_para = roles["ortho"] + roles["para"]
+    assert min(by_main[a] for a in ortho_para) > max(by_main[a] for a in roles["meta"])
+    assert min(by_main[a] for a in ortho_para) > 0.1
+    assert max(ring_pi, key=lambda rw: rw[1])[0] == "para"
 
 
 def test_anisole_atom_homo_weights_are_ortho_para(qm_record):

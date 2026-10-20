@@ -746,3 +746,82 @@ legal. Token schema 5; schema-4 files are rebuilt on load.
   no longer holds. Left as computed for now; the physics phase has to decide whether to
   clamp G to a negative value there.
 - The truncation test now runs again on schema-5 files.
+
+## 2026-10-20 — Prompt 3b re-check: SOMOs localized apart, tests tightened
+
+The 3b brief (continuous descriptors as the only orbital input, `type` demoted to a
+diagnostic, deterministic PM, spectral store, spectral KS3 with G as its own feature,
+resonance keys) was re-run against the spec-v3 code. Everything was in place, except a
+SOMO never got occupation 1. Three choices from the spec-v3 reconciliation still hold where
+the brief words them differently:
+
+- the overlap is one signed population, not a sign and a magnitude;
+- the mask is `CandidateConfig.allow_d_acceptors`, not `allow_empty_d_acceptors`;
+- KS3 uses the contact kernel for every pair (D1). The converged `(l_r^T B l_s)^2 G` form is
+  `ks_terms.ks3` / `ks3_matrix`, and G is the pair feature `gap_kernel`.
+
+The descriptor list, spectral cutoff, deterministic start, the reason types were demoted and
+the 147 removed resonance steps are recorded in the 3b and spec-v3 entries above.
+
+### SOMOs are localized apart from the doubly occupied MOs
+
+- **Rule.** Within the occupied block (occupation >= 0.5), the MOs at or above
+  `DOUBLE_THRESHOLD = 1.5` and the ones below it (SOMOs, and the rare smeared fractional
+  levels) are localized separately. `U_occ` is block-diagonal, so every LMO's spectral
+  weights still run over the whole occupied block and G is unchanged in form. The occupied
+  `PMStats` sum both sub-blocks (sweeps: the max).
+- **Why.** The density sum_i n_i |phi_i|^2 is invariant only under rotations among MOs of
+  equal occupation. Mixing a SOMO into the doubly occupied block gave LMOs that no longer
+  represent the computed density. It also spread the radical over many tokens. Br[C]Br had
+  four tokens at 1.861 and two at 1.277. CC(=CC=O)C(O)O[O] had thirteen between 1.67
+  and 1.99. Spec section 4: n_r in {2, 0}, 1 reserved for singly occupied orbitals. Spec
+  §4.1 ("separately to the occupied valence block and to the virtual block") needs one
+  sentence for the singly occupied sub-block.
+- **The old `partially_occupied = 7` hid most of it.** That count only sees tokens that
+  fall below the 1.5 donor threshold. Most radical-contaminated tokens stayed above 1.5 and
+  were accepted as donors. 11 of the 2,001 schema-5 token files had a fractional occupied
+  token. Now: one token at 1.000 per SOMO (Br[C]Br: two), the rest at 2 (or a smeared
+  1.9x level, as before). A SOMO is neither donor nor acceptor until the radical extension.
+- **Closed-shell records are unchanged.** 36 of the first 40 cached files rebuild
+  bit-identically. 4 differ at floating-point noise level: the same LMOs (|<old|new>| = 1.0),
+  the same sweep counts, and two fresh builds of each are bit-identical. The old files were
+  most likely written with a different BLAS thread count. Token schema 5 -> 6, so every file
+  is rebuilt on load.
+- Tests: `[CH3]` gives occupations 1, 2, 2, 2, and its SOMO token's spectral set is one
+  canonical MO. `[CH2]` (triplet) has a `U_occ` with zero SOMO / doubly occupied blocks.
+
+### Tests tightened
+
+- **Determinism** compares every model-input matrix (`orbital_features`, `orbital_spectra`,
+  `orbital_centres`, `atom_features`), `C_loc` and the full spectral vectors of two
+  tokenizations of the benzene record.
+- **Anisole** now asserts the brief's form, with the HOMO weight resolved by main centre:
+  each ring pi token gives its spectral weight on the HOMO to its main centre. Values:
+  ortho 0.212 / 0.128, para 0.404, meta 0 / 0, ipso 0, so ortho and para > meta. The
+  population-spread form `sum_r p_r,HOMO w_r(c)` gives ortho 0.109 / 0.065, meta 0.152 /
+  0.100, para 0.202. It is printed, not asserted, for the cross-term reason above.
+- The build summary adds an occupation histogram (0.1 bins) to the centres,
+  cos-character and spectral-entry histograms.
+
+### PMechDB rebuild, schema 6 (2,001 molecules, 2026-10-20 03:31)
+
+- `ksmech-orbitals build --source pmechdb --workers 4`: 2,001 built, 0 failed, 12,382
+  without a current-method QM record (counted). 35 molecules at the PM sweep cap. 8 min 17 s
+  wall clock, each worker at ~100% of one core. Token counts, types, centres,
+  cos-character, spectral entries and the input quantiles match the spec-v3 rebuild above;
+  only the open-shell molecules changed.
+- **Occupation** (0.1 bins): 2.0: 83,142; 0.0: 76,418; 1.0: 10 (the SOMOs of 6
+  molecules); 10 tokens in between (0.1: 5, 0.2: 1, 0.4: 1, 1.3: 1, 1.9: 2).
+- **The 10 tokens in between are Fermi smearing, not radicals.** Two small-gap carbocations
+  (C=CCN1...[CH+]...: 1.91 occupied, 0.075 and 0.057 virtual) and `C=[O+][Ti-]` (1.27
+  occupied; 0.42, 0.17 and 0.10 virtual). The virtual block is localized as one block, so a
+  smeared level there still mixes with the empty ones, as before this change. They are too
+  few to act on now. The 1.27 token is neither donor nor acceptor. The virtual tokens
+  under 0.5 count as acceptors.
+- Masks: 83,144 donors, 71,657 acceptors, 11 occupied tokens that are neither (10 SOMOs +
+  the Ti 1.27 token), 4,768 d-type tokens.
+- Contact table regenerated from the schema-6 cache: 352,990 occupied-virtual and 352,820
+  occupied-occupied samples, global medians 0.0042 and 0.0007 (schema 5: 352,985 /
+  352,802, same medians).
+- The PMechDB truncation test runs again on the schema-6 files: G from the 8-entry spectra
+  differs from the full-spectrum G by up to 21.8% over 50,323 pairs.

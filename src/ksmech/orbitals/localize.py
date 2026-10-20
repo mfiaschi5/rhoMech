@@ -5,7 +5,9 @@ P = sum_i sum_A (Q_A^i)^2, maximized by 2x2 Jacobi rotations (Pipek & Mezey, J. 
 90, 4916, 1989). One sweep visits every orbital pair once, as n-1 round-robin rounds of n/2
 disjoint pairs: rotations on disjoint pairs do not change each other's angle, so a round is one
 vectorized step (the angle needs only Q_ii, Q_jj and Q_ij) and the functional never decreases.
-Occupied and virtual orbitals are localized as separate blocks.
+Occupied and virtual orbitals are localized as separate blocks. Within the occupied block the
+doubly and the singly occupied MOs are localized separately, because a rotation that mixes MOs
+of different occupation changes the density sum_i n_i |phi_i|^2: a SOMO stays occupation 1.
 
 Foster-Boys is not available as a fallback: tblite's Python interface exposes overlap and
 Hamiltonian integrals only (`save-integrals`), no dipole integrals.
@@ -25,6 +27,7 @@ from ksmech.qm.records import QMRecord
 
 # AO index within a p shell -> Cartesian axis: tblite's (py, pz, px) order.
 P_AXIS_ORDER = (1, 2, 0)
+DOUBLE_THRESHOLD = 1.5  # an occupied MO at or above this is doubly occupied, below it a SOMO
 _N_VALENCE_AOS = frozenset({1, 4, 9})
 _MIN_GAIN = 1e-14
 
@@ -196,12 +199,41 @@ class LocalizedOrbitals:
         return self.stats_occ.converged and self.stats_virt.converged
 
 
+def _merge_stats(a: PMStats, b: PMStats) -> PMStats:
+    return PMStats(
+        a.n_orbitals + b.n_orbitals,
+        max(a.n_sweeps, b.n_sweeps),
+        a.converged and b.converged,
+        a.functional_start + b.functional_start,
+        a.functional_end + b.functional_end,
+    )
+
+
+def _localize_occupied(rec: QMRecord, occ_idx: np.ndarray, config: PMConfig | None):
+    """PM on the doubly and the singly occupied MOs of `occ_idx` separately.
+
+    U is block-diagonal in the order of `occ_idx`, so the spectral weights of every LMO still
+    run over the whole occupied block, and the stats cover both sub-blocks (sweeps: the max).
+    """
+    n = len(occ_idx)
+    U = np.zeros((n, n))
+    stats = PMStats(0, 0, True, 0.0, 0.0)
+    double = rec.occupations[occ_idx] >= DOUBLE_THRESHOLD
+    for sel in (np.flatnonzero(double), np.flatnonzero(~double)):
+        if len(sel):
+            _, U_sub, st = pipek_mezey_stats(rec.C[:, occ_idx[sel]], rec.S, rec.ao_atom, config)
+            U[np.ix_(sel, sel)] = U_sub
+            stats = _merge_stats(stats, st)
+    return rec.C[:, occ_idx] @ U, U, stats
+
+
 def localize_record(rec: QMRecord, config: PMConfig | None = None) -> LocalizedOrbitals:
-    """PM-localize the occupied (occupation >= 0.5) and virtual blocks of a QM record."""
+    """PM-localize the occupied (occupation >= 0.5) and virtual blocks of a QM record; the
+    SOMOs of an open-shell record are localized among themselves, apart from the rest."""
     assert_valence_only(rec)
     occ_idx = np.flatnonzero(rec.occupations >= OCC_THRESHOLD)
     virt_idx = np.flatnonzero(rec.occupations < OCC_THRESHOLD)
-    C_occ, U_occ, st_occ = pipek_mezey_stats(rec.C[:, occ_idx], rec.S, rec.ao_atom, config)
+    C_occ, U_occ, st_occ = _localize_occupied(rec, occ_idx, config)
     C_virt, U_virt, st_virt = pipek_mezey_stats(rec.C[:, virt_idx], rec.S, rec.ao_atom, config)
     return LocalizedOrbitals(occ_idx, virt_idx, C_occ, C_virt, U_occ, U_virt, st_occ, st_virt)
 

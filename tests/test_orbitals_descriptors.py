@@ -91,9 +91,15 @@ def test_occupation_centres_and_padding(sp_record):
 
 
 def test_radical_somo_occupation(sp_record):
+    """The SOMO is localized apart from the doubly occupied MOs: one token at occupation 1 whose
+    spectral set is the canonical SOMO alone, neither a donor nor an acceptor candidate."""
     t = build_molecule_tokens(sp_record("[CH3]"))
-    occ = [o.descriptors.occupation for o in t.occupied()]
-    assert abs(sum(occ) - 7.0) < 1e-6 and min(occ) < 1.99  # 7 valence electrons, one SOMO
+    occ = sorted(o.descriptors.occupation for o in t.occupied())
+    assert np.allclose(occ, [1.0, 2.0, 2.0, 2.0], atol=1e-6)  # 7 valence electrons
+    somo = next(o for o in t.occupied() if o.descriptors.occupation < 1.5)
+    assert somo.descriptors.n_spectral() == 1
+    candidates = t.donor_candidates() + t.acceptor_candidates()
+    assert somo.token_id not in {o.token_id for o in candidates}
 
 
 def test_spectral_entries_truncate_and_renormalize():

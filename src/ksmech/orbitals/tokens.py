@@ -51,7 +51,7 @@ from ksmech.orbitals.localize import LocalizedOrbitals, PMConfig, localize_recor
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class OrbitalKind(StrEnum):

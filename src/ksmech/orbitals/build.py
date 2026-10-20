@@ -84,6 +84,7 @@ class BuildRow:
     n_metal_bound: int = 0
     types: dict[str, int] = field(default_factory=dict)
     unresolved_types: dict[str, int] = field(default_factory=dict)
+    occupation_hist: dict[str, int] = field(default_factory=dict)  # occupation, 0.1 bins
     centers_hist: dict[str, int] = field(default_factory=dict)  # n_centers -> tokens
     cos_hist: dict[str, int] = field(default_factory=dict)  # cos-character bin -> tokens
     spectral_hist: dict[str, int] = field(default_factory=dict)  # spectral entries -> tokens
@@ -154,6 +155,7 @@ def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
         n_metal_bound=sum(o.metal_bound for o in occ),
         types=dict(types),
         unresolved_types=dict(Counter(str(o.type) for o in bad_occ + bad_virt)),
+        occupation_hist=dict(Counter(f"{o.descriptors.occupation:.1f}" for o in t.orbitals)),
         centers_hist=dict(Counter(str(o.descriptors.n_centers) for o in t.orbitals)),
         cos_hist=dict(Counter(_cos_bin(o) for o in t.orbitals if o.descriptors.n_centers >= 2)),
         spectral_hist=dict(Counter(str(o.descriptors.n_spectral()) for o in t.orbitals)),
@@ -331,6 +333,7 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
         ),
         worst_molecules=worst_molecules(rows),
         descriptors=dict(
+            occupation=_merge(r.occupation_hist for r in ok),
             centers_per_token=_merge(r.centers_hist for r in ok),
             cos_character=_merge(r.cos_hist for r in ok),
             spectral_entries_per_token=_merge(r.spectral_hist for r in ok),
@@ -388,6 +391,7 @@ def _print_type_table(summary: dict, console: Console) -> None:
 def _print_descriptor_distributions(summary: dict, console: Console) -> None:
     d = summary["descriptors"]
     for title, hist in (
+        ("occupation (0.1 bins; 1.0 = SOMO)", d["occupation"]),
         ("centres per token", d["centers_per_token"]),
         ("cos-character (tokens with >= 2 centres)", d["cos_character"]),
         ("spectral entries per token", d["spectral_entries_per_token"]),
