@@ -22,7 +22,9 @@ aligned or absorbed; every other step is skipped with a reason code and counted.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -43,6 +45,7 @@ from ksmech.arrows.reactants import (
     TokenLoader,
 )
 from ksmech.data import chem, splits
+from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
 from ksmech.data.resonance import canonical_resonance_key
 from ksmech.data.schema import ElementaryStep
@@ -58,7 +61,9 @@ from ksmech.physics.pairs import (
 )
 from ksmech.physics.params import REDUCED, KSParams, to_params
 
-SAMPLE_VERSION = 7
+log = logging.getLogger(__name__)
+
+SAMPLE_VERSION = 8
 PARTS = ("train", "val", "test")
 STRATEGIES = ("random", "scaffold", "loco")
 
@@ -99,6 +104,8 @@ class MechanismSample:
     product_key: str = ""
     product_key_flag: str = ""
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
+    inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file and
+    #   contact block this sample was built from (`file:<path>` -> content sha256)
 
     @property
     def n_atoms(self) -> int:
@@ -188,16 +195,19 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens, kernels: Pair
 def sample_for_step(
     step: ElementaryStep, loader: TokenLoader, kernels: PairKernels
 ) -> MechanismSample | SkipReason:
-    try:
-        rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
-    except MissingTokens:
-        return SkipReason.MISSING_TOKENS
-    except CorrespondenceError:
-        return SkipReason.CORRESPONDENCE
-    alignment = align_step(step, rt)
-    if not alignment.complete:
-        return SkipReason.UNALIGNED_ARROW
-    return make_sample(step, rt, alignment.labels, kernels)
+    with prov.collecting() as used:
+        try:
+            rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
+        except MissingTokens:
+            return SkipReason.MISSING_TOKENS
+        except CorrespondenceError:
+            return SkipReason.CORRESPONDENCE
+        alignment = align_step(step, rt)
+        if not alignment.complete:
+            return SkipReason.UNALIGNED_ARROW
+        sample = make_sample(step, rt, alignment.labels, kernels)
+    sample.inputs = dict(sorted(used.items()))
+    return sample
 
 
 def build_step_samples(
@@ -241,8 +251,42 @@ def samples_path(source: str, split: str, processed_dir: Path = DEFAULT_PROCESSE
     return source_dir(source, processed_dir) / f"samples_{split}.pt"
 
 
-def write_samples(path: Path, split: str, ids: list[str], samples: dict, skipped: dict) -> dict:
-    """Write the samples of `ids` and return the split's counts (also written as JSON)."""
+def splits_path(source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
+    return source_dir(source, processed_dir) / f"splits_{strategy}.json"
+
+
+def write_split_file(
+    path: Path, strategy: str, seed: int, ids: dict[str, list[str]], parquet: Path
+) -> Path:
+    """The step ids of every part of one strategy, stamped with the parquet they came from."""
+    header = prov.stamp(
+        "split",
+        SAMPLE_VERSION,
+        prov.file_input(parquet),
+        {"strategy": strategy, "seed": seed},
+        prov.sha256_text(json.dumps(ids, sort_keys=True)),
+    )
+    return prov.write_json(path, {"splits": ids}, header)
+
+
+def load_split_file(path: Path) -> dict[str, list[str]]:
+    """The ids of a split file; raises StaleArtifact when its parquet changed."""
+    prov.verify(path, "split", SAMPLE_VERSION)
+    return json.loads(Path(path).read_text())["splits"]
+
+
+def write_samples(
+    path: Path,
+    split: str,
+    ids: list[str],
+    samples: dict,
+    skipped: dict,
+    inputs: dict[str, str] | None = None,
+    config: dict | None = None,
+) -> dict:
+    """Write the samples of `ids` with a provenance header and return the split's counts (also
+    written as JSON). The header's inputs are `inputs` (parquet, split file) plus every token
+    file and contact block the kept samples were built from."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
     report = {
@@ -253,11 +297,29 @@ def write_samples(path: Path, split: str, ids: list[str], samples: dict, skipped
         "n_labels": sum(len(s.labels) for s in kept),
         "n_fermi_smeared": sum(s.fermi_smeared for s in kept),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": SAMPLE_VERSION, **report, "samples": [s.to_dict() for s in kept]}
-    torch.save(payload, path)
+    all_inputs = dict(inputs or {})
+    for s in kept:
+        all_inputs.update(s.inputs)
+    buf = io.BytesIO()
+    torch.save({"version": SAMPLE_VERSION, **report, "samples": [s.to_dict() for s in kept]}, buf)
+    payload = buf.getvalue()
+    header = prov.stamp(
+        "samples", SAMPLE_VERSION, all_inputs, config or {}, prov.sha256_bytes(payload)
+    )
+    prov.write_framed(path, payload, header)
     path.with_suffix(".json").write_text(json.dumps(report, indent=1) + "\n")
     return report
+
+
+def _split_inputs(source, strategy, seed, ids, processed_dir) -> dict[str, str]:
+    parquet = steps_path(source, processed_dir)
+    out = splits_path(source, strategy, processed_dir)
+    path = write_split_file(out, strategy, seed, ids, parquet)
+    return {**prov.file_input(parquet), **prov.file_input(path)}
+
+
+def _config(split: str, kernels: PairKernels, seed: int) -> dict:
+    return {"split": split, "seed": seed, "sample_version": SAMPLE_VERSION, **kernels.describe()}
 
 
 def build_samples(
@@ -274,12 +336,13 @@ def build_samples(
     ids = split_ids(steps, strategy, seed)
     if split not in ids:
         raise ValueError(f"split {split!r} not produced by strategy {strategy!r}: {sorted(ids)}")
+    inputs = _split_inputs(source, strategy, seed, ids, processed_dir)
     wanted = set(ids[split])
     samples, skipped = build_step_samples(
         (s for s in steps if s.step_id in wanted), loader or TokenCache(), kernels
     )
     path = samples_path(source, split, processed_dir)
-    write_samples(path, split, ids[split], samples, skipped)
+    write_samples(path, split, ids[split], samples, skipped, inputs, _config(split, kernels, seed))
     return path
 
 
@@ -310,9 +373,12 @@ def build_all_samples(
         except ValueError as exc:
             report["strategies_not_applicable"][strategy] = str(exc)
             continue
+        inputs = _split_inputs(source, strategy, seed, ids, processed_dir)
         for split, members in ids.items():
             path = samples_path(source, split, processed_dir)
-            report["splits"][split] = write_samples(path, split, members, samples, skipped)
+            cfg = _config(split, kernels, seed)
+            counts = write_samples(path, split, members, samples, skipped, inputs, cfg)
+            report["splits"][split] = counts
             if split.endswith("_train"):
                 train = [samples[i] for i in members if i in samples]
                 stats_path = pair_stats_path(source, split[: -len("_train")], processed_dir)
@@ -334,8 +400,18 @@ def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -
     )
 
 
-def load_samples(path: Path) -> list[MechanismSample]:
-    payload = torch.load(Path(path), weights_only=True)
+def load_samples(path: Path, allow_stale: bool = False) -> list[MechanismSample]:
+    """The samples of one file. Its provenance header is verified first (parquet, split file,
+    token files, contact blocks); raises StaleArtifact naming what changed. `allow_stale` is
+    for diagnostic CLIs only: the mismatch is logged and the file is read anyway."""
+    try:
+        prov.verify(path, "samples", SAMPLE_VERSION)
+    except prov.StaleArtifact as exc:
+        if not allow_stale:
+            raise
+        log.warning("reading a stale sample file (--allow-stale): %s", exc)
+    _, payload_bytes = prov.read_framed(path)
+    payload = torch.load(io.BytesIO(payload_bytes), weights_only=True)
     if payload.get("version") != SAMPLE_VERSION:
         raise ValueError(f"{path}: sample version {payload.get('version')} != {SAMPLE_VERSION}")
     return [MechanismSample.from_dict(d) for d in payload["samples"]]

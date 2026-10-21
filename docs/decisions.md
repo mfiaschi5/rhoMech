@@ -2637,3 +2637,72 @@ Each step is counted once, under the first reason that applies, in this order:
 - **Rule until the rebuild.** None of these numbers is quoted as a result. The rebuild after fix
   items 1-10 (provenance-stamped) replaces them, and the new numbers are reported next to these
   with the delta.
+
+## 2026-10-21 — Provenance headers on every artifact (fix item 1, `ksmech.data.provenance`)
+
+- **One module, one header.** A `Provenance` holds:
+  - `kind`, `schema_version`;
+  - `code_git_hash` (HEAD, `+dirty` when tracked files differ);
+  - `spec_sha256` (of `docs/ksmech_architecture.tex`);
+  - `inputs` {name: sha256}, `config`, `built_at`;
+  - `content_sha256` (the hash of the artifact's own payload).
+
+  Writers call `stamp()`; loaders call `verify()`, which raises `StaleArtifact` (reason
+  `STALE_ARTIFACT`) with one line per change, e.g. `input changed: data/processed/pmechdb/steps.parquet`.
+- **Where the header lives.** In the artifact itself:
+  - `.npz`: a `__provenance__` member that `np.load` reads alone;
+  - `.json`: a `provenance` key;
+  - sample `.pt` files: a frame (magic, length, JSON header, then the torch payload).
+
+  A file input's current hash is read from that file's header and recomputed from its bytes
+  only when it has none (the parquet). `current_hash` memoizes on (path, mtime, size). A pure
+  `touch` therefore changes nothing; changed content always does.
+- **What is compared and what is not.** `schema_version`, `config` and `inputs` are compared.
+  `code_git_hash`, `spec_sha256` and `built_at` are for tracing only, so a commit does not by
+  itself invalidate the caches. A code change that alters outputs must bump the artifact's
+  schema version (QM `SCHEMA_VERSION`, token `SCHEMA_VERSION`, `ORIENTED_VERSION`,
+  `SAMPLE_VERSION` now 8, `BASELINE_VERSION`), as before.
+- **Chain and stamps.**
+
+  | artifact | inputs | config |
+  |---|---|---|
+  | QM record | `smiles` (sha256 of the canonical SMILES) | method, solvation, conformer id |
+  | token file | its QM record (`file:`) | DescriptorConfig (tau_atom, spectral_min / max, top_centers, min_p_norm), PM tol and max sweeps |
+  | contact block | `tokens:F`, `tokens:G` (content digests of the two token sets) | contact mode (`oriented_v<version>`), block, N directions, N rolls, distance, tol, clash, site weight (intra) |
+  | split file `splits_<strategy>.json` (new) | steps.parquet | strategy, seed |
+  | sample file | steps.parquet, the split file, every token file and contact block its samples used | split, seed, sample version, kernel description |
+  | baseline model | the train and val sample files | model, feature list |
+
+  Each sample also keeps its own inputs (`MechanismSample.inputs`), gathered by
+  `provenance.collecting()` while it is built. `TokenCache` and the oriented block cache report
+  every file they serve with `note_input`.
+- **Loaders.**
+  - Read-only consumers refuse with exit 2 and the reason: `load_samples`, `load_gbdt`,
+    `load_split_file`, `load_record` (always the header; the molecule and config when the
+    caller passes its identity).
+  - Builders that own a cache rebuild the stale entry and count it:
+    - `ksmech-orbitals build` rebuilds a stale token file and reports a stale QM record as
+      `stale_qm` (`n_stale_qm`);
+    - the oriented kernel recomputes a stale block (`oriented.STALE_BLOCKS`);
+    - `compute_fixture_records` recomputes a stale record;
+    - `textbook.ensure_tokens` rebuilds a stale token file.
+  - `TokenCache` treats a stale token file as absent and keeps the reason in `.stale`, so
+    MISSING_TOKENS and STALE_ARTIFACT can be told apart.
+  - A file that is not even a readable `.npz` raises `CorruptArtifact`: a failure, not stale.
+- **Skip flag.** Only `--allow-stale`, and only on the diagnostic commands (`ksmech-physics
+  ks-rank`, `ksmech-physics textbook`). It logs the mismatch and reads anyway.
+  `ksmech-arrows samples`, `ksmech-physics baseline` and training have no skip.
+- **CLI.** `ksmech-data provenance <path>` prints the chain: each artifact with its config and
+  status, following file inputs up to `--depth`. It exits 1 if anything is stale.
+  `ksmech-data provenance --backfill qm` adds headers to existing QM records in place,
+  atomically and with the arrays unchanged, marked `extra.backfilled`. Run it once, after the
+  QM batch; it was not run while the batch was writing.
+- **Consequence for the current caches.**
+  - Every file written before this commit has no header. The QM records are backfilled.
+  - Token files, contact blocks, samples and baselines are rebuilt: they would be anyway
+    (fix items 2-5 change their content).
+  - Until then the real-data alignment test skips with "token cache predates provenance
+    headers".
+- **Not stamped.** `contact_table.json` (table ablation), the MLP kernel (deleted in item 9),
+  `pair_feature_stats_*.json` (read by nothing yet; it will be with the trainer) and the
+  reports.

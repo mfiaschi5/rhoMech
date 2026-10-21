@@ -76,6 +76,7 @@ def test_truncation_matters_on_pmechdb_pairs():
     """G from the full spectra and from the 8 model-input entries differ by > 5% somewhere."""
     from pathlib import Path
 
+    from ksmech.data.provenance import StaleArtifact
     from ksmech.orbitals.tokens import load_tokens
     from ksmech.physics.ks_terms import token_gap_kernel, token_gap_kernel_truncated
 
@@ -86,7 +87,7 @@ def test_truncation_matters_on_pmechdb_pairs():
     for path in files:
         try:
             t = load_tokens(path)
-        except ValueError:
+        except (ValueError, StaleArtifact):
             continue
         occ, virt = t.occupied(), t.virtual()  # every pair, not just the frontier ones
         for r in occ:

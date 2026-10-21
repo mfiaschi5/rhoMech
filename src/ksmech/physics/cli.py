@@ -14,7 +14,9 @@ from rich.table import Table
 
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.steps import PARTS, load_samples, samples_path
+from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir
+from ksmech.data.provenance import StaleArtifact
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.physics.contact_kernel import KERNELS
@@ -41,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--untrained", default=UNTRAINED_SCORE, help="untrained scorer name")
     t.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
     t.add_argument("--gbdt", type=Path, default=None, help="GBDT model (default: random split)")
+    for p in (r, t):  # diagnostic commands only: read stale artifacts with a warning
+        p.add_argument("--allow-stale", action="store_true", help="read stale artifacts (warns)")
     for p in (r, m, b):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -97,8 +101,8 @@ def _load_parts(args: argparse.Namespace, console: Console) -> dict[str, list] |
             console.print(f"[red]{path} missing[/red]; run `ksmech-arrows samples`")
             return None
         try:
-            parts[part] = load_samples(path)
-        except ValueError as exc:  # an old sample version: rebuild, never reinterpret
+            parts[part] = load_samples(path, allow_stale=getattr(args, "allow_stale", False))
+        except (StaleArtifact, ValueError) as exc:  # stale or old: rebuild, never reinterpret
             console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows samples`")
             return None
     return parts
@@ -316,15 +320,12 @@ def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
     note = _loco_note(args)
     console.print(note)
     out_dir = source_dir(args.source, args.processed_dir)
-    bl.save_gbdt(gbdt, out_dir / f"baseline_gbdt_{args.split}.npz")
-    np.savez(
-        out_dir / f"baseline_lr_{args.split}.npz",
-        scale=lr.scale,
-        mean=lr.mean,
-        std=lr.std,
-        weights=lr.weights,
-        l2=lr.l2,
-    )
+    inputs = {}
+    for part in ("train", "val"):
+        path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+        inputs |= prov.file_input(path)
+    bl.save_gbdt(gbdt, out_dir / f"baseline_gbdt_{args.split}.npz", inputs)
+    bl.save_logistic(lr, out_dir / f"baseline_lr_{args.split}.npz", inputs)
     report = {
         "split": args.split,
         "results": results,
@@ -386,7 +387,11 @@ def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
     if gbdt_path.exists():
         from ksmech.physics import baseline as bl
 
-        gbdt = bl.load_gbdt(gbdt_path)
+        try:
+            gbdt = bl.load_gbdt(gbdt_path, allow_stale=args.allow_stale)
+        except StaleArtifact as exc:
+            console.print(f"[red]{exc}[/red]; re-run `ksmech-physics baseline`")
+            return 2
 
         def trained(sample, loader):
             cs = bl.candidate_set(sample, loader)

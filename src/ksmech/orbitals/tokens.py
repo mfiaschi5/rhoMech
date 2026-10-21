@@ -26,9 +26,7 @@ Hartree. `C_loc` holds the S-orthonormal AO coefficients of every orbital token 
 
 from __future__ import annotations
 
-import io
-import os
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 
@@ -36,6 +34,7 @@ import numpy as np
 from rdkit import Chem
 from rich.table import Table
 
+from ksmech.data import provenance as prov
 from ksmech.orbitals.chirality import chirality_signs
 from ksmech.orbitals.classify import Classification, ClassifyConfig, OrbitalType, classify_block
 from ksmech.orbitals.descriptors import (
@@ -288,6 +287,8 @@ class MoleculeTokens:
     schema_version: int = SCHEMA_VERSION
     fg_vocab_size: int = 0
     fermi_smeared: bool = False  # an MO is > 0.05 from its aufbau occupation (`is_fermi_smeared`)
+    digest: str = field(default="", repr=False, compare=False)  # content sha256 (provenance)
+    source_path: str = field(default="", repr=False, compare=False)  # file it was loaded from
 
     @property
     def C_loc(self) -> np.ndarray:
@@ -623,19 +624,42 @@ def _payload(t: MoleculeTokens) -> dict[str, np.ndarray]:
     return pay
 
 
-def save_tokens(tokens: MoleculeTokens, path: Path) -> Path:
-    """Write as .npz (no pickle), atomically: tmp file, fsync, rename."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    buf = io.BytesIO()
-    np.savez_compressed(buf, **_payload(tokens))
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with open(tmp, "wb") as fh:
-        fh.write(buf.getvalue())
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
-    return path
+def token_config(
+    pm_config: PMConfig | None = None, descriptor_config: DescriptorConfig | None = None
+) -> dict:
+    """The configuration a token file is stamped with and checked against: the descriptor
+    thresholds (tau_atom, spectral cutoff) and the PM convergence settings."""
+    pm = pm_config or PMConfig()
+    return {
+        **asdict(descriptor_config or DescriptorConfig()),
+        "pm_tol": pm.tol,
+        "pm_max_sweeps": pm.max_sweeps,
+    }
+
+
+def token_digest(tokens: MoleculeTokens) -> str:
+    """The content hash of the tokens (the one their file header carries); computed once."""
+    if not tokens.digest:
+        tokens.digest = prov.array_digest(_payload(tokens))
+    return tokens.digest
+
+
+def save_tokens(
+    tokens: MoleculeTokens,
+    path: Path,
+    inputs: dict[str, str] | None = None,
+    config: dict | None = None,
+) -> Path:
+    """Write as .npz (no pickle) with its provenance header, atomically. `inputs`: the QM
+    record it was built from (`prov.file_input(qm_path)`); `config`: `token_config(...)`."""
+    arrays = _payload(tokens)
+    tokens.digest = prov.array_digest(arrays)
+    header = prov.stamp(
+        "tokens", SCHEMA_VERSION, inputs or {}, config or token_config(), tokens.digest
+    )
+    out = prov.save_npz(path, arrays, header)
+    tokens.source_path = str(out)
+    return out
 
 
 def _load_atoms(z: dict) -> list[AtomToken]:
@@ -707,16 +731,20 @@ def _load_orbitals(z: dict, first_id: int) -> list[OrbitalToken]:
     return out
 
 
-class TokenSchemaError(ValueError):
-    """The token file was written by another schema version; rebuild it."""
+TokenSchemaError = prov.StaleArtifact  # the old name: a stale token file; rebuild it
 
 
-def load_tokens(path: Path) -> MoleculeTokens:
+def load_tokens(path: Path, config: dict | None = None, verify: bool = True) -> MoleculeTokens:
+    """Read a token file. Its header is verified against the current schema, `config`
+    (default `token_config()`) and the QM record it was built from; raises StaleArtifact.
+    `verify=False` is for diagnostics only."""
+    header = (
+        prov.verify(path, "tokens", SCHEMA_VERSION, config or token_config())
+        if verify
+        else prov.read_header(path)
+    )
     with np.load(Path(path), allow_pickle=False) as npz:
-        z = {k: npz[k] for k in npz.files}
-    version = int(z["schema_version"].item())
-    if version != SCHEMA_VERSION:
-        raise TokenSchemaError(f"{path}: schema {version}, expected {SCHEMA_VERSION}")
+        z = {k: npz[k] for k in npz.files if k != prov.HEADER_KEY}
     atoms = _load_atoms(z)
     meta = {k: z[k].item() for k in _META}
     for k in ("conformer_id", "pm_sweeps_occ", "pm_sweeps_virt", "schema_version", "fg_vocab_size"):
@@ -730,6 +758,8 @@ def load_tokens(path: Path) -> MoleculeTokens:
         F=z["F"],
         ao_atom=z["ao_atom"],
         ao_l=z["ao_l"],
+        digest=header.content_sha256 if header else "",
+        source_path=str(path),
         **meta,
     )
 

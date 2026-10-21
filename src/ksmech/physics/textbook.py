@@ -24,10 +24,13 @@ from rdkit import Chem
 from ksmech.arrows.reactants import ReactantTokens, TokenCache
 from ksmech.arrows.steps import MechanismSample, reactant_sample
 from ksmech.data import chem
+from ksmech.data import provenance as prov
+from ksmech.data.provenance import StaleArtifact
 from ksmech.orbitals.build import tokens_path
-from ksmech.orbitals.tokens import build_molecule_tokens, save_tokens
+from ksmech.orbitals.tokens import build_molecule_tokens, load_tokens, save_tokens
 from ksmech.physics.ranking import token_class
 from ksmech.qm.embed import prepare_mol
+from ksmech.qm.records import cache_path
 from ksmech.qm.xtb_calc import QMConfig
 
 
@@ -82,9 +85,14 @@ def ensure_tokens(keys: list[str], tokens_dir: Path, qm: QMConfig | None = None)
     for key in keys:
         path = tokens_path(tokens_dir, key, 0, qm.method)
         if path.exists():
-            continue
+            try:
+                load_tokens(path)
+                continue
+            except StaleArtifact:
+                pass  # rebuilt below
         record = compute_fixture_records({key: key}, qm)[key]
-        save_tokens(build_molecule_tokens(record), path)
+        qm_path = cache_path(qm.cache_dir, key, 0, qm.method)
+        save_tokens(build_molecule_tokens(record), path, prov.file_input(qm_path))
         built.append(key)
     return built
 

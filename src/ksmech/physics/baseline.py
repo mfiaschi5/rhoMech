@@ -27,6 +27,7 @@ not trained on and count as misses.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from scipy.optimize import minimize
 
 from ksmech.arrows.reactants import TokenLoader
 from ksmech.arrows.steps import MechanismSample
+from ksmech.data import provenance as prov
 from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.tokens import atom_feature_names
 from ksmech.physics.pairs import PAIR_FEATURES, frozen_head
@@ -45,6 +47,8 @@ from ksmech.physics.ranking import (
     physical_pair_z,
     summarize_ranks,
 )
+
+log = logging.getLogger(__name__)
 
 FEATURE_NAMES = (
     list(PAIR_FEATURES)
@@ -394,20 +398,47 @@ def fit_gbdt(train: list[CandidateSet], val: list[CandidateSet], cfg: TreeConfig
 # ---- persistence
 
 
-def save_gbdt(model: GBDTRanker, path: Path) -> Path:
+BASELINE_VERSION = 1
+
+
+def _save_model(path: Path, arrays: dict, kind: str, inputs: dict[str, str] | None) -> Path:
+    """Write a fitted ranker with a provenance header: its inputs are the sample files it was
+    fitted and selected on, its config the feature list."""
+    header = prov.stamp(
+        "baseline",
+        BASELINE_VERSION,
+        inputs or {},
+        {"model": kind, "features": FEATURE_NAMES},
+        prov.array_digest(arrays),
+    )
+    return prov.save_npz(path, arrays, header, compressed=False)
+
+
+def save_gbdt(model: GBDTRanker, path: Path, inputs: dict[str, str] | None = None) -> Path:
     arrays = {f"edge{i}": e for i, e in enumerate(model.edges)}
     for t, tree in enumerate(model.trees):
         for name in ("feature", "threshold", "left", "right", "value"):
             arrays[f"t{t}_{name}"] = getattr(tree, name)
     meta = {"n_trees": len(model.trees), "lr": model.learning_rate, "features": FEATURE_NAMES}
     arrays["meta"] = np.array(json.dumps(meta))
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(path, **arrays)
-    return path
+    return _save_model(Path(path), arrays, "gbdt", inputs)
 
 
-def load_gbdt(path: Path) -> GBDTRanker:
+def save_logistic(model: LogisticRanker, path: Path, inputs: dict[str, str] | None = None):
+    arrays = {k: np.asarray(getattr(model, k)) for k in ("scale", "mean", "std", "weights", "l2")}
+    return _save_model(Path(path), arrays, "logistic", inputs)
+
+
+def load_gbdt(path: Path, allow_stale: bool = False) -> GBDTRanker:
+    """The fitted GBDT, after verifying that its sample files and features are unchanged
+    (StaleArtifact otherwise; `allow_stale` only logs it, for diagnostics)."""
+    try:
+        config = {"model": "gbdt", "features": FEATURE_NAMES}
+        prov.verify(path, "baseline", BASELINE_VERSION, config)
+    except prov.StaleArtifact as exc:
+        if not allow_stale:
+            raise
+        log.warning("using a stale GBDT (--allow-stale): %s", exc)
     with np.load(Path(path), allow_pickle=False) as z:
         meta = json.loads(str(z["meta"]))
         if meta["features"] != FEATURE_NAMES:

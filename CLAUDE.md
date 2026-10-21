@@ -127,6 +127,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
 
 - Data: `uv run ksmech-data ingest --source pmechdb` (parquet + rejections + report under
   `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
+- Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
+  whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
+  written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
+  (STALE_ARTIFACT); only `ks-rank` and `textbook` take `--allow-stale`.
 - QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules

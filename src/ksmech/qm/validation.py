@@ -6,6 +6,7 @@ the numbers that decided it, and returns a short description of what it measured
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,10 +15,20 @@ import numpy as np
 from rdkit import Chem
 
 from ksmech.data import chem
+from ksmech.data.provenance import StaleArtifact
 from ksmech.qm.ao import per_atom_sum
 from ksmech.qm.embed import embed, prepare_mol
-from ksmech.qm.records import QMError, QMRecord, cache_path, load_record, save_record
+from ksmech.qm.records import (
+    QMError,
+    QMRecord,
+    cache_path,
+    is_valid_cache_file,
+    load_record,
+    save_record,
+)
 from ksmech.qm.xtb_calc import GFN2Calculator, QMConfig
+
+log = logging.getLogger(__name__)
 
 Records = Mapping[str, QMRecord]
 ORTHO_TOL = 1e-6
@@ -34,9 +45,12 @@ def compute_fixture_records(
     for name, smi in molecules.items():
         canonical = chem.unmapped_canonical(Chem.MolFromSmiles(smi))
         path = cache_path(config.cache_dir, canonical, 0, config.method)
-        if path.is_file():
-            out[name] = load_record(path)
-            continue
+        if is_valid_cache_file(path):
+            try:
+                out[name] = load_record(path, (canonical, 0, config.method))
+                continue
+            except StaleArtifact as exc:
+                log.info("recomputing %s: %s", name, exc)
         mol = prepare_mol(canonical)
         embed(mol, n_conformers=1, seed=0)
         res = calc.try_run(mol, 0)

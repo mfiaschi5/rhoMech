@@ -23,7 +23,9 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.data import chem
+from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, steps_path
+from ksmech.data.provenance import StaleArtifact
 from ksmech.orbitals.classify import UNRESOLVED_TYPES, ClassifyConfig, OrbitalType
 from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.fgroups import NONE_ID, UNK_ID
@@ -31,11 +33,11 @@ from ksmech.orbitals.localize import PMConfig
 from ksmech.orbitals.tokens import (
     CandidateConfig,
     MoleculeTokens,
-    TokenSchemaError,
     atom_feature_names,
     build_molecule_tokens,
     load_tokens,
     save_tokens,
+    token_config,
 )
 from ksmech.qm.batch import collect_molecules
 from ksmech.qm.records import (
@@ -70,7 +72,7 @@ class BuildConfig:
 @dataclass
 class BuildRow:
     smiles: str
-    status: str  # built | loaded | missing_qm | failed
+    status: str  # built | loaded | missing_qm | stale_qm | failed
     detail: str = ""
     n_atoms: int = 0
     n_heavy: int = 0
@@ -184,21 +186,26 @@ def _cos_bin(o) -> str:
 
 
 def process_molecule(smiles: str, config: BuildConfig) -> BuildRow:
-    """Build (or load) the tokens of one molecule. Never raises."""
+    """Build (or load) the tokens of one molecule. Never raises. A token file whose header no
+    longer matches (schema, config, or the QM record it was built from) is rebuilt; a QM record
+    whose header does not match this molecule and method is `stale_qm` (STALE_ARTIFACT)."""
     qm_path = cache_path(config.qm_cache_dir, smiles, config.conformer_id, config.method)
     if not is_valid_cache_file(qm_path):
         return BuildRow(smiles, "missing_qm", str(qm_path))
     out = tokens_path(config.out_dir, smiles, config.conformer_id, config.method)
+    tok_config = token_config(config.pm)
     try:
         if out.is_file() and not config.force:
             try:
-                return _row_from_tokens(smiles, "loaded", load_tokens(out))
-            except TokenSchemaError:
-                pass  # written by an older schema: rebuild below
-        tokens = build_molecule_tokens(
-            load_record(qm_path), pm_config=config.pm, classify_config=config.classify
-        )
-        save_tokens(tokens, out)
+                return _row_from_tokens(smiles, "loaded", load_tokens(out, tok_config))
+            except StaleArtifact as exc:
+                log.info("rebuilding %s", exc)
+        try:
+            record = load_record(qm_path, (smiles, config.conformer_id, config.method))
+        except StaleArtifact as exc:
+            return BuildRow(smiles, "stale_qm", str(exc))
+        tokens = build_molecule_tokens(record, pm_config=config.pm, classify_config=config.classify)
+        save_tokens(tokens, out, prov.file_input(qm_path), tok_config)
         return _row_from_tokens(smiles, "built", tokens)
     except Exception as exc:  # noqa: BLE001 - one bad molecule must not stop the batch
         log.exception("token build failed for %s", smiles)
@@ -322,6 +329,7 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
         n_built=status["built"],
         n_loaded=status["loaded"],
         n_missing_qm=status["missing_qm"],
+        n_stale_qm=status["stale_qm"],  # STALE_ARTIFACT: run `ksmech-data provenance --backfill qm`
         n_failed=status["failed"],
         failures={r.smiles: r.detail for r in rows if r.status == "failed"},
         tokens_per_molecule=dict(
@@ -480,7 +488,8 @@ def print_summary(summary: dict, console: Console, show_worst: bool = False) -> 
     console.print(
         f"[bold]Orbital tokens[/bold] ({s['method']}): {s['n_ok']}/{s['n_molecules']} molecules "
         f"({s['n_built']} built, {s['n_loaded']} loaded), {s['n_missing_qm']} without a QM "
-        f"record, {s['n_failed']} failed"
+        f"record, {s.get('n_stale_qm', 0)} with a stale QM record (STALE_ARTIFACT), "
+        f"{s['n_failed']} failed"
     )
     tpm = s["tokens_per_molecule"]
     console.print(

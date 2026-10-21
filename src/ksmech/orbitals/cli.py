@@ -10,6 +10,7 @@ from pathlib import Path
 from rich.console import Console
 
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
+from ksmech.data.provenance import StaleArtifact
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR, BuildConfig, build_dataset
 from ksmech.orbitals.fgroups import DEFAULT_VOCAB_PATH, build_vocab
@@ -130,7 +131,11 @@ def cmd_show(args: argparse.Namespace, console: Console) -> int:
 
         rec = compute_fixture_records({"x": smiles}, config)["x"]
     else:
-        rec = load_record(path)
+        try:
+            rec = load_record(path, (smiles, 0, config.method))
+        except StaleArtifact as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
     tokens = build_molecule_tokens(rec)
     console.print(token_table(tokens))
     console.print(

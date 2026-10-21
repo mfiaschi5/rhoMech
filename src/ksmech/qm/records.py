@@ -8,14 +8,16 @@ atom_order_smiles))`; AO indices run atom by atom (see `ksmech.qm.ao`).
 from __future__ import annotations
 
 import hashlib
-import io
 import logging
-import os
+from collections import Counter
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+
+from ksmech.data import provenance as prov
 
 log = logging.getLogger(__name__)
 
@@ -118,20 +120,36 @@ def cache_path(cache_dir: Path, smiles: str, conformer_id: int, method: str) -> 
     return Path(cache_dir) / f"{cache_key(smiles, conformer_id, method)}.npz"
 
 
+def record_config(method: str, conformer_id: int) -> dict[str, Any]:
+    """The configuration a QM record is stamped with and checked against: the method string,
+    its solvation part and the conformer id."""
+    parts = method.split("/")
+    return {
+        "method": method,
+        "solvation": parts[1] if len(parts) > 1 else "",
+        "conformer_id": int(conformer_id),
+    }
+
+
+def record_inputs(smiles: str) -> dict[str, str]:
+    return {"smiles": prov.sha256_text(smiles)}
+
+
+def _record_arrays(record: QMRecord) -> dict[str, np.ndarray]:
+    return {f.name: np.asarray(getattr(record, f.name)) for f in fields(record)}
+
+
 def save_record(record: QMRecord, path: Path) -> Path:
-    """Write the record as .npz (no pickle). The write is atomic: tmp file, then rename."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {f.name: np.asarray(getattr(record, f.name)) for f in fields(record)}
-    buf = io.BytesIO()
-    np.savez_compressed(buf, **payload)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with open(tmp, "wb") as fh:
-        fh.write(buf.getvalue())
-        fh.flush()
-        os.fsync(fh.fileno())  # a power loss after the rename must not leave an empty file
-    os.replace(tmp, path)
-    return path
+    """Write the record as .npz (no pickle) with its provenance header, atomically."""
+    arrays = _record_arrays(record)
+    header = prov.stamp(
+        "qm_record",
+        record.schema_version,
+        record_inputs(record.smiles),
+        record_config(record.method, record.conformer_id),
+        prov.array_digest(arrays),
+    )
+    return prov.save_npz(path, arrays, header)
 
 
 def is_valid_cache_file(path: Path) -> bool:
@@ -142,7 +160,25 @@ def is_valid_cache_file(path: Path) -> bool:
         return False
 
 
-def load_record(path: Path) -> QMRecord:
+def verify_record(path: Path, smiles: str, conformer_id: int, method: str) -> prov.Provenance:
+    """Raise StaleArtifact unless the record at `path` was written for this molecule, method
+    and conformer at the current schema."""
+    return prov.verify(
+        path,
+        "qm_record",
+        SCHEMA_VERSION,
+        record_config(method, conformer_id),
+        record_inputs(smiles),
+    )
+
+
+def load_record(path: Path, identity: tuple[str, int, str] | None = None) -> QMRecord:
+    """Read a record. Its header is always verified (kind, schema); with `identity` =
+    (smiles, conformer_id, method) also the molecule and configuration it was built for."""
+    if identity is None:
+        prov.verify(path, "qm_record", SCHEMA_VERSION)
+    else:
+        verify_record(Path(path), *identity)
     with np.load(Path(path), allow_pickle=False) as npz:
         kwargs = {}
         for f in fields(QMRecord):
@@ -151,6 +187,35 @@ def load_record(path: Path) -> QMRecord:
                 arr if arr.ndim else _SCALAR_TYPES.get(str(f.type), lambda x: x)(arr.item())
             )
     return _current_ao_layout(QMRecord(**kwargs), Path(path))
+
+
+def backfill_header(path: Path) -> str:
+    """Add the provenance header to a record written before headers existed, leaving every
+    array unchanged. Returns `stamped`, `already` or `unreadable`."""
+    if prov.read_header(path) is not None:
+        return "already"
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            arrays = {k: z[k] for k in z.files}
+    except (OSError, ValueError, EOFError) as exc:
+        log.warning("backfill: %s unreadable: %s", path, exc)
+        return "unreadable"
+    smiles, method = str(arrays["smiles"]), str(arrays["method"])
+    header = prov.stamp(
+        "qm_record",
+        int(arrays["schema_version"]),
+        record_inputs(smiles),
+        record_config(method, int(arrays["conformer_id"])),
+        prov.array_digest(arrays),
+        extra={"backfilled": True},
+    )
+    prov.save_npz(path, arrays, header)
+    return "stamped"
+
+
+def backfill_headers(cache_dir: Path) -> Counter:
+    """`backfill_header` on every record in `cache_dir`; counts by outcome."""
+    return Counter(backfill_header(p) for p in sorted(Path(cache_dir).glob("*.npz")))
 
 
 def _current_ao_layout(rec: QMRecord, path: Path) -> QMRecord:

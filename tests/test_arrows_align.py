@@ -22,6 +22,7 @@ from ksmech.arrows.roundtrip import evaluate_alignment
 from ksmech.data import chem
 from ksmech.data.io import read_training_steps, steps_path
 from ksmech.data.pmechdb import parse_arrow_code
+from ksmech.data.provenance import read_header
 from ksmech.data.schema import Source
 from ksmech.data.validation import build_step
 from ksmech.qm.embed import prepare_mol
@@ -184,8 +185,11 @@ def test_label_dict_round_trip(mini_steps, token_loader):
 def test_pmechdb_alignment_and_predicted_round_trip():
     path = steps_path("pmechdb")
     cache = TokenCache()
-    if not path.exists() or not any(cache.tokens_dir.glob("*.npz")):
+    files = sorted(cache.tokens_dir.glob("*.npz"))
+    if not path.exists() or not files:
         pytest.skip("PMechDB steps or token cache missing")
+    if read_header(files[0]) is None:
+        pytest.skip("token cache predates provenance headers: backfill qm, rebuild tokens")
     report = evaluate_alignment(read_training_steps(path), cache, member_check=False)
     print({k: v for k, v in report.items() if k != "unaligned_groups"})
     assert report["n_steps_aligned_or_tried"] > 0

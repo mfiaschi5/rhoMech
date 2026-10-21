@@ -1,7 +1,9 @@
 """Training samples, split files and the collate function (`ksmech.arrows.steps`)."""
 
 import dataclasses
+import io
 import json
+import os
 
 import pytest
 import torch
@@ -18,7 +20,9 @@ from ksmech.arrows.steps import (
     make_loader,
     sample_for_step,
     samples_path,
+    write_samples,
 )
+from ksmech.data import provenance as prov
 from ksmech.data.io import steps_path, write_steps
 from ksmech.data.schema import Arrow, ElementaryStep
 
@@ -69,7 +73,7 @@ def test_sample_holds_tokens_labels_and_product_key(mini_steps, token_loader, pa
 
 def test_samples_round_trip_through_torch_save(mini_steps, token_loader, pair_kernels, tmp_path):
     s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
-    torch.save({"version": SAMPLE_VERSION, "samples": [s.to_dict()]}, tmp_path / "x.pt")
+    write_samples(tmp_path / "x.pt", "x", [s.step_id], {s.step_id: s}, {})
     (back,) = load_samples(tmp_path / "x.pt")
     assert back.labels == s.labels and back.product_key == s.product_key
     assert (back.orbital_features == s.orbital_features).all()
@@ -193,9 +197,40 @@ def test_sample_stores_the_physics_pair_block(mini_steps, token_loader, pair_ker
 
 def test_old_sample_versions_are_refused(mini_steps, token_loader, pair_kernels, tmp_path):
     s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
-    torch.save({"version": SAMPLE_VERSION - 1, "samples": [s.to_dict()]}, tmp_path / "old.pt")
-    with pytest.raises(ValueError, match="sample version"):
+    buf = io.BytesIO()
+    torch.save({"version": SAMPLE_VERSION - 1, "samples": [s.to_dict()]}, buf)
+    old = prov.stamp("samples", SAMPLE_VERSION - 1, content_sha256="x")
+    prov.write_framed(tmp_path / "old.pt", buf.getvalue(), old)
+    with pytest.raises(prov.StaleArtifact, match="schema_version"):
         load_samples(tmp_path / "old.pt")
+    torch.save({"version": SAMPLE_VERSION, "samples": [s.to_dict()]}, tmp_path / "bare.pt")
+    with pytest.raises(prov.StaleArtifact, match="no provenance header"):
+        load_samples(tmp_path / "bare.pt")  # written without a header: refused, never guessed
+
+
+def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
+    mini_processed, token_loader, monkeypatch, tmp_path
+):
+    import ksmech.arrows.cli as cli
+    from ksmech.data.io import read_steps
+
+    monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: missing_iodide(token_loader))
+    args = ["--source", "pmechdb", "--processed-dir", str(mini_processed)]
+    cache = ["--oriented-cache", str(tmp_path / "oriented")]
+    assert arrows_main(["samples", *args, *cache, "--strategy", "random"]) == 0
+    path = samples_path("pmechdb", "random_train", mini_processed)
+    assert load_samples(path)
+    parquet = steps_path("pmechdb", mini_processed)
+    header = prov.read_header(path)
+    assert prov.file_input_name(parquet) in header.inputs
+    assert any("oriented" in name for name in header.inputs)  # the contact blocks it used
+    os.utime(parquet)  # a timestamp alone is not a change of content
+    assert load_samples(path)
+    steps = read_steps(parquet)
+    write_steps(steps[:-1], parquet)  # re-ingested: one step fewer
+    with pytest.raises(prov.StaleArtifact, match=r"input changed: .*steps\.parquet"):
+        load_samples(path)
+    assert load_samples(path, allow_stale=True)  # diagnostics may still read it
 
 
 def test_sample_stores_the_contact_sites_and_clash_flags(mini_steps, token_loader, pair_kernels):

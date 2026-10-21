@@ -12,7 +12,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from ksmech.data import mech_uspto, pmechdb, reactmech
+from ksmech.data import mech_uspto, pmechdb, provenance, reactmech
 from ksmech.data.ingest import IngestResult, write_outputs
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, source_dir, steps_path
 from ksmech.data.schema import Source
@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
         if name == "ingest":
             p.add_argument("--raw", type=Path, default=None, help="raw file or dir")
+    v = sub.add_parser("provenance", help="print an artifact's provenance chain, or backfill")
+    v.add_argument("path", type=Path, nargs="?", help="artifact to describe")
+    v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
+    v.add_argument("--qm-cache-dir", type=Path, default=Path("data/cache/qm"))
+    v.add_argument("--depth", type=int, default=4, help="levels of inputs to follow")
     return parser
 
 
@@ -43,7 +48,30 @@ def main(argv: list[str] | None = None) -> int:
     console = Console()
     if args.command == "ingest":
         return cmd_ingest(Source(args.source), args.raw, args.processed_dir, console)
+    if args.command == "provenance":
+        return cmd_provenance(args, console)
     return cmd_stats(Source(args.source), args.processed_dir, console)
+
+
+def cmd_provenance(args: argparse.Namespace, console: Console) -> int:
+    """`ksmech-data provenance <path>` prints the chain; `--backfill qm` stamps the QM records
+    written before headers existed (run once, never while a QM batch is writing)."""
+    if args.backfill == "qm":
+        from ksmech.qm.records import backfill_headers
+
+        if not args.qm_cache_dir.is_dir():
+            console.print(f"[red]{args.qm_cache_dir} is not a directory[/red]")
+            return 2
+        counts = backfill_headers(args.qm_cache_dir)
+        console.print(f"QM records in {args.qm_cache_dir}: {dict(counts)}")
+        return 1 if counts.get("unreadable") else 0
+    if args.path is None or not args.path.is_file():
+        console.print(f"[red]no such artifact: {args.path}[/red]")
+        return 2
+    lines = provenance.describe_chain(args.path, max_depth=args.depth)
+    for line in lines:
+        console.print(line, markup=False, highlight=False, soft_wrap=True)
+    return 1 if any(" STALE" in line or "  ! " in line for line in lines) else 0
 
 
 def cmd_ingest(source: Source, raw: Path | None, processed: Path, console: Console) -> int:

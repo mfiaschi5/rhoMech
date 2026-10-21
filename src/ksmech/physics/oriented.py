@@ -40,7 +40,8 @@ Blocks are cached per (molecule, molecule, block, d) in memory and, given a dire
 from __future__ import annotations
 
 import hashlib
-import os
+import logging
+from collections import Counter
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -48,6 +49,7 @@ from pathlib import Path
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+from ksmech.data import provenance as prov
 from ksmech.orbitals.tokens import (
     CandidateConfig,
     MoleculeTokens,
@@ -55,10 +57,13 @@ from ksmech.orbitals.tokens import (
     OrbitalToken,
     bonded_matrix,
     site_pairs_excluded,
+    token_digest,
 )
 from ksmech.physics.gto import SPH, atom_ao_slices, element_shells, shell_overlap
 from ksmech.qm.fukui import HARTREE_TO_EV
 from ksmech.qm.geometry import BOHR_ANG
+
+log = logging.getLogger(__name__)
 
 ORIENTED_VERSION = 5  # bump when the lobe rules, placement, integrals or stored fields change
 DEFAULT_CACHE_DIR = Path("data/cache/oriented")
@@ -708,7 +713,7 @@ def _mol_key(t: MoleculeTokens) -> str:
 
 
 _CANDIDATES: dict[str, dict] = {}
-_BLOCKS: dict[str, Contacts] = {}
+_BLOCKS: dict[str, tuple[Contacts, str]] = {}
 _MEMORY_LIMIT = 4096
 
 
@@ -721,6 +726,21 @@ def _candidates(t: MoleculeTokens) -> dict:
     return _CANDIDATES[key]
 
 
+def _block_config(block: str, config: OrientedConfig, intra: bool) -> dict:
+    """The configuration a contact block is stamped with (contact mode, direction count,
+    distance, filter threshold)."""
+    return {
+        "contact_mode": f"oriented_v{ORIENTED_VERSION}",
+        "block": block,
+        "n_directions": N_DIRECTIONS,
+        "n_rolls": N_ROLLS,
+        "distance": config.distance,
+        "tol": config.tol,
+        "clash": config.clash,
+        "site_weight": config.site_weight if intra else None,
+    }
+
+
 def _block_key(t_F, t_G, block: str, config: OrientedConfig, intra: bool = False) -> str:
     raw = "|".join(
         [f"v{ORIENTED_VERSION}", _mol_key(t_F), _mol_key(t_G), block, str(config.distance)]
@@ -730,23 +750,48 @@ def _block_key(t_F, t_G, block: str, config: OrientedConfig, intra: bool = False
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _load_or_compute(key: str, config: OrientedConfig, compute) -> Contacts:
-    if key in _BLOCKS:
-        return _BLOCKS[key]
+STALE_BLOCKS: Counter = Counter()  # STALE_ARTIFACT recomputations, by the first change
+
+
+def _arrays(value: Contacts) -> dict[str, np.ndarray]:
+    return {"S": value.S, "sites": value.sites, "clash": value.clash, "beta": value.beta}
+
+
+def _read_block(path: Path, cfg: dict, inputs: dict) -> Contacts | None:
+    """The cached block, or None when absent or stale (counted in STALE_BLOCKS)."""
+    if not (path.is_file() and path.stat().st_size > 0):
+        return None
+    try:
+        prov.verify(path, "contact_block", ORIENTED_VERSION, cfg, inputs)
+    except prov.StaleArtifact as exc:
+        STALE_BLOCKS[exc.changes[0]] += 1
+        log.info("recomputing %s", exc)
+        return None
+    with np.load(path, allow_pickle=False) as z:
+        return Contacts(z["S"], z["sites"], z["clash"], z["beta"])
+
+
+def _load_or_compute(key: str, config: OrientedConfig, compute, cfg: dict, inputs: dict):
+    """The block from memory, then disk (verified), else computed; written with its header
+    whenever the disk copy is missing. The file used is reported to `provenance.note_input`."""
     path = Path(config.cache_dir) / f"{key}.npz" if config.cache_dir else None
-    if path is not None and path.is_file() and path.stat().st_size > 0:
-        with np.load(path, allow_pickle=False) as z:
-            value = Contacts(z["S"], z["sites"], z["clash"], z["beta"])
+    if key in _BLOCKS:
+        value, digest = _BLOCKS[key]
+        on_disk = path is None or path.is_file()
     else:
-        value = compute()
-        if path is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f".{path.stem}.{os.getpid()}.tmp.npz")
-            np.savez(tmp, S=value.S, sites=value.sites, clash=value.clash, beta=value.beta)
-            tmp.replace(path)
-    if len(_BLOCKS) > _MEMORY_LIMIT:
-        _BLOCKS.clear()
-    _BLOCKS[key] = value
+        value = _read_block(path, cfg, inputs) if path is not None else None
+        on_disk = value is not None or path is None
+        if value is None:
+            value = compute()
+        digest = prov.array_digest(_arrays(value))
+        if len(_BLOCKS) > _MEMORY_LIMIT:
+            _BLOCKS.clear()
+        _BLOCKS[key] = (value, digest)
+    if path is not None:
+        if not on_disk:
+            header = prov.stamp("contact_block", ORIENTED_VERSION, inputs, cfg, digest)
+            prov.save_npz(path, _arrays(value), header, compressed=False)
+        prov.note_input(prov.file_input_name(path), digest)
     return value
 
 
@@ -758,6 +803,11 @@ def oriented_block(t_F, t_G, block: str, config: OrientedConfig, intra: bool = F
     want = OrbitalKind.OCCUPIED if block == "occ_occ" else OrbitalKind.VIRTUAL
     cols = [k for k, o in enumerate(t_G.orbitals) if o.kind == want]
     key = _block_key(t_F, t_G, block, config, intra)
+    inputs = {"tokens:F": token_digest(t_F), "tokens:G": token_digest(t_G)}
     return _load_or_compute(
-        key, config, lambda: block_contacts(t_F, occ_F, t_G, cols, config, intra=intra)
+        key,
+        config,
+        lambda: block_contacts(t_F, occ_F, t_G, cols, config, intra=intra),
+        _block_config(block, config, intra),
+        inputs,
     )

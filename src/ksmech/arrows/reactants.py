@@ -28,13 +28,14 @@ import numpy as np
 from rdkit import Chem, rdBase
 
 from ksmech.data import chem
+from ksmech.data import provenance as prov
+from ksmech.data.provenance import StaleArtifact
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR, tokens_path
 from ksmech.orbitals.tokens import (
     CandidateConfig,
     MoleculeTokens,
     OrbitalKind,
     OrbitalToken,
-    TokenSchemaError,
     load_tokens,
 )
 from ksmech.qm.embed import prepare_mol
@@ -162,7 +163,11 @@ class FragmentTokens:
 
 class TokenCache:
     """Token files of one QM method and conformer, loaded on demand. The `maxsize` most
-    recently used molecules stay in memory (a file holds S and F, up to ~1 MB each)."""
+    recently used molecules stay in memory (a file holds S and F, up to ~1 MB each).
+
+    A file whose provenance header no longer matches (schema, config or its QM record) is
+    treated as absent and its reason kept in `stale` (STALE_ARTIFACT), unless `allow_stale`
+    (diagnostics only). Every token file served is reported to `provenance.note_input`."""
 
     def __init__(
         self,
@@ -170,25 +175,37 @@ class TokenCache:
         method: str | None = None,
         conformer_id: int = 0,
         maxsize: int = 1024,
+        allow_stale: bool = False,
     ):
         self.tokens_dir = Path(tokens_dir)
         self.method = method or QMConfig().method
         self.conformer_id = conformer_id
         self.maxsize = maxsize
+        self.allow_stale = allow_stale
+        self.stale: dict[str, str] = {}
         self._memo: OrderedDict[str, MoleculeTokens | None] = OrderedDict()
+
+    def _load(self, key: str) -> MoleculeTokens | None:
+        path = tokens_path(self.tokens_dir, key, self.conformer_id, self.method)
+        if not path.exists():
+            return None
+        try:
+            return load_tokens(path, verify=not self.allow_stale)
+        except StaleArtifact as exc:
+            self.stale[key] = str(exc)
+            return None
 
     def __call__(self, key: str) -> MoleculeTokens | None:
         if key in self._memo:
             self._memo.move_to_end(key)
-            return self._memo[key]
-        path = tokens_path(self.tokens_dir, key, self.conformer_id, self.method)
-        try:
-            value = load_tokens(path) if path.exists() else None
-        except TokenSchemaError:
-            value = None  # stale schema: rebuild with ksmech-orbitals build
-        self._memo[key] = value
-        if len(self._memo) > self.maxsize:
-            self._memo.popitem(last=False)
+            value = self._memo[key]
+        else:
+            value = self._load(key)
+            self._memo[key] = value
+            if len(self._memo) > self.maxsize:
+                self._memo.popitem(last=False)
+        if value is not None and value.source_path:
+            prov.note_input(prov.file_input_name(value.source_path), value.digest)
         return value
 
 
