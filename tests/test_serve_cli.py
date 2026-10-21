@@ -74,18 +74,37 @@ def _subcommands(parser: argparse.ArgumentParser) -> dict[str, argparse.Argument
     return dict(action.choices)
 
 
-def test_parser_has_port_and_no_host():
+def test_parser_host_defaults_to_loopback():
     parser = cli.build_parser()
     args = parser.parse_args(["run", "--port", "8123"])
     assert args.port == 8123 and args.chemistry is None and not args.dev
-    with pytest.raises(SystemExit):
-        parser.parse_args(["run", "--host", "0.0.0.0"])
+    assert args.host == "127.0.0.1"
+    assert parser.parse_args(["run", "--host", "0.0.0.0"]).host == "0.0.0.0"
     subs = _subcommands(parser)
     assert set(subs) == set(cli.COMMANDS)
     for name, sub in subs.items():
         options = {o for a in sub._actions for o in a.option_strings}
-        assert "--host" not in options, name
+        assert ("--host" in options) == (name == "run"), name
     assert "--port" in {o for a in subs["run"]._actions for o in a.option_strings}
+
+
+def test_lan_hosts(monkeypatch):
+    monkeypatch.setattr(cli.socket, "gethostname", lambda: "labhost")
+    monkeypatch.setattr(cli.socket, "getfqdn", lambda: "labhost.example.org")
+    monkeypatch.setattr(
+        cli.socket,
+        "getaddrinfo",
+        lambda *a: [(2, 1, 6, "", ("10.0.0.7", 0)), (2, 1, 6, "", ("127.0.1.1", 0))],
+    )
+    monkeypatch.setattr(cli, "primary_ipv4", lambda: "192.168.1.50")
+    assert cli.lan_hosts("127.0.0.1") == [] and cli.lan_hosts("127.0.1.1") == []
+    every = {"labhost", "labhost.local", "labhost.example.org", "10.0.0.7", "192.168.1.50"}
+    assert set(cli.lan_hosts("0.0.0.0")) == every
+    bound = cli.lan_hosts("192.168.1.50")
+    assert set(bound) == {"labhost", "labhost.local", "labhost.example.org", "192.168.1.50"}
+    for bad in ("localhost", "::1", "not-an-address"):
+        with pytest.raises(ValueError):
+            cli.lan_hosts(bad)
 
 
 @pytest.mark.parametrize(
@@ -120,10 +139,26 @@ def test_run_binds_loopback_with_one_worker(env_root, fake_server):
     s = fake_server["settings"]
     assert s.data_root == env_root.resolve() and s.chemistry == "synthetic"
     assert s.auto_index is False and s.dev is False
-    assert fake_server["app_kwargs"] == {"serve_ui": True}
+    assert fake_server["app_kwargs"] == {"serve_ui": True, "lan_hosts": []}
     assert all(
         os.environ[v] == "1" for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
     )
+
+
+def test_run_on_the_local_network(env_root, fake_server, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "lan_hosts", lambda host: ["192.168.1.50", "labhost"])
+    port = _free_port()
+    assert cli.main(["--host", "0.0.0.0", "--port", str(port)]) == 0
+    assert fake_server["run"]["host"] == "0.0.0.0" and fake_server["run"]["port"] == port
+    assert fake_server["app_kwargs"]["lan_hosts"] == ["192.168.1.50", "labhost"]
+    out, err = capsys.readouterr()
+    assert f"http://192.168.1.50:{port}" in out
+    assert "without authentication" in err
+
+
+def test_run_refuses_a_host_that_is_not_ipv4(env_root, fake_server, capsys):
+    assert cli.main(["--host", "localhost"]) == 2
+    assert "IPv4" in capsys.readouterr().err and "run" not in fake_server
 
 
 def test_run_options(env_root, fake_server):
@@ -141,7 +176,7 @@ def test_run_options(env_root, fake_server):
     assert cli.main(argv) == 0
     s = fake_server["settings"]
     assert s.auto_index is True and s.dev is True and s.chemistry == "cached"
-    assert fake_server["app_kwargs"] == {"serve_ui": False}
+    assert fake_server["app_kwargs"] == {"serve_ui": False, "lan_hosts": []}
 
 
 def test_run_refuses_a_held_lock(env_root, fake_server, capsys):

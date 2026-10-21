@@ -2128,3 +2128,21 @@ ships its own types.
   A `stale_only` re-check skips the mechanisms whose every step already has a clean re-check
   at the current predictor version, spec version and physics fingerprint (skip code
   RECHECKED_AT_CURRENT_VERSIONS); the `stale` flag keeps its section 9.4 meaning.
+
+### 2026-10-21 — ksmech-serve on the local network (`--host`)
+
+- The brief asked for 127.0.0.1 only; the user then asked to reach the app from the local
+  network. `ksmech-serve run --host <IPv4>` binds that address (default 127.0.0.1, unchanged).
+  With `0.0.0.0` or a LAN address the server has still no authentication: anyone on the network
+  can run predictions, edit the curation database and start exports. The CLI prints that
+  warning and the LAN URLs at start.
+- The DNS-rebinding and cross-site defences stay on: `create_app(lan_hosts=...)` extends the Host
+  allow-list and the same-origin guard with this machine's names only (`cli.lan_hosts`: host
+  name, `<name>.local`, the FQDN and the IPv4 addresses - every address of the host name plus
+  the default-route address for `0.0.0.0`, else the bound one). Any other Host is 400 and any
+  other Origin on a mutating request is 403, as on loopback. A name outside that list (an alias
+  in the LAN's DNS) is refused.
+- Only IPv4 is accepted (`--host localhost` or an IPv6 address exits 2): the port check and the
+  allow-list are IPv4. The firewall is not touched by the app: the FedoraWorkstation zone
+  shipped with firewalld allows TCP 1025-65535 (a local override under /etc/firewalld needs
+  root to inspect).

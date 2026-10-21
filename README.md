@@ -116,8 +116,12 @@ spawned compute worker with one BLAS / OpenMP / torch thread. Do not raise
 PMechDB browse index (about 10 minutes on the worker) is built only on request: the "Build
 PMechDB index" button (`POST /api/browse/index`), `--index-on-start`, or an export.
 
-**Security.** There is no authentication: the server binds only to 127.0.0.1 (there is no
-`--host` option) and is reached through the SSH tunnel above.
+**Security.** There is no authentication. By default the server binds only to 127.0.0.1 and is
+reached through the SSH tunnel above. `uv run ksmech-serve --port 8000 --host 0.0.0.0` (or one
+of the machine's addresses) opens it to the local network at `http://<server-ip>:8000`: anyone
+on that network can then run predictions, edit the curation database and start exports. The
+Host allow-list and the same-origin guard then also accept the machine's addresses and host
+names; any other name is refused.
 
 **Tests.** The serve tests (`tests/test_serve_*.py`) use synthetic or stub chemistry and never
 run xTB; on a loaded host run them one file at a time with `OMP_NUM_THREADS=1`. The Playwright smoke test uses the system Chrome or Chromium (Playwright browsers are

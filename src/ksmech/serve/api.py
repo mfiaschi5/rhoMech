@@ -16,12 +16,13 @@ unless injected), the curation database, the job store and runner, `JobService`,
 same-origin guard, the handlers, gzip, the Host allow-list, and the frontend mount last.
 Shutdown closes the runner and the scheduler.
 
-There is no authentication: the server binds 127.0.0.1 and is reached through an SSH tunnel.
-Two checks keep other web pages out while the tunnel is open. The Host allow-list
-(`ALLOWED_HOSTS`, port ignored) answers 400 to any other Host, which defeats DNS rebinding,
-and `SameOriginGuard` answers 403 REQUEST_FORBIDDEN to a POST, PATCH, PUT or DELETE whose
-Origin header names another host (or is "null"), which defeats cross-site form and no-body
-POSTs. A request without an Origin header (curl, the test client) passes.
+There is no authentication: by default the server binds 127.0.0.1 and is reached through an
+SSH tunnel; `ksmech-serve --host 0.0.0.0` opens it to the local network (`lan_hosts` then
+names this machine's addresses and host names). Two checks keep other web pages out. The Host
+allow-list (`LOCAL_HOSTS` plus `lan_hosts`, port ignored) answers 400 to any other Host, which
+defeats DNS rebinding, and `SameOriginGuard` answers 403 REQUEST_FORBIDDEN to a POST, PATCH,
+PUT or DELETE whose Origin header names another host (or is "null"), which defeats cross-site
+form and no-body POSTs. A request without an Origin header (curl, the test client) passes.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -72,7 +73,7 @@ log = logging.getLogger(__name__)
 
 GZIP_MIN_BYTES = 1024
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
-ALLOWED_HOSTS = [*LOCAL_HOSTS, "testserver"]  # "testserver": the Host of Starlette's TestClient
+TEST_HOST = "testserver"  # the Host of Starlette's TestClient
 MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 
 # ---- id validation (design 6.1): pattern and the 404 code of a mismatch
@@ -241,16 +242,17 @@ class RequestContext:
             await error_response(err, rid)(scope, receive, send_with_id)
 
 
-def foreign_origin(origin: str) -> bool:
-    """Whether an Origin header names a page outside this machine's loopback names: any other
-    hostname, an opaque "null" origin, or a value that does not parse."""
+def foreign_origin(origin: str, hosts: Sequence[str] = LOCAL_HOSTS) -> bool:
+    """Whether an Origin header names a page outside `hosts` (this machine's loopback names,
+    plus its network names when it serves the LAN): any other hostname, an opaque "null"
+    origin, or a value that does not parse."""
     if origin.strip().lower() == "null":
         return True
     try:
         host = urlsplit(origin.strip()).hostname
     except ValueError:
         return True
-    return host not in LOCAL_HOSTS
+    return host not in hosts
 
 
 class SameOriginGuard:
@@ -258,13 +260,14 @@ class SameOriginGuard:
     is foreign gets 403 REQUEST_FORBIDDEN before any route runs. Installed inside
     `RequestContext`, so the refusal carries the request id."""
 
-    def __init__(self, app) -> None:
+    def __init__(self, app, hosts: Sequence[str] = LOCAL_HOSTS) -> None:
         self.app = app
+        self.hosts = tuple(hosts)
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "http" and scope.get("method") in MUTATING_METHODS:
             origin = Headers(scope=scope).get("origin")
-            if origin is not None and foreign_origin(origin):
+            if origin is not None and foreign_origin(origin, self.hosts):
                 rid = str(scope.get("state", {}).get("request_id", ""))
                 log.warning(
                     "%s %s from origin %r -> 403 %s [request_id=%s]",
@@ -760,8 +763,11 @@ def create_app(
     registry: PredictorRegistry | None = None,
     jobs_inline: bool = False,
     serve_ui: bool = True,
+    lan_hosts: Sequence[str] = (),
 ) -> FastAPI:
-    """The app (module docstring). `serve_ui=False` (`--no-ui`) serves the API only."""
+    """The app (module docstring). `serve_ui=False` (`--no-ui`) serves the API only;
+    `lan_hosts` are the extra Host / Origin names accepted when serving the local network."""
+    hosts = (*LOCAL_HOSTS, *lan_hosts)
     pin_threads()
     settings = settings or load_settings()
     svc = _services_of(settings, scheduler, chemistry, registry, jobs_inline)
@@ -775,10 +781,11 @@ def create_app(
     )
     app.state.services = svc
     app.include_router(router)
-    app.add_middleware(SameOriginGuard)  # added before RequestContext: runs inside it
+    app.add_middleware(SameOriginGuard, hosts=hosts)  # added before RequestContext: runs inside
     install_handlers(app)
     app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)  # outermost
+    allowed = [*hosts, TEST_HOST]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)  # outermost
     svc.frontend_built = _mount_ui(app, settings, serve_ui)
     log.info(
         "ksmech-serve app: chemistry %s, data root %s, frontend %s",

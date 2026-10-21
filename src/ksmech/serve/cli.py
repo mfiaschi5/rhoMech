@@ -1,14 +1,16 @@
 """`ksmech-serve`: the local web app (design 12).
 
-    ksmech-serve [run] --port 8000 [--chemistry real|cached|synthetic] [--dev] [--no-ui]
-                       [--index-on-start]
+    ksmech-serve [run] --port 8000 [--host 127.0.0.1|0.0.0.0|<address>]
+                       [--chemistry real|cached|synthetic] [--dev] [--no-ui] [--index-on-start]
     ksmech-serve recheck [--stale-only] [--predictor P] [--mechanism ID ...]
     ksmech-serve export
     ksmech-serve schema-ts [--out apps/ui/src/api/types.gen.ts]
     ksmech-serve probe-cache --smiles S [--smiles S ...]
 
-The server binds only to 127.0.0.1 (no `--host`; there is no authentication: reach it through
-`ssh -L 8000:localhost:8000 <server>`). A first token that is not a subcommand gets `run`
+There is no authentication. By default the server binds 127.0.0.1 (reach it through
+`ssh -L 8000:localhost:8000 <server>`); `--host 0.0.0.0` (or one of this machine's addresses)
+opens it to the local network, and the Host / Origin checks then also accept this machine's
+addresses and host names (`lan_hosts`). A first token that is not a subcommand gets `run`
 inserted, so `ksmech-serve --port 8000` works. `run`, `recheck` and `export` hold
 `data/serve/run/server.lock` (flock), so at most one serve worker pool exists per data root;
 `recheck` and `export` refuse with exit 2 while a server runs.
@@ -23,6 +25,7 @@ import argparse
 import contextlib
 import errno
 import fcntl
+import ipaddress
 import json
 import logging
 import os
@@ -62,8 +65,14 @@ def _pin_env() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ksmech-serve", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="serve the web app on 127.0.0.1 (the default command)")
-    run.add_argument("--port", type=int, default=DEFAULT_PORT, help="TCP port on 127.0.0.1")
+    run = sub.add_parser("run", help="serve the web app (the default command)")
+    run.add_argument("--port", type=int, default=DEFAULT_PORT, help="TCP port")
+    run.add_argument(
+        "--host",
+        default=HOST,
+        help="IPv4 address to bind: 127.0.0.1 (default; SSH tunnel) or 0.0.0.0 / a LAN address "
+        "for the local network (no authentication)",
+    )
     run.add_argument(
         "--chemistry",
         choices=CHEMISTRY_CHOICES,
@@ -174,6 +183,65 @@ def _settings(**overrides: Any) -> ServeSettings:
         raise SettingsError(str(exc)) from exc
 
 
+def is_loopback(host: str) -> bool:
+    return ipaddress.IPv4Address(host).is_loopback  # ValueError unless an IPv4 address
+
+
+def _loopback_address(name: str) -> bool:
+    """True for a loopback IPv4 address such as 127.0.1.1 (the host name's /etc/hosts alias)."""
+    try:
+        return ipaddress.IPv4Address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def primary_ipv4() -> str | None:
+    """The address of the interface that carries the default route (a UDP connect sends no
+    packet), or None without a network."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))  # TEST-NET-1: never answered, only routed
+            return s.getsockname()[0]
+        except OSError:
+            return None
+
+
+def lan_hosts(host: str) -> list[str]:
+    """Host / Origin names a browser on the local network may use for this server: this
+    machine's host names and IPv4 addresses (all of them for 0.0.0.0, else the bound one).
+    Empty when the server binds a loopback address."""
+    if is_loopback(host):
+        return []
+    name = socket.gethostname()
+    names = {name, f"{name}.local", socket.getfqdn()}
+    if host == "0.0.0.0":
+        with contextlib.suppress(OSError):
+            names |= {ai[4][0] for ai in socket.getaddrinfo(name, None, socket.AF_INET)}
+        names.add(primary_ipv4() or "")
+    else:
+        names.add(host)
+    return sorted(n for n in names if n and n != "localhost" and not _loopback_address(n))
+
+
+def _banner(host: str, port: int, settings: ServeSettings, names: list[str]) -> None:
+    where = f"chemistry {settings.chemistry}, data root {settings.data_root}"
+    if not names:
+        print(
+            f"ksmech-serve on http://{host}:{port} ({where}); from your PC: "
+            f"ssh -L {port}:localhost:{port} <server>",
+            flush=True,
+        )
+        return
+    urls = ", ".join(f"http://{n}:{port}" for n in names if n[0].isdigit()) or host
+    print(f"ksmech-serve on {host}:{port} ({where}); on the local network: {urls}", flush=True)
+    print(
+        f"WARNING: listening on {host}:{port} without authentication: anyone on the local "
+        "network can run predictions, edit the curation database and start exports",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -182,29 +250,30 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not 0 < args.port < 65536:
         print(f"--port must be in 1..65535, got {args.port}", file=sys.stderr)
         return 2
+    try:
+        names = lan_hosts(args.host)
+    except ValueError:
+        print(f"--host must be an IPv4 address, got {args.host!r}", file=sys.stderr)
+        return 2
     settings = _settings(
         chemistry=args.chemistry, dev=args.dev or None, auto_index=args.index_on_start or None
     )
     if not _take_lock(settings, "run"):
         return 2
-    if port_in_use(args.port):
+    if port_in_use(args.port, args.host):
         print(
-            f"port {args.port} is in use on {HOST}: stop the other server or pass --port",
+            f"port {args.port} is in use on {args.host}: stop the other server or pass --port",
             file=sys.stderr,
         )
         return 2
-    app = create_app(settings, serve_ui=not args.no_ui)
-    print(
-        f"ksmech-serve on http://{HOST}:{args.port} (chemistry {settings.chemistry}, data root "
-        f"{settings.data_root}); from your PC: ssh -L {args.port}:localhost:{args.port} "
-        "<server>",
-        flush=True,
-    )
+    app = create_app(settings, serve_ui=not args.no_ui, lan_hosts=names)
+    _banner(args.host, args.port, settings, names)
     try:
-        uvicorn.run(app, host=HOST, port=args.port, workers=1, reload=False, log_level="info")
+        uvicorn.run(app, host=args.host, port=args.port, workers=1, reload=False, log_level="info")
     except SystemExit as exc:
         if exc.code not in (0, None):
-            print(f"uvicorn could not serve {HOST}:{args.port} (exit {exc.code})", file=sys.stderr)
+            msg = f"uvicorn could not serve {args.host}:{args.port} (exit {exc.code})"
+            print(msg, file=sys.stderr)
             return 2
     return 0
 

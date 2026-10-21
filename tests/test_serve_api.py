@@ -557,6 +557,21 @@ def test_foreign_host_is_refused(synthetic_app):  # noqa: F811
         assert synthetic_app.get("/api/meta", headers={"Host": host}).status_code == 200, host
 
 
+def test_lan_hosts_are_accepted_only_when_configured(fresh_synthetic_settings):  # noqa: F811
+    lan = {"Host": "192.168.1.50:8000"}
+    origin = {**lan, "Origin": "http://192.168.1.50:8000"}
+    body = {"reactants_smiles": SN2_REACTANTS}
+    with api_client(fresh_synthetic_settings) as client:
+        assert client.get("/api/meta", headers=lan).status_code == 400
+    with api_client(fresh_synthetic_settings, lan_hosts=["192.168.1.50", "labhost"]) as client:
+        assert client.get("/api/meta", headers=lan).status_code == 200
+        assert client.get("/api/meta", headers={"Host": "labhost:8000"}).status_code == 200
+        assert client.get("/api/meta", headers={"Host": "evil.example"}).status_code == 400
+        assert client.post("/api/normalize", json=body, headers=origin).status_code == 200
+        r = client.post("/api/normalize", json=body, headers={**lan, "Origin": "http://evil.x"})
+        error_of(r, 403, "REQUEST_FORBIDDEN")
+
+
 def _n_jobs(settings) -> int:
     return len(list(settings.jobs.iterdir())) if settings.jobs.is_dir() else 0
 
