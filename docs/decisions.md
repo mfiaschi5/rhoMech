@@ -2614,3 +2614,26 @@ Each step is counted once, under the first reason that applies, in this order:
 | TIMEOUT | `CC(=O)OI1(OC(C)=O)([OH+]C(C(OCc2ccccc2)C(C=Cc2ccccc2)O[Si](C)(C)C(C)(C)C)C2(C(=O)OC(C)(C)C)OC3(CCCC3)OC2C(=O)OC(C)(C)C)OC(=O)c2ccccc21` |
 | TIMEOUT | `CC(=O)O[I+]1(OC(C(OCc2ccccc2)C(C=Cc2ccccc2)O[Si](C)(C)C(C)(C)C)C2(C(=O)OC(C)(C)C)OC3(CCCC3)OC2C(=O)OC(C)(C)C)OC(=O)c2ccccc21` |
 | TIMEOUT | `CC(=O)[O][Sn-]([Br])([Br])([Br])[Br+]C1CC(CCc2ccc(OCc3ccccc3)cc2)OC(c2ccc(OS(=O)(=O)c3ccc(C)cc3)cc2)C1` |
+
+## 2026-10-21 — Current samples, baselines and ks-rank reports are stale (review, fix branch)
+
+- **What is stale.** Everything under `data/processed/pmechdb/` built from samples:
+  - `samples_{random,scaffold}_{train,val,test}.pt`, `samples_report.json` and
+    `pair_feature_stats_{random,scaffold}.json` (2026-10-21 02:04);
+  - `baseline_{lr,gbdt}_{random,scaffold}.npz` and `baseline_report_{random,scaffold}.json`
+    (02:13-02:15);
+  - `ks_rank_report_{random,scaffold}_oriented_d2.3.json` (02:05);
+  - the untagged `ks_rank_report_{table,mlp,analytic,oriented_d*}.json` from 2026-10-20.
+- **Why.**
+  - The `random` files were built with `split_by_pathway`, which on PMechDB (no pathway ids) is
+    a per-step split. 447 / 1,284 random-test steps have their largest reactant in train
+    (docs/review_2026-10-21.md, D1).
+  - `split_by_molecule` (2026-10-19 entry above) lived on `main` and was never merged into the
+    line these files were built on. The merge into `fix/review-2026-10-21` brings it in. After
+    the merge, `splits.default_split("pmechdb")` returns it, but `arrows/steps.split_ids` still
+    maps `random` to `split_by_pathway`; fix item 2 changes that.
+  - All of these files also predate the 18:15 re-ingest (12,943 → 12,840 training steps): 49 / 66
+    of the old random-test steps now fall in train under the same seed.
+- **Rule until the rebuild.** None of these numbers is quoted as a result. The rebuild after fix
+  items 1-10 (provenance-stamped) replaces them, and the new numbers are reported next to these
+  with the delta.
