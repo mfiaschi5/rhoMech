@@ -2791,3 +2791,76 @@ Each step is counted once, under the first reason that applies, in this order:
     config.
 - **Rebuild.** Token `SCHEMA_VERSION` 7 → 8. Every existing token file is now stale and
   `ksmech-orbitals build` rebuilds it after the QM backfill. Nothing has been rebuilt yet.
+
+## 2026-10-22 — Intrinsic bond orbitals are the default localization (fix item 4b, spec v7.2)
+
+- **Method** (`localize.PMConfig(method="ibo", start="cholesky")`, the default):
+  - The functional is sum_i sum_A (Q_A^i)^4 over Löwdin populations Q_A^i =
+    sum_{mu in A} (S^1/2 L)_{mu i}^2 (Knizia, JCTC 9, 4834, 2013).
+  - **Why Löwdin populations are the IAO populations here.** In GFN2-xTB's minimal valence basis
+    the IAO reference minimal basis is the computational basis itself. The IAO projector is
+    then the identity, the intrinsic atomic orbitals are the symmetrically orthogonalized AOs
+    S^1/2, and IAO populations are Löwdin populations.
+  - The functional is maximized by the same vectorized disjoint-pair Jacobi sweeps, with the
+    same 1e-8 convergence and the same 200-sweep cap.
+  - The occupied, SOMO and virtual blocks are localized separately, as before.
+  - `method="pm_mulliken"` (Mulliken, exponent 2, closed-form angle) and `start="canonical"`
+    stay behind flags. Both enter the token provenance config, so a token file built one way
+    is stale for the other.
+- **Rotation angle.** A bracketed 1-D maximization per pair, not Knizia's closed form.
+  - Reason: Knizia's closed-form angle keeps only the first harmonic in 4γ, while the exact
+    exponent-4 gain also has an 8γ term.
+  - The exact gain 12 m²(x² − d²) + 2(x⁴ − d⁴) over atoms, with x = d cos2γ + q sin2γ, is
+    evaluated on a 32-point grid over its period [−π/4, π/4).
+  - The grid contains γ = 0, so no pair can lose. The best point is refined by up to 4 Newton
+    steps, each kept only if it improves the gain.
+  - Test: it agrees with a 20,001-point scan to 1e-9.
+- **Start.** A pivoted Cholesky factorization of each block's density matrix in the Löwdin
+  basis: pivot at the largest remaining diagonal, first index on ties. The resulting orbitals
+  are made orthonormal symmetrically, then swept.
+- **Measured** on 200 PMechDB molecules (every 70th record, single process) plus the 35 that
+  hit the PM cap in the 2026-10-20 build. Data in
+  `data/processed/pmechdb/diagnostics/localization_pm_vs_ibo.json`.
+
+  | | PM (Mulliken, p=2, canonical) | IBO (Löwdin, p=4, Cholesky) |
+  |---|---|---|
+  | occupied sweeps median / p95 / max | 7 / 92 / 200 | 6 / 8 / 42 |
+  | virtual sweeps median / p95 / max | 8 / 89 / 200 | 6 / 8 / 16 |
+  | molecules at the 200-sweep cap | 2.0% | 0% |
+  | the 35 PM-capped molecules: sweeps (occ / virt median, max) | 189 / 200, 200 | 8 / 7, 12 |
+  | seconds per molecule, median / mean | 0.15 / 0.85 | 0.56 / 2.67 |
+
+  - **Starts** (first 50 molecules, IBO): sweeps median / p95 / max are 6 / 8 / 19 (occupied)
+    from the Cholesky start and 6 / 9 / 16 from the canonical start. The Cholesky start is
+    deterministic and not slower to converge, but it is not a large gain here.
+  - **The cap count.** The prompt said 18 molecules; the 2026-10-20 token build has 35 at the
+    PM cap (17 occupied blocks, 26 virtual). All 35 converge under IBO, and
+    `test_molecules_that_hit_the_pm_cap_converge_under_ibo` (slow, realdata) asserts it.
+  - **Cost.** IBO needs far fewer sweeps but costs ~4x more per molecule today: each round
+    evaluates the exponent-4 gain on the 32-point grid. Fix item 10 (Jacobi vectorization,
+    target < 0.3 s per typical molecule) covers both methods.
+- **Benzene: the expectation in the prompt and in spec v7.2 does not hold in this basis.**
+  - IBO converges in 5 sweeps (PM: 6 at this geometry) with no cap. The three occupied π
+    tokens are not two-centre Kekulé bonds; they are three-centre (0.50 on one carbon, 0.22 on
+    each neighbour). The virtual π* tokens look the same.
+  - This is the maximum of the functional, not a stalled sweep. On the occupied π space the
+    three-centre set scores sum Q^4 = 0.202. The explicit Kekulé π sets, projected into the
+    same space and orthonormalized, score 0.177. Three random rotations of the occupied block
+    all converge to the same total (1.6655362), with only two-centre σ and the three-centre π.
+  - So with Löwdin populations in GFN2's minimal basis the exponent-4 functional prefers the
+    alternating three-centre π form; the Kekulé preference reported for IBO comes from IAOs
+    built against a large basis.
+  - The test pins what holds: convergence in under 60 sweeps, three π tokens (χ < 0.2) per
+    block, and the e1g block weight in the occupied π tokens = 2.000 ± 1e-3. The two-centre
+    expectation is kept as a strict xfail with this reason.
+  - Across the 200 molecules the fraction of occupied tokens that are two-centre with χ < 0.3
+    *falls* in aromatics (91 molecules: 6.2% PM → 3.5% IBO) and is flat elsewhere (3.9% →
+    3.7%). Centre counts over all occupied tokens: PM 1 / 2 / 3 = 15.1 / 82.3 / 2.7%, IBO
+    15.3 / 80.4 / 4.3%. The χ quantiles are unchanged (σ-dominated).
+  - **The spec sentence "Benzene then converges in a few tens of sweeps to three two-centre π
+    bonds" should be corrected** (the user's call).
+- **Determinism.** Two builds of the same record give byte-identical array members; the
+  provenance header differs only in `built_at` (`test_token_files_are_byte_identical_across_two_builds`).
+  The fixture tests (acetone, chloromethane, methylamine, acetonitrile and the slow sanity
+  set) pass unchanged.
+- **Rebuild.** Token `SCHEMA_VERSION` 8 → 9. Nothing has been rebuilt yet.

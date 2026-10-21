@@ -1,10 +1,20 @@
-"""Pipek-Mezey localization of GFN2-xTB orbitals, in plain numpy.
+"""Population localization of GFN2-xTB orbitals, in plain numpy (spec v7.2, appendix).
 
-The functional is the sum over orbitals and atoms of the squared Mulliken gross population,
-P = sum_i sum_A (Q_A^i)^2, maximized by 2x2 Jacobi rotations (Pipek & Mezey, J. Chem. Phys.
-90, 4916, 1989). One sweep visits every orbital pair once, as n-1 round-robin rounds of n/2
-disjoint pairs: rotations on disjoint pairs do not change each other's angle, so a round is one
-vectorized step (the angle needs only Q_ii, Q_jj and Q_ij) and the functional never decreases.
+Default: intrinsic bond orbitals (IBO; Knizia, J. Chem. Theory Comput. 9, 4834, 2013), the
+functional P_4 = sum_i sum_A (Q_A^i)^4 over Lowdin populations Q_A^i = sum_{mu in A}
+(S^1/2 L)_{mu i}^2, started from a pivoted Cholesky factorization of each block's density
+matrix in the Lowdin basis. In GFN2-xTB's minimal valence basis the IAO reference basis is the
+computational basis itself, so the IAO projector is the identity and the intrinsic atomic
+orbitals are the symmetrically orthogonalized AOs S^1/2: IAO populations are Lowdin populations.
+For comparison `method="pm_mulliken"` keeps Pipek-Mezey: the squared Mulliken gross population,
+P_2 = sum_i sum_A (Q_A^i)^2 (Pipek & Mezey, J. Chem. Phys. 90, 4916, 1989); `start="canonical"`
+starts either from the canonical MOs.
+
+Both are maximized by 2x2 Jacobi rotations. One sweep visits every orbital pair once, as n-1
+round-robin rounds of n/2 disjoint pairs: rotations on disjoint pairs do not change each
+other's angle, so a round is one vectorized step (the angle needs only Q_ii, Q_jj and Q_ij)
+and the functional never decreases (PM: closed-form angle; IBO: the exact exponent-4 gain
+maximized per pair on a grid that contains 0, then Newton-refined).
 Occupied and virtual orbitals are localized as separate blocks. Within the occupied block the
 doubly and the singly occupied MOs are localized separately, because a rotation that mixes MOs
 of different occupation changes the density sum_i n_i |phi_i|^2: a SOMO stays occupation 1.
@@ -37,10 +47,22 @@ class LocalizationError(RuntimeError):
     """The basis is not valence-only or the input block is malformed."""
 
 
+METHODS = ("ibo", "pm_mulliken")
+STARTS = ("cholesky", "canonical")
+_IBO_GRID = np.linspace(-np.pi / 4, np.pi / 4, 33)[:-1]  # one period of the p=4 gain; has 0
+_NEWTON_STEPS = 4
+
+
 @dataclass(frozen=True)
 class PMConfig:
     tol: float = 1e-8  # stop when the functional changes by less than this over a sweep
     max_sweeps: int = 200
+    method: str = "ibo"  # "ibo" (Lowdin populations, exponent 4) | "pm_mulliken" (comparison)
+    start: str = "cholesky"  # "cholesky" (pivoted, Lowdin basis) | "canonical" (the MOs)
+
+    def __post_init__(self) -> None:
+        if self.method not in METHODS or self.start not in STARTS:
+            raise LocalizationError(f"unknown method/start {self.method!r}/{self.start!r}")
 
 
 @dataclass(frozen=True)
@@ -202,6 +224,124 @@ def pipek_mezey(
     return C_loc, U
 
 
+def _sqrt_psd(S: np.ndarray) -> np.ndarray:
+    """S^1/2 of the symmetric positive-definite overlap matrix."""
+    w, V = np.linalg.eigh(S)
+    return (V * np.sqrt(np.clip(w, 0.0, None))) @ V.T
+
+
+def cholesky_start(X: np.ndarray) -> np.ndarray:
+    """Orthogonal U whose columns X U are the pivoted-Cholesky orbitals of the block, made
+    orthonormal symmetrically. `X` (nao, n) holds the block's orthonormal Lowdin coefficients;
+    the density X X^T is factorized with the pivot at the largest remaining diagonal (first
+    index on ties), so the start is deterministic and already local (Aquilante et al. 2006)."""
+    dens = X @ X.T
+    n = X.shape[1]
+    L = np.zeros((len(dens), n))
+    diag = np.diag(dens).copy()
+    for k in range(n):
+        piv = int(np.argmax(diag))
+        col = dens[:, piv] - L[:, :k] @ L[piv, :k]
+        L[:, k] = col / np.sqrt(diag[piv])
+        diag = diag - L[:, k] ** 2
+        diag[piv] = -np.inf  # never pivot twice on one AO
+    M = X.T @ L
+    w, V = np.linalg.eigh(M.T @ M)
+    return M @ ((V / np.sqrt(w)) @ V.T)
+
+
+def _ibo_gain(m: np.ndarray, d: np.ndarray, q: np.ndarray, gamma: np.ndarray) -> np.ndarray:
+    """Change of sum_A [Q_ii^4 + Q_jj^4] when the pair is rotated by `gamma` (..., pairs):
+    Q_ii = m + x, Q_jj = m - x with x = d cos 2g + q sin 2g, so the sum is
+    2 m^4 + 12 m^2 x^2 + 2 x^4 and the gain is relative to x = d (g = 0)."""
+    x = d * np.cos(2 * gamma[..., None, :]) + q * np.sin(2 * gamma[..., None, :])
+    return np.sum(12 * m * m * (x * x - d * d) + 2 * (x**4 - d**4), axis=-2)
+
+
+def ibo_angles(m: np.ndarray, d: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Per-pair rotation angle that maximizes the exponent-4 gain: the best of a 32-point grid
+    over the period (it contains 0, so no pair loses), refined by Newton steps that are kept
+    only where they improve the gain. (m, d, q): (n_atoms, n_pairs)."""
+    grid = _ibo_gain(m, d, q, np.repeat(_IBO_GRID[:, None], m.shape[1], axis=1))
+    gamma = _IBO_GRID[np.argmax(grid, axis=0)]
+    best = grid.max(axis=0)
+    step_max = _IBO_GRID[1] - _IBO_GRID[0]
+    for _ in range(_NEWTON_STEPS):
+        c, s = np.cos(2 * gamma), np.sin(2 * gamma)
+        x, x1 = d * c + q * s, 2 * (q * c - d * s)
+        f1 = np.sum((24 * m * m * x + 8 * x**3) * x1, axis=0)
+        f2 = np.sum(24 * m * m * (x1 * x1 - 4 * x * x) + 24 * x * x * x1 * x1 - 32 * x**4, axis=0)
+        trial = gamma - np.clip(
+            np.where(f2 < 0, f1 / np.where(f2 < 0, f2, -1.0), 0.0), -step_max, step_max
+        )
+        gain = _ibo_gain(m, d, q, trial[None, :])[0]
+        better = gain > best
+        gamma, best = np.where(better, trial, gamma), np.where(better, gain, best)
+    return np.where(best > _MIN_GAIN, gamma, 0.0)
+
+
+def _ibo_round(X, U, D, P, left, right) -> None:
+    """Rotate every (left[k], right[k]) pair by its exponent-4 angle, in place. X: Lowdin
+    coefficients, U: accumulated rotation, D: (n_atoms, n) populations, P: AO-to-atom map."""
+    q = P @ (X[:, left] * X[:, right])
+    m = 0.5 * (D[:, left] + D[:, right])
+    d = 0.5 * (D[:, left] - D[:, right])
+    gamma = ibo_angles(m, d, q)
+    c, s = np.cos(gamma), np.sin(gamma)
+    for M in (X, U):
+        Mi, Mj = M[:, left], M[:, right]
+        M[:, left] = c * Mi + s * Mj
+        M[:, right] = c * Mj - s * Mi
+    x = d * np.cos(2 * gamma) + q * np.sin(2 * gamma)
+    D[:, left], D[:, right] = m + x, m - x
+
+
+def ibo_stats(
+    C_sub: np.ndarray, S: np.ndarray, ao_to_atom: np.ndarray, config: PMConfig | None = None
+) -> tuple[np.ndarray, np.ndarray, PMStats]:
+    """IBO localization of the columns of `C_sub` from where they are (the caller picks the
+    start): (C_loc, U, stats), C_loc = C_sub @ U, functional sum (Lowdin population)^4."""
+    config = config or PMConfig()
+    ao_to_atom = np.asarray(ao_to_atom)
+    n = C_sub.shape[1]
+    if n < 2:
+        return np.array(C_sub, dtype=float), np.eye(n), PMStats(n, 0, True, 0.0, 0.0)
+    X = _sqrt_psd(S) @ C_sub
+    U = np.eye(n)
+    P = np.zeros((int(ao_to_atom.max()) + 1, len(ao_to_atom)))
+    P[ao_to_atom, np.arange(len(ao_to_atom))] = 1.0
+    D = P @ (X * X)
+    start = value = float(np.sum(D**4))
+    rounds = _schedule(n)
+    sweeps, converged = 0, False
+    while sweeps < config.max_sweeps and not converged:
+        sweeps += 1
+        for left, right in rounds:
+            _ibo_round(X, U, D, P, left, right)
+        new = float(np.sum(D**4))
+        converged = abs(new - value) < config.tol
+        value = new
+    return C_sub @ U, U, PMStats(n, sweeps, converged, start, value)
+
+
+def localize_block(
+    C_sub: np.ndarray, S: np.ndarray, ao_to_atom: np.ndarray, config: PMConfig | None = None
+) -> tuple[np.ndarray, np.ndarray, PMStats]:
+    """Localize one block with `config.method` from `config.start`: (C_loc, U, stats) with
+    C_loc = C_sub @ U and U orthogonal (start rotation included)."""
+    config = config or PMConfig()
+    C_sub = np.asarray(C_sub, dtype=float)
+    if C_sub.ndim != 2 or C_sub.shape[0] != len(ao_to_atom) or S.shape != (len(ao_to_atom),) * 2:
+        raise LocalizationError(f"shape mismatch: C {C_sub.shape}, S {S.shape}")
+    U0 = np.eye(C_sub.shape[1])
+    if config.start == "cholesky" and C_sub.shape[1] > 1:
+        U0 = cholesky_start(_sqrt_psd(S) @ C_sub)
+    run = ibo_stats if config.method == "ibo" else pipek_mezey_stats
+    _, U1, stats = run(C_sub @ U0, S, ao_to_atom, config)
+    U = U0 @ U1
+    return C_sub @ U, U, stats
+
+
 @dataclass(frozen=True)
 class LocalizedOrbitals:
     """Localized occupied and virtual blocks of one record, with their canonical-MO index sets."""
@@ -231,7 +371,7 @@ def _merge_stats(a: PMStats, b: PMStats) -> PMStats:
 
 
 def _localize_occupied(rec: QMRecord, occ_idx: np.ndarray, config: PMConfig | None):
-    """PM on the doubly and the singly occupied MOs of `occ_idx` separately.
+    """Localization of the doubly and the singly occupied MOs of `occ_idx` separately.
 
     U is block-diagonal in the order of `occ_idx`, so the spectral weights of every LMO still
     run over the whole occupied block, and the stats cover both sub-blocks (sweeps: the max).
@@ -242,20 +382,20 @@ def _localize_occupied(rec: QMRecord, occ_idx: np.ndarray, config: PMConfig | No
     double = rec.occupations[occ_idx] >= DOUBLE_THRESHOLD
     for sel in (np.flatnonzero(double), np.flatnonzero(~double)):
         if len(sel):
-            _, U_sub, st = pipek_mezey_stats(rec.C[:, occ_idx[sel]], rec.S, rec.ao_atom, config)
+            _, U_sub, st = localize_block(rec.C[:, occ_idx[sel]], rec.S, rec.ao_atom, config)
             U[np.ix_(sel, sel)] = U_sub
             stats = _merge_stats(stats, st)
     return rec.C[:, occ_idx] @ U, U, stats
 
 
 def localize_record(rec: QMRecord, config: PMConfig | None = None) -> LocalizedOrbitals:
-    """PM-localize the occupied (occupation >= 0.5) and virtual blocks of a QM record; the
-    SOMOs of an open-shell record are localized among themselves, apart from the rest."""
+    """Localize (IBO by default, `config.method`) the occupied (occupation >= 0.5) and virtual
+    blocks of a QM record; the SOMOs of an open-shell record are localized among themselves."""
     assert_valence_only(rec)
     occ_idx = np.flatnonzero(rec.occupations >= OCC_THRESHOLD)
     virt_idx = np.flatnonzero(rec.occupations < OCC_THRESHOLD)
     C_occ, U_occ, st_occ = _localize_occupied(rec, occ_idx, config)
-    C_virt, U_virt, st_virt = pipek_mezey_stats(rec.C[:, virt_idx], rec.S, rec.ao_atom, config)
+    C_virt, U_virt, st_virt = localize_block(rec.C[:, virt_idx], rec.S, rec.ao_atom, config)
     return LocalizedOrbitals(occ_idx, virt_idx, C_occ, C_virt, U_occ, U_virt, st_occ, st_virt)
 
 

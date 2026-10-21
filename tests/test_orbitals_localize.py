@@ -114,3 +114,117 @@ def test_mulliken_populations_sum_to_one(sp_record):
     Q = L.mulliken_populations(loc.C_occ, rec.S, rec.ao_atom, rec.n_atoms)
     assert Q.shape == (rec.n_atoms, loc.C_occ.shape[1])
     assert np.allclose(Q.sum(axis=0), 1.0, atol=1e-8)
+
+
+# ---- intrinsic bond orbitals (default since spec v7.2)
+
+
+def test_ibo_is_an_orthogonal_rotation_that_raises_the_functional(sp_record):
+    rec = sp_record("CCO")
+    occ = rec.C[:, rec.occupations >= 0.5]
+    C_loc, U, st = L.localize_block(occ, rec.S, rec.ao_atom)
+    assert np.allclose(U.T @ U, np.eye(U.shape[0]), atol=1e-10)
+    assert np.allclose(C_loc, occ @ U) and np.allclose(occ @ occ.T, C_loc @ C_loc.T, atol=1e-10)
+    assert st.converged and st.functional_end >= st.functional_start - 1e-12
+
+
+def test_ibo_angle_never_loses_and_finds_the_exact_maximum():
+    rng = np.random.default_rng(0)
+    m, d, q = rng.random((5, 40)), rng.normal(size=(5, 40)) * 0.3, rng.normal(size=(5, 40)) * 0.3
+    gamma = L.ibo_angles(m, d, q)
+    dense = np.linspace(-np.pi / 4, np.pi / 4, 20001)
+    best = L._ibo_gain(m, d, q, np.repeat(dense[:, None], 40, axis=1)).max(axis=0)
+    got = L._ibo_gain(m, d, q, gamma[None, :])[0]
+    assert (got >= -1e-15).all() and np.allclose(got, best, atol=1e-9)
+
+
+def _ring_pi(tokens, kind: str) -> list:
+    toks = tokens.occupied() if kind == "occ" else tokens.virtual()
+    return [o for o in toks if o.descriptors.n_centers >= 2 and o.descriptors.cos_character() < 0.2]
+
+
+def test_benzene_ibo_converges_with_three_pi_tokens_per_block(sp_record):
+    """IBO converges in a few sweeps (no cap) and the e1g weight stays in the ring tokens:
+    whatever local form the pi space takes, energies are invariant to it."""
+    from ksmech.orbitals.frontier import frontier_blocks
+    from ksmech.orbitals.tokens import build_molecule_tokens
+
+    rec = sp_record("c1ccccc1")
+    lo = L.localize_record(rec)
+    assert lo.converged and max(lo.stats_occ.n_sweeps, lo.stats_virt.n_sweeps) < 60
+    t = build_molecule_tokens(rec)
+    pi_occ, pi_virt = _ring_pi(t, "occ"), _ring_pi(t, "virt")
+    assert len(pi_occ) == 3 and len(pi_virt) == 3
+    e1g = frontier_blocks(rec.orbital_energies_ev, rec.occupations)["homo"]
+    rows = [list(lo.occ_index).index(k) for k in e1g]
+    weight = sum(o.descriptors.full_weights[rows].sum() for o in pi_occ)
+    assert abs(weight - 2.0) < 1e-3  # the local form moves no e1g weight out of the ring
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="In GFN2's minimal basis with Lowdin populations the exponent-4 maximum of benzene's "
+    "pi space is three 3-centre LMOs (0.50 / 0.22 / 0.22; pi P4 0.202 vs 0.177 for Kekule; "
+    "random starts reach the same P4), not three 2-centre bonds as spec v7.2 states. "
+    "docs/decisions.md 2026-10-22, fix item 4b.",
+)
+def test_benzene_ibo_gives_two_centre_pi_bonds(sp_record):
+    from ksmech.orbitals.tokens import build_molecule_tokens
+
+    t = build_molecule_tokens(sp_record("c1ccccc1"))
+    assert all(o.descriptors.n_centers == 2 for o in _ring_pi(t, "occ"))
+
+
+def test_pm_mulliken_and_the_canonical_start_stay_available(sp_record):
+    rec = sp_record("CC=O")
+    occ = rec.C[:, rec.occupations >= 0.5]
+    for cfg in (L.PMConfig(method="pm_mulliken", start="canonical"), L.PMConfig(start="canonical")):
+        C_loc, _, st = L.localize_block(occ, rec.S, rec.ao_atom, cfg)
+        assert st.converged and np.allclose(occ @ occ.T, C_loc @ C_loc.T, atol=1e-10)
+    with pytest.raises(L.LocalizationError):
+        L.PMConfig(method="boys")
+
+
+def test_token_files_are_byte_identical_across_two_builds(sp_record, tmp_path):
+    """Every array member of two independent builds is byte-identical; the provenance header
+    differs only in `built_at`."""
+    import json
+    import zipfile
+
+    from ksmech.orbitals.tokens import build_molecule_tokens, save_tokens
+
+    rec = sp_record("c1ccccc1O")
+    paths = [save_tokens(build_molecule_tokens(rec), tmp_path / f"{k}.npz") for k in "ab"]
+    members = [dict((n, z.read(n)) for n in z.namelist()) for z in map(zipfile.ZipFile, paths)]
+    header = "__provenance__.npy"
+    assert {k: v for k, v in members[0].items() if k != header} == {
+        k: v for k, v in members[1].items() if k != header
+    }
+    heads = [json.loads(np.load(p)["__provenance__"].item()) for p in paths]
+    for h in heads:
+        h.pop("built_at")
+    assert heads[0] == heads[1]
+
+
+@pytest.mark.slow
+@pytest.mark.realdata
+def test_molecules_that_hit_the_pm_cap_converge_under_ibo():
+    """The 35 PMechDB molecules whose occupied or virtual block reached 200 PM sweeps in the
+    2026-10-20 token build (tests/fixtures/pm_capped_smiles.json)."""
+    import json
+    from pathlib import Path
+
+    from ksmech.qm.records import DEFAULT_CACHE_DIR, cache_path, is_valid_cache_file, load_record
+    from ksmech.qm.xtb_calc import QMConfig
+
+    method = QMConfig().method
+    smiles = json.loads(Path("tests/fixtures/pm_capped_smiles.json").read_text())
+    paths = {s: cache_path(DEFAULT_CACHE_DIR, s, 0, method) for s in smiles}
+    if not all(is_valid_cache_file(p) for p in paths.values()):
+        pytest.skip("PMechDB QM records missing")
+    capped = []
+    for s, path in paths.items():
+        lo = L.localize_record(load_record(path, (s, 0, method)))
+        if not lo.converged:
+            capped.append((s, lo.stats_occ.n_sweeps, lo.stats_virt.n_sweeps))
+    assert not capped, capped

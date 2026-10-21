@@ -55,7 +55,7 @@ from ksmech.orbitals.localize import (
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class OrbitalKind(StrEnum):
@@ -635,6 +635,8 @@ def token_config(
         **asdict(descriptor_config or DescriptorConfig()),
         "pm_tol": pm.tol,
         "pm_max_sweeps": pm.max_sweeps,
+        "localization": pm.method,
+        "localization_start": pm.start,
     }
 
 
