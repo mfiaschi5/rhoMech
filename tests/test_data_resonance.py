@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 import pytest
+from rdkit import Chem
 
 from ksmech.data import chem
 from ksmech.data.resonance import (
@@ -57,7 +58,8 @@ def test_truncation_falls_back_to_the_plain_smiles():
     assert full.flag == ResonanceFlag.OK and full.n_structures > 2
     cut = canonical_resonance_key(mol, max_structures=2)
     assert cut.flag == ResonanceFlag.RESONANCE_TRUNCATED and cut.n_structures == 2
-    assert cut.key == full.key  # the input happens to be the smallest structure
+    assert cut.key == "[CH2-]C=CC=CC=O"  # the input itself, maps stripped
+    assert full.key == "C=CC=CC=C[O-]"  # the smallest over the enumeration
     sides = (mol, chem.parse_mapped("[CH2:1]=[CH:2][CH:3]=[CH:4][CH:5]=[CH:6][O-:7]"))
     assert is_resonance_step(*sides)[0] is True
     assert is_resonance_step(*sides, max_structures=2) == (False, ResonanceFlag.RESONANCE_TRUNCATED)
@@ -109,3 +111,37 @@ def test_ingestion_flags_the_mini_fixture_resonance_step(mini_steps, mini_result
 def test_single_structure_molecules(smiles):
     k = key(smiles)
     assert k.flag == ResonanceFlag.OK and k.n_structures == 1
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    ["c1ccccc1[O-]", "CO[C:20]([O-:10])=[CH:21][CH:22]=[CH2:23]", "CC(=O)C=C[O-]", "C=C[CH2+]"],
+)
+def test_key_does_not_depend_on_atom_order(smiles):
+    """RDKit's resonance enumeration depends on atom order (phenoxide gave two keys before the
+    key was taken on the canonical re-read molecule)."""
+    import random
+
+    mol = Chem.MolFromSmiles(smiles)
+    keys = set()
+    for seed in range(30):
+        order = list(range(mol.GetNumAtoms()))
+        random.Random(seed).shuffle(order)
+        keys.add(canonical_resonance_key(Chem.RenumberAtoms(mol, order)).key)
+    assert len(keys) == 1, keys
+
+
+def test_key_strips_atom_maps():
+    """Deprotonating either methyl of acetone gives the same product."""
+    a = canonical_resonance_key(Chem.MolFromSmiles("[CH3:1][C:2](=[O:3])[CH2-:4]"))
+    b = canonical_resonance_key(Chem.MolFromSmiles("[CH2-:1][C:2](=[O:3])[CH3:4]"))
+    assert a.key == b.key and ":" not in a.key
+
+
+def test_a_charge_separation_rdkit_reaches_from_one_side_only_is_a_resonance_step():
+    """C=N-O <-> C(+)-N(-)-O: RDKit enumerates the neutral form from the charged one, not the
+    reverse, so the minima differ; the step is still a resonance step (the sets intersect)."""
+    neutral = chem.parse_mapped("C[CH:10]=[N:11]O")
+    charged = chem.parse_mapped("C[CH+:10][N-:11]O")
+    assert is_resonance_step(neutral, charged) == (True, ResonanceFlag.OK)
+    assert is_resonance_step(charged, neutral) == (True, ResonanceFlag.OK)

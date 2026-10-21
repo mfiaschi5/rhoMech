@@ -1,11 +1,14 @@
 """Resonance keys: identify steps whose reactants and products are resonance structures.
 
 `canonical_resonance_key(mol)` is the lexicographically smallest canonical SMILES over RDKit's
-`ResonanceMolSupplier` structures of the (sanitized, atom-mapped) molecule, at most
+`ResonanceMolSupplier` structures of the molecule with its atom maps stripped, at most
 `MAX_STRUCTURES` of them; when the enumeration hits the cap the key falls back to the plain
-canonical SMILES and the `RESONANCE_TRUNCATED` flag is set. Charges may sit on any atom and
-charge separation is allowed, because PMechDB resonance steps move charge onto carbon
-(enolate <-> carbanion, allyl cation shifts, C=O <-> C+-O-).
+canonical SMILES and the `RESONANCE_TRUNCATED` flag is set. The enumeration runs on the
+molecule re-read from its own map-free canonical SMILES, so the key depends neither on the
+input's atom order nor on which equivalent atom carries a charge (RDKit's enumeration does
+depend on atom order: phenoxide gave two keys; docs/decisions.md, 2026-10-22). Charges may
+sit on any atom and charge separation is allowed, because PMechDB resonance steps move charge
+onto carbon (enolate <-> carbanion, allyl cation shifts, C=O <-> C+-O-).
 
 Resonance structures share the sigma skeleton, so `skeleton_key` (every bond single, charges
 zero, maps and explicit H kept) is a cheap necessary condition: two sides with different
@@ -53,21 +56,54 @@ def _sanitized_copy(mol: Chem.Mol) -> Chem.Mol | None:
     return m
 
 
-def canonical_resonance_key(mol: Chem.Mol, max_structures: int = MAX_STRUCTURES) -> ResonanceKey:
-    """Smallest canonical SMILES over the resonance structures of `mol` (atom maps kept)."""
-    plain = Chem.MolToSmiles(mol)
-    m = _sanitized_copy(mol)
+def _map_free(mol: Chem.Mol) -> Chem.Mol:
+    m = Chem.Mol(mol)
+    for atom in m.GetAtoms():
+        atom.SetAtomMapNum(0)
+    return m
+
+
+def _canonical_form(mol: Chem.Mol) -> Chem.Mol | None:
+    """The sanitized molecule rebuilt from its map-free canonical SMILES: canonical atom order
+    and Kekule structure, whatever order and drawing it came in. Every atom keeps the H count
+    it had (a re-read SMILES would let RDKit add implicit H in the enumerated structures: a
+    terminal diazo N gained two)."""
+    m = _sanitized_copy(_map_free(mol))
     if m is None:
-        return ResonanceKey(plain, 0, ResonanceFlag.RESONANCE_FAILED)
+        return None
+    with rdBase.BlockLogs():
+        out = Chem.MolFromSmiles(Chem.MolToSmiles(m))
+    if out is None:
+        return None
+    for atom in out.GetAtoms():
+        atom.SetNumExplicitHs(atom.GetTotalNumHs())
+        atom.SetNoImplicit(True)
+    return _sanitized_copy(out)
+
+
+def resonance_structures(
+    mol: Chem.Mol, max_structures: int = MAX_STRUCTURES
+) -> tuple[set[str], int, ResonanceFlag]:
+    """Map-free canonical SMILES of every resonance structure of `mol` (enumerated on its
+    canonical form), the enumeration size and the flag. Truncated or failed: the plain SMILES."""
+    m = _canonical_form(mol)
+    if m is None:
+        return {Chem.MolToSmiles(_map_free(mol))}, 0, ResonanceFlag.RESONANCE_FAILED
     with rdBase.BlockLogs():
         supplier = rdchem.ResonanceMolSupplier(m, int(_FLAGS), max_structures)
         n = len(supplier)
         if n >= max_structures:
-            return ResonanceKey(Chem.MolToSmiles(m), n, ResonanceFlag.RESONANCE_TRUNCATED)
-        keys = [Chem.MolToSmiles(supplier[i]) for i in range(n) if supplier[i] is not None]
+            return {Chem.MolToSmiles(m)}, n, ResonanceFlag.RESONANCE_TRUNCATED
+        keys = {Chem.MolToSmiles(supplier[i]) for i in range(n) if supplier[i] is not None}
     if not keys:
-        return ResonanceKey(Chem.MolToSmiles(m), n, ResonanceFlag.RESONANCE_FAILED)
-    return ResonanceKey(min(keys), n, ResonanceFlag.OK)
+        return {Chem.MolToSmiles(m)}, n, ResonanceFlag.RESONANCE_FAILED
+    return keys, n, ResonanceFlag.OK
+
+
+def canonical_resonance_key(mol: Chem.Mol, max_structures: int = MAX_STRUCTURES) -> ResonanceKey:
+    """Smallest map-free canonical SMILES over the resonance structures of `mol`."""
+    keys, n, flag = resonance_structures(mol, max_structures)
+    return ResonanceKey(min(keys), n, flag)
 
 
 def skeleton_key(mol: Chem.Mol) -> str:
@@ -88,16 +124,16 @@ def skeleton_key(mol: Chem.Mol) -> str:
 def is_resonance_step(
     reactants: Chem.Mol, products: Chem.Mol, max_structures: int = MAX_STRUCTURES
 ) -> tuple[bool, ResonanceFlag]:
-    """True when both sides share a resonance key. The flag reports a truncated enumeration."""
+    """True when the two sides share a resonance structure: their map-free enumerations
+    intersect. RDKit does not always enumerate a charge separation from the neutral side
+    (C=N-X -> C+-N(-)-X), so comparing the two minima would miss pairs that either side's
+    enumeration connects. The flag reports a truncated or failed enumeration."""
     if skeleton_key(reactants) != skeleton_key(products):
         return False, ResonanceFlag.OK
-    kr = canonical_resonance_key(reactants, max_structures)
-    kp = canonical_resonance_key(products, max_structures)
-    worst = ResonanceFlag.OK
-    for flag in (kr.flag, kp.flag):
-        if flag != ResonanceFlag.OK:
-            worst = flag
-    return kr.key == kp.key, worst
+    kr, _, fr = resonance_structures(reactants, max_structures)
+    kp, _, fp = resonance_structures(products, max_structures)
+    worst = next((f for f in (fr, fp) if f != ResonanceFlag.OK), ResonanceFlag.OK)
+    return bool(kr & kp), worst
 
 
 def training_steps(steps: list[ElementaryStep]) -> list[ElementaryStep]:

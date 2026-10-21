@@ -2732,3 +2732,33 @@ Each step is counted once, under the first reason that applies, in this order:
   group, which goes to train. Val and test are the steps that share no non-trivial molecule
   with it. They are out of distribution by construction, so numbers on them are expected to
   drop relative to the leaky split; that is the point of the change.
+
+## 2026-10-22 — Resonance key: map-free, canonical form, set intersection (fix item 3)
+
+- **Key.** `canonical_resonance_key` is the smallest canonical SMILES over the resonance
+  structures of the molecule. The molecule first has its atom maps stripped, then is rebuilt
+  from its own canonical SMILES (canonical atom order and Kekulé structure). Each atom keeps
+  the H count it had, so RDKit does not add implicit H inside the enumerated structures.
+  - Before, the key kept maps and depended on input atom order: phenoxide gave two keys under
+    renumbering.
+  - Without the H freeze, a terminal diazo N gained two H.
+  - Tests: 30 random renumberings of phenoxide, a dienolate, an enone enolate and allyl give
+    one key each. Acetone deprotonated at C1 or C4 gives one key.
+- **Resonance step.** `is_resonance_step` is true when the two sides' map-free structure sets
+  intersect, not when their two minima are equal. Under the canonical order RDKit enumerates
+  the neutral C=N-X from C(+)-N(-)-X but not the reverse. With minima, 12 oxime / hydrazone
+  pairs that the dataset's atom order happened to connect would have been lost.
+- **Effect on PMechDB** (482 same-skeleton steps; not re-ingested yet, counted against the
+  stored flags):
+  - 10 steps become resonance steps and none stop being one. The 10 are a dienolate shift,
+    two acetylacetonate shifts, six Zn / Sn / Sc-bound oxocarbenium ↔ carbocation pairs, and
+    a proton between the two equivalent oxygens of a protonated sulfonic acid.
+  - The 6 truncated enumerations are unchanged (still not counted; review D7).
+  - The resonance definition question (D6: RDKit misses C=O ↔ C(+)-O(-) and lone pair →
+    adjacent cation) is open and not changed here.
+- **Round trip.** Dataset arrows: 12,840 / 12,840 (12,839 exact, 1 modulo resonance). It is now
+  map-free, so a product formed on a symmetry-equivalent atom also matches (the user's choice;
+  the review had proposed keeping a mapped key for round trips).
+- **To do at the rebuild.** `steps.parquet` stores `resonance_step` from ingest, so the rebuild
+  starts with `ksmech-data ingest --source pmechdb`. Provenance then marks everything downstream
+  stale.
