@@ -49,26 +49,6 @@ class OrbitalType(StrEnum):
     UNKNOWN = "unknown"
 
 
-OCCUPIED_TYPES = frozenset(
-    {
-        OrbitalType.LONE_PAIR,
-        OrbitalType.SIGMA,
-        OrbitalType.PI,
-        OrbitalType.DELOCALIZED_PI,
-        OrbitalType.UNKNOWN,
-    }
-)
-VIRTUAL_TYPES = frozenset(
-    {
-        OrbitalType.SIGMA_STAR,
-        OrbitalType.PI_STAR,
-        OrbitalType.EMPTY_P,
-        OrbitalType.EMPTY_S,
-        OrbitalType.EMPTY_D,
-        OrbitalType.DELOCALIZED_PI_STAR,
-        OrbitalType.UNKNOWN,
-    }
-)
 DELOCALIZED_TYPES = frozenset({OrbitalType.DELOCALIZED_PI, OrbitalType.DELOCALIZED_PI_STAR})
 # "not cleanly classified": what the build summary reports as delocalized-or-unknown
 UNRESOLVED_TYPES = DELOCALIZED_TYPES | {OrbitalType.UNKNOWN}

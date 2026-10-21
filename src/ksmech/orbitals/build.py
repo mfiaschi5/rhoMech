@@ -13,7 +13,7 @@ import os
 import statistics
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field
 from multiprocessing import get_context
 from pathlib import Path
 
@@ -565,9 +565,3 @@ def build_dataset(
     print_summary(summary, console, show_worst=summary["occupied_unresolved_fraction"] > 0.10)
     console.print(f"wrote summary: {out}")
     return summary
-
-
-def rows_to_dicts(rows: list[BuildRow]) -> list[dict]:
-    """Rows as plain dicts, without the per-token input arrays."""
-    keep = [f.name for f in fields(BuildRow) if f.name not in ARRAY_FIELDS]
-    return [{k: v for k, v in asdict(r).items() if k in keep} for r in rows]

@@ -99,19 +99,3 @@ def contact_coupling(
             )
             best = max(best, value)
     return best
-
-
-def oriented_contact_overlap(
-    r: OrbitalDescriptors, z_r: np.ndarray, s: OrbitalDescriptors, z_s: np.ndarray
-) -> float:
-    """Phase 5b: the overlap of the two LMOs themselves at a contact geometry.
-
-    The two orbitals (all their AO coefficients, not one centre's |s| and p norms) are placed
-    with their main centres at the van der Waals contact distance, each turned so that its main
-    lobe (the p vector on the main centre, or the bond axis of a two-centre orbital) points at
-    the other, and l_r^T S(contact) l_s is evaluated with the GFN2 overlap integrals of the
-    joint geometry. That replaces both the contact table and the descriptor MLP, which only
-    summarize intramolecular contacts at whatever orientation the conformers happen to have.
-    Not implemented; `ContactConfig(kernel="oriented")` raises.
-    """
-    raise NotImplementedError("oriented LMO-LMO contact overlap: Phase 5b")

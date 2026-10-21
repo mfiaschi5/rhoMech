@@ -22,7 +22,6 @@ from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.physics.contact.legacy_fixed23 import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
 from ksmech.physics.contact.legacy_fixed23 import OrientedConfig
 from ksmech.physics.contact_kernel import KERNELS
-from ksmech.physics.contact_mlp import DEFAULT_MLP_PATH
 from ksmech.physics.contact_table import DEFAULT_TABLE_PATH
 
 # the untrained physics floor: KS3 + KS2 at d = 2.3 (user decision, docs/decisions.md)
@@ -33,7 +32,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ksmech-physics", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     r = sub.add_parser("ks-rank", help="rank first arrows by the untrained KS terms")
-    m = sub.add_parser("contact-mlp", help="fit the descriptor contact kernel (kernel=mlp)")
     b = sub.add_parser("baseline", help="train the logistic-regression and GBDT rankers")
     b.add_argument("--split", default="molecule", help="split strategy of the sample files")
     t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
@@ -45,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--gbdt", type=Path, default=None, help="GBDT model (default: molecule split)")
     for p in (r, t):  # diagnostic commands only: read stale artifacts with a warning
         p.add_argument("--allow-stale", action="store_true", help="read stale artifacts (warns)")
-    for p in (r, m, b):
+    for p in (r, b):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
@@ -59,11 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="oriented kernel: main-centre distance(s) in Angstrom, one report each",
     )
     r.add_argument("--contact-table", type=Path, default=DEFAULT_TABLE_PATH)
-    r.add_argument("--contact-mlp", type=Path, default=DEFAULT_MLP_PATH)
     r.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
-    m.add_argument("--epochs", type=int, default=20)
-    m.add_argument("--window", type=float, default=0.3)
-    m.add_argument("--out", type=Path, default=DEFAULT_MLP_PATH)
     return parser
 
 
@@ -73,7 +67,6 @@ def main(argv: list[str] | None = None) -> int:
     console = Console()
     commands = {
         "ks-rank": cmd_ks_rank,
-        "contact-mlp": cmd_contact_mlp,
         "baseline": cmd_baseline,
         "textbook": cmd_textbook,
     }
@@ -82,15 +75,13 @@ def main(argv: list[str] | None = None) -> int:
 
 def make_kernel(args: argparse.Namespace, distance: float | None = None):
     from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
-    from ksmech.physics.contact_mlp import load_contact_mlp
     from ksmech.physics.contact_table import load_tables
 
     tables = load_tables(args.contact_table) if args.kernel == "table" else None
-    mlp = load_contact_mlp(args.contact_mlp) if args.kernel == "mlp" else None
     oriented = OrientedConfig(
         distance=distance or OrientedConfig().distance, cache_dir=args.oriented_cache
     )
-    return ContactKernel(tables, ContactConfig(kernel=args.kernel, oriented=oriented), mlp)
+    return ContactKernel(tables, ContactConfig(kernel=args.kernel, oriented=oriented))
 
 
 def _load_parts(args: argparse.Namespace, console: Console) -> dict[str, list] | None:
@@ -456,35 +447,6 @@ def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
         for name, (fn, seen) in runs.items()
     }
     return 0 if max(passes.values()) >= 4 else 1
-
-
-def cmd_contact_mlp(args: argparse.Namespace, console: Console) -> int:
-    from ksmech.orbitals.build import tokens_path
-    from ksmech.physics.contact_mlp import fit_contact_mlp, samples_from_paths, save_contact_mlp
-    from ksmech.qm.batch import collect_molecules
-    from ksmech.qm.xtb_calc import QMConfig
-
-    method = QMConfig().method
-    smiles_list, _ = collect_molecules(args.source, args.processed_dir)
-    paths = [tokens_path(args.tokens_dir, s, 0, method) for s in smiles_list]
-    samples, skipped = samples_from_paths(paths, method, args.window)
-    n_used = len(paths) - sum(skipped.values())
-    console.print(
-        f"contact samples from {n_used}/{len(paths)} molecules (skipped: {skipped or 'none'})"
-    )
-    model = fit_contact_mlp(samples, epochs=args.epochs, method=method)
-    for kind in ("occ_virt", "occ_occ"):
-        meta = model.meta[kind]
-        console.print(f"  {kind}: {meta['n_train']} training samples, {meta['n_molecules']} mols")
-        for which in ("mlp_held_out", "table_held_out"):
-            if which in meta:
-                r = meta[which]
-                console.print(
-                    f"    {which}: R2(log) {r['r2_log']:.3f}, "
-                    f"median |log10 err| {r['median_abs_log10_error']:.3f} (n {r['n']})"
-                )
-    console.print(f"wrote {save_contact_mlp(model, args.out)}")
-    return 0
 
 
 if __name__ == "__main__":

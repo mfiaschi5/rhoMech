@@ -61,7 +61,7 @@ def _contact_pairs(t: MoleculeTokens, window: float) -> list[tuple[int, int]]:
 
 def contact_rows(t: MoleculeTokens, window: float = 0.3) -> list[tuple[str, int, int, float]]:
     """(kind, r, s, |l_r,a^T S_ab l_s,b|) for every contact sample of one molecule, with r and s
-    positions in `t.orbitals`: the samples of the table and of the descriptor MLP."""
+    positions in `t.orbitals`: the samples of the table."""
     main = np.array([int(o.descriptors.center_atoms[0]) for o in t.orbitals])
     occ = np.array([o.kind == OrbitalKind.OCCUPIED for o in t.orbitals])
     L = t.C_loc

@@ -60,8 +60,8 @@ def test_round_trip(contact_tables, tmp_path):
 def test_kernel_configuration(contact_tables, sp_record):
     with pytest.raises(ValueError, match="needs contact tables"):
         ContactKernel(None, ContactConfig(kernel="table"))
-    with pytest.raises(ValueError, match="fitted ContactMLP"):
-        ContactKernel(contact_tables, ContactConfig(kernel="mlp"))
+    with pytest.raises(ValueError, match="unknown contact kernel"):
+        ContactKernel(contact_tables, ContactConfig(kernel="mlp"))  # deleted 2026-10-22
     assert ContactKernel().config.kernel == "oriented"  # the default needs no table
     with pytest.raises(ValueError, match="unknown"):
         ContactKernel(contact_tables, ContactConfig(kernel="nope"))

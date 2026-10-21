@@ -20,7 +20,6 @@ from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.physics.contact.legacy_fixed23 import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
 from ksmech.physics.contact_kernel import KERNELS, ContactConfig, ContactKernel
-from ksmech.physics.contact_mlp import DEFAULT_MLP_PATH, load_contact_mlp
 from ksmech.physics.contact_table import DEFAULT_TABLE_PATH, load_tables
 from ksmech.physics.pairs import PairKernels, oriented_kernels, single_kernel
 
@@ -40,7 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--kernel", choices=KERNELS, default="oriented", help="contact kernel")
     s.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
     s.add_argument("--contact-table", type=Path, default=DEFAULT_TABLE_PATH)
-    s.add_argument("--contact-mlp", type=Path, default=DEFAULT_MLP_PATH)
     a.add_argument("--no-member-check", action="store_true", help="skip the set-member swap")
     s.add_argument(
         "--strategy",
@@ -126,12 +124,11 @@ def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
 
 def samples_kernels(args: argparse.Namespace) -> PairKernels:
     """The contact kernels the samples' pair features are computed with: the oriented kernel
-    at every feature distance by default; an ablation kernel (table, mlp, analytic) for all."""
+    at every feature distance by default; an ablation kernel (table, analytic) for all."""
     if args.kernel == "oriented":
         return oriented_kernels(args.oriented_cache)
     tables = load_tables(args.contact_table) if args.kernel == "table" else None
-    mlp = load_contact_mlp(args.contact_mlp) if args.kernel == "mlp" else None
-    return single_kernel(ContactKernel(tables, ContactConfig(kernel=args.kernel), mlp))
+    return single_kernel(ContactKernel(tables, ContactConfig(kernel=args.kernel)))
 
 
 def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:

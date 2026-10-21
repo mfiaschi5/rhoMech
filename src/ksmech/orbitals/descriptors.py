@@ -98,10 +98,6 @@ class OrbitalDescriptors:
         """(spectral_max, 2) model-input rows (E_k in eV, p_rk); padding rows have p = 0."""
         return np.column_stack([self.spectral_energies, self.spectral_weights]).astype(float)
 
-    def to_vector(self) -> np.ndarray:
-        """Every model-input number of the token: the continuous vector, then the set rows."""
-        return np.concatenate([self.continuous_vector(), self.spectral_set().ravel()])
-
 
 def feature_names(config: DescriptorConfig | None = None) -> list[str]:
     """One name per entry of `OrbitalDescriptors.continuous_vector()`."""

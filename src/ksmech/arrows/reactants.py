@@ -105,7 +105,7 @@ def _heavy_by_skeleton(frag: Chem.Mol, record: Chem.Mol) -> dict[int, int]:
     if not matches:
         raise CorrespondenceError("skeletons do not match")
 
-    def score(match) -> int:
+    def score(match: tuple[int, ...]) -> int:
         pairs = [(q.GetAtomWithIdx(i), t.GetAtomWithIdx(j)) for i, j in enumerate(match)]
         return sum(
             (a.GetIntProp("_q") == b.GetIntProp("_q")) + (a.GetIntProp("_h") == b.GetIntProp("_h"))

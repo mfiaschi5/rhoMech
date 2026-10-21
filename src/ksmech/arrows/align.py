@@ -32,6 +32,7 @@ mostly-d main centre on an element without a valence d shell: all continuous des
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -309,7 +310,9 @@ def align_arrows(step: ElementaryStep, reactant_tokens: ReactantTokens) -> list[
     return align_step(step, reactant_tokens).labels
 
 
-def representatives(rt: ReactantTokens, label: ArrowLabel, valid=None) -> tuple[int, int]:
+def representatives(
+    rt: ReactantTokens, label: ArrowLabel, valid: Callable[[int, int], bool] | None = None
+) -> tuple[int, int]:
     """Teacher representatives (r*, s*): the donor and the acceptor with the largest weight on
     their site; ties go to the higher donor and the lower acceptor energy. `valid(r, s)`, when
     given, restricts the choice to valid pairs (s* among r*'s valid partners)."""

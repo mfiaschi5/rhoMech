@@ -245,15 +245,25 @@ def test_frozen_head_is_the_floor_minus_the_repulsion(pair):
     )
 
 
-def test_non_finite_entries_are_counted_and_left_undefined(sp_record):
-    """Without %Vbur (NaN) the contact repulsion cannot be formed: counted, never silent."""
+def test_contact_repulsion_needs_no_buried_volume(sp_record):
+    """Spec v7.2: no buried-volume factor in KS1. Without %Vbur (the sp fixture skips sterics)
+    the contact form is defined everywhere it was, and one cell is (N_m(r) + N_m(r')) |beta| a."""
+    from ksmech.physics.repulsion import contact_repulsion_matrix
+
     methanol = build_molecule_tokens(sp_record("CO"))
     chloromethane = build_molecule_tokens(sp_record("CCl"))
-    block = pair_block([methanol, chloromethane], oriented_kernels())
-    assert block.n_non_finite > 0 and np.isfinite(block.z).all()
+    kernels = oriented_kernels()
+    block = pair_block([methanol, chloromethane], kernels)
     n_occ_m, n_virt_m = len(methanol.occupied()), len(methanol.virtual())
-    assert not block.defined[:n_occ_m, n_virt_m:, F["log_abs_ks1"]].any()  # intermolecular
-    assert block.defined[:n_occ_m, :n_virt_m, F["log_abs_ks1"]].any()  # intramolecular
+    assert block.n_non_finite == 0
+    assert block.defined[:n_occ_m, n_virt_m:, F["log_abs_ks1"]].any()  # intermolecular
+    r, r2 = methanol.occupied()[0], chloromethane.occupied()[0]
+    C = contact_repulsion_matrix([r], methanol, [r2], chloromethane, kernels.main)
+    n = atom_populations(methanol)[int(r.descriptors.center_atoms[0])]
+    n += atom_populations(chloromethane)[int(r2.descriptors.center_atoms[0])]
+    beta = kernels.main.beta_matrix([r], methanol, [r2], chloromethane)[0, 0]
+    amp = kernels.main.amplitude_matrix([r], methanol, [r2], chloromethane)[0, 0]
+    assert C[0, 0] >= 0 and C[0, 0] == pytest.approx(n * abs(beta) * amp, rel=1e-12)
 
 
 def _at(seq: list, x) -> int:

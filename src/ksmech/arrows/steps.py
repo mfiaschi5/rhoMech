@@ -32,6 +32,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -159,7 +160,7 @@ def _atom_maps(rt: ReactantTokens) -> np.ndarray:
 
 def make_sample(
     step: ElementaryStep, rt: ReactantTokens, labels: list[ArrowLabel], kernels: PairKernels
-):
+) -> MechanismSample:
     """The sample of an aligned step (the product key and pair features are computed here)."""
     key = canonical_resonance_key(chem.parse_mapped(step.products_smiles))
     sample = reactant_sample(step.step_id, str(step.source), rt, kernels)
@@ -167,7 +168,9 @@ def make_sample(
     return sample
 
 
-def reactant_sample(step_id: str, source: str, rt: ReactantTokens, kernels: PairKernels):
+def reactant_sample(
+    step_id: str, source: str, rt: ReactantTokens, kernels: PairKernels
+) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
     hand-built reactant sets, e.g. the textbook selectivity checks)."""
     tok = [f.tokens for f in rt.fragments]
@@ -555,7 +558,9 @@ def collate_samples(batch: list[MechanismSample]) -> dict:
     return out
 
 
-def make_loader(path: Path, batch_size: int = 16, shuffle: bool = True, **kwargs):
+def make_loader(
+    path: Path, batch_size: int = 16, shuffle: bool = True, **kwargs: Any
+) -> torch.utils.data.DataLoader:
     """DataLoader over one samples file with `collate_samples`."""
     return torch.utils.data.DataLoader(
         SampleDataset(path),

@@ -145,7 +145,9 @@ def _recharged(mol: Chem.Mol, atom: int, charge: int) -> Chem.Mol:
     return out.GetMol()
 
 
-def screen_side(mol: Chem.Mol, side: str, repair: bool = True):
+def screen_side(
+    mol: Chem.Mol, side: str, repair: bool = True
+) -> tuple[Chem.Mol, list[DomainCode], list[tuple[str, str, str, str]]]:
     """(side with the repairs applied, codes of its odd fragments, repairs) for one side."""
     out, codes, repairs = mol, [], []
     for atoms, frag in _fragments(mol):

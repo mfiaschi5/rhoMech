@@ -25,8 +25,6 @@ Ablation kernels, kept for comparison only:
   contacts keyed by element and dominant shell of the two main centres. It fails as a
   reactivity amplitude: contacts at random orientation favour H and s shells
   (docs/decisions.md, Prompt 5).
-- `mlp`: a = S_contact(r, s) w_m(r) w_m(s), an MLP over the two descriptor vectors fitted to the
-  same contact samples (`ksmech.physics.contact_mlp`).
 - `analytic`: the tblite two-atom probe of `ksmech.physics.contact` (|s| and p-vector norms of
   every centre pair at the covalent-radii distance, best pair).
 
@@ -44,11 +42,10 @@ import numpy as np
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalKind, OrbitalToken
 from ksmech.physics.contact import contact_coupling
 from ksmech.physics.contact.legacy_fixed23 import OrientedConfig, oriented_block
-from ksmech.physics.contact_mlp import ContactMLP, descriptor_matrix
 from ksmech.physics.contact_table import ContactTable, contact_key
 from ksmech.physics.params import KSParams, shell_fock_ev
 
-KERNELS = ("oriented", "table", "mlp", "analytic")
+KERNELS = ("oriented", "table", "analytic")
 
 
 @dataclass(frozen=True)
@@ -85,7 +82,6 @@ class ContactKernel:
         self,
         tables: dict[str, ContactTable] | None = None,
         config: ContactConfig | None = None,
-        mlp: ContactMLP | None = None,
     ) -> None:
         self.config = config or ContactConfig()
         kernel = self.config.kernel
@@ -93,10 +89,7 @@ class ContactKernel:
             raise ValueError(f"unknown contact kernel {kernel!r}; one of {KERNELS}")
         if kernel == "table" and tables is None:
             raise ValueError("the table kernel needs contact tables (`load_tables`)")
-        if kernel == "mlp" and mlp is None:
-            raise ValueError("the mlp kernel needs a fitted ContactMLP (`load_contact_mlp`)")
         self.tables = tables
-        self.mlp = mlp
 
     def _table_overlap(self, rows, t_r, cols, t_s, kinds: np.ndarray) -> np.ndarray:
         """S[kappa] per pair, one lookup per distinct (key_r, key_s, kind)."""
@@ -112,14 +105,6 @@ class ContactKernel:
             value, _ = self.tables[kind].lookup(tuple(kappa), n=len(where))
             ii, jj = np.array(where).T
             out[ii, jj] = value
-        return out
-
-    def _mlp_overlap(self, rows, cols, kinds: np.ndarray) -> np.ndarray:
-        V_r, V_s = descriptor_matrix(rows), descriptor_matrix(cols)
-        out = np.empty((len(rows), len(cols)))
-        for kind in np.unique(kinds):
-            cols_k = np.flatnonzero(kinds == kind)
-            out[:, cols_k] = self.mlp.pair_matrix(str(kind), V_r, V_s[cols_k])
         return out
 
     def _oriented(self, rows, t_r, cols, t_s, field: str, same: bool = False) -> np.ndarray:
@@ -172,10 +157,7 @@ class ContactKernel:
                 ]
             )
         kinds = _kinds(cols)
-        if self.config.kernel == "mlp":
-            overlap = self._mlp_overlap(rows, cols, kinds)
-        else:
-            overlap = self._table_overlap(rows, t_r, cols, t_s, kinds)
+        overlap = self._table_overlap(rows, t_r, cols, t_s, kinds)
         return overlap * _main_weights(rows)[:, None] * _main_weights(cols)[None, :]
 
     def amplitude(

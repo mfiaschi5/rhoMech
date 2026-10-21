@@ -23,10 +23,14 @@ import io
 import json
 from dataclasses import fields
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from ksmech.data import provenance as prov
+
+if TYPE_CHECKING:
+    from ksmech.arrows.steps import MechanismSample
 
 SHARD_SIZE = 256
 VALID_ONLY = ("pair_z", "pair_defined", "pair_gap_sign", "pair_contact_sites")
@@ -44,7 +48,7 @@ def store_dir(view_dir: Path) -> Path:
     return Path(view_dir) / "samples"
 
 
-def pack(sample) -> tuple[dict[str, np.ndarray], dict]:
+def pack(sample: MechanismSample) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """(arrays as stored, the JSON-able rest) of one MechanismSample."""
     arrays, meta = {}, {}
     for f in fields(sample):
@@ -73,7 +77,9 @@ def pack(sample) -> tuple[dict[str, np.ndarray], dict]:
     return arrays, meta
 
 
-def unpack(arrays: dict[str, np.ndarray], meta: dict, cls):
+def unpack(
+    arrays: dict[str, np.ndarray], meta: dict[str, Any], cls: type[MechanismSample]
+) -> MechanismSample:
     """The dense MechanismSample of `pack`'s output (cls: MechanismSample)."""
     from ksmech.arrows.align import ArrowLabel
 
@@ -135,7 +141,9 @@ def _write_shard(path: Path, samples: list, inputs: dict, version: int) -> str:
     return header.content_sha256
 
 
-def write_store(view_dir: Path, samples: dict, skipped: dict, parquet: Path, version: int):
+def write_store(
+    view_dir: Path, samples: dict[str, MechanismSample], skipped: dict, parquet: Path, version: int
+) -> Path:
     """Write every sample once (sorted by step id) into shards and the index. Returns the
     index path."""
     root = store_dir(view_dir)
@@ -163,7 +171,14 @@ def write_store(view_dir: Path, samples: dict, skipped: dict, parquet: Path, ver
     return prov.write_json(root / "index.json", body, header)
 
 
-def write_view(path: Path, ids: list[str], report: dict, index: Path, split_file: Path, config):
+def write_view(
+    path: Path,
+    ids: list[str],
+    report: dict[str, Any],
+    index: Path,
+    split_file: Path,
+    config: dict[str, Any],
+) -> Path:
     """`samples_<split>.json`: the split's ids and counts over the store."""
     body = {"ids": ids, "report": report}
     header = prov.stamp(
@@ -203,7 +218,9 @@ def _verify(path: Path, kind: str, version: int, allow_stale: bool) -> prov.Prov
         return prov.read_header(path)
 
 
-def load_view(path: Path, cls, version: int, allow_stale: bool = False) -> list:
+def load_view(
+    path: Path, cls: type[MechanismSample], version: int, allow_stale: bool = False
+) -> list[MechanismSample]:
     """The samples of one split view, in its id order (skipped steps have none). Verifies the
     view, the index and every shard read: StaleArtifact names what changed."""
     header = _verify(path, "samples", version, allow_stale)
@@ -228,7 +245,7 @@ def load_view(path: Path, cls, version: int, allow_stale: bool = False) -> list:
     return [loaded[sid] for sid in wanted]
 
 
-def stored_bytes(sample) -> int:
+def stored_bytes(sample: MechanismSample) -> int:
     """Compressed size of one sample as stored (for the size report)."""
     arrays, meta = pack(sample)
     buf = io.BytesIO()

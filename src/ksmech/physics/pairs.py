@@ -17,7 +17,7 @@
   phases are arbitrary; contact form with |beta| of the primary kernel across, so KS1 >= 0
   everywhere); undefined where it is 0
   (no other occupied token near s's main centre, or a single-atom fragment: no resonance
-  integral within an atom) or not finite (%Vbur missing, across fragments).
+  integral within an atom) or not finite.
 - Within a fragment only: the centroid distance and |l_r^T B l_s| over the AO blocks between the
   two tokens' centres (its sign is an arbitrary LMO phase).
 - CLASH: the primary kernel's flag for the pair's contact amplitude (oriented kernel).
@@ -246,7 +246,7 @@ def pair_block(
             _fill(block, cell, terms, f == g)
             if (terms["sites"] >= 0).all():
                 block.sites[cell] = terms["sites"] + [atom0[f], atom0[g]]
-    bad = ~np.isfinite(block.z)  # e.g. KS1 without %Vbur: counted, never silent
+    bad = ~np.isfinite(block.z)  # counted, never silent
     block.n_non_finite = int(bad.sum())
     block.defined[bad] = False
     block.z[~block.defined] = 0.0  # e.g. log|KS1| floored where KS1 == 0

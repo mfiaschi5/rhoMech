@@ -317,7 +317,9 @@ def atomic_write(path: Path | str, data: bytes) -> Path:
     return path
 
 
-def save_npz(path: Path | str, arrays: Mapping[str, Any], prov: Provenance, compressed=True):
+def save_npz(
+    path: Path | str, arrays: Mapping[str, Any], prov: Provenance, compressed: bool = True
+) -> Path:
     """Write `arrays` plus the header member, atomically. `prov.content_sha256` should be
     `array_digest(arrays)`."""
     buf = io.BytesIO()
@@ -376,7 +378,9 @@ def _status(header: Provenance) -> list[str]:
     return _input_changes(header, {})
 
 
-def describe_chain(path: Path | str, depth: int = 0, max_depth: int = 4, max_inputs: int = 6):
+def describe_chain(
+    path: Path | str, depth: int = 0, max_depth: int = 4, max_inputs: int = 6
+) -> list[str]:
     """Lines describing the artifact and, recursively, its file inputs."""
     pad = "  " * depth
     header = read_header(path)

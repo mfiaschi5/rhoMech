@@ -2997,3 +2997,37 @@ Each step is counted once, under the first reason that applies, in this order:
   - The real number is measured at the rebuild.
 - `pair_feature_stats_<strategy>.json` is now fitted on the valid cells only (it never sees
   the others), as the review asked (A11).
+
+## 2026-10-22 — Deletions and hygiene (fix item 9)
+
+- **Vbur-scaled contact KS1 deleted** (spec v7.2: "No buried-volume factor enters").
+  - The contact form is now (N_m(r) + N_m(r')) |beta_c(r, r')| a(r, r'). The V_m(r) V_m(r') /
+    1e4 factor is gone, and with it review PK3: one NaN %Vbur used to void a whole KS1 block.
+  - A test now checks one contact cell against that formula (review PK10).
+  - The per-atom %Vbur (morfeus) stays an atom-token model input.
+  - Expect the intra / inter KS1 scale gap (medians 7.40 vs 0.51 eV with the factor) to shrink;
+    it is measured at the rebuild.
+- **MLP contact kernel deleted:**
+  - `physics/contact_mlp.py`, `ksmech-physics contact-mlp` and `--kernel mlp`;
+  - `--contact-mlp` on `ks-rank` and `samples`;
+  - the `ContactKernel` mlp branch, its tests and the CLAUDE.md lines.
+
+  The data file `data/cache/contact_mlp.npz` is left on disk (data is not deleted by code
+  changes); nothing reads it.
+- **Dead code removed:**
+  - `contact.oriented_contact_overlap` (a stub);
+  - `fukui.nan_fukui`, `build.rows_to_dicts`, `OrbitalDescriptors.to_vector`;
+  - `classify.OCCUPIED_TYPES` / `VIRTUAL_TYPES` (no callers);
+  - the whole-molecule acceptor `_Side` built per block by the legacy kernel, of which only the
+    coordinates were used (now `_Anchors`). The pinned outputs are unchanged.
+- **Dead flags.** Every option of every `ksmech-*` CLI is read (checked by scanning each
+  `add_argument` dest against `args.<dest>`); none was left over.
+- **Function length.** No function in `src/` exceeds 60 lines; the longest is
+  `orbitals.build.summarize` at 58.
+- **Annotations.** Every public function in `ksmech.data` and `ksmech.arrows` is annotated
+  (mypy --strict: 0 `no-untyped-def` on public functions there; 4 private helpers remain).
+  - mypy --strict over all of `src/` reports 453 errors in 46 files, against 425 in 47 before
+    the fix branch.
+  - The rise comes from the new provenance, store, IBO and frame code (bare `dict` / `Callable`
+    type parameters, untyped numpy returns). The prompt limited annotation work to the public
+    functions of data/ and arrows/.

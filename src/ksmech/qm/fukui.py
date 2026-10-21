@@ -40,11 +40,6 @@ def finite_difference(q_n: np.ndarray, q_plus: np.ndarray, q_minus: np.ndarray) 
     return FukuiFD(f_plus, f_minus, 0.5 * (f_plus + f_minus), f_plus - f_minus)
 
 
-def nan_fukui(n_atoms: int) -> FukuiFD:
-    nan = np.full(n_atoms, np.nan)
-    return FukuiFD(nan, nan.copy(), nan.copy(), nan.copy())
-
-
 def homo_index(occupations: np.ndarray) -> int | None:
     """Index of the highest MO with occupation >= 0.5; None for a zero-electron system."""
     occupied = np.flatnonzero(occupations >= OCC_THRESHOLD)

@@ -390,6 +390,14 @@ TIER2 = ((2, 0), (2, 1), (0, 2), (1, 2), (2, 2))  # slot 2: the opposite face
 
 
 @dataclass
+class _Anchors:
+    """The acceptor molecule's atom positions (bohr): where its sites are. Only the cap of an
+    acceptor token is placed and overlapped (`_Side.cap`), so nothing else of it is needed."""
+
+    xyz: np.ndarray
+
+
+@dataclass
 class _Side:
     """Bohr geometry and coefficient rows of the tokens of one fragment."""
 
@@ -757,7 +765,7 @@ def block_contacts(
     sites = np.full((*shape, 2), -1, dtype=int)
     if not rows or not cols:
         return Contacts(S, sites, clash, beta)
-    F, G = _Side.of(t_F, rows), _Side.of(t_G, cols)
+    F, G = _Side.of(t_F, rows), _Anchors(_positions(t_G) / BOHR_ANG)
     caps = {i: _Side.cap(t_G, k) for i, k in enumerate(cols)}
     EF, EG = _entries(t_F, rows, sites_F), _entries(t_G, cols, sites_G)
     value, b_sp, flagged = _evaluate_block(F, G, caps, EF, EG, config)

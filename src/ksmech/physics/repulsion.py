@@ -17,9 +17,12 @@ is the repulsion between r and the occupied orbitals around the acceptor:
 
 Between fragments the AO sum has no geometry. Its contact form keeps the populations and
 replaces beta S l l by the contact resonance integral times the contact amplitude of the two
-occupied tokens, scaled by the buried volumes of the two main centres (as fractions):
+occupied tokens:
 
-    KS1(r, r') = (N_m(r) + N_m(r')) |beta_c(r, r')| a(r, r') V_m(r) V_m(r') / 100^2
+    KS1(r, r') = (N_m(r) + N_m(r')) |beta_c(r, r')| a(r, r')
+
+No buried-volume factor enters (spec v7.2, repulsion term; until 2026-10-22 the contact form
+was scaled by V_m(r) V_m(r') / 100^2, which also made one missing %Vbur void a whole block).
 
 Each AO term -(N + N) beta_mu,nu S_mu,nu = -(N + N) K S_mu,nu^2 (F_mu,mu + F_nu,nu) / 2 is
 positive for bound AOs, so the contact form takes the magnitude of the orbital-level beta_c
@@ -79,8 +82,6 @@ def contact_repulsion_matrix(
     a = np.array([int(r.descriptors.center_atoms[0]) for r in rows], dtype=int)
     b = np.array([int(s.descriptors.center_atoms[0]) for s in cols], dtype=int)
     n = atom_populations(t_r)[a][:, None] + atom_populations(t_s)[b][None, :]
-    v_r = np.array([t_r.atoms[i].vbur for i in a], dtype=float)
-    v_s = np.array([t_s.atoms[i].vbur for i in b], dtype=float)
     beta = kernel.beta_matrix(rows, t_r, cols, t_s, params)
     amp = kernel.amplitude_matrix(rows, t_r, cols, t_s)
-    return n * np.abs(beta) * amp * np.outer(v_r, v_s) / 1e4  # >= 0, like the AO terms
+    return n * np.abs(beta) * amp  # >= 0, like the AO terms

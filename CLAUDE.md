@@ -147,18 +147,18 @@ Main CLI entry points are added phase by phase and listed here as they land:
   view per split of `molecule`, `scaffold` and `loco`; the per-step `random_leaky` split only with
   `--strategy random_leaky`; re-run both after a token rebuild)
 - Physics: `uv run ksmech-physics ks-rank --source pmechdb [--split molecule|scaffold] [--kernel
-  oriented|table|mlp|analytic] [--distance 2.0 2.3 ...]` (untrained KS ranking of each step's
+  oriented|table|analytic] [--distance 2.0 2.3 ...]` (untrained KS ranking of each step's
   first arrow: the floor -(KS3 + KS2) and the frozen head on train + val and test, scorer
   table, failure classes, per-class table, `ks_rank_report_<split>_<kernel>[_d<d>].json`;
   oriented blocks are cached under `data/cache/oriented/`), `uv run ksmech-physics baseline
   --source pmechdb [--split molecule|scaffold]` (logistic regression + GBDT ranker,
-  `baseline_report_<split>.json` and the models), `uv run ksmech-physics textbook` (five
-  textbook selectivity cases, expected vs top-3; builds missing QM records and tokens), `uv
-  run ksmech-physics contact-mlp --source pmechdb` (the MLP ablation kernel,
-  `data/cache/contact_mlp.npz`). After a token rebuild: `ksmech-arrows samples` (the 11 KS
+  `baseline_report_<split>.json`, the models and a GBDT with the textbook pools held out), `uv
+  run ksmech-physics textbook` (five textbook selectivity cases, expected vs top-3, cases seen in
+  a model's training marked; builds missing QM records and tokens). The oriented kernel is the
+  frozen baseline `physics/contact/legacy_fixed23.py`. After a token rebuild: `ksmech-arrows samples` (the 11 KS
   pair features with the oriented kernel at 2.0, 2.3 and 3.0 Angstrom by default, and
   `pair_feature_stats_<strategy>.json` from each training part), then `ksmech-orbitals
-  contact-table` and `contact-mlp` for the ablations, then `ks-rank`, `baseline`,
+  contact-table` for the table ablation, then `ks-rank`, `baseline`,
   `textbook`.
 - Training: _not yet_
 - Evaluation: _not yet_

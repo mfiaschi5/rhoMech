@@ -21,7 +21,12 @@ from ksmech.arrows.apply_predicted import (
     labeled_arrows,
 )
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
-from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
+from ksmech.arrows.reactants import (
+    CorrespondenceError,
+    MissingTokens,
+    ReactantTokens,
+    TokenLoader,
+)
 from ksmech.data import chem
 from ksmech.data.schema import ElementaryStep
 
@@ -127,7 +132,9 @@ def member_agreement(
     return out
 
 
-def evaluate_alignment(steps: Iterable[ElementaryStep], loader, member_check: bool = True) -> dict:
+def evaluate_alignment(
+    steps: Iterable[ElementaryStep], loader: TokenLoader, member_check: bool = True
+) -> dict:
     """One pass over `steps`: align every step whose reactants are tokenized, apply the
     labeled tuples of every completely aligned step from their sites, and (optionally) swap
     in every other set member. Returns the alignment report with a `predicted` section."""
