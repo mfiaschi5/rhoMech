@@ -5,27 +5,32 @@ import pytest
 
 from ksmech.arrows.steps import sample_for_step
 from ksmech.physics import baseline as bl
+from ksmech.physics.pairs import F, frozen_head
 from ksmech.physics.ranking import first_label, label_pairs, physical_pair_z
 from tests.test_arrows_steps import mini_processed, missing_iodide  # noqa: F401 (fixture)
 
 
 @pytest.fixture(scope="module")
-def sets(mini_steps, token_loader, contact_kernel):
+def sets(mini_steps, token_loader, pair_kernels):
     names = ("sn2", "proton_transfer", "carbonyl_addition", "e2")
-    samples = [sample_for_step(mini_steps[k], token_loader, contact_kernel) for k in names]
+    samples = [sample_for_step(mini_steps[k], token_loader, pair_kernels) for k in names]
     return samples, [bl.candidate_set(s, token_loader) for s in samples]
 
 
 def test_candidate_features(sets):
     samples, cs_list = sets
-    assert len(bl.FEATURE_NAMES) == 57
+    assert len(bl.FEATURE_NAMES) == 61
     for s, cs in zip(samples, cs_list, strict=True):
-        assert cs.X.shape == (int(s.pair_valid.sum()), 57) and np.isfinite(cs.X).all()
+        assert cs.X.shape == (int(s.pair_valid.sum()), 61) and np.isfinite(cs.X).all()
         z = physical_pair_z(s)[cs.rows, cs.cols]
-        assert np.allclose(cs.X[:, :7], z)
+        assert np.allclose(cs.X[:, :11], z)
         assert np.array_equal(cs.positive, label_pairs(s, first_label(s))[cs.rows, cs.cols])
         assert cs.positive.any() and not (cs.positive & cs.ignore).any()
-        assert np.allclose(bl.untrained_scores(cs.X)["ks3"], -z[:, 0])
+        ks3 = cs.gap_sign * np.exp(z[:, F["log_abs_ks3"]])
+        scores = bl.untrained_scores(cs)
+        assert np.allclose(scores["ks3+ks2"], -(ks3 + z[:, F["ks2"]]))
+        head = frozen_head(cs.X[:, :11], cs.gap_sign, cs.defined)
+        assert np.allclose(scores["frozen_head"], head)  # logits in eV, no statistics
         assert cs.rank(np.where(cs.positive, 1.0, 0.0)) == 0  # a perfect score ranks first
 
 
@@ -49,7 +54,7 @@ def _toy_sets(rng, n_sets=40, n=60):
     """Candidate sets where the positive is the row with the largest feature 3."""
     out = []
     for k in range(n_sets):
-        X = rng.normal(size=(n, 57))
+        X = rng.normal(size=(n, 61))
         pos = np.zeros(n, bool)
         pos[np.argmax(X[:, 3])] = True
         valid = np.ones((1, n), bool)
@@ -61,6 +66,8 @@ def _toy_sets(rng, n_sets=40, n=60):
                 np.arange(n),
                 pos,
                 np.zeros(n, bool),
+                -np.ones(n),
+                np.ones((n, 11), bool),
                 valid,
                 pos[None, :].copy(),
             )
@@ -91,14 +98,14 @@ def test_gbdt_learns_a_ranking_and_round_trips(tmp_path):
     assert np.allclose(back.score(X), model.score(X))
 
 
-def test_baseline_cli(mini_processed, token_loader, contact_kernel, monkeypatch):  # noqa: F811
+def test_baseline_cli(mini_processed, token_loader, pair_kernels, monkeypatch):  # noqa: F811
     import json
 
     import ksmech.physics.cli as cli
     from ksmech.arrows.steps import build_all_samples
 
     build_all_samples(
-        "pmechdb", contact_kernel, ["random"], mini_processed, missing_iodide(token_loader)
+        "pmechdb", pair_kernels, ["random"], mini_processed, missing_iodide(token_loader)
     )
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
     quick = bl.TreeConfig(max_rounds=20, check_every=5)

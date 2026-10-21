@@ -23,9 +23,8 @@ from ksmech.physics.contact_table import DEFAULT_TABLE_PATH
 from ksmech.physics.oriented import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
 from ksmech.physics.oriented import OrientedConfig
 
-# the untrained score: the full KS3 product failed its gate (beat F^2 G on train + val) at
-# every d, also with site-based placement, so F^2 G + KS2 stands in (docs/decisions.md)
-UNTRAINED_SCORE = "fbar2_g+ks2"
+# the untrained physics floor: KS3 + KS2 at d = 2.3 (user decision, docs/decisions.md)
+UNTRAINED_SCORE = "ks3+ks2"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,7 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     t.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
     t.add_argument("--untrained", default=UNTRAINED_SCORE, help="untrained scorer name")
-    t.add_argument("--distance", type=float, default=OrientedConfig().distance)
     t.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
     t.add_argument("--gbdt", type=Path, default=None, help="GBDT model (default: random split)")
     for p in (r, m, b):
@@ -149,11 +147,11 @@ def print_class_table(classes: dict, console: Console, min_n: int = 5) -> None:
     console.print(table)
 
 
-FLOORS = ("ks3", "fbar2_g", "fbar2_g+ks2")  # scorers whose misses are broken down by class
+FLOORS = ("ks3+ks2", "frozen_head")  # scorers whose misses are broken down by class
 
 
 def _subsets(parts: dict, comps: dict) -> dict[str, tuple[list, list]]:
-    """(samples, components) of the test split, train + val (the gate) and everything."""
+    """(samples, components) of the test split, train + val and everything."""
 
     def join(names):
         return [s for p in names for s in parts[p]], [c for p in names for c in comps[p]]
@@ -163,7 +161,7 @@ def _subsets(parts: dict, comps: dict) -> dict[str, tuple[list, list]]:
 
 def clash_summary(samples, comps, ranks) -> dict:
     """CLASH shares: over the valid pairs (within / across fragments), over the pairs ranked
-    first by KS3, and over the first arrows' teacher pairs."""
+    first by the floor (KS3 + KS2), and over the first arrows' teacher pairs."""
     from ksmech.physics.ranking import SCORERS, teacher_cell
 
     intra, inter, top, teacher = [], [], [], []
@@ -171,7 +169,7 @@ def clash_summary(samples, comps, ranks) -> dict:
         v = s.pair_valid
         intra.append(c["clash"][v & ~c["inter"]])
         inter.append(c["clash"][v & c["inter"]])
-        sc = np.where(v, SCORERS["ks3"](c), -np.inf)
+        sc = np.where(v, SCORERS["ks3+ks2"](c), -np.inf)
         top.append(bool(c["clash"][np.unravel_index(np.argmax(sc), sc.shape)]))
         cell = teacher_cell(s)
         if cell is not None:
@@ -184,7 +182,7 @@ def clash_summary(samples, comps, ranks) -> dict:
     return {
         "valid_intramolecular": share(intra),
         "valid_intermolecular": share(inter),
-        "ks3_top_ranked": share(top),
+        "floor_top_ranked": share(top),
         "teacher_pair": share(teacher),
     }
 
@@ -192,7 +190,6 @@ def clash_summary(samples, comps, ranks) -> dict:
 def _rank_report(parts: dict, loader, kernel) -> dict:
     from ksmech.physics.ranking import (
         ALL_SCORERS,
-        SCORERS,
         class_table,
         evaluate,
         failure_classes,
@@ -200,12 +197,13 @@ def _rank_report(parts: dict, loader, kernel) -> dict:
         refresh_validity,
     )
 
+    scorers = ALL_SCORERS
     parts = {p: [refresh_validity(s, loader) for s in xs] for p, xs in parts.items()}
     comps = {p: [pair_components(s, loader, kernel) for s in xs] for p, xs in parts.items()}
     subsets = _subsets(parts, comps)
-    results = {sub: evaluate(*subsets[sub], ALL_SCORERS) for sub in subsets}
+    results = {sub: evaluate(*subsets[sub], scorers) for sub in subsets}
     report = {"scorers": {}, "failure_classes": {}}
-    for name in ALL_SCORERS:
+    for name in scorers:
         report["scorers"][name] = {
             sub: {k: v for k, v in res[name].items() if k != "ranks"}
             for sub, res in results.items()
@@ -213,18 +211,20 @@ def _rank_report(parts: dict, loader, kernel) -> dict:
     everything, all_comps = subsets["all"]
     for name in FLOORS:
         ranks = results["all"][name]["ranks"]
-        fc = failure_classes(everything, all_comps, ranks, loader, SCORERS[name])
+        fc = failure_classes(everything, all_comps, ranks, loader, scorers[name])
         report["failure_classes"][name] = fc
-    rows = report["failure_classes"]["ks3"]["rows"]
-    ranks_all = {n: results["all"][n]["ranks"] for n in ALL_SCORERS}
+    rows = report["failure_classes"]["ks3+ks2"]["rows"]
+    ranks_all = {n: results["all"][n]["ranks"] for n in scorers}
     report["class_table"] = class_table(rows, ranks_all)
     if kernel.config.kernel == "oriented":
-        report["clash"] = clash_summary(everything, all_comps, ranks_all["ks3"])
+        report["clash"] = clash_summary(everything, all_comps, ranks_all["ks3+ks2"])
     sc = report["scorers"]
-    report["gate"] = {
-        f"{n}_{sub}_top5": sc[n][sub]["top5"] for n in FLOORS for sub in ("trainval", "test")
+    report["floor"] = {
+        f"{n}_{sub}_top{k}": sc[n][sub][f"top{k}"]
+        for n in FLOORS
+        for sub in ("trainval", "test")
+        for k in (1, 3, 5)
     }
-    report["gate"]["pass"] = sc["ks3"]["trainval"]["top5"] > sc["fbar2_g"]["trainval"]["top5"]
     return report
 
 
@@ -234,10 +234,9 @@ def cmd_ks_rank(args: argparse.Namespace, console: Console) -> int:
         return 2
     loader = TokenCache(args.tokens_dir)
     distances = args.distance if args.kernel == "oriented" else [None]
-    passed = False
     for d in distances:
         kernel = make_kernel(args, d)
-        tag = args.kernel if d is None else f"{args.kernel}_d{d:g}"
+        tag = f"{args.split}_{args.kernel}" + ("" if d is None else f"_d{d:g}")
         report = {"split": args.split, "kernel": args.kernel, "distance": d}
         report |= _rank_report(parts, loader, kernel)
         print_rank_table(report, console, f"first-arrow ranking, untrained KS, {tag}")
@@ -248,17 +247,17 @@ def cmd_ks_rank(args: argparse.Namespace, console: Console) -> int:
             console.print(
                 "CLASH shares: " + ", ".join(f"{k} {v:.1%}" for k, v in report["clash"].items())
             )
-        gate = report["gate"]
-        verdict = "[green]pass[/green]" if gate["pass"] else "[red]FAIL[/red]"
+        floor = report["floor"]
         console.print(
-            f"gate ({tag}, train + val): KS3 top-5 {gate['ks3_trainval_top5']:.1%} vs F^2 G "
-            f"{gate['fbar2_g_trainval_top5']:.1%} {verdict}"
+            f"floor ({tag}): KS3 + KS2 top-1/3/5 train + val "
+            + "/".join(f"{floor[f'ks3+ks2_trainval_top{k}']:.1%}" for k in (1, 3, 5))
+            + ", test "
+            + "/".join(f"{floor[f'ks3+ks2_test_top{k}']:.1%}" for k in (1, 3, 5))
         )
-        passed |= gate["pass"]
         out = source_dir(args.source, args.processed_dir) / f"ks_rank_report_{tag}.json"
         out.write_text(json.dumps(report, indent=1, default=str) + "\n")
         console.print(f"wrote {out}")
-    return 0 if passed else 1
+    return 0
 
 
 def _baseline_table(results: dict, console: Console, title: str) -> None:
@@ -294,22 +293,22 @@ def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
     n_rows = {p: int(sum(len(cs.X) for cs in v)) for p, v in sets.items()}
     console.print(f"candidate pairs per part: {n_rows}")
     results, scores = {}, {}
-    for name in ("ks3", "fbar2_g", "fbar2_g+ks2", "ks3+ks2", "gap_kernel"):
-        scores[f"untrained {name}"] = lambda X, n=name: bl.untrained_scores(X)[n]
+    for name in ("ks3+ks2", "frozen_head", "ks3", "fbar2_g", "fbar2_g+ks2", "gap_kernel"):
+        scores[f"untrained {name}"] = lambda cs, n=name: bl.untrained_scores(cs)[n]
     lr, scan = bl.select_logistic(sets["train"], sets["val"])
     console.print(f"logistic regression: L2 {lr.l2} (validation scan {scan})")
     gbdt = bl.fit_gbdt(sets["train"], sets["val"], bl.TreeConfig())
     console.print(f"GBDT: {len(gbdt.trees)} trees (validation history {gbdt.history[-3:]})")
-    scores["logistic regression"] = lr.score
-    scores["GBDT ranker"] = gbdt.score
+    scores["logistic regression"] = lambda cs: lr.score(cs.X)
+    scores["GBDT ranker"] = lambda cs: gbdt.score(cs.X)
     for name, fn in scores.items():
         results[name] = {
             part: {
                 k: v
-                for k, v in bl.evaluate_scores(sets[part], [fn(cs.X) for cs in sets[part]]).items()
+                for k, v in bl.evaluate_scores(sets[part], [fn(cs) for cs in sets[part]]).items()
                 if k != "ranks"
             }
-            for part in ("val", "test")
+            for part in ("train", "val", "test")
         }
     _baseline_table(
         results, console, f"first-arrow ranking on {args.split}_test (n {len(sets['test'])})"
@@ -365,7 +364,7 @@ def print_textbook(results, console: Console, title: str) -> int:
 
 
 def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
-    from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
+    from ksmech.physics.pairs import oriented_kernels
     from ksmech.physics.ranking import ALL_SCORERS, pair_components
     from ksmech.physics.textbook import CASES, ensure_tokens, fragment_keys, run_suite
 
@@ -374,14 +373,13 @@ def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
     if built:
         console.print(f"built tokens for {built}")
     loader = TokenCache(args.tokens_dir)
-    oriented = OrientedConfig(distance=args.distance, cache_dir=args.oriented_cache)
-    kernel = ContactKernel(config=ContactConfig(oriented=oriented))
+    kernels = oriented_kernels(args.oriented_cache)
     scorer = ALL_SCORERS[args.untrained]
 
     def untrained(sample, loader):
-        return scorer(pair_components(sample, loader, kernel))
+        return scorer(pair_components(sample, loader, kernels.main))
 
-    results = {f"untrained {args.untrained}": run_suite(untrained, loader, kernel)}
+    results = {f"untrained {args.untrained}": run_suite(untrained, loader, kernels)}
     gbdt_path = (
         args.gbdt or source_dir(args.source, args.processed_dir) / "baseline_gbdt_random.npz"
     )
@@ -396,7 +394,7 @@ def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
             out[cs.rows, cs.cols] = gbdt.score(cs.X)
             return out
 
-        results["GBDT ranker"] = run_suite(trained, loader, kernel)
+        results["GBDT ranker"] = run_suite(trained, loader, kernels)
     else:
         console.print(f"[yellow]{gbdt_path} missing: run `ksmech-physics baseline` first[/yellow]")
     passes = {name: print_textbook(res, console, name) for name, res in results.items()}

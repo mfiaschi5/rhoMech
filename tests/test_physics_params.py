@@ -4,12 +4,13 @@ import numpy as np
 
 from ksmech.orbitals.tokens import build_molecule_tokens
 from ksmech.physics.ks_terms import resonance_integral, wolfsberg_helmholz
+from ksmech.physics.pairs import PAIR_FEATURES
 from ksmech.physics.params import (
     REDUCED,
     SCALING,
     KSParams,
-    scale,
     shell_fock_ev,
+    to_params,
 )
 from ksmech.qm.fukui import HARTREE_TO_EV
 
@@ -18,8 +19,18 @@ def test_defaults_are_the_textbook_values():
     assert KSParams() == KSParams(K=1.75, eps=4.0)
     assert KSParams(K=1.0, eps=1.0) == REDUCED
     p = KSParams(K=2.0, eps=8.0)
-    assert scale(p, "ks3") == 4.0 and scale(p, "ks1") == 2.0 and scale(p, "ks2") == 0.125
-    assert scale(p, "gap_kernel") == 1.0 and set(SCALING) >= {"ks3", "ks2", "ks1", "coupling_sq"}
+    assert set(SCALING) == set(PAIR_FEATURES)
+    z = np.ones((2, 3, len(PAIR_FEATURES)))
+    out = to_params(z, p, PAIR_FEATURES)
+    k = {n: i for i, n in enumerate(PAIR_FEATURES)}
+    assert np.allclose(out[..., k["log_beta2_d2.3"]], 1 + 2 * np.log(2.0))
+    assert np.allclose(out[..., k["log_abs_ks3"]], 1 + 2 * np.log(2.0))
+    assert np.allclose(out[..., k["log_abs_ks1"]], 1 + np.log(2.0))
+    assert np.allclose(out[..., k["ks2"]], 1 / 8.0) and np.allclose(
+        out[..., k["cross_coupling"]], 2
+    )
+    assert np.allclose(out[..., k["log_abs_g"]], 1) and np.allclose(out[..., k["clash"]], 1)
+    assert np.array_equal(to_params(z, REDUCED, PAIR_FEATURES), z)
 
 
 def test_resonance_integral_is_wolfsberg_helmholz():

@@ -157,7 +157,8 @@ class CandidateConfig:
 
     Donor: a doubly occupied token. Acceptor: an empty token that is not a d-type polarization
     function (unless `allow_d_acceptors`) and, for a given donor of the same molecule, not a
-    token sharing a centre with it (`shares_centres`). Until the radical extension, a token
+    token excluded with it (`excluded_pair`, threshold `site_weight`). Until the radical
+    extension, a token
     whose occupation lies in `fractional_band` (a SOMO at 1, a Fermi-smeared level of a
     small-gap molecule) is neither (`exclude_fractional`); its occupation stays the continuous
     model input either way.
@@ -168,6 +169,7 @@ class CandidateConfig:
     empty: float = 0.5  # occupation below this: empty
     exclude_fractional: bool = True
     fractional_band: tuple[float, float] = (0.2, 1.8)  # open interval
+    site_weight: float = 0.20  # `site_pairs_excluded`: weight that makes a near site a self-pair
 
     def is_fractional(self, occupation: float) -> bool:
         lo, hi = self.fractional_band
@@ -184,14 +186,88 @@ def is_d_type(d: OrbitalDescriptors, z_main: int) -> bool:
     return int(np.argmax(d.center_spd[0])) == 2 and int(z_main) not in VALENCE_D
 
 
-def shares_centres(donor: OrbitalToken, acceptor: OrbitalToken) -> bool:
-    """The two tokens of one molecule have a centre atom in common (weight >= tau_atom on the
-    same atom). Such a pair is never an arrow candidate: it generalizes the own-antibond rule
-    (pi -> pi*, sigma -> sigma* of one bond) to every donor-acceptor pair that overlaps on an
-    atom, e.g. a carbonyl's own n -> pi*. Centre indices are atoms of one molecule: only
-    compare tokens of the same fragment."""
-    a = {int(x) for x in donor.descriptors.all_center_atoms}
-    return not a.isdisjoint(int(x) for x in acceptor.descriptors.all_center_atoms)
+def is_antibonding_partner(donor: OrbitalToken, acceptor: OrbitalToken) -> bool:
+    """`acceptor` is an antibonding orbital of the donor's own bond, read from descriptors:
+    both have at least two centres, the same two leading centres, a bonding (positive) overlap
+    population on the donor and an antibonding (negative) one on the acceptor."""
+    d, a = donor.descriptors, acceptor.descriptors
+    shared = (
+        len(d.all_center_atoms) >= 2
+        and len(a.all_center_atoms) >= 2
+        and set(d.all_center_atoms[:2]) == set(a.all_center_atoms[:2])
+    )
+    return shared and d.overlap_population > 0 and a.overlap_population < 0
+
+
+BONDED = 1.3  # x covalent-radii sum, as in the QM layer and the contact table
+
+
+def bonded_matrix(t: MoleculeTokens) -> np.ndarray:
+    """(n_atoms, n_atoms) True for atom pairs within `BONDED` x their covalent-radii sum, False
+    on the diagonal (record geometry)."""
+    pt = Chem.GetPeriodicTable()
+    z = [a.atomic_number for a in t.atoms]
+    pos = np.array([a.position for a in t.atoms], dtype=float).reshape(-1, 3)
+    radii = np.array([pt.GetRcovalent(x) for x in z])
+    d = np.linalg.norm(pos[:, None] - pos[None], axis=-1)
+    return (d <= BONDED * (radii[:, None] + radii[None, :])) & ~np.eye(len(z), dtype=bool)
+
+
+def site_pairs_excluded(
+    t: MoleculeTokens, donors, a, acceptors, b, weight: float, bonded: np.ndarray | None = None
+) -> np.ndarray:
+    """Elementwise over site pairs of one molecule (donor token `donors[k]` at its site atom
+    `a[k]`, acceptor `acceptors[k]` at `b[k]`): True where the two sites are the same atom or
+    bonded and the acceptor carries at least `weight` of its population on a or the donor at
+    least `weight` on b. Such a site pair is an interaction of a bond with itself (n(O) ->
+    sigma*(O-H) of one O-H), not an arrow. A weight below the centre cut (0.15) reads as 0.
+    `bonded`: `bonded_matrix(t)`, if already computed."""
+    a, b = np.asarray(a, dtype=int), np.asarray(b, dtype=int)
+    near = (bonded_matrix(t) if bonded is None else bonded)[a, b] | (a == b)
+    w_acc = np.array([_weight_on(o, x) for o, x in zip(acceptors, a, strict=True)])
+    w_don = np.array([_weight_on(o, x) for o, x in zip(donors, b, strict=True)])
+    return near & ((w_acc >= weight) | (w_don >= weight))
+
+
+def _weight_on(o: OrbitalToken, atom: int) -> float:
+    d = o.descriptors
+    hit = np.flatnonzero(np.asarray(d.all_center_atoms) == atom)
+    return float(np.asarray(d.all_center_weights)[hit[0]]) if len(hit) else 0.0
+
+
+def site_excluded_matrix(t: MoleculeTokens, donors, acceptors, weight: float) -> np.ndarray:
+    """(len(donors), len(acceptors)) True where every site pair of the two tokens (each centre
+    of the donor x each centre of the acceptor) is excluded by `site_pairs_excluded`."""
+    out = np.ones((len(donors), len(acceptors)), dtype=bool)
+    cen_a = [np.asarray(o.descriptors.all_center_atoms, dtype=int) for o in acceptors]
+    j = np.repeat(np.arange(len(acceptors)), [len(c) for c in cen_a])
+    b = np.concatenate(cen_a) if cen_a else np.zeros(0, dtype=int)
+    acc = [acceptors[k] for k in j]
+    bonded = bonded_matrix(t)
+    for i, d in enumerate(donors):
+        for site in np.asarray(d.descriptors.all_center_atoms, dtype=int):
+            a = np.full(len(j), site)
+            hit = site_pairs_excluded(t, [d] * len(j), a, acc, b, weight, bonded)
+            kept = np.zeros(len(acceptors), dtype=bool)
+            np.logical_or.at(kept, j, ~hit)
+            out[i] &= ~kept
+    return out
+
+
+def excluded_pair(
+    donor: OrbitalToken,
+    acceptor: OrbitalToken,
+    t: MoleculeTokens,
+    weight: float = CandidateConfig.site_weight,
+) -> bool:
+    """A donor-acceptor pair of molecule `t` that is never an arrow candidate: the donor's own
+    antibond (the spec's rule), or a pair whose every site pair is a bond interacting with
+    itself (`site_excluded_matrix`). A centre shared at a small weight does not exclude: a
+    tetrahedral intermediate's C-Cl sigma* carries 0.20 on its O(-), and the collapse
+    O -> C stays a candidate (docs/decisions.md). Only compare tokens of one molecule."""
+    if is_antibonding_partner(donor, acceptor):
+        return True
+    return bool(site_excluded_matrix(t, [donor], [acceptor], weight)[0, 0])
 
 
 @dataclass
@@ -291,7 +367,7 @@ class MoleculeTokens:
         self, config: CandidateConfig | None = None, donor: OrbitalToken | None = None
     ) -> list[OrbitalToken]:
         """Empty tokens an arrow may end on: d-type tokens only with `allow_d_acceptors`, and
-        never a token sharing a centre with `donor` (of this molecule) when one is given."""
+        never a token excluded with `donor` (of this molecule) when one is given."""
         config = config or CandidateConfig()
         return [
             o
@@ -299,7 +375,7 @@ class MoleculeTokens:
             if o.descriptors.occupation < config.empty
             and not config.is_fractional(o.descriptors.occupation)
             and (config.allow_d_acceptors or not self.is_d_type(o))
-            and (donor is None or not shares_centres(donor, o))
+            and (donor is None or not excluded_pair(donor, o, self, config.site_weight))
         ]
 
     def atoms_with_only_d_virtuals(self) -> list[int]:

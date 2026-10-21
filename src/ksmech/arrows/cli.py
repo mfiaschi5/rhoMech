@@ -22,7 +22,7 @@ from ksmech.physics.contact_kernel import KERNELS, ContactConfig, ContactKernel
 from ksmech.physics.contact_mlp import DEFAULT_MLP_PATH, load_contact_mlp
 from ksmech.physics.contact_table import DEFAULT_TABLE_PATH, load_tables
 from ksmech.physics.oriented import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
-from ksmech.physics.oriented import OrientedConfig
+from ksmech.physics.pairs import PairKernels, oriented_kernels, single_kernel
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,7 +38,6 @@ def build_parser() -> argparse.ArgumentParser:
     for p in (a, s):
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
     s.add_argument("--kernel", choices=KERNELS, default="oriented", help="contact kernel")
-    s.add_argument("--distance", type=float, default=OrientedConfig().distance)
     s.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
     s.add_argument("--contact-table", type=Path, default=DEFAULT_TABLE_PATH)
     s.add_argument("--contact-mlp", type=Path, default=DEFAULT_MLP_PATH)
@@ -119,24 +118,25 @@ def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
     return 0 if ok and report["flag_fraction"]["ALIGN_FALLBACK"] <= 0.10 else 1
 
 
-def samples_kernel(args: argparse.Namespace) -> ContactKernel:
-    """The contact kernel the samples' pair features are computed with (oriented by default;
-    the table and the MLP need their files)."""
+def samples_kernels(args: argparse.Namespace) -> PairKernels:
+    """The contact kernels the samples' pair features are computed with: the oriented kernel
+    at every feature distance by default; an ablation kernel (table, mlp, analytic) for all."""
+    if args.kernel == "oriented":
+        return oriented_kernels(args.oriented_cache)
     tables = load_tables(args.contact_table) if args.kernel == "table" else None
     mlp = load_contact_mlp(args.contact_mlp) if args.kernel == "mlp" else None
-    oriented = OrientedConfig(distance=args.distance, cache_dir=args.oriented_cache)
-    return ContactKernel(tables, ContactConfig(kernel=args.kernel, oriented=oriented), mlp)
+    return single_kernel(ContactKernel(tables, ContactConfig(kernel=args.kernel), mlp))
 
 
 def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
     try:
-        kernel = samples_kernel(args)
+        kernels = samples_kernels(args)
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         return 2
     report = build_all_samples(
         args.source,
-        kernel,
+        kernels,
         args.strategy,
         args.processed_dir,
         TokenCache(args.tokens_dir),

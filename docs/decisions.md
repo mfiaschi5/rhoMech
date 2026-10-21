@@ -1706,3 +1706,652 @@ Top-1 / 3 / 5 on the test split:
   - In both, SN2 outranks E2 (F^2 G + KS2: 13.8 vs 2.24; GBDT: 3.99 vs 1.43) and 1,4 outranks
     1,2 (23.7 vs 17.1; 3.26 vs 2.41).
 - These supersede the 467-sample numbers of the previous entry.
+
+## 2026-10-20 — KS3 + KS2 floor, local-cap placement, narrowed filter, Prompt 6 pair features (user decisions)
+
+The user's decisions after the site-based sweep, and the three checks they asked for before
+Prompt 6. This entry supersedes the placement ("an intramolecular pair is placed against a
+copy of the molecule"), the shared-centre rule and the pair-feature list of the entries above.
+**Superseded in part by the next entry:** the orbital-level beta, the main-centre filter, the
+geometric intramolecular KS2, the standardized frozen head and the sample / cache versions.
+
+### The floor and the frozen-head kernel
+
+- **Adopted:** -(KS3 + KS2) at d = 2.3 Angstrom is the untrained physics floor
+  (`physics.cli.UNTRAINED_SCORE = "ks3+ks2"`, also the `textbook` default). With KS1 it is
+  the kernel of the frozen head.
+- **The earlier gate compared unequal term sets.** It set KS3 alone (29.4% top-5, train + val)
+  against F^2 G (35.1%), and then adopted F^2 G + KS2. With KS2 on both sides the comparison
+  is KS3 + KS2 44.9% against F^2 G + KS2 35.3% (whole-copy placement, strict shared-centre
+  filter). So the amplitude did carry signal; the gate missed it because only one side had the
+  Coulomb term.
+- `ks-rank` reports the floor (`report["floor"]`) instead of a gate and always exits 0. Its
+  tags are `<split>_<kernel>_d<d>` (`ks_rank_report_random_oriented_d2.3.json`).
+
+### Only the acceptor's local cap is placed (`oriented.cap_atoms`, `_Side.cap`)
+
+- **Rule (user):** for every pair, intra- and intermolecular, only the acceptor's cap is
+  placed: its centre atoms plus their first bonded neighbours, hydrogens included. The
+  acceptor's LMO is truncated to the cap atoms' AOs. The donor fragment stays whole.
+- **Why:** the whole-copy placement made CLASH an artefact. The copy of the molecule landed on
+  the molecule itself, giving CLASH on 55% of the intramolecular pairs and on 26% of the
+  labeled pairs.
+- **Check on 200 random valid intermolecular pairs** (d = 2.3, seed 0):
+  - median relative change of |S| 0.13% (target < 5%), 90th percentile 33.5%;
+  - 47 pairs change by more than 5%, 21 of which clash under one of the two placements; over
+    the 170 pairs clash-free under both, the median change is 0.06% and the 90th percentile
+    10.2%;
+  - CLASH 15.0% -> 6.0%.
+- **The plain cap left 6.5% of the labeled pairs flagged CLASH** (target < 5%). The remaining
+  contacts were donor-side hydrogens within 1.5 Angstrom of the placed cap, in placements that
+  a rotation about the approach axis avoids.
+- **Deviation: roll search** (`N_ROLLS = 6`, `_rolled`). A clashing placement is also tried
+  rolled about the approach axis in 60 deg steps. The roll keeps the two lobes antiparallel
+  and the acceptor site at x_a + d u, so it is the same approach with the cap turned about
+  it. It runs in both tiers (tied lobes, then opposite faces). When every placement clashes,
+  the CLASH value is the smallest |S| over the *unrolled* placements, so a CLASH pair keeps
+  the value it had without the search.
+- **CLASH at d = 2.3 after the cap and the roll search** (576 samples, valid pairs):
+
+  | pairs | whole copy | cap + roll |
+  |---|---|---|
+  | intramolecular | 55.1% | 23.1% |
+  | intermolecular | 35.1% | 15.3% |
+  | labeled (teacher) pairs | 25.6% | 4.0% (intra 12 / 219 = 5.5%, inter 11 / 357 = 3.1%) |
+  | ranked first by the floor | 11.1% (KS3) | 0.9% |
+
+- **Tests:**
+  - brute-force overlaps on two strict-subset caps: methanol n(O) with ethanol sigma*(O-H)
+    (intermolecular) and ethanol n(O) with its own methyl sigma*(C-H) (intramolecular). A
+    mutant taking the global AO offsets fails both;
+  - the exact cap of ethanol sigma*(O-H) is {O, H, C1};
+  - over ethanol's sigma* tokens, some placements clash against the whole molecule but not
+    against the cap, and a cap clash always implies a whole-molecule clash;
+  - `site_contact` (the production path) on both strict-subset caps equals the maximum of the
+    cap-truncated brute force over the tied-lobe placements; a mutant that places the whole
+    molecule in `block_contacts` fails it;
+  - a roll keeps the lobes antiparallel and turns every cap atom about the approach axis by
+    k x 60 deg.
+- **Cost:** `ORIENTED_VERSION = 3`. Per distance, all 1,210 occupied x virtual blocks of the
+  samples take 1,143 s at 2.0, 1,048 s at 2.3 and 786 s at 3.0 on one core; the 732
+  occupied x occupied blocks at 2.3 take 231 s. That is about 0.9 s a block, against
+  3.7-4.6 s with the whole copy.
+- **Disk:** a block stores the same per-pair arrays (S, sites, CLASH), so the cache shrinks in
+  compute, not in bytes. The 4,362 version-3 blocks take about 78 MB. The 7,561 version-2
+  blocks (123 MB) are still in `data/cache/oriented/` for the whole-copy comparison above; the
+  code never reads them.
+
+### Shared-centre filter: the 10 steps that lost every labeled pair
+
+All 10 have the same first arrow: a lone pair on atom X pushed to the neighbouring atom Y,
+with the Y-Z bond breaking (diagnostics in `diagnostics/lost_label_steps.json`):
+
+| step | part | reactants | arrows |
+|---|---|---|---|
+| pmechdb-02d1522c8ec3ce63 | train | `C#CCC1=C([N:10]=[N:20][OH2+:21])C=CC=C1` | lp(10) -> 20; (20-21) -> 21 |
+| pmechdb-c203c91f0a9dfe29 | train | `CC(=O)NC1=CC=C([N:10]=[N:20][OH2+:21])C=C1` | same |
+| pmechdb-3b8d5ef8aeea049c | train | `CC(=O)C(C)(C)[C:20](C)([O-:10])[Cl:21]` | same |
+| pmechdb-4c5143fdfc205f89 | train | `C=C[C:20](CC(C)=[N+]1CCCC1)([O-:10])[Cl:21]` | same |
+| pmechdb-9b1653479e80c4c4 | train | `CC(=O)CC[C:20](C#N)([O-:10])[Cl:21]` | same |
+| pmechdb-b2acc68b38d8dd9f | train | `CC(=O)OC(=O)CC[C:20](C#N)([O-:10])[Cl:21]` | same |
+| pmechdb-e2112b6254124167 | train | `C=C[C:20](C#N)([O-:10])[Cl:21]` | same |
+| pmechdb-4a7b049712ab483b | val | `C=C[C:20](CC(C)=O)([O-:10])[O:21]C(C)=O` | same |
+| pmechdb-e174509f7b8dc941 | val | `...[N+](C)(C)[C:20](OC1=CC=CC=C1)([O-:10])[Cl:21]` | same |
+| pmechdb-69915f38690dce51 | test | `CC(=O)O[C:20](C)([O-:10])[Cl:21]` | same |
+
+- **Eight are tetrahedral collapses** (R-C(O-)(Cl or OAc) -> C=O + leaving group). **Two are
+  diazohydroxide dehydrations** (Ar-N=N-OH2+ -> ArN2+ + H2O).
+- **The acceptor contains the donor atom as a minor centre.** In the collapses the acceptor
+  localizes as one delocalized antibonding token over C 0.62, O 0.20, Cl 0.15 (sigma*(C-Cl)
+  mixed with the C-O(-) pi). Every donor on O therefore shares a centre with it.
+- **Verdict:** a three-lens panel (mechanism, orbital picture, dataset annotation) judged each
+  step independently: 30 of 30 votes "genuine elementary step", confidence 0.80-0.96. So no
+  `resonance_step` tag.
+- **Filter narrowed, per the instruction** (`tokens.excluded_pair`). Within one fragment, a
+  pair is excluded when:
+  - the acceptor is the donor's own antibond (same two leading centres, the donor bonding,
+    the acceptor antibonding: the spec's rule, kept), or
+  - donor and acceptor have the same main centre.
+- **Tests:**
+  - acetone n(O) -> pi*(C=O) is kept (main centres O and C);
+  - the own pi -> pi* and a same-main-centre pair are excluded;
+  - the 1,2-hydride shift is kept.
+- **Effect:** all 10 steps have a valid labeled pair again.
+- **Side effect on the floor: the narrowed rule re-admits same-atom pairs, which the floor
+  ranks first.** n(O) -> sigma*(O-H) of the same O-H (main centre H) shares O but not the
+  main centre, so it is a candidate again. Floor top-1/3/5, cap placement, d = 2.3, random
+  split:
+
+  | filter | train + val | test |
+  |---|---|---|
+  | narrowed (adopted) | 21.0 / 28.2 / 33.7 | 18.2 / 22.7 / 33.3 |
+  | strict shared-centre | 24.9 / 39.4 / 45.7 | 28.8 / 39.4 / 47.0 |
+
+  In 253 of the 576 steps the floor's top pair is one that only the narrowed rule allows:
+
+  | re-admitted pair | steps where it ranks first |
+  |---|---|
+  | n(O) -> sigma*(O-H) | 117 |
+  | n(O) -> delocalized pi*(C-O) | 45 |
+  | n(O) -> pi*(C-O) | 33 |
+  | n(Br) -> sigma*(H-Br) | 18 |
+
+  The proton transfers carry the loss. Floor top-5 under the narrowed and the strict filter,
+  same cap placement: lone_pair(O) -> sigma*(H-O) 0% and 35%, lone_pair(N) -> sigma*(H-O) 4%
+  and 37%, pi(C-C) -> sigma*(H-O) 0% and 32%. A rule in between (for example, excluding acceptors that carry the donor's main centre above
+  a weight) is a user decision; nothing was changed beyond the instruction.
+
+### HBr protonations (pi(C=C) / sigma(C-C) -> sigma*(H-Br))
+
+- 34 steps have sigma*(H-Br) as the labeled acceptor (the earlier count of 29 took only the
+  three largest classes). The teacher pair's donor is:
+  - a C-C token of the C=C (sigma or pi) in 22;
+  - an O lone pair in 7;
+  - another donor in 5: pi(O-N) 2, lone_pair(P), pi(N-C), lone_pair(C-Mg).
+- **The floor misses all 34**, as do -KS3, F^2 G + KS2 and S^2 G. Some reach the top 5 under
+  other scores:
+  - -KS2 alone: 2 of the 11 pi(C-C) steps and 2 of the 7 O-lone-pair steps;
+  - the frozen head: 3 of the 7 O-lone-pair steps.
+- **Five of them** (`diagnostics/hbr_protonations.json`). The rank of the labeled pair under
+  each score (lower is better):
+
+  | step | reactants | -G | beta^2 | -KS2 | -KS3 | floor |
+  |---|---|---|---|---|---|---|
+  | 02fbef20 | 1,3,5-triphenylcyclopentene + HBr | 555 | 1382 | 6 | 1308 | 492 |
+  | 054b3fa9 | 1,7,7-triphenylcycloheptene + HBr | 614 | 1718 | 16 | 1644 | 502 |
+  | 0cf491aa | 1,6,6-triphenylcyclohexene + HBr | 585 | 1733 | 13 | 1542 | 499 |
+  | 19c0ec8c | 1,4-cyclohexadiene + HBr | 33 | 243 | 28 | 175 | 79 |
+  | 1b02a817 | 1-methyl-1-vinylcyclopentane + HBr | 22 | 532 | 9 | 429 | 94 |
+
+- **Labeled pair:** G -0.12 to -0.18, beta^2 0.013-0.030, KS2 -0.001 to -0.046 eV.
+- **What outranks it** (the floor's top five, the same in every step):
+  - HBr's own n(Br) -> sigma*(H-Br), intramolecular: G -0.079, beta^2 4.47, KS2 -0.32 eV
+    (the bonded H(+) and Br(-)). It is first in 4 of 5 steps. It is a re-admitted same-atom
+    pair (above).
+  - Br lone pairs -> pi*(C=C) of the alkene, intermolecular: G -0.12 to -0.30, beta^2 2-6.
+- **Why beta^2 is 100x smaller: the Wolfsberg-Helmholz mean cancels.** beta = K |S| (E_r +
+  E_s) / 2 with the LMO Fock diagonals. The sigma*(H-Br) LMO lies at E_s = +8.78 eV, so
+  (E_r + E_s) / 2 = -1.18 eV, against -8.56 eV for n(Br) -> pi*(C=C). The overlaps are
+  similar (|S| 0.084 against 0.108). A high-lying acceptor gets a near-zero resonance
+  integral, whatever its overlap.
+- -KS2 alone places the labeled pair at rank 6-28: the protonation is charge-controlled, and
+  the floor's KS2 is too small next to KS3 to show it.
+
+### Pair features for Prompt 6 (`physics.pairs.PAIR_FEATURES`, replacing the list)
+
+| feature | definition | defined | K, eps dependence |
+|---|---|---|---|
+| `log_beta2_d2.0`, `_d2.3`, `_d3.0` | log beta^2, oriented contact at that d | all | + 2 log K |
+| `log_abs_g` | log \|G\| (sign in `pair_gap_sign`) | all | none |
+| `log_abs_ks3` | log \|beta^2 G\| at 2.3 | all | + 2 log K |
+| `ks2` | signed Coulomb, main centres | main centres differ | x 1 / eps |
+| `log_abs_ks1` | log KS1 (repulsion with the occupied tokens near m(s)) | KS1 > 0 | + log K |
+| `inter` | 1 between fragments | all | none |
+| `centroid_distance` | Angstrom | within a fragment | none |
+| `cross_coupling` | \|cross-centre coupling\| | within a fragment | x K |
+| `clash` | 1 where the argmax site pair's placements all clash | all | none |
+
+- **Three beta^2 distances:** the decay from 2.0 to 3.0 Angstrom encodes how diffuse the
+  lobes are.
+- **Stored at K = eps = 1** (`REDUCED`). `params.to_params` applies the dependence above, so
+  K and eps stay learnable. Logs are floored at 1e-12, and undefined entries are stored as 0.
+- **Standardized on the training part only:** `pair_feature_stats_<strategy>.json`, with
+  mean, std and count per feature over the defined entries of every (occupied, virtual) pair
+  of the strategy's train samples, at K = 1.75, eps = 4. Written by `ksmech-arrows samples`.
+  On the random split's train part: log|KS3| std 2.25, KS2 std 0.116 eV, log|KS1| std 2.31.
+- **`pair_clash` is gone** (clash is a feature). Samples are version 5.
+- **Frozen head** (`pairs.frozen_head`, no parameters):
+  z(log|KS3|) - z(KS2) - z(log|KS1|), with z the standardized feature. Higher means more
+  favourable:
+  - a larger stabilization magnitude raises it;
+  - an attractive (negative) KS2 raises it;
+  - a larger closed-shell repulsion lowers it.
+
+  It reads the magnitude of KS3, so an inverted-gap pair (G > 0, which the floor penalizes)
+  is not penalized: 161 of the 833,972 valid pairs (0.02%), between fragments.
+
+### KS1 is phase-free (found in review)
+
+- **The bug:** within a molecule, KS1(r, r') was the bilinear form -l_r^T Q l_r'. Its sign
+  follows the arbitrary phase of each Pipek-Mezey LMO, so summing it over the occupied tokens
+  near the acceptor's main centre let terms of random sign cancel. log|KS1| therefore
+  depended on the phases.
+- **The fix:** KS1(r, r') = |l_r^T Q l_r'|, positive like the intermolecular contact form.
+  This departs from spec v3's Eq. for term 1, written with the signed coefficients; the spec
+  is unchanged.
+- **Test:** flipping the sign of half of methanol's occupied LMOs leaves the matrix
+  unchanged.
+- **Undefined entries:** log|KS1| where KS1 = 0 (inside a single-atom fragment: no resonance
+  integral within an atom) was stored as log(1e-12) = -27.6. It is now 0, as documented,
+  tested on Br(-).
+- The floor does not use KS1. The frozen head's top-5 on train + val went from 20.4% to
+  24.5%.
+
+### Floor and frozen head (d = 2.3, 576 samples)
+
+Top-1 / 3 / 5:
+
+| scorer | random train + val (510) | random test (66) | scaffold train + val (556) | scaffold test (20) |
+|---|---|---|---|---|
+| **floor -(KS3 + KS2)** | **21.0 / 28.2 / 33.7** | **18.2 / 22.7 / 33.3** | **21.0 / 27.9 / 33.8** | **10.0 / 20.0 / 30.0** |
+| frozen head | 9.0 / 15.7 / 24.5 | 4.5 / 10.6 / 22.7 | 9.2 / 15.6 / 24.6 | 0.0 / 0.0 / 10.0 |
+| -KS3 | 18.2 / 26.5 / 29.6 | 24.2 / 31.8 / 33.3 | 19.2 / 27.3 / 30.4 | 10.0 / 20.0 / 20.0 |
+| F^2 G + KS2 | 18.8 / 30.0 / 35.3 | 22.7 / 31.8 / 37.9 | 19.2 / 30.2 / 35.6 | 20.0 / 30.0 / 35.0 |
+| S^2 G | 22.0 / 31.6 / 34.7 | 25.8 / 34.8 / 43.9 | 22.7 / 32.2 / 36.0 | 15.0 / 25.0 / 30.0 |
+| G | 26.5 / 35.3 / 40.6 | 25.8 / 36.4 / 39.4 | 26.8 / 35.6 / 40.6 | 15.0 / 30.0 / 35.0 |
+
+- **The narrowed filter set the floor's level** (33.7% top-5 against 45.7% with the strict
+  filter, above), not the cap.
+- **The frozen head is weak untrained, because equal weights over-weight KS2.**
+  Standardization multiplies KS2 by 1 / 0.116 against 1 / 2.25 for log|KS3|, about 20 times
+  more weight than in the eV sum. Its terms on random train + val, top-5:
+
+  | term | top-5 |
+  |---|---|
+  | z(log\|KS3\|) | 30.4 |
+  | z(log\|KS3\|) - z(KS2) | 24.3 |
+  | z(log\|KS3\|) - z(log\|KS1\|) | 22.0 |
+  | -z(KS2) | 3.7 |
+  | -z(log\|KS1\|) | 12.5 |
+
+  The head is a fixed kernel the trained heads sit beside, so it was left as specified.
+
+**Per-class floor at d = 2.3** (random split, all 576; classes with n >= 10):
+
+| labeled pair | n | floor | -KS3 | F^2 G + KS2 | S^2 G | G | frozen head |
+|---|---|---|---|---|---|---|---|
+| lone_pair(O) -> sigma*(H-O) | 57 | 0% | 0% | 0% | 9% | 2% | 23% |
+| lone_pair(O) -> sigma*(C-O) | 50 | 40% | 8% | 8% | 8% | 12% | 42% |
+| pi(C-C) -> pi*(C-O) | 42 | 76% | 81% | 90% | 71% | 90% | 36% |
+| lone_pair(O) -> delocalized pi*(C-O) | 40 | 65% | 12% | 18% | 12% | 18% | 82% |
+| pi(C-C) -> pi*(C-N) | 31 | 100% | 100% | 100% | 100% | 100% | 19% |
+| lone_pair(N) -> sigma*(H-O) | 27 | 4% | 0% | 0% | 37% | 4% | 4% |
+| lone_pair(O) -> pi*(C-O) | 23 | 65% | 96% | 100% | 87% | 100% | 43% |
+| pi(C-C) -> sigma*(H-O) | 22 | 0% | 0% | 0% | 73% | 0% | 0% |
+| pi(C-C) -> sigma*(C-O) | 19 | 21% | 21% | 21% | 21% | 26% | 5% |
+| pi(C-C) -> pi*(C-C) | 14 | 57% | 93% | 93% | 93% | 93% | 0% |
+| pi(C-C) -> sigma*(C-Br) | 13 | 0% | 0% | 31% | 8% | 92% | 0% |
+| sigma(C-C) -> sigma*(H-Br) | 11 | 0% | 0% | 0% | 0% | 0% | 0% |
+| pi(C-C) -> sigma*(H-Br) | 11 | 0% | 0% | 0% | 0% | 0% | 0% |
+| lone_pair(N) -> pi*(C-O) | 10 | 100% | 100% | 100% | 100% | 100% | 30% |
+
+### Why the floor misses: it prefers intramolecular pairs
+
+- **Measured on the 576 samples:**
+  - the floor's top pair is intramolecular in 442 steps (77%);
+  - the labeled pair is intermolecular in 357 (62%; 366 steps have two or more fragments).
+- **The floor's top pairs, by how the two tokens' centres relate** (median -KS3 and -KS2 of
+  that pair, eV):
+
+  | top pair | steps | -KS3 | -KS2 |
+  |---|---|---|---|
+  | intramolecular, a shared centre (re-admitted) | 253 | 0.08 | 0.62 |
+  | intermolecular | 134 | 1.14 | 0.03 |
+  | intramolecular, farther | 111 | 1.08 | 0.02 |
+  | intramolecular, centres bonded (geminal / vicinal) | 78 | 0.10 | 0.59 |
+
+  The labeled intermolecular pairs have a median -KS3 of 0.05 eV and -KS2 of 0.07 eV.
+- **Within a fragment, KS2 is taken between the main centres at their geometric distance.**
+  For bonded atoms that is the bond's own polarity (O(-) H(+) at 1 Angstrom), about 0.6 eV,
+  against at most a few tenths at the van der Waals contact used between fragments.
+- **Ablation, not adopted:** intramolecular KS2 at the van der Waals contact. Floor top-5,
+  train + val / test:
+  - narrowed filter: 33.7 / 33.3 -> 36.5 / 33.3;
+  - strict filter: 45.7 / 47.0 -> 40.2 / 40.9.
+
+  The labeled geminal / vicinal pairs (111) need that Coulomb term too (median -KS2 0.43 eV).
+- **The whole-copy CLASH had hidden this.** It flagged 55% of the intramolecular pairs and gave
+  them the smallest |S| found, an accidental penalty on intramolecular pairs. The cap removed
+  it.
+- **Option for the user: a weighted shared-centre rule.** Within a fragment, exclude a pair
+  when one atom carries at least w of the population in both tokens (own antibond kept).
+  Floor top-1/3/5, random split:
+
+  | w | train + val | test | lost steps with a label |
+  |---|---|---|---|
+  | 0.15 (= tau_atom, the strict rule) | 24.9 / 39.4 / 45.7 | 28.8 / 39.4 / 47.0 | 0 / 10 |
+  | **0.25** | **23.9 / 38.4 / 45.7** | **28.8 / 39.4 / 45.5** | **10 / 10** |
+  | 0.30 | 22.5 / 30.4 / 36.5 | 22.7 / 27.3 / 36.4 | 10 / 10 |
+  | 0.35-0.40 | 21.6 / 28.2 / 33.7 | 19.7 / 22.7 / 33.3 | 10 / 10 |
+
+  At w = 0.25 it keeps all 10 steps and the strict rule's floor. The window is narrow: the
+  collapses' acceptor has O at 0.20, and by 0.30 the re-admitted pairs are back. Not adopted,
+  because the instruction named the main-centre rule.
+
+### Baselines (`ksmech-physics baseline`, 61 features, samples version 5)
+
+Top-1 / 3 / 5. The trained models were fitted on train, so train + val is not a fair number
+for them; their val and test are.
+
+| scorer | random val (56) | random test (66) | scaffold val (23) | scaffold test (20) |
+|---|---|---|---|---|
+| floor -(KS3 + KS2) | 10.7 / 17.9 / 25.0 | 18.2 / 22.7 / 33.3 | 8.7 / 8.7 / 13.0 | 10.0 / 20.0 / 30.0 |
+| frozen head | 5.4 / 8.9 / 19.6 | 4.5 / 10.6 / 22.7 | 4.3 / 4.3 / 8.7 | 0.0 / 0.0 / 10.0 |
+| G | 17.9 / 30.4 / 37.5 | 25.8 / 36.4 / 39.4 | 8.7 / 13.0 / 17.4 | 15.0 / 30.0 / 35.0 |
+| logistic regression | 28.6 / 48.2 / 53.6 | 34.8 / 57.6 / 66.7 | 8.7 / 30.4 / 34.8 | 35.0 / 55.0 / 60.0 |
+| GBDT ranker | 71.4 / 80.4 / 91.1 | **69.7 / 87.9 / 90.9** | 30.4 / 52.2 / 60.9 | **55.0 / 70.0 / 75.0** |
+
+- **Model choices:**
+  - logistic regression: L2 0.1 on both splits;
+  - GBDT: 120 trees (random) and 150 (scaffold).
+- **Against version 3** (whole copy, strict filter, 7 features): GBDT random test 68.2 / 84.8
+  / 95.5, scaffold test 55.0 / 75.0 / 75.0. The trained ranker is unchanged within the noise
+  of 66 and 20 test steps, and it learns past the floor's intramolecular bias. Logistic
+  regression improved on random test top-5 from 63.6 to 66.7.
+- **Textbook suite** (expected pair in the top 3):
+  - **floor 1 / 5.** F^2 G + KS2 scored 3 / 5. The floor misses:
+    - MeO(-) + MeCl (rank 58: methoxide's n(O) -> its own sigma*(C-H));
+    - MeO(-) + EtBr (rank 34: EtBr's n(Br) -> its own sigma*(C-H));
+    - cyanide + acrolein (rank 8);
+    - H3O(+) + acetone (rank 12: H3O(+)'s n(O) -> its own sigma*(O-H)).
+  - **GBDT 4 / 5.** It misses cyanide + acrolein (rank 11).
+  - Both scores put SN2 above E2 and 1,4 above 1,2:
+
+    | | SN2 vs E2 | 1,4 vs 1,2 |
+    |---|---|---|
+    | floor | 0.127 vs 0.106 (ranks 34 and 46) | 0.414 vs 0.413 (ranks 8 and 9) |
+    | GBDT | 5.38 vs 1.5 | 2.13 vs 2.06 (ranks 11 and 13) |
+
+## 2026-10-21 — AO-level beta, site-pair filter, frozen head in eV, KS2 difference form (user decisions)
+
+The user's seven decisions of 2026-10-20 on the previous entry, as implemented, with the
+deviations and the measurements. Samples are version 6, the oriented cache version 5. Every
+number is on the 576 samples (random 454 / 56 / 66, scaffold 533 / 23 / 20) at d = 2.3.
+
+### 1. beta at AO level (the spec's form; the orbital-level mean was a spec error)
+
+- **Formula:** beta_rs = K sum_mu,nu l_mu,r l_nu,s S^c_mu,nu (F_mu,mu + F_nu,nu) / 2.
+  - S^c is the AO overlap at the oriented placement (the acceptor's LMO on its local cap).
+  - F_mu,mu is each molecule's own GFN2 Fock diagonal, in eV.
+  - The sum is contracted as half of (f l_r)^T S^c l_s + l_r^T S^c (f l_s), sharing the
+    spline evaluations with S (`oriented._group_overlap`).
+  - It is stored at K = 1 in `Contacts.beta`; `params.to_params` applies K as before.
+  - The ablation kernels (table, MLP) keep their dominant-shell Fock diagonal.
+- **Placement still chosen by the largest |S|.** beta is taken from that same placement,
+  including the CLASH fallback.
+- **Phase:** beta is stored times sign(S_rs). The LMO signs are arbitrary, and flipping one
+  flips both S and the sum, so beta sign(S) does not depend on them. It is negative for bound
+  AOs, like the old K |S| F.
+- **Deviation, found in review: shell-averaged AO energies** (`oriented.ao_energies`).
+  - GFN2's anisotropic terms split the lab-frame Fock diagonal within a p or d shell: 0.06-0.2
+    eV on C and O p, 0.4 eV on Br d.
+  - That split depends on the record's Cartesian orientation, which would make beta depend on
+    it too, against "geometry enters only through distances".
+  - The shell average is rotation-invariant. Test: a rotated single point of acetone gives the
+    same averages, while its raw diagonal moves.
+  - The intramolecular Wolfsberg-Helmholz B (KS1 within a fragment, the cross-centre
+    coupling) uses the same averages (`ks_terms.wh_matrix`).
+- **Cache: `ORIENTED_VERSION = 5`.** Version 4 was the same with the raw diagonal; its partial
+  warm-up (833 blocks) was deleted unused.
+  - The warm-up computed 1,210 occupied x virtual blocks at each of 2.0, 2.3 and 3.0, plus 732
+    occupied x occupied at 2.3.
+  - Timing on one core: 1,413 s for d = 2.3 including the occupied x occupied blocks; 2,063 s
+    for 2.0 and 3.0 together.
+- **The user's test, "AO-level beta at least 10x the orbital-level one for HBr's
+  n(Br) -> sigma*(H-Br)", does not hold. Measured 7.5x** on the ALPB record.
+  - beta_AO / (K |S|) = -12.0 eV, the Br 4p / H 1s scale.
+  - The orbital-level mean is (E_r + E_s) / 2 = (-12.01 + 8.78) / 2 = -1.6 eV.
+  - So this pair cannot reach 10x; the labeled pi(C=C) -> sigma*(H-Br), with a mean of
+    -1.18 eV, would be about 10x.
+  - On the gas-phase force-field single point of the fixtures, sigma*(H-Br) lies at +1.98 eV
+    and the ratio is 2.5x.
+  - Recorded as a strict xfail with these numbers, next to a passing test of what the physics
+    gives: at least 5x, and |beta| / (K |S|) above 8 eV.
+- **Effect on the HBr protonations** (`diagnostics/hbr_protonations.json`, the same five steps
+  as before):
+  - the labeled beta^2 rose from 0.013-0.030 to 0.107-0.142 (sigma(C-C) labels) and to 2.38
+    (the pi(C-C) label);
+  - their floor ranks moved from 492 / 502 / 499 / 79 / 94 to 103 / 117 / 118 / 33 / 49;
+  - none reaches the top 5.
+  - In the three large molecules the floor's top five are now intermolecular sigma(C-C) ->
+    sigma*(H-Br) of other C-C bonds (beta^2 about 19).
+  - In the two small ones the top three are HBr's own n(Br) -> sigma*(H-Br), which the 0.25
+    site rule does not exclude (below). Ranks 4-5 are intermolecular n(Br) -> sigma*(C-H)
+    (beta^2 about 19).
+  - -KS2 alone ranks the labeled pair 3-25.
+
+### 2. The site-pair filter
+
+- **Rule (user):** exclude when sites a (donor) and b (acceptor) are identical or bonded, and
+  w_a(acceptor) >= 0.25 or w_b(donor) >= 0.25.
+- **Implemented at the level of the site pair, where the sites are defined**
+  (`tokens.site_pairs_excluded`, bonds at 1.3x the covalent radii, `tokens.bonded_matrix`).
+  - A token pair of one fragment is excluded when every one of its centre pairs is excluded
+    (`tokens.site_excluded_matrix`), or when it is the donor's own antibond (the spec's rule,
+    kept).
+  - This is read from descriptors and geometry only, so `pair_valid` needs no kernel.
+  - In a one-molecule oriented block (`intra=True`) an excluded site pair wins the
+    pair-track maximum only when the token pair has no admissible site pair (key offset -100,
+    against -10 for CLASH). Such a token pair is then excluded from `pair_valid` anyway.
+  - The intra block has its own cache key with the threshold. Two fragments that are copies of
+    one molecule use the unfiltered intermolecular block; the `same=` keyword of the
+    `ContactKernel` methods selects which (`pairs` passes f == g).
+- **Why per site pair.** If the rule were applied only to the argmax site pair, keeping a
+  collapse would depend on whether (O, O) or (O, C) happened to win. (O, O) is always excluded,
+  because a donor carries most of its weight on its own site.
+- **Verification at 0.25** (critical weights in `diagnostics/site_rule_critical_weights.json`;
+  a pair is excluded iff w <= w*, with w* the smallest over its centre pairs of the larger of
+  the two weights):
+  - **the 10 collapse / dehydration steps keep a valid label at any threshold.** Each labeled
+    pair has a site pair that is neither identical nor bonded (O -> Cl, O -> leaving O, N -> O),
+    so w* = -inf. No step lacks a valid label (`n_no_valid_label` 0 on both splits).
+  - **n(O) -> sigma*(O-H) of the same O-H:** 650 of the 667 pairs are excluded. The 17 left
+    have an O share in the sigma* of 0.163-0.243. The median w* is 0.29.
+  - **HBr's own n(Br) -> sigma*(H-Br): none of the 102 is excluded.** In the ALPB record
+    sigma*(H-Br) carries 0.751 on H and 0.249 on Br, just under 0.25. The gas-phase fixture
+    has a larger Br share, so the unit test excludes it.
+- **Margin.** Floor top-1/3/5, random split (`diagnostics/site_rule_margin.json`):
+
+  | site weight | floor train + val | floor test | n(O) -> sigma*(O-H) left (of 667) | HBr's own pair left (of 102) | collapse steps kept |
+  |---|---|---|---|---|---|
+  | 0.20 | 20.0 / 37.1 / 42.4 | 21.2 / 33.3 / 43.9 | 4 | 0 | 10 / 10 |
+  | **0.25 (adopted)** | 20.0 / 37.1 / 42.4 | 21.2 / 33.3 / 43.9 | 17 | 102 | 10 / 10 |
+  | 0.30 | 20.0 / 37.1 / 42.4 | 21.2 / 33.3 / 43.9 | 391 | 102 | 10 / 10 |
+
+  - **The floor does not move between 0.20 and 0.30.** Pairs do change: 329 pairs at 0.20 and
+    858 at 0.30, and 66 and 16 of them rank in a step's top five. The labeled pair's rank
+    changes in 69 and 53 steps. In none of them does it cross the top five, because those
+    labels sit at ranks 30-3,400 (mostly the HBr protonations).
+  - The difference-form KS2 already demotes most same-bond pairs: for O(-) H(+) the bond's own
+    polarity becomes a cost (median KS2 of the threshold-dependent pairs +0.18 / +0.34 eV).
+  - **The threshold decides which pairs are candidates, not the floor.** At 0.20 HBr's own
+    pair is excluded and 4 same-bond O-H pairs remain, with nothing lost. Left at the user's
+    0.25 pending their decision.
+
+### 3. The frozen head in eV
+
+- **Logits:** -(KS3 + KS2 + KS1) / tau, no standardization (`pairs.frozen_head`,
+  `pairs.ks_energies`, `SCORERS["frozen_head"]`).
+  - tau is `KSParams.tau`: 1 eV at initialization, learnable, positive. It only scales the
+    logits.
+  - The learned heads keep the standardized log features (`pair_feature_stats_*.json`).
+- **KS1 sign.** KS1 is stored as the repulsion, >= 0 (the spec's term (1) is positive), so it
+  enters with a plus sign and lowers the logit. The user wrote -(KS3 + KS2 - KS1), which reads
+  KS1 as the stabilization-signed sum Sum (q + q) beta S. Read literally against our positive
+  KS1, it would reward repulsion.
+- **By construction** (tests):
+  - the ks-rank scorer equals the head on the stored features;
+  - without KS1 the ranking equals the floor's -(KS3 + KS2) exactly;
+  - tau does not change the ranking.
+- **Finding: KS1 dominates, and its two forms differ in scale.** Medians over the valid
+  candidates (eV, `diagnostics/frozen_head_terms.json`):
+
+  | term | intramolecular | intermolecular |
+  |---|---|---|
+  | \|KS3\| | 0.027 | 0.035 |
+  | \|KS2\| | 0.002 | 0.008 |
+  | KS1 | 7.40 | 0.51 |
+
+  - At the floor's top pair the medians are KS3 1.17 eV and KS1 2.47 eV.
+  - The within-fragment form is the full AO sum. The contact form carries the extra %Vbur
+    product / 10^4 of the spec, about 0.1.
+  - So the head mostly ranks by low KS1 and favours intermolecular pairs: its top pair is the
+    floor's in 151 of 576 steps.
+  - Top-5: 28.6% on train + val, 27.3% on test (random).
+  - A common scale for the two KS1 forms is a user decision; nothing was changed.
+
+### 4. Intramolecular KS2 in difference form
+
+- **Formula:** KS2 = q_a q_b / eps (1 / R_contact - 1 / R_reactant) within a fragment, with
+  R_contact the van der Waals sum (the distance the intermolecular form uses). Intermolecular
+  KS2 is unchanged.
+- It is undefined when the two main centres are one atom.
+- `pair_block(..., ks2_form="geometric")` keeps the old form for the ablation.
+- The atom-level `atom_coulomb` matrix is unchanged: geometric within a fragment.
+- **Floor top-1/3/5, with the difference form / with the geometric form**
+  (`diagnostics/ks2_forms.json`):
+
+  | split | train + val | test |
+  |---|---|---|
+  | random | 20.0 / 37.1 / 42.4 vs 20.2 / 31.2 / 37.5 | 21.2 / 33.3 / 43.9 vs 19.7 / 27.3 / 37.9 |
+  | scaffold | 20.3 / 36.7 / 42.6 vs 20.7 / 31.3 / 37.6 | 15.0 / 35.0 / 40.0 vs 5.0 / 15.0 / 35.0 |
+
+  The floor's top pair is intramolecular in 53.5% of the train + val steps, against 72.7%
+  with the geometric form (62% of the labeled pairs are intermolecular).
+
+### 5-7. KS1 magnitude, cap, cache, QM batch
+
+- **KS1 = |l_r^T Q l_r'| per orbital pair is approved** (user, 2026-10-20). It deviates from
+  the spec's term-1 expression, which is written with the signed coefficients; the user will
+  update the spec.
+- **The contact KS1 now takes |beta|:** each AO term -(N + N) beta S is positive for bound
+  AOs. So KS1 >= 0 in both forms and log|KS1| loses no sign.
+- **The acceptor cap and the roll search are approved.**
+- **The version-2 oriented blocks were deleted:** 7,561 files, 114 MB apparent size (the
+  123 MB recorded earlier is disk usage).
+  - 7,556 were identified by their recomputed version-2 keys.
+  - 5 were written before the version-3 code existed (textbook molecules).
+  - The 4,381 version-3 blocks (73 MB apparent) are now unused too and are kept until the user
+    says.
+- **The PMechDB QM batch was restarted** on 2026-10-20 at 20:58 with 2 workers, to leave room
+  for the warm-up (`full_run.log`).
+
+### Results (sample version 6, d = 2.3)
+
+Top-1 / 3 / 5. The trained models were fitted on train, so only val and test are fair for them.
+
+| scorer | random train + val (510) | random test (66) | scaffold train + val (556) | scaffold test (20) |
+|---|---|---|---|---|
+| **floor -(KS3 + KS2)** | **20.0 / 37.1 / 42.4** | **21.2 / 33.3 / 43.9** | **20.3 / 36.7 / 42.6** | **15.0 / 35.0 / 40.0** |
+| frozen head (eV) | 12.7 / 26.1 / 28.6 | 9.1 / 21.2 / 27.3 | 12.4 / 25.5 / 28.6 | 10.0 / 25.0 / 25.0 |
+| -KS3 | 19.6 / 30.4 / 35.7 | 22.7 / 30.3 / 39.4 | 20.3 / 30.8 / 36.5 | 10.0 / 20.0 / 25.0 |
+| G | 26.7 / 36.1 / 40.6 | 25.8 / 37.9 / 40.9 | 27.0 / 36.5 / 40.8 | 15.0 / 30.0 / 35.0 |
+| logistic regression (val / test) | 28.6 / 46.4 / 55.4 | 33.3 / 59.1 / 72.7 | 8.7 / 21.7 / 39.1 | 30.0 / 50.0 / 55.0 |
+| GBDT ranker (val / test) | 69.6 / 89.3 / 92.9 | **72.7 / 92.4 / 93.9** | 26.1 / 47.8 / 73.9 | **55.0 / 75.0 / 75.0** |
+
+- **Against the previous entry:**
+  - the floor's top-5 is 42.4 / 43.9 (was 33.7 / 33.3 on random train + val / test) and 40.0 on
+    the scaffold test (was 30.0);
+  - the GBDT is unchanged within the noise of 66 and 20 test steps.
+  - Model choices: logistic regression L2 0.1 (random) and 1.0 (scaffold); GBDT 170 and 100
+    trees.
+- **CLASH at d = 2.3:**
+  - valid pairs: 24.5% intramolecular, 15.3% intermolecular;
+  - teacher pairs: 4.3%;
+  - the floor's top-ranked pairs: 8.5%.
+- **Per class, floor top-5** (all 576), against the previous entry:
+  - proton transfers recovered:
+    - n(O) -> sigma*(H-O): 0% -> 63%;
+    - n(N) -> sigma*(H-O): 4% -> 74%;
+    - pi -> sigma*(H-O): 0% -> 36%;
+    - n(O) -> sigma*(H-N): 0% -> 62%.
+  - The collapse-type classes fell:
+    - n(O) -> sigma*(C-O): 40% -> 6%;
+    - n(O) -> delocalized pi*(C-O): 65% -> 12%.
+
+    Their misses are outranked by intramolecular pairs (43 of 46 and 35 of 35 misses), most
+    often into a pi*(C-O)-type acceptor (28 of 46, 18 of 35).
+  - The HBr classes stay at 0%.
+- **Textbook** (expected pair in the top 3): floor 2 / 5 (was 1 / 5), frozen head 1 / 5,
+  GBDT 4 / 5.
+  - The floor misses both SN2 cases (rank 28 each):
+    - in MeO(-) + MeCl to an intermolecular pair, MeCl's n(Cl) -> methoxide's sigma*(C-H);
+    - in MeO(-) + EtBr to geminal / vicinal hyperconjugation inside EtBr, n(Br) ->
+      sigma*(C-H). The site rule does not touch it: the weights on the bonded sites are near 0.
+  - It also misses cyanide + acrolein (rank 5).
+  - **Orderings:**
+    - the floor keeps SN2 above E2 (ranks 28 / 40) and 1,4 above 1,2 (0.544 / 0.525);
+    - the GBDT keeps SN2 above E2 (5.76 / 2.08) but now puts 1,2 above 1,4 (4.02 at rank 4
+      against 2.57 at rank 8; it was the other way round before);
+    - the frozen head puts E2 above SN2 (ranks 0 / 38).
+
+## 2026-10-21 — User decisions on the open points: site weight 0.20, KS1 sign, cache, QM throughput
+
+The user's answers to the open points of the previous entry, as implemented. Samples are
+version 7.
+
+- **Site-rule weight 0.20** (`CandidateConfig.site_weight`; `OrientedConfig.site_weight`
+  follows it).
+  - It excludes HBr's own n(Br) -> sigma*(H-Br): 0 of 102 left, its w* is 0.249. Of the 667
+    same-bond n(O) -> sigma*(O-H) pairs, 4 are left, those with an O share of 0.163-0.185.
+  - The 10 collapse / dehydration steps keep a valid label: `n_no_valid_label` is 0 on both
+    splits.
+  - The one-molecule oriented blocks at 0.20 (cache key `intra0.2`) were computed for 2.0
+    (1,001 s), 2.3 (from the margin run) and 3.0 (670 s), 478 molecules each.
+  - **The floor is unchanged,** as the margin run showed: random 20.0 / 37.1 / 42.4 (train +
+    val) and 21.2 / 33.3 / 43.9 (test); scaffold 20.3 / 36.7 / 42.6 and 15.0 / 35.0 / 40.0.
+- **beta:**
+  - the >= 5x HBr test is the criterion; the strict 10x xfail was removed;
+  - the shell-averaged AO energies are approved.
+- **KS1 sign: the spec had it wrong.** The spec writes the frozen head as
+  l^(0) = KS3 + KS2 - KS1 (section "The frozen Klopman-Salem head"). By its own conventions
+  KS3 < 0 and KS2 < 0 are stabilizing and KS1 >= 0 is the repulsion, so that logit would fall
+  for favourable pairs and rise with the repulsion. The correct head is the code's,
+  -(KS3 + KS2 + KS1) / tau: the logit is minus the perturbation energy, scaled.
+- **KS1 is not rescaled.** It gets a difference-form definition in Prompt 5b, and the frozen
+  head stays as it is until then. Its dominance by KS1 (previous entry: medians 7.4 eV within a
+  fragment, 0.51 eV across) is known and accepted for now.
+- **The version-3 oriented blocks were deleted:** 4,381 files, 72.7 MB. They were the files
+  older than the start of the version-4 warm-up (2026-10-20 21:17:30), when no later version
+  existed. `data/cache/oriented/` now holds only version 5.
+  - The one-molecule blocks at site weight 0.25 (three distances) and 0.30 (2.3) are kept:
+    they reproduce the margin table of the previous entry.
+
+### Host load and QM throughput (user request)
+
+- **`nproc` = 16:** a Ryzen 7 2700X, 8 cores x 2 SMT threads. There are no other users: the
+  three sessions are all the user's (seat, tty, ssh). The load average (about 3.8) was this
+  project's own jobs.
+- **Per-stage time on 20 random pending molecules** (`diagnostics/qm_stage_profile.json`):
+  - setup: one conformer, the batch's config (ALPB water, tblite L-BFGS), one at a time on
+    one core next to the batch; nothing written to the cache;
+  - all 20 succeeded; 11-75 atoms; 0.3-70 s each, median 14.4 s, mean 21 s.
+
+  | stage | seconds (20 molecules) | share |
+  |---|---|---|
+  | geometry optimization (free; with bond walls when a bond breaks) | 393.6 | 93.9% |
+  | %Vbur (morfeus) | 11.6 | 2.8% |
+  | embedding (prepare + ETKDG / MMFF) | 6.0 | 1.4% |
+  | N+1 / N-1 single points (finite-difference Fukui) | 5.7 | 1.4% |
+  | final single point with integrals + record assembly | 2.3 | 0.5% |
+
+  The optimization is the whole cost, and it grows steeply with size (1 s at 24 atoms, 50-70 s
+  at 50-75).
+- **The manifest's 2,531 finished molecules:** median 2.6 s, mean 23.9 s, 90th percentile
+  44.5 s, maximum 905 s (the 900 s timeout). Molecules over 300 s take 41% of the time.
+- **Projection:** the 11,929 pending molecules need about 70-80 CPU-hours, roughly 18-20 h at 4
+  workers. The batch walks its queue in SMILES order, so its instantaneous rate swings with the
+  molecules in flight (10 molecules in 28 minutes on one heavy stretch).
+- **Workers: 4 (unchanged).** The user asked for nproc - 2 = 14 with OMP_NUM_THREADS=1. That
+  is the configuration that hard-rebooted the host three times within 1-2 minutes on
+  2026-10-19: the batch already spawned its workers with `OMP_NUM_THREADS=1` then (Batch
+  section above). 8 workers rebooted it once after 34 minutes. The BLAS-oversubscription cause
+  found on 2026-10-20 was `ksmech-orbitals build`, not the QM batch. The ramp was put back to the
+  user before running it.
+
+### Re-run on samples version 7 (d = 2.3)
+
+Top-1 / 3 / 5 on the test split; the trained models' val in parentheses:
+
+| scorer | random test (66) | scaffold test (20) |
+|---|---|---|
+| floor -(KS3 + KS2) | 21.2 / 33.3 / 43.9 | 15.0 / 35.0 / 40.0 |
+| frozen head (eV) | 9.1 / 21.2 / 27.3 | 10.0 / 25.0 / 25.0 |
+| logistic regression | 33.3 / 57.6 / 71.2 (val 26.8 / 46.4 / 55.4) | 35.0 / 55.0 / 70.0 (val 8.7 / 26.1 / 39.1) |
+| GBDT ranker | 74.2 / 89.4 / 92.4 (val 76.8 / 85.7 / 92.9) | 55.0 / 75.0 / 75.0 (val 30.4 / 52.2 / 65.2) |
+
+- **Model choices:** logistic regression L2 0.1 on both splits; GBDT 220 trees (random) and
+  110 (scaffold).
+- **Textbook:** floor 2 / 5, frozen head 1 / 5, GBDT 4 / 5. The GBDT misses cyanide +
+  acrolein (rank 4) and again puts 1,4 above 1,2 (rank 4 against 5).
+- **CLASH** on the floor's top-ranked pairs: 8.2%.

@@ -166,15 +166,16 @@ def _atom_label(rt: ReactantTokens, g: int) -> str:
     return f"{symbol}{g}" + (f"(:{mapnum})" if mapnum else "")
 
 
-def case_sample(case: TextbookCase, loader, kernel) -> tuple[MechanismSample, ReactantTokens]:
+def case_sample(case: TextbookCase, loader, kernels) -> tuple[MechanismSample, ReactantTokens]:
     rt = ReactantTokens.from_smiles(case.smiles, loader)
-    return reactant_sample(f"textbook:{case.name}", "textbook", rt, kernel), rt
+    return reactant_sample(f"textbook:{case.name}", "textbook", rt, kernels), rt
 
 
-def run_suite(scorer, loader: TokenCache, kernel) -> list[CaseResult]:
-    """`scorer(sample, loader) -> (n_occ, n_virt) scores` for every case."""
+def run_suite(scorer, loader: TokenCache, kernels) -> list[CaseResult]:
+    """`scorer(sample, loader) -> (n_occ, n_virt) scores` for every case (`kernels`: the
+    `physics.pairs.PairKernels` the samples' pair features are computed with)."""
     out = []
     for case in CASES:
-        sample, rt = case_sample(case, loader, kernel)
+        sample, rt = case_sample(case, loader, kernels)
         out.append(run_case(case, sample, rt, scorer(sample, loader)))
     return out

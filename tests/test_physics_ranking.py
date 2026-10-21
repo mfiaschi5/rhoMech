@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from ksmech.arrows.steps import build_all_samples, sample_for_step, samples_path
-from ksmech.physics.pairs import PAIR_FEATURES
+from ksmech.physics.pairs import F, frozen_head
 from ksmech.physics.params import KSParams
 from ksmech.physics.ranking import (
     ALL_SCORERS,
@@ -23,13 +23,11 @@ from ksmech.physics.ranking import (
 )
 from tests.test_arrows_steps import mini_processed, missing_iodide  # noqa: F401 (fixture)
 
-F = {name: k for k, name in enumerate(PAIR_FEATURES)}
-
 
 @pytest.fixture(scope="module")
-def samples(mini_steps, token_loader, contact_kernel):
+def samples(mini_steps, token_loader, pair_kernels):
     names = ("sn2", "proton_transfer", "carbonyl_addition", "e2")
-    return [sample_for_step(mini_steps[k], token_loader, contact_kernel) for k in names]
+    return [sample_for_step(mini_steps[k], token_loader, pair_kernels) for k in names]
 
 
 @pytest.fixture(scope="module")
@@ -71,23 +69,45 @@ def test_physical_scaling(samples):
     s = samples[0]
     z = physical_pair_z(s, KSParams(K=2.0, eps=8.0))
     stored = s.pair_z.astype(float)
-    assert np.allclose(z[..., F["ks3"]], 4.0 * stored[..., F["ks3"]])
+    ok = s.pair_defined
+    assert np.allclose(
+        z[..., F["log_abs_ks3"]][ok[..., F["log_abs_ks3"]]],
+        stored[..., F["log_abs_ks3"]][ok[..., F["log_abs_ks3"]]] + 2 * np.log(2.0),
+    )
     assert np.allclose(z[..., F["ks2"]], stored[..., F["ks2"]] / 8.0)
-    assert np.allclose(z[..., F["gap_kernel"]], stored[..., F["gap_kernel"]])
+    assert np.allclose(z[..., F["log_abs_g"]], stored[..., F["log_abs_g"]])
+    assert (z[~ok] == 0).all()
 
 
 def test_components_are_the_factors_of_ks3(samples, components):
     for s, c in zip(samples, components, strict=True):
-        K = KSParams().K
-        assert np.allclose(c["ks3"], (K * c["amp"] * c["fbar"]) ** 2 * c["gap_kernel"])
-        assert np.allclose(c["ks3"], physical_pair_z(s)[..., F["ks3"]], rtol=1e-5, atol=1e-12)
+        assert (np.sign(c["ks3"]) == np.sign(c["gap_kernel"]))[c["ks3"] != 0].all()
+        stored = s.pair_gap_sign * np.exp(physical_pair_z(s)[..., F["log_abs_ks3"]])
+        assert np.allclose(c["ks3"], stored, rtol=1e-4, atol=1e-12)
         assert (c["amp"] >= 0).all() and c["fbar"].shape == s.pair_valid.shape
+        assert (c["ks1"] >= 0).all() and (c["ks1"][~c["ks1_ok"]] == 0).all()
+
+
+def test_frozen_head_scorer_is_the_model_head_by_construction(samples, components):
+    """The ks-rank frozen head is -(KS3 + KS2 + KS1) / tau on the components, the same as the
+    model's head on the stored features (float32 storage aside), and with KS1 removed it ranks
+    exactly like the floor."""
+    for s, c in zip(samples, components, strict=True):
+        score = SCORERS["frozen_head"](c)
+        assert np.allclose(score, -(c["ks3"] + c["ks2"] + c["ks1"]) / KSParams().tau)
+        head = frozen_head(physical_pair_z(s), s.pair_gap_sign, s.pair_defined)
+        assert np.allclose(score, head, rtol=1e-4, atol=1e-9)
+        bare = SCORERS["frozen_head"]({**c, "ks1": np.zeros_like(c["ks1"])})
+        floor = SCORERS["ks3+ks2"](c)
+        assert np.array_equal(
+            np.argsort(bare, axis=None, kind="stable"), np.argsort(floor, axis=None, kind="stable")
+        )
 
 
 def test_evaluate_and_failure_classes(samples, components, token_loader):
     report = evaluate(samples, components, ALL_SCORERS)
     assert set(report) == set(ALL_SCORERS)
-    assert {"ks3", "fbar2_g", "fbar2_g+ks2", "ks3+ks2"} <= set(SCORERS)
+    assert {"ks3+ks2", "ks3", "fbar2_g", "fbar2_g+ks2"} <= set(SCORERS)
     for r in report.values():
         assert r["n"] == len(samples) and r["n_no_valid_label"] == 0
         assert all(isinstance(x, int) for x in r["ranks"])
@@ -107,11 +127,11 @@ def test_components_with_an_ablation_kernel(samples, token_loader, table_kernel,
     assert not np.allclose(other["ks3"], components[0]["ks3"])
 
 
-def test_ks_rank_cli(mini_processed, token_loader, contact_kernel, monkeypatch):  # noqa: F811
+def test_ks_rank_cli(mini_processed, token_loader, pair_kernels, monkeypatch):  # noqa: F811
     import ksmech.physics.cli as cli
 
     build_all_samples(
-        "pmechdb", contact_kernel, ["random"], mini_processed, missing_iodide(token_loader)
+        "pmechdb", pair_kernels, ["random"], mini_processed, missing_iodide(token_loader)
     )
     assert samples_path("pmechdb", "random_test", mini_processed).exists()
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
@@ -119,15 +139,16 @@ def test_ks_rank_cli(mini_processed, token_loader, contact_kernel, monkeypatch):
     cache = ["--oriented-cache", str(mini_processed / "oriented")]
     code = cli.main([*base, *cache, "--distance", "2.3", "2.6"])
     for d in ("2.3", "2.6"):
-        path = mini_processed / "pmechdb" / f"ks_rank_report_oriented_d{d}.json"
+        path = mini_processed / "pmechdb" / f"ks_rank_report_random_oriented_d{d}.json"
         report = json.loads(path.read_text())
-        assert set(report["scorers"]) == set(ALL_SCORERS) and report["distance"] == float(d)
-        assert report["scorers"]["ks3"]["all"]["n"] == report["failure_classes"]["ks3"]["n"]
-        assert set(report["scorers"]["ks3"]) == {"test", "trainval", "all"}
-        assert {"fbar2_g+ks2"} <= set(report["failure_classes"]) and "clash" in report
-        gate = report["gate"]
-        assert gate["pass"] == (gate["ks3_trainval_top5"] > gate["fbar2_g_trainval_top5"])
-    assert code in (0, 1)
+        assert set(report["scorers"]) == set(ALL_SCORERS) | {"frozen_head"}
+        assert report["distance"] == float(d)
+        floor = report["failure_classes"]["ks3+ks2"]
+        assert report["scorers"]["ks3+ks2"]["all"]["n"] == floor["n"]
+        assert set(report["scorers"]["ks3+ks2"]) == {"test", "trainval", "all"}
+        assert "frozen_head" in report["failure_classes"] and "clash" in report
+        assert report["floor"]["ks3+ks2_test_top5"] == report["scorers"]["ks3+ks2"]["test"]["top5"]
+    assert code == 0
     assert cli.main(["ks-rank", "--source", "pmechdb", "--processed-dir", "/nonexistent"]) == 2
 
 
@@ -155,4 +176,4 @@ def test_refresh_validity_applies_the_current_filter(samples, token_loader):
 def test_components_carry_fragment_and_clash_flags(samples, components):
     for s, c in zip(samples, components, strict=True):
         assert c["inter"].dtype == bool and c["clash"].dtype == bool
-        assert np.array_equal(c["clash"], s.pair_clash)  # same kernel as the stored sample
+        assert np.array_equal(c["clash"], s.pair_z[..., F["clash"]] > 0.5)  # same kernel

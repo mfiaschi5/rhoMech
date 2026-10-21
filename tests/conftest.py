@@ -124,6 +124,14 @@ def contact_kernel():
 
 
 @pytest.fixture(scope="session")
+def pair_kernels():
+    """The oriented kernel at every pair-feature distance, without a disk cache."""
+    from ksmech.physics.pairs import oriented_kernels
+
+    return oriented_kernels()
+
+
+@pytest.fixture(scope="session")
 def table_kernel(contact_tables):
     """The vdW-contact table kernel over the fixture tables (an ablation baseline)."""
     from ksmech.physics.contact_kernel import ContactConfig, ContactKernel

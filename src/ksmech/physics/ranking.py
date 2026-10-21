@@ -2,7 +2,8 @@
 
 Candidates of a step: every (occupied, virtual) token pair of its reactant side that passes
 `MechanismSample.pair_valid` (doubly occupied donor, empty acceptor, no d polarization function,
-no centre atom shared within a fragment; all read from descriptors). Target: the
+within a fragment not the donor's own antibond nor a pair whose every site pair is a bond
+interacting with itself; read from descriptors and the record geometry). Target: the
 first labeled arrow of the step (smallest `arrow_index`), whose labeled pairs are its donor set x
 acceptor set. Metric: top-k accuracy under multi-label marginalization: a hit when any labeled
 pair ranks among the k best candidates. Ties count against the label (the rank is the number of
@@ -10,13 +11,16 @@ other candidates scoring at least as well as the best labeled pair). A step whos
 are all filtered out is a miss, counted as `n_no_valid_label`.
 
 Untrained scorers work on per-sample component matrices (`pair_components`, physical K = 1.75,
-eps = 4; energies in eV, more negative = more stabilizing). With F = (E_r + E_s) / 2 the mean of
-the two LMO Fock diagonals and S the contact amplitude:
+eps = 4; energies in eV, more negative = more stabilizing). With beta the kernel's resonance
+integral (AO-level for the oriented kernel), F = (E_r + E_s) / 2 the mean of the two LMO Fock
+diagonals and S the contact amplitude:
 
-- `ks3` = -KS3 = -(K S F)^2 G, the full product;
-- `fbar2_g` = -F^2 G, the product without the amplitude;
+- `ks3+ks2` = -(KS3 + KS2): **the untrained physics floor** (oriented kernel, d = 2.3);
+- `frozen_head` = -(KS3 + KS2 + KS1) / tau: the model's frozen KS head untrained (tau = 1 eV;
+  KS1 >= 0 the closed-shell repulsion), the floor with the repulsion subtracted;
+- `ks3` = -KS3 = -beta^2 G, the full product alone;
+- `fbar2_g` = -F^2 G, the orbital energies without the amplitude;
 - `fbar2_g+ks2` = -(F^2 G + KS2), the same with the Coulomb term between the main centres;
-- `ks3+ks2` = -(KS3 + KS2);
 - diagnostics: `amp2` = S^2 alone, `amp2_g` = -S^2 G, `gap_kernel` = -G, `ks2` = -KS2.
 """
 
@@ -34,7 +38,7 @@ from ksmech.arrows.steps import MechanismSample
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
 from ksmech.physics.contact_kernel import ContactKernel
 from ksmech.physics.pairs import PAIR_FEATURES, valid_pairs
-from ksmech.physics.params import KSParams, scale
+from ksmech.physics.params import KSParams, to_params
 
 TOP_K = (1, 3, 5)
 _F = {name: k for k, name in enumerate(PAIR_FEATURES)}
@@ -43,10 +47,11 @@ Components = dict[str, np.ndarray]  # name -> (n_occ, n_virt) physical matrix
 Scorer = Callable[[Components], np.ndarray]
 
 SCORERS: dict[str, Scorer] = {
+    "ks3+ks2": lambda c: -(c["ks3"] + c["ks2"]),
+    "frozen_head": lambda c: -(c["ks3"] + c["ks2"] + c["ks1"]) / KSParams().tau,
     "ks3": lambda c: -c["ks3"],
     "fbar2_g": lambda c: -(c["fbar"] ** 2) * c["gap_kernel"],
     "fbar2_g+ks2": lambda c: -((c["fbar"] ** 2) * c["gap_kernel"] + c["ks2"]),
-    "ks3+ks2": lambda c: -(c["ks3"] + c["ks2"]),
 }
 DIAGNOSTIC_SCORERS: dict[str, Scorer] = {
     "amp2": lambda c: c["amp"] ** 2,
@@ -58,10 +63,10 @@ ALL_SCORERS = {**SCORERS, **DIAGNOSTIC_SCORERS}
 
 
 def physical_pair_z(sample: MechanismSample, params: KSParams | None = None) -> np.ndarray:
-    """The stored z (computed at K = eps = 1) at `params` (default: the physical values)."""
-    params = params or KSParams()
-    factors = np.array([scale(params, name) for name in PAIR_FEATURES])
-    return sample.pair_z.astype(np.float64) * factors
+    """The stored z (computed at K = eps = 1) at `params` (default: the physical values);
+    undefined entries stay 0."""
+    z = to_params(sample.pair_z, params or KSParams(), PAIR_FEATURES)
+    return np.where(sample.pair_defined, z, 0.0)
 
 
 def _by_fragment(tokens: list[MoleculeTokens], kind: str) -> list[np.ndarray]:
@@ -73,8 +78,9 @@ def _by_fragment(tokens: list[MoleculeTokens], kind: str) -> list[np.ndarray]:
 def pair_components(
     sample: MechanismSample, loader: TokenLoader, kernel: ContactKernel, params=None
 ) -> Components:
-    """Physical (n_occ, n_virt) KS3 (= beta^2 G with `kernel`), KS2, G, F, the amplitude, and
-    the fragment flag and (oriented kernel) the CLASH flag of the amplitude."""
+    """Physical (n_occ, n_virt) KS3 (= beta^2 G with `kernel`), KS2, KS1 (stored, >= 0), G, F,
+    the amplitude, and the fragment flag and (oriented kernel) the CLASH flag of the
+    amplitude."""
     params = params or KSParams()
     tokens = sample.tokens(loader)
     z = physical_pair_z(sample, params)
@@ -85,16 +91,23 @@ def pair_components(
     for f, t_f in enumerate(tokens):
         for g, t_g in enumerate(tokens):
             cell = np.ix_(occ_rows[f], virt_cols[g])
-            amp[cell] = kernel.amplitude_matrix(t_f.occupied(), t_f, t_g.virtual(), t_g)
-            beta[cell] = kernel.beta_matrix(t_f.occupied(), t_f, t_g.virtual(), t_g, params)
+            occ, virt, same = t_f.occupied(), t_g.virtual(), f == g
+            amp[cell] = kernel.amplitude_matrix(occ, t_f, virt, t_g, same)
+            beta[cell] = kernel.beta_matrix(occ, t_f, virt, t_g, params, same)
             if kernel.config.kernel == "oriented":
-                clash[cell] = kernel.oriented_details(t_f.occupied(), t_f, t_g.virtual(), t_g)[1]
+                clash[cell] = kernel.oriented_details(occ, t_f, virt, t_g, same)[1]
     e_occ = np.array([o.energy_ev for t in tokens for o in t.occupied()])
     e_virt = np.array([o.energy_ev for t in tokens for o in t.virtual()])
-    G = z[..., _F["gap_kernel"]]
+    G = sample.pair_gap_sign * np.exp(z[..., _F["log_abs_g"]])
     return {
         "ks3": beta**2 * G,
         "ks2": z[..., _F["ks2"]],
+        "ks2_ok": sample.pair_defined[..., _F["ks2"]],
+        "log_abs_ks1": z[..., _F["log_abs_ks1"]],
+        "ks1_ok": sample.pair_defined[..., _F["log_abs_ks1"]],
+        "ks1": np.where(
+            sample.pair_defined[..., _F["log_abs_ks1"]], np.exp(z[..., _F["log_abs_ks1"]]), 0.0
+        ),
         "gap_kernel": G,
         "fbar": 0.5 * (e_occ[:, None] + e_virt[None, :]),
         "amp": amp,

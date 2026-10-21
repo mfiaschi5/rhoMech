@@ -17,11 +17,15 @@ from ksmech.orbitals.tokens import (
     CandidateConfig,
     OrbitalKind,
     atom_feature_names,
+    bonded_matrix,
     build_molecule_tokens,
+    excluded_pair,
+    is_antibonding_partner,
     is_d_type,
     load_tokens,
     save_tokens,
-    shares_centres,
+    site_excluded_matrix,
+    site_pairs_excluded,
     token_table,
 )
 from ksmech.qm.fukui import HARTREE_TO_EV, homo_index
@@ -188,11 +192,12 @@ def test_acceptor_candidates_exclude_d_type_by_default(sp_record):
     assert len(acceptors) == 4 and chloromethane.atoms_with_only_d_virtuals() == []
     assert all(len(leading(o)) == 2 for o in acceptors)  # C-Cl and 3 C-H sigma*
     c_cl = next(o for o in chloromethane.occupied() if set(leading(o)) == {0, 1})
-    # sigma(C-Cl) shares C with every C-H sigma* and C, Cl with sigma*(C-Cl): none is left
-    assert chloromethane.acceptor_candidates(donor=c_cl) == []
+    kept = chloromethane.acceptor_candidates(donor=c_cl)  # only its own antibond is excluded
+    assert len(kept) == 3 and all(set(leading(o)) != {0, 1} for o in kept)
+    assert all(is_antibonding_partner(c_cl, o) for o in acceptors if o not in kept)
     lone_cl = next(o for o in chloromethane.occupied() if leading(o) == (1,) and one_centre(o))
-    kept = chloromethane.acceptor_candidates(donor=lone_cl)  # Cl is a centre of sigma*(C-Cl)
-    assert len(kept) == 3 and all(1 not in leading(o) for o in kept)
+    kept = chloromethane.acceptor_candidates(donor=lone_cl)  # not into its own C-Cl sigma*
+    assert len(kept) == 3 and all(set(leading(o)) != {0, 1} for o in kept)
 
 
 def smeared(rec, shift: float):
@@ -284,17 +289,43 @@ def test_metal_bound_lone_pair_round_trip(sp_record, tmp_path):
     assert "Mg1-bound]" in text.export_text() or "-bound]" in text.export_text()
 
 
-def test_shared_centres_exclude_a_pair(sp_record):
-    """The validity rule: donor and acceptor of one molecule may not share a centre atom."""
+def _lone_pair(t, z: int):
+    atom = next(a.atom_index for a in t.atoms if a.atomic_number == z)
+    lone = [o for o in t.occupied() if leading(o) == (atom,) and one_centre(o)]
+    return max(lone, key=lambda o: o.energy_ev), atom
+
+
+def test_excluded_pairs(sp_record):
+    """Within one molecule a pair is excluded when it is the donor's own antibond, or when
+    every site pair (donor centre a, acceptor centre b) has a and b identical or bonded with
+    the acceptor carrying >= 0.20 on a or the donor >= 0.20 on b: a bond interacting with
+    itself."""
     acetone = build_molecule_tokens(sp_record("CC(C)=O"))
-    oxygen = next(a.atom_index for a in acetone.atoms if a.atomic_number == 8)
-    n_o = max(
-        (o for o in acetone.occupied() if leading(o) == (oxygen,) and one_centre(o)),
-        key=lambda o: o.energy_ev,
-    )
+    n_o, oxygen = _lone_pair(acetone, 8)
     pi_star = min(acetone.virtual(), key=lambda o: o.energy_ev)
-    assert oxygen in leading(pi_star) and shares_centres(n_o, pi_star)  # n -> pi*(C=O): out
+    pi = next(
+        o
+        for o in acetone.occupied()
+        if set(leading(o)) == set(leading(pi_star))
+        and o.descriptors.overlap_population > 0
+        and o.descriptors.cos_character() < 0.3
+    )
+    assert oxygen in leading(pi_star) and leading(pi_star)[0] != oxygen
+    assert excluded_pair(n_o, pi_star, acetone)  # n(O) into its own C=O pi*
     assert pi_star not in acetone.acceptor_candidates(donor=n_o)
+    assert excluded_pair(pi, pi_star, acetone) and is_antibonding_partner(pi, pi_star)
+    methanol = build_molecule_tokens(sp_record("CO"))
+    n_o, oxygen = _lone_pair(methanol, 8)
+    o_h = next(
+        o for o in methanol.virtual() if {methanol.symbol(a) for a in leading(o)} == {"O", "H"}
+    )
+    assert excluded_pair(n_o, o_h, methanol)  # n(O) -> sigma*(O-H) of the same O-H
+    c_h = [o for o in methanol.virtual() if {methanol.symbol(a) for a in leading(o)} == {"C", "H"}]
+    assert c_h and not any(excluded_pair(n_o, o, methanol) for o in c_h)  # vicinal: kept
+    hbr = build_molecule_tokens(sp_record("Br"))
+    n_br, _ = _lone_pair(hbr, 35)
+    h_br = next(o for o in hbr.virtual() if len(leading(o)) == 2)
+    assert excluded_pair(n_br, h_br, hbr)  # HBr's own n(Br) -> sigma*(H-Br)
     cation = build_molecule_tokens(sp_record("C[CH+]C"))  # 1,2-hydride shift: allowed
     empty_p = min(cation.virtual(), key=lambda o: o.energy_ev)
     c2 = leading(empty_p)[0]
@@ -305,5 +336,51 @@ def test_shared_centres_exclude_a_pair(sp_record):
         and {cation.symbol(a) for a in leading(o)} == {"C", "H"}
         and c2 not in leading(o)
     )
-    assert not shares_centres(sigma_ch, empty_p)
+    assert not excluded_pair(sigma_ch, empty_p, cation)
     assert empty_p in cation.acceptor_candidates(donor=sigma_ch)
+
+
+def test_site_rule_threshold(sp_record):
+    """The weight test is a threshold on the population at the near site (a tetrahedral
+    intermediate's sigma* carries 0.20 on its O(-): excluded at 0.20 as a site pair, but its
+    O -> Cl site pair is never near, so the collapse stays a candidate); sites
+    neither identical nor bonded never exclude; a token pair is excluded when every one of its
+    centre pairs is."""
+    methanol = build_molecule_tokens(sp_record("CO"))
+    n_o, oxygen = _lone_pair(methanol, 8)
+    o_h = next(
+        o for o in methanol.virtual() if {methanol.symbol(a) for a in leading(o)} == {"O", "H"}
+    )
+    hydrogen = next(a for a in leading(o_h) if a != oxygen)
+    d = o_h.descriptors
+    w_o = dict(zip(d.all_center_atoms, d.all_center_weights, strict=True))[oxygen]
+
+    def excluded(d, a, s, b, w=CandidateConfig.site_weight) -> bool:
+        return bool(site_pairs_excluded(methanol, [d], [a], [s], [b], w)[0])
+
+    assert excluded(n_o, oxygen, o_h, hydrogen, w_o - 0.01)
+    assert not excluded(n_o, oxygen, o_h, hydrogen, w_o + 0.01)
+    carbon = next(a.atom_index for a in methanol.atoms if a.atomic_number == 6)
+    near_c = bonded_matrix(methanol)[carbon]
+    h_on_c = next(i for i, a in enumerate(methanol.atoms) if a.atomic_number == 1 and near_c[i])
+    assert not excluded(n_o, oxygen, o_h, h_on_c, 0.0)  # O and a methyl H: not bonded
+    c_o = next(
+        o for o in methanol.occupied() if {methanol.symbol(a) for a in leading(o)} == {"C", "O"}
+    )
+    w_d = dict(
+        zip(c_o.descriptors.all_center_atoms, c_o.descriptors.all_center_weights, strict=True)
+    )
+    # donor sigma(C-O) at C, acceptor sigma*(O-H) at O: bonded sites, no acceptor weight on C,
+    # so only the donor's share on O decides
+    assert excluded(c_o, carbon, o_h, oxygen, w_d[oxygen] - 0.01)
+    assert not excluded(c_o, carbon, o_h, oxygen, w_d[oxygen] + 0.01)
+    occ, virt = methanol.occupied(), methanol.virtual()
+    matrix = site_excluded_matrix(methanol, occ, virt, CandidateConfig().site_weight)
+    for i, d in enumerate(occ):
+        for j, s in enumerate(virt):
+            every = all(
+                excluded(d, int(a), s, int(b))
+                for a in d.descriptors.all_center_atoms
+                for b in s.descriptors.all_center_atoms
+            )
+            assert matrix[i, j] == every

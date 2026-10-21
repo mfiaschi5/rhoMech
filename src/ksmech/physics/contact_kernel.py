@@ -2,13 +2,18 @@
 
 Default kernel `oriented` (Phase 5b, brought forward 2026-10-20):
 
-    beta_rs = K * S_rs * (F_rr + F_ss) / 2
+    beta_rs = K * sum_mu,nu l_mu,r l_nu,s S^c_mu,nu (F_mu,mu + F_nu,nu) / 2
 
-S_rs is the overlap of the two LMOs placed with their lobes antiparallel, the acceptor's site at
-distance d from the donor's site (`ksmech.physics.oriented`, tblite's own basis), maximized over
-the donor's centres x the acceptor's centres (the pair-track value; the argmax sites and the
-CLASH flag are in `oriented_details`); F_rr, F_ss are the LMOs' own Fock diagonals
-(E_r = l^T F l, eV). The amplitude a(r, s) is |S_rs|.
+the spec's AO-level Wolfsberg-Helmholz sum, with S^c the AO overlaps of the two LMOs placed with
+their lobes antiparallel, the acceptor's site at distance d from the donor's site
+(`ksmech.physics.oriented`, tblite's own basis, the acceptor on its local cap), and F_mu,mu each
+molecule's own AO Fock diagonal (eV). The placement is the one with the largest |S_rs|,
+maximized over the donor's centres x the acceptor's centres (the pair-track value; the argmax
+sites and the CLASH flag are in `oriented_details`), and beta is taken in the phase that makes
+S_rs positive. The amplitude a(r, s) is |S_rs|. (Until 2026-10-20 beta was K S_rs (E_r + E_s)/2
+with the LMO energies: a virtual LMO above 0 eV, such as sigma*(H-Br) at +8.8 eV, cancelled the
+occupied one's energy and gave a near-zero beta.) Pass `same=True` for a pair of one molecule:
+the oriented block then applies the intramolecular site rule (`oriented.block_contacts`).
 
 Ablation kernels, kept for comparison only:
 
@@ -116,7 +121,7 @@ class ContactKernel:
             out[:, cols_k] = self.mlp.pair_matrix(str(kind), V_r, V_s[cols_k])
         return out
 
-    def _oriented(self, rows, t_r, cols, t_s, field: str) -> np.ndarray:
+    def _oriented(self, rows, t_r, cols, t_s, field: str, same: bool = False) -> np.ndarray:
         """One field of the cached molecule-pair `Contacts` for every (row, col) pair."""
         occ_r = _block_positions(t_r, OrbitalKind.OCCUPIED)
         i = [occ_r[id(o)] for o in rows]
@@ -126,31 +131,37 @@ class ContactKernel:
             if not where:
                 continue
             pos = _block_positions(t_s, kind)
-            values = getattr(oriented_block(t_r, t_s, block, self.config.oriented), field)
+            intra = same and block == "occ_virt"
+            values = getattr(oriented_block(t_r, t_s, block, self.config.oriented, intra), field)
             part = values[np.ix_(i, [pos[id(cols[j])] for j in where])]
             if out is None:
                 out = np.zeros((len(rows), len(cols), *part.shape[2:]), dtype=part.dtype)
             out[:, where] = part
         return out
 
-    def oriented_details(self, rows, t_r, cols, t_s) -> tuple[np.ndarray, np.ndarray]:
+    def oriented_details(self, rows, t_r, cols, t_s, same: bool = False):
         """(sites (len(rows), len(cols), 2), CLASH flags) of the oriented kernel's pair-track
         values: the argmax donor and acceptor site atoms (indices within t_r and t_s)."""
         if not rows or not cols:
             return np.zeros((len(rows), len(cols), 2), int), np.zeros((len(rows), len(cols)), bool)
         return (
-            self._oriented(rows, t_r, cols, t_s, "sites"),
-            self._oriented(rows, t_r, cols, t_s, "clash"),
+            self._oriented(rows, t_r, cols, t_s, "sites", same),
+            self._oriented(rows, t_r, cols, t_s, "clash", same),
         )
 
     def amplitude_matrix(
-        self, rows: list[OrbitalToken], t_r: MoleculeTokens, cols: list, t_s: MoleculeTokens
+        self,
+        rows: list[OrbitalToken],
+        t_r: MoleculeTokens,
+        cols: list,
+        t_s: MoleculeTokens,
+        same: bool = False,
     ) -> np.ndarray:
         """(len(rows), len(cols)) dimensionless contact amplitudes; rows occupied."""
         if not rows or not cols:
             return np.zeros((len(rows), len(cols)))
         if self.config.kernel == "oriented":
-            return self._oriented(rows, t_r, cols, t_s, "S")
+            return self._oriented(rows, t_r, cols, t_s, "S", same)
         if self.config.kernel == "analytic":
             z_r, z_s = _z(t_r), _z(t_s)
             return np.array(
@@ -167,20 +178,27 @@ class ContactKernel:
         return overlap * _main_weights(rows)[:, None] * _main_weights(cols)[None, :]
 
     def amplitude(
-        self, r: OrbitalToken, t_r: MoleculeTokens, s: OrbitalToken, t_s: MoleculeTokens
+        self,
+        r: OrbitalToken,
+        t_r: MoleculeTokens,
+        s: OrbitalToken,
+        t_s: MoleculeTokens,
+        same: bool = False,
     ) -> float:
         """Dimensionless contact amplitude of an occupied r with a token s of either block."""
-        return float(self.amplitude_matrix([r], t_r, [s], t_s)[0, 0])
+        return float(self.amplitude_matrix([r], t_r, [s], t_s, same)[0, 0])
 
-    def beta_matrix(self, rows, t_r, cols, t_s, params: KSParams | None = None) -> np.ndarray:
+    def beta_matrix(
+        self, rows, t_r, cols, t_s, params: KSParams | None = None, same: bool = False
+    ) -> np.ndarray:
         """(len(rows), len(cols)) contact resonance integrals (eV)."""
         params = params or KSParams()
+        if not rows or not cols:
+            return np.zeros((len(rows), len(cols)))
         if self.config.kernel == "oriented":
-            f_r = np.array([o.energy_ev for o in rows])
-            f_s = np.array([o.energy_ev for o in cols])
-        else:
-            f_r = np.array([main_shell_fock(o, t_r) for o in rows])
-            f_s = np.array([main_shell_fock(o, t_s) for o in cols])
+            return params.K * self._oriented(rows, t_r, cols, t_s, "beta", same)
+        f_r = np.array([main_shell_fock(o, t_r) for o in rows])
+        f_s = np.array([main_shell_fock(o, t_s) for o in cols])
         f_mean = 0.5 * (f_r[:, None] + f_s[None, :])
         return params.K * self.amplitude_matrix(rows, t_r, cols, t_s) * f_mean
 
@@ -191,6 +209,7 @@ class ContactKernel:
         s: OrbitalToken,
         t_s: MoleculeTokens,
         params: KSParams | None = None,
+        same: bool = False,
     ) -> float:
         """Contact resonance integral (eV)."""
-        return float(self.beta_matrix([r], t_r, [s], t_s, params)[0, 0])
+        return float(self.beta_matrix([r], t_r, [s], t_s, params, same)[0, 0])

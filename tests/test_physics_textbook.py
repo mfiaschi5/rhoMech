@@ -43,16 +43,16 @@ def _oracle(sample, loader):
     return ((classes[d] == want_d)[:, None] & (classes[a] == want_a)[None, :]).astype(float)
 
 
-def test_suite_runs_and_matches_sites(token_loader, contact_kernel):
-    results = run_suite(_oracle, token_loader, contact_kernel)
+def test_suite_runs_and_matches_sites(token_loader, pair_kernels):
+    results = run_suite(_oracle, token_loader, pair_kernels)
     assert len(results) == 5 and all(r.passed and r.expected_rank == 0 for r in results)
     for r in results:
         assert len(r.top) == 3 and r.top[0]["score"] == 1.0
 
     def untrained(sample, loader):
-        return ALL_SCORERS["ks3"](pair_components(sample, loader, contact_kernel))
+        return ALL_SCORERS["ks3+ks2"](pair_components(sample, loader, pair_kernels.main))
 
-    results = run_suite(untrained, token_loader, contact_kernel)
+    results = run_suite(untrained, token_loader, pair_kernels)
     assert all(r.expected_rank is not None and np.isfinite(r.expected_score) for r in results)
     sn2_vs_e2 = results[1].alternatives[0]
     assert sn2_vs_e2[1] is not None and np.isfinite(sn2_vs_e2[2])
@@ -74,5 +74,5 @@ def test_textbook_cli(token_loader, monkeypatch, tmp_path, capsys):
         ["textbook", "--processed-dir", str(tmp_path), "--oriented-cache", str(tmp_path)]
     )
     out = capsys.readouterr().out
-    assert code in (0, 1) and "untrained fbar2_g" in out and "expected pairs in the top 3" in out
+    assert code in (0, 1) and "untrained ks3+ks2" in out and "expected pairs in the top 3" in out
     assert "baseline` first" in out  # no GBDT model in this processed dir

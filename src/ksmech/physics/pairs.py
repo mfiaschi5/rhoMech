@@ -1,228 +1,271 @@
-"""The physics pair vector z_ij of the spec (section 5.6), for every ordered token pair.
+"""The pair-track features z_rs (Prompt 6), for every (occupied r, virtual s) token pair.
 
-    z_ij = [KS3, (l^T B l)^2, G, KS2, KS1, 1[phi(i) != phi(j)], R_ij]
+    z_rs = [log beta^2 at d = 2.0, 2.3, 3.0 Angstrom, log|G|, log|KS3| at 2.3, KS2, log|KS1|,
+            1[intermolecular], centroid distance, |cross-centre coupling|, CLASH]
 
-Tokens of all fragments form one sequence: fragment by fragment, atoms then orbitals, in each
-fragment's own token order. An entry is defined only where its term exists, and is 0
-elsewhere (`defined` says which):
+- beta = K sum_mu,nu l_mu,r l_nu,s S^c_mu,nu (F_mu,mu + F_nu,nu) / 2, the AO-level
+  Wolfsberg-Helmholz sum over the oriented contact placement at each distance (`contact_kernel`):
+  three values whose decay with d encodes how diffuse the two lobes are.
+- G: the spectral gap kernel (full spectra); KS3 = beta^2 G at the primary distance 2.3. Logs
+  drop the sign of G (positive only for inverted levels, 0.02% of the PMechDB pairs); the sign
+  is kept apart (`PairBlock.gap_sign`) so the untrained floor KS3 + KS2 stays exact.
+- KS2: the Coulomb term between the two main centres, signed (eV): at the van der Waals contact
+  across fragments; within a fragment in difference form q q / eps (1/R_contact - 1/R), the
+  change on bringing the two centres to contact (`_ks2`); undefined when both sit on one atom.
+- KS1: the closed-shell repulsion of r with the occupied tokens around s's main centre
+  (Wolfsberg-Helmholz form within a fragment, its magnitude per orbital pair because the LMO
+  phases are arbitrary; contact form with |beta| of the primary kernel across, so KS1 >= 0
+  everywhere); undefined where it is 0
+  (no other occupied token near s's main centre, or a single-atom fragment: no resonance
+  integral within an atom) or not finite (%Vbur missing, across fragments).
+- Within a fragment only: the centroid distance and |l_r^T B l_s| over the AO blocks between the
+  two tokens' centres (its sign is an arbitrary LMO phase).
+- CLASH: the primary kernel's flag for the pair's contact amplitude (oriented kernel).
 
-- KS3 and G: occupied i, virtual j (donor first), within one fragment or across two; KS3 is the
-  contact term for every pair.
-- (l^T B l)^2: occupied i, virtual j of one fragment: the Wolfsberg-Helmholz coupling over
-  the AO blocks between i's centres and j's centres, the intramolecular extra.
-- KS2: any two tokens on different sites (an atom, or an orbital's main centre).
-- KS1: occupied i with occupied j (the pair repulsion), or with virtual j (the repulsion with
-  the occupied tokens around j's main centre).
-- the fragment flag and R_ij: every pair. R_ij is the distance between token positions (atom
-  position, orbital centroid) within a fragment and the van der Waals contact distance of the
-  two sites across fragments.
-
-Entries are standardized with statistics of defined entries computed at the initial K and eps
-(`fit_pair_stats`, `standardize`); a non-finite value is counted and left undefined.
-
-A training sample stores the donor-acceptor part of z (`donor_acceptor_block`: every ordered
-(occupied i, virtual j) pair, in the sample's orbital order), the validity filter of those pairs
-(`valid_pairs`) and the symmetric atom-atom Coulomb matrix (`atom_coulomb_matrix`).
+Logs use a floor of 1e-12; undefined entries are stored as 0. Values are computed at
+K = eps = 1 (`params.REDUCED`) for storage; `params.to_params` applies other values (log
+features shift additively, KS2 and the coupling scale). Each entry
+is standardized with statistics of the defined entries of a training set (`fit_pair_stats`)
+for the learned heads. The frozen head (`frozen_head`) is not standardized: its logits are
+-(KS3 + KS2 + KS1) / tau in eV, so untrained it ranks like the floor -(KS3 + KS2) with the
+repulsion subtracted.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
 from ksmech.orbitals.tokens import (
     CandidateConfig,
     MoleculeTokens,
-    OrbitalKind,
-    shares_centres,
+    is_antibonding_partner,
+    site_excluded_matrix,
 )
-from ksmech.physics.contact_kernel import ContactKernel
+from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
 from ksmech.physics.contact_table import vdw_sum
 from ksmech.physics.coulomb import coulomb_matrix
-from ksmech.physics.ks_terms import (
-    contact_beta_matrix,
-    cross_center_coupling_matrix,
-    gap_kernel_matrix,
-    wh_matrix,
-)
-from ksmech.physics.params import KSParams
+from ksmech.physics.ks_terms import cross_center_coupling_matrix, gap_kernel_matrix, wh_matrix
+from ksmech.physics.oriented import OrientedConfig
+from ksmech.physics.params import COULOMB_EV_ANG, KSParams
 from ksmech.physics.repulsion import contact_repulsion_matrix, neighbourhood, repulsion_matrix
 
-PAIR_FEATURES = ("ks3", "coupling_sq", "gap_kernel", "ks2", "ks1", "inter", "distance")
-_F = {name: k for k, name in enumerate(PAIR_FEATURES)}
+FEATURE_DISTANCES = (2.0, 2.3, 3.0)
+PRIMARY_DISTANCE = 2.3
+PAIR_FEATURES = (
+    "log_beta2_d2.0",
+    "log_beta2_d2.3",
+    "log_beta2_d3.0",
+    "log_abs_g",
+    "log_abs_ks3",
+    "ks2",
+    "log_abs_ks1",
+    "inter",
+    "centroid_distance",
+    "cross_coupling",
+    "clash",
+)
+F = {name: k for k, name in enumerate(PAIR_FEATURES)}
+LOG_FLOOR = 1e-12
 
 
-@dataclass
-class TokenIndex:
-    """Where every token of every fragment sits in the joint sequence."""
+@dataclass(frozen=True)
+class PairKernels:
+    """The contact kernel at each feature distance; the primary one gives KS3, KS1, CLASH."""
 
-    fragment: np.ndarray  # (N,) fragment index
-    site: np.ndarray  # (N,) atom index (in its fragment) of the token's site
-    position: np.ndarray  # (N, 3) atom position or orbital centroid, Angstrom
-    site_position: np.ndarray  # (N, 3) position of the site atom
-    charge: np.ndarray  # (N,) Mulliken charge of the site
-    z: np.ndarray  # (N,) atomic number of the site
-    occ: dict[int, np.ndarray]  # fragment -> joint indices of its occupied tokens, in order
-    virt: dict[int, np.ndarray]
+    by_distance: dict[float, ContactKernel]
+    primary: float = PRIMARY_DISTANCE
+
+    @property
+    def main(self) -> ContactKernel:
+        return self.by_distance[self.primary]
 
 
-def token_index(fragments: list[MoleculeTokens]) -> TokenIndex:
-    frag: list[int] = []
-    site: list[int] = []
-    pos: list[np.ndarray] = []
-    occ, virt = {}, {}
-    for f, t in enumerate(fragments):
-        start = len(frag) + len(t.atoms)
-        frag += [f] * (len(t.atoms) + len(t.orbitals))
-        site += [a.atom_index for a in t.atoms]
-        site += [int(o.descriptors.center_atoms[0]) for o in t.orbitals]
-        pos += [a.position for a in t.atoms] + [o.descriptors.centroid for o in t.orbitals]
-        kinds = np.array([str(o.kind) for o in t.orbitals])
-        occ[f] = start + np.flatnonzero(kinds == OrbitalKind.OCCUPIED)
-        virt[f] = start + np.flatnonzero(kinds == OrbitalKind.VIRTUAL)
-    atoms = [fragments[f].atoms[s] for f, s in zip(frag, site, strict=True)]
-    return TokenIndex(
-        fragment=np.array(frag, dtype=int),
-        site=np.array(site, dtype=int),
-        position=np.array(pos, dtype=float).reshape(-1, 3),
-        site_position=np.array([a.position for a in atoms], dtype=float).reshape(-1, 3),
-        charge=np.array([a.mulliken_charge for a in atoms], dtype=float),
-        z=np.array([a.atomic_number for a in atoms], dtype=int),
-        occ=occ,
-        virt=virt,
+def oriented_kernels(cache_dir: Path | None = None) -> PairKernels:
+    return PairKernels(
+        {
+            d: ContactKernel(
+                config=ContactConfig(oriented=OrientedConfig(distance=d, cache_dir=cache_dir))
+            )
+            for d in FEATURE_DISTANCES
+        }
     )
 
 
-@dataclass
-class PairFeatures:
-    z: np.ndarray  # (N, N, 7), PAIR_FEATURES order, 0 where undefined
-    defined: np.ndarray  # (N, N, 7) bool
-    index: TokenIndex
-    n_non_finite: int = 0
+def single_kernel(kernel: ContactKernel) -> PairKernels:
+    """An ablation kernel without a distance: the same beta at every feature distance."""
+    return PairKernels(dict.fromkeys(FEATURE_DISTANCES, kernel))
 
 
 def _pairwise(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1)
 
 
-def _set(pf: PairFeatures, name: str, rows: np.ndarray, cols: np.ndarray, values) -> None:
-    pf.z[np.ix_(rows, cols, [_F[name]])] = np.asarray(values)[..., None]
-    pf.defined[np.ix_(rows, cols, [_F[name]])] = True
+def _log(x: np.ndarray) -> np.ndarray:
+    return np.log(np.maximum(np.abs(x), LOG_FLOOR))
 
 
-def _token_level(pf: PairFeatures, params: KSParams) -> None:
-    """Fragment flag, R_ij and KS2: defined for (almost) every pair."""
-    ix = pf.index
-    inter = ix.fragment[:, None] != ix.fragment[None, :]
-    vdw = np.array([[vdw_sum(a, b) for b in ix.z] for a in ix.z]).reshape(inter.shape)
-    distance = np.where(inter, vdw, _pairwise(ix.position, ix.position))
-    site_distance = np.where(inter, vdw, _pairwise(ix.site_position, ix.site_position))
-    everything = np.arange(len(ix.fragment))
-    _set(pf, "inter", everything, everything, inter.astype(float))
-    _set(pf, "distance", everything, everything, distance)
-    ks2_defined = inter | (site_distance > 0)
-    pf.z[..., _F["ks2"]] = coulomb_matrix(ix.charge, site_distance, ks2_defined, params)
-    pf.defined[..., _F["ks2"]] = ks2_defined
+def _main(tokens) -> np.ndarray:
+    return np.array([int(o.descriptors.center_atoms[0]) for o in tokens], dtype=int)
 
 
-def _virtual_sites(t: MoleculeTokens) -> np.ndarray:
-    return np.array([int(o.descriptors.center_atoms[0]) for o in t.virtual()], dtype=int)
+KS2_INTRA_FORMS = ("difference", "geometric")
 
 
-def _intra(pf, t: MoleculeTokens, f: int, params: KSParams) -> None:
-    occ, virt = t.occupied(), t.virtual()
-    rows, cols = pf.index.occ[f], pf.index.virt[f]
-    if occ and virt:
-        coupling = cross_center_coupling_matrix(occ, virt, t.ao_atom, wh_matrix(t, params))
-        _set(pf, "coupling_sq", rows, cols, coupling**2)
-    if occ:
-        M = repulsion_matrix(t, params)
-        _set(pf, "ks1", rows, rows, M)
-        if virt:
-            _set(pf, "ks1", rows, cols, M @ neighbourhood(occ, t, _virtual_sites(t)).T)
+def _ks2(
+    t_f, occ, t_g, virt, same: bool, params, form: str = "difference"
+) -> tuple[np.ndarray, np.ndarray]:
+    """KS2 between the main centres, and where it is defined. Across fragments: q q / (eps R)
+    at the van der Waals contact R_c. Within a fragment, `form` "difference" (default):
+    q q / eps (1 / R_c - 1 / R), the change on bringing the two centres from their distance in
+    the reactant to contact, so a bond's own polarity (O(-) H(+) at 1 Angstrom) is not counted
+    as an attraction; "geometric" (the ablation): q q / (eps R)."""
+    if form not in KS2_INTRA_FORMS:
+        raise ValueError(f"unknown KS2 form {form!r}; one of {KS2_INTRA_FORMS}")
+    a, b = _main(occ), _main(virt)
+    za, zb = [t_f.atoms[i].atomic_number for i in a], [t_g.atoms[i].atomic_number for i in b]
+    R_c = np.array([[vdw_sum(x, y) for y in zb] for x in za], dtype=float).reshape(len(a), len(b))
+    q_a = [t_f.atoms[i].mulliken_charge for i in a]
+    qq = np.outer(q_a, [t_g.atoms[i].mulliken_charge for i in b])
+    k = COULOMB_EV_ANG * qq / params.eps
+    if not same:
+        return k / R_c, np.ones(R_c.shape, dtype=bool)
+    pos_f = np.array([x.position for x in t_f.atoms]).reshape(-1, 3)
+    R = _pairwise(pos_f[a], pos_f[b])
+    defined = R > 0  # not when both main centres are one atom
+    inv = 1.0 / np.where(defined, R, 1.0)
+    out = k * (1.0 / R_c - inv) if form == "difference" else k * inv
+    return np.where(defined, out, 0.0), defined
 
 
-def _inter(pf, fragments, f: int, g: int, kernel: ContactKernel, params: KSParams) -> None:
-    t_f, t_g = fragments[f], fragments[g]
-    occ_f, occ_g, virt_g = t_f.occupied(), t_g.occupied(), t_g.virtual()
-    if not occ_f or not occ_g:
-        return
-    C = contact_repulsion_matrix(occ_f, t_f, occ_g, t_g, kernel, params)
-    _set(pf, "ks1", pf.index.occ[f], pf.index.occ[g], C)
-    if virt_g:
-        N = neighbourhood(occ_g, t_g, _virtual_sites(t_g))
-        _set(pf, "ks1", pf.index.occ[f], pf.index.virt[g], C @ N.T)
+def _ks1(t_f, occ, t_g, virt, same: bool, kernel, params) -> np.ndarray:
+    """KS1 of each occupied r of f with the occupied tokens of g around each virtual s's main
+    centre (r itself excluded within a fragment)."""
+    N = neighbourhood(t_g.occupied(), t_g, _main(virt))  # (n_virt, n_occ_g)
+    if same:
+        return repulsion_matrix(t_f, params) @ N.T  # zero diagonal: r never repels itself
+    C = contact_repulsion_matrix(occ, t_f, t_g.occupied(), t_g, kernel, params)
+    return C @ N.T
 
 
-def _orbital_term(pf, fragments, f: int, g: int, kernel, params) -> None:
-    """KS3 and G for the occupied tokens of f against the virtual tokens of g."""
-    t_f, t_g = fragments[f], fragments[g]
+def _terms(
+    t_f, t_g, same: bool, kernels: PairKernels, params, ks2_form: str = "difference"
+) -> dict[str, np.ndarray]:
+    """Every raw term of the (occupied of f) x (virtual of g) block."""
     occ, virt = t_f.occupied(), t_g.virtual()
-    if not occ or not virt:
-        return
-    G = gap_kernel_matrix(occ, virt)
-    beta = contact_beta_matrix(occ, t_f, virt, t_g, kernel, params)
-    _set(pf, "gap_kernel", pf.index.occ[f], pf.index.virt[g], G)
-    _set(pf, "ks3", pf.index.occ[f], pf.index.virt[g], beta**2 * G)
+    out = {
+        f"beta_{d}": kernels.by_distance[d].beta_matrix(occ, t_f, virt, t_g, params, same=same)
+        for d in FEATURE_DISTANCES
+    }
+    out["G"] = gap_kernel_matrix(occ, virt)
+    out["ks2"], out["ks2_defined"] = _ks2(t_f, occ, t_g, virt, same, params, ks2_form)
+    out["ks1"] = _ks1(t_f, occ, t_g, virt, same, kernels.main, params)
+    shape = out["G"].shape
+    out["clash"] = np.zeros(shape, dtype=bool)
+    out["sites"] = np.full((*shape, 2), -1, dtype=int)
+    if kernels.main.config.kernel == "oriented":
+        out["sites"], out["clash"] = kernels.main.oriented_details(occ, t_f, virt, t_g, same)
+    if same:
+        cen_o = np.array([o.descriptors.centroid for o in occ]).reshape(-1, 3)
+        cen_v = np.array([o.descriptors.centroid for o in virt]).reshape(-1, 3)
+        out["centroid_distance"] = _pairwise(cen_o, cen_v)
+        B = wh_matrix(t_f, params)
+        out["cross_coupling"] = np.abs(cross_center_coupling_matrix(occ, virt, t_f.ao_atom, B))
+    return out
 
 
-def pair_features(
-    fragments: list[MoleculeTokens], kernel: ContactKernel, params: KSParams | None = None
-) -> PairFeatures:
-    """z_ij for every ordered pair of tokens of the reactant set `fragments`."""
+@dataclass
+class PairBlock:
+    z: np.ndarray  # (n_occ, n_virt, len(PAIR_FEATURES)), 0 where undefined
+    defined: np.ndarray  # same shape, bool
+    gap_sign: np.ndarray  # (n_occ, n_virt) int8: sign of G (bookkeeping, not a feature)
+    sites: np.ndarray  # (n_occ, n_virt, 2) global atoms of the contact amplitude's argmax
+    n_non_finite: int = 0
+
+
+def _fill(block: PairBlock, cell, terms: dict, same: bool) -> None:
+    z, ok = block.z[cell], block.defined[cell]
+    for d in FEATURE_DISTANCES:
+        z[..., F[f"log_beta2_d{d}"]] = _log(terms[f"beta_{d}"] ** 2)
+    beta2 = terms[f"beta_{PRIMARY_DISTANCE}"] ** 2
+    z[..., F["log_abs_g"]] = _log(terms["G"])
+    z[..., F["log_abs_ks3"]] = _log(beta2 * terms["G"])
+    z[..., F["ks2"]] = terms["ks2"]
+    z[..., F["log_abs_ks1"]] = _log(terms["ks1"])
+    z[..., F["inter"]] = 0.0 if same else 1.0
+    z[..., F["clash"]] = terms["clash"].astype(float)
+    ok[...] = True
+    ok[..., F["ks2"]] = terms["ks2_defined"]
+    ok[..., F["log_abs_ks1"]] = np.isfinite(terms["ks1"]) & (terms["ks1"] != 0)
+    for name in ("centroid_distance", "cross_coupling"):
+        ok[..., F[name]] = same
+        if same:
+            z[..., F[name]] = terms[name]
+    block.z[cell], block.defined[cell] = z, ok
+    block.gap_sign[cell] = np.where(terms["G"] > 0, 1, -1)
+
+
+def pair_block(
+    fragments: list[MoleculeTokens], kernels: PairKernels, params=None, ks2_form="difference"
+) -> PairBlock:
+    """z_rs of every (occupied, virtual) pair of the reactant set, in the sample's orbital
+    order (fragment by fragment, each file's own order). `ks2_form`: the intramolecular KS2
+    (`_ks2`; "geometric" only for the ablation)."""
     params = params or KSParams()
-    ix = token_index(fragments)
-    n = len(ix.fragment)
-    pf = PairFeatures(np.zeros((n, n, len(PAIR_FEATURES))), np.zeros((n, n, 7), bool), ix)
-    _token_level(pf, params)
-    for f, t_f in enumerate(fragments):
-        for g in range(len(fragments)):
-            _orbital_term(pf, fragments, f, g, kernel, params)
-            if f == g:
-                _intra(pf, t_f, f, params)
-            else:
-                _inter(pf, fragments, f, g, kernel, params)
-    diag = np.arange(n)
-    pf.defined[diag, diag, _F["ks1"]] = False  # an orbital does not repel itself
-    bad = pf.defined & ~np.isfinite(pf.z)
-    pf.n_non_finite = int(bad.sum())
-    pf.z[bad], pf.defined[bad] = 0.0, False
-    return pf
-
-
-def _joint_orbitals(pf: PairFeatures) -> tuple[np.ndarray, np.ndarray]:
-    """Joint indices of all occupied and all virtual tokens, fragment by fragment: the order
-    of the sample's occupied and virtual orbitals."""
-    frags = sorted(pf.index.occ)
-    return (
-        np.concatenate([pf.index.occ[f] for f in frags]).astype(int),
-        np.concatenate([pf.index.virt[f] for f in frags]).astype(int),
+    n_occ = [len(t.occupied()) for t in fragments]
+    n_virt = [len(t.virtual()) for t in fragments]
+    shape = (sum(n_occ), sum(n_virt))
+    block = PairBlock(
+        np.zeros((*shape, len(PAIR_FEATURES))),
+        np.zeros((*shape, len(PAIR_FEATURES)), dtype=bool),
+        np.zeros(shape, dtype=np.int8),
+        np.full((*shape, 2), -1, dtype=np.int64),
     )
-
-
-def donor_acceptor_block(pf: PairFeatures) -> tuple[np.ndarray, np.ndarray]:
-    """(z, defined) of every ordered (occupied i, virtual j) pair, shape (n_occ, n_virt, 7)."""
-    occ, virt = _joint_orbitals(pf)
-    return pf.z[np.ix_(occ, virt)], pf.defined[np.ix_(occ, virt)]
+    r0, atom0 = np.cumsum([0, *n_occ]), np.cumsum([0, *[len(t.atoms) for t in fragments]])
+    c0 = np.cumsum([0, *n_virt])
+    for f, t_f in enumerate(fragments):
+        for g, t_g in enumerate(fragments):
+            if not n_occ[f] or not n_virt[g]:
+                continue
+            cell = np.s_[r0[f] : r0[f + 1], c0[g] : c0[g + 1]]
+            terms = _terms(t_f, t_g, f == g, kernels, params, ks2_form)
+            _fill(block, cell, terms, f == g)
+            if (terms["sites"] >= 0).all():
+                block.sites[cell] = terms["sites"] + [atom0[f], atom0[g]]
+    bad = ~np.isfinite(block.z)  # e.g. KS1 without %Vbur: counted, never silent
+    block.n_non_finite = int(bad.sum())
+    block.defined[bad] = False
+    block.z[~block.defined] = 0.0  # e.g. log|KS1| floored where KS1 == 0
+    return block
 
 
 def valid_pairs(fragments: list[MoleculeTokens], config: CandidateConfig | None = None):
     """(n_occ, n_virt) arrow-candidate filter: a doubly occupied donor, an empty acceptor that
-    is not d-type (unless allowed), and, within one fragment, no centre atom in common
-    (`shares_centres`, which contains the own-antibond rule). Every criterion is read from
-    descriptors (`ksmech.orbitals.tokens`)."""
+    is not d-type (unless allowed), and, within one fragment, not the donor's own antibond and
+    not a pair whose every site pair is a bond interacting with itself (sites identical or
+    bonded, and the acceptor carries >= `config.site_weight` on the donor's site or the donor
+    on the acceptor's: `tokens.site_excluded_matrix`). Every criterion is read from descriptors
+    and the record geometry (`ksmech.orbitals.tokens`)."""
     config = config or CandidateConfig()
     donors = {id(o) for t in fragments for o in t.donor_candidates(config)}
     acceptors = {id(o) for t in fragments for o in t.acceptor_candidates(config)}
-    occ = [(f, o) for f, t in enumerate(fragments) for o in t.occupied()]
-    virt = [(f, o) for f, t in enumerate(fragments) for o in t.virtual()]
-    ok_d = np.array([id(o) in donors for _, o in occ], dtype=bool)
-    ok_a = np.array([id(o) in acceptors for _, o in virt], dtype=bool)
+    occ = [o for t in fragments for o in t.occupied()]
+    virt = [o for t in fragments for o in t.virtual()]
+    ok_d = np.array([id(o) in donors for o in occ], dtype=bool)
+    ok_a = np.array([id(o) in acceptors for o in virt], dtype=bool)
     out = ok_d[:, None] & ok_a[None, :]
-    for i, j in np.argwhere(out):
-        (f, d), (g, a) = occ[i], virt[j]
-        out[i, j] = f != g or not shares_centres(d, a)  # centres are atoms of one fragment
+    r0 = np.cumsum([0, *[len(t.occupied()) for t in fragments]])
+    c0 = np.cumsum([0, *[len(t.virtual()) for t in fragments]])
+    for f, t in enumerate(fragments):  # centres are atoms of one fragment
+        o_f, v_f = t.occupied(), t.virtual()
+        if not o_f or not v_f:
+            continue
+        own = np.array([[is_antibonding_partner(d, a) for a in v_f] for d in o_f])
+        bad = own | site_excluded_matrix(t, o_f, v_f, config.site_weight)
+        out[r0[f] : r0[f + 1], c0[f] : c0[f + 1]] &= ~bad
     return out
 
 
@@ -241,30 +284,74 @@ def atom_coulomb_matrix(fragments: list[MoleculeTokens], params: KSParams | None
     return coulomb_matrix(q, distance, ~np.eye(len(atoms), dtype=bool), params)
 
 
+# ---- standardization and the frozen head
+
+
 @dataclass(frozen=True)
 class PairStats:
     """Mean and standard deviation of each z entry over the defined entries of a training set,
-    computed at the initial K and eps and then frozen."""
+    at the physical K and eps, then frozen."""
 
     mean: np.ndarray
     std: np.ndarray
     count: np.ndarray
+    names: tuple[str, ...] = field(default=PAIR_FEATURES)
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                n: {"mean": m, "std": s, "count": int(c)}
+                for n, m, s, c in zip(
+                    self.names, self.mean.tolist(), self.std.tolist(), self.count, strict=True
+                )
+            },
+            indent=1,
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> PairStats:
+        d = json.loads(text)
+        if tuple(d) != PAIR_FEATURES:
+            raise ValueError(f"pair statistics for {tuple(d)}, expected {PAIR_FEATURES}")
+        return cls(*(np.array([d[n][k] for n in PAIR_FEATURES]) for k in ("mean", "std", "count")))
 
 
-def fit_pair_stats(features) -> PairStats:
-    """Streaming mean / std over the defined entries of many `PairFeatures`."""
+def fit_pair_stats(blocks) -> PairStats:
+    """Streaming mean / std over the defined entries of many (z, defined) pairs."""
     k = len(PAIR_FEATURES)
     n, s1, s2 = np.zeros(k), np.zeros(k), np.zeros(k)
-    for pf in features:
+    for z, defined in blocks:
         for j in range(k):
-            v = pf.z[..., j][pf.defined[..., j]]
+            v = z[..., j][defined[..., j]].astype(float)
             n[j], s1[j], s2[j] = n[j] + v.size, s1[j] + v.sum(), s2[j] + (v * v).sum()
     mean = np.divide(s1, n, out=np.zeros(k), where=n > 0)
     var = np.divide(s2, n, out=np.zeros(k), where=n > 0) - mean**2
     return PairStats(mean, np.sqrt(np.clip(var, 0.0, None)), n)
 
 
-def standardize(pf: PairFeatures, stats: PairStats) -> np.ndarray:
+def standardize(z: np.ndarray, defined: np.ndarray, stats: PairStats) -> np.ndarray:
     """(z - mean) / std on defined entries, 0 elsewhere; a constant entry is only centred."""
     std = np.where(stats.std > 0, stats.std, 1.0)
-    return np.where(pf.defined, (pf.z - stats.mean) / std, 0.0)
+    return np.where(defined, (z - stats.mean) / std, 0.0)
+
+
+def ks_energies(z: np.ndarray, gap_sign: np.ndarray, defined: np.ndarray):
+    """(KS3, KS2, KS1) in eV from stored features at the physical K, eps (`to_params` first):
+    KS3 = sign(G) |KS3| at 2.3 Angstrom, KS2 signed, KS1 >= 0 the closed-shell repulsion; an
+    undefined term is 0."""
+    ks3 = gap_sign * np.exp(z[..., F["log_abs_ks3"]])
+    ks2 = np.where(defined[..., F["ks2"]], z[..., F["ks2"]], 0.0)
+    ks1 = np.where(defined[..., F["log_abs_ks1"]], np.exp(z[..., F["log_abs_ks1"]]), 0.0)
+    return ks3, ks2, ks1
+
+
+def frozen_head(
+    z: np.ndarray, gap_sign: np.ndarray, defined: np.ndarray, params: KSParams | None = None
+) -> np.ndarray:
+    """Logits of the frozen KS head: -(KS3 + KS2 + KS1) / tau in eV, no standardization, from
+    stored features at the physical K and eps (`ks_energies`). KS1 is the repulsion, >= 0, so
+    it lowers the logit (the spec's term (1); the user's `-(KS3 + KS2 - KS1)` with KS1 written
+    as the stabilization-signed sum). tau (`KSParams.tau`, a learnable positive scalar,
+    1 eV at initialization) only scales: the ranking is the floor -(KS3 + KS2) minus KS1."""
+    ks3, ks2, ks1 = ks_energies(z, gap_sign, defined)
+    return -(ks3 + ks2 + ks1) / (params or KSParams()).tau

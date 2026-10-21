@@ -35,6 +35,7 @@ import numpy as np
 
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
 from ksmech.physics.contact_kernel import ContactKernel
+from ksmech.physics.oriented import ao_energies
 from ksmech.physics.params import KSParams
 from ksmech.qm.fukui import HARTREE_TO_EV
 
@@ -46,12 +47,15 @@ def resonance_integral(S_ab, H_aa, H_bb, K: float = 1.75):
     return K * np.asarray(S_ab) * 0.5 * (np.asarray(H_aa) + np.asarray(H_bb))
 
 
-def wolfsberg_helmholz(S: np.ndarray, F: np.ndarray, ao_atom: np.ndarray, K: float) -> np.ndarray:
+def wolfsberg_helmholz(
+    S: np.ndarray, F: np.ndarray, ao_atom: np.ndarray, K: float, h: np.ndarray | None = None
+) -> np.ndarray:
     """B_mu,nu = beta_mu,nu (eV) for AOs on different atoms, 0 within an atom.
 
-    `F` is the converged GFN2 Fock matrix in Hartree; only its diagonal enters.
+    `F` is the converged GFN2 Fock matrix in Hartree; only its diagonal enters. `h`: the AO
+    energies (eV) to use instead, as `wh_matrix` passes the shell averages (`ao_energies`).
     """
-    h = np.diag(F) * HARTREE_TO_EV
+    h = np.diag(F) * HARTREE_TO_EV if h is None else h
     B = resonance_integral(S, h[:, None], h[None, :], K)
     B[ao_atom[:, None] == ao_atom[None, :]] = 0.0
     return B
@@ -171,8 +175,10 @@ def centroid_distance(r: OrbitalToken, s: OrbitalToken) -> float:
 
 
 def wh_matrix(t: MoleculeTokens, params: KSParams | None = None) -> np.ndarray:
-    """The molecule's Wolfsberg-Helmholz B (eV), zero within an atom."""
-    return wolfsberg_helmholz(t.S, t.F, t.ao_atom, (params or KSParams()).K)
+    """The molecule's Wolfsberg-Helmholz B (eV), zero within an atom, on the shell-averaged
+    AO energies (rotation-invariant, `oriented.ao_energies`)."""
+    K = (params or KSParams()).K
+    return wolfsberg_helmholz(t.S, t.F, t.ao_atom, K, ao_energies(t))
 
 
 def centre_restricted(tokens: list[OrbitalToken], ao_atom: np.ndarray) -> np.ndarray:
@@ -207,8 +213,8 @@ def intramolecular_pair_features(
     """The unified term plus the two intramolecular extras for a pair of one molecule."""
     return dict(
         gap_kernel=token_gap_kernel(r, s),
-        contact_beta=kernel.beta(r, t, s, t, params),
-        ks3_contact=ks3_contact(r, t, s, t, kernel, params),
+        contact_beta=kernel.beta(r, t, s, t, params, same=True),
+        ks3_contact=kernel.beta(r, t, s, t, params, same=True) ** 2 * token_gap_kernel(r, s),
         centroid_distance=centroid_distance(r, s),
         cross_center_coupling=cross_center_coupling(r, s, wh_matrix(t, params), t.ao_atom),
     )

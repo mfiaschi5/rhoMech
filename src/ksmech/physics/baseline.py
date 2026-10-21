@@ -1,10 +1,11 @@
 """Ranking baselines with no neural network (Prompt 5): a logistic regression and a
 gradient-boosted ranker that score the candidate pairs of each step's first arrow.
 
-Features of a candidate pair (donor r, acceptor s), no type one-hot (`FEATURE_NAMES`, 57):
+Features of a candidate pair (donor r, acceptor s), no type one-hot (`FEATURE_NAMES`, 61):
 
-- the 7 Klopman-Salem pair features z_rs at the physical K and eps (`ranking.physical_pair_z`;
-  the samples' stored kernel, oriented by default);
+- the 11 pair-track features z_rs at the physical K and eps (`physics.pairs.PAIR_FEATURES`,
+  `ranking.physical_pair_z`; log beta^2 at three distances, log|G|, log|KS3|, KS2, log|KS1|,
+  the fragment flag, centroid distance, cross-centre coupling, CLASH);
 - the 23 continuous descriptors of r and of s (the model inputs `orbital_features`);
 - the frozen-orbital f- on r's main centre and f+ on s's main centre;
 - the diagnostic LMO energies E_r and E_s.
@@ -36,7 +37,7 @@ from ksmech.arrows.reactants import TokenLoader
 from ksmech.arrows.steps import MechanismSample
 from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.tokens import atom_feature_names
-from ksmech.physics.pairs import PAIR_FEATURES
+from ksmech.physics.pairs import PAIR_FEATURES, frozen_head
 from ksmech.physics.ranking import (
     first_label,
     label_pairs,
@@ -64,6 +65,8 @@ class CandidateSet:
     cols: np.ndarray  # (n,) virtual column
     positive: np.ndarray  # (n,) a labeled pair of the first arrow
     ignore: np.ndarray  # (n,) a labeled pair of another arrow only (left out of training)
+    gap_sign: np.ndarray  # (n,) sign of G (the logs drop it; the untrained floor needs it)
+    defined: np.ndarray  # (n, n_pair_features) which pair features are defined
     valid: np.ndarray  # (n_occ, n_virt) the pair filter
     label: np.ndarray  # (n_occ, n_virt) the first arrow's labeled pairs, unfiltered
 
@@ -117,22 +120,30 @@ def candidate_set(sample: MechanismSample, loader: TokenLoader) -> CandidateSet:
         cols,
         first[rows, cols],
         (others & ~first)[rows, cols],
+        sample.pair_gap_sign[rows, cols].astype(float),
+        sample.pair_defined[rows, cols],
         sample.pair_valid,
         first,
     )
 
 
-def untrained_scores(X: np.ndarray) -> dict[str, np.ndarray]:
-    """The untrained KS scores of candidate pairs, from their own feature rows."""
+def untrained_scores(cs: CandidateSet) -> dict[str, np.ndarray]:
+    """The untrained KS scores of candidate pairs, from their own feature rows (signed KS3 and
+    G restored with the stored sign of G), the frozen head's logits among them."""
+    X = cs.X
     fbar = 0.5 * (X[:, _COL["donor_energy_ev"]] + X[:, _COL["acceptor_energy_ev"]])
-    G = X[:, _COL["gap_kernel"]]
-    return {
-        "ks3": -X[:, _COL["ks3"]],
+    G = cs.gap_sign * np.exp(X[:, _COL["log_abs_g"]])
+    ks3 = cs.gap_sign * np.exp(X[:, _COL["log_abs_ks3"]])
+    ks2 = X[:, _COL["ks2"]]
+    out = {
+        "ks3+ks2": -(ks3 + ks2),
+        "ks3": -ks3,
         "fbar2_g": -(fbar**2) * G,
-        "fbar2_g+ks2": -((fbar**2) * G + X[:, _COL["ks2"]]),
-        "ks3+ks2": -(X[:, _COL["ks3"]] + X[:, _COL["ks2"]]),
+        "fbar2_g+ks2": -((fbar**2) * G + ks2),
         "gap_kernel": -G,
+        "frozen_head": frozen_head(X[:, : len(PAIR_FEATURES)], cs.gap_sign, cs.defined),
     }
+    return out
 
 
 def evaluate_scores(sets: list[CandidateSet], scores: list[np.ndarray]) -> dict:

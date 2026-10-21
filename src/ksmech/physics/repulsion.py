@@ -1,8 +1,11 @@
 """Klopman-Salem term 1: the closed-shell (four-electron) repulsion between occupied orbitals.
 
-    KS1(r, r') = - sum_{mu, nu} (N_a(mu) + N_a(nu)) beta_mu,nu S_mu,nu l_mu,r l_nu,r'
+    KS1(r, r') = | sum_{mu, nu} (N_a(mu) + N_a(nu)) beta_mu,nu S_mu,nu l_mu,r l_nu,r' |
 
-over AO pairs on different atoms, with beta the Wolfsberg-Helmholz resonance integral.
+over AO pairs on different atoms, with beta the Wolfsberg-Helmholz resonance integral. The sum
+is bilinear in the two coefficient vectors, so its sign follows the arbitrary phase of each LMO
+(Pipek-Mezey fixes none); the magnitude is the phase-free repulsion, positive like the contact
+form below.
 N_a is the electron population of the atom carrying the AO, valence electrons minus the
 Mulliken charge: the spec's Eq. (ks) writes term 1 with lowercase q (populations, as in
 Klopman's and Salem's papers) and term 2 with Q (charges), and a partial charge would make the
@@ -16,7 +19,11 @@ Between fragments the AO sum has no geometry. Its contact form keeps the populat
 replaces beta S l l by the contact resonance integral times the contact amplitude of the two
 occupied tokens, scaled by the buried volumes of the two main centres (as fractions):
 
-    KS1(r, r') = - (N_m(r) + N_m(r')) beta_c(r, r') a(r, r') V_m(r) V_m(r') / 100^2
+    KS1(r, r') = (N_m(r) + N_m(r')) |beta_c(r, r')| a(r, r') V_m(r) V_m(r') / 100^2
+
+Each AO term -(N + N) beta_mu,nu S_mu,nu = -(N + N) K S_mu,nu^2 (F_mu,mu + F_nu,nu) / 2 is
+positive for bound AOs, so the contact form takes the magnitude of the orbital-level beta_c
+(the AO-level sum of the oriented kernel), as the within-fragment form takes |...|.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ import numpy as np
 from ksmech.orbitals.localize import valence_electrons
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
 from ksmech.physics.contact_kernel import ContactKernel
-from ksmech.physics.ks_terms import wolfsberg_helmholz
+from ksmech.physics.ks_terms import wh_matrix
 from ksmech.physics.params import KSParams
 
 NEIGHBOURHOOD_ANG = 3.5
@@ -42,11 +49,11 @@ def repulsion_matrix(t: MoleculeTokens, params: KSParams | None = None) -> np.nd
     occ = t.occupied()
     if not occ:
         return np.zeros((0, 0))
-    B = wolfsberg_helmholz(t.S, t.F, t.ao_atom, (params or KSParams()).K)  # 0 within an atom
+    B = wh_matrix(t, params)  # 0 within an atom; shell-averaged AO energies
     n = atom_populations(t)[t.ao_atom]
     Q = (n[:, None] + n[None, :]) * B * t.S
     L = np.column_stack([o.coeff_vector for o in occ])
-    M = -(L.T @ Q @ L)
+    M = np.abs(L.T @ Q @ L)  # the LMO phases are arbitrary
     np.fill_diagonal(M, 0.0)
     return M
 
@@ -76,4 +83,4 @@ def contact_repulsion_matrix(
     v_s = np.array([t_s.atoms[i].vbur for i in b], dtype=float)
     beta = kernel.beta_matrix(rows, t_r, cols, t_s, params)
     amp = kernel.amplitude_matrix(rows, t_r, cols, t_s)
-    return -n * beta * amp * np.outer(v_r, v_s) / 1e4
+    return n * np.abs(beta) * amp * np.outer(v_r, v_s) / 1e4  # >= 0, like the AO terms
