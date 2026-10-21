@@ -1706,3 +1706,425 @@ Top-1 / 3 / 5 on the test split:
   - In both, SN2 outranks E2 (F^2 G + KS2: 13.8 vs 2.24; GBDT: 3.99 vs 1.43) and 1,4 outranks
     1,2 (23.7 vs 17.1; 3.26 vs 2.41).
 - These supersede the 467-sample numbers of the previous entry.
+
+## 2026-10-21 — ksmech-serve web app
+
+`ksmech-serve` is a local web app (backend `src/ksmech/serve/`, FastAPI + SQLModel on SQLite;
+frontend `apps/ui/`, Vite + React + TypeScript with RDKit.js, 3Dmol.js and cytoscape) to predict
+mechanisms as reaction networks, inspect the physics of every arrow, correct steps, curate and
+export mechanisms, and browse PMechDB and curated steps. The spec has 13 sections and no pools,
+pool keys, stoichiometry, networks, cycles, order groups, curation or serving: every such notion
+below is an app-level definition. Spec section 10 (Inference) is the serving contract that does
+exist: per arrow the intermediate, the step probability, the three KS values, the dominant
+canonical MO pair (k, m) in G with its energies, and the frozen head's weight. The upstream
+packages (`qm`, `orbitals`, `physics`, `arrows`, `model`) are consumed, never modified.
+
+### 1. Response schema
+
+- **Models.** The pydantic models of `serve/schemas.py` are the HTTP contract. `ksmech-serve
+  schema-ts` mirrors them to `apps/ui/src/api/types.gen.ts` and `tests/test_serve_schemas_ts.py`
+  fails on drift. Response models are rendered from their serialization-mode JSON schema with
+  defaults required (a response always carries them); request models from the validation-mode
+  schema (defaulted fields optional) and they forbid extra fields (a misspelt field is a 422).
+- **Provenance.** Every prediction-bearing response (`JobOut` of predict and override,
+  `NetworkOut`, `CandidatesOut`, `PhysicsOut`, `ContactOut`, `RecheckReportOut`) embeds
+  `provenance`: predictor, predictor_version, checkpoint_hash, spec_version,
+  physics_fingerprint, artifact_versions, chemistry, temperature, candidate_scope, ks_params,
+  contact distance, candidate config and notes (for example "the floor and gbdt have no
+  END_MECH head" and the synthetic-chemistry warning).
+- **Spec version.** The spec carries no version string, so `spec_version = "v3+" +
+  sha256(docs/ksmech_architecture.tex)[:12] + ";tok7;smp6;ori5;qm1"` (token schema, sample,
+  oriented and QM schema versions, read from the upstream sources with `ast` so the API process
+  never imports torch). `artifact_versions` is also exposed on its own.
+- **Errors.** Always `{"error": {code, message, upstream, detail, request_id}}`, with the
+  upstream codes (qm `ReasonCode`, `ApplyReason`, `RejectReason`) in `upstream`. The request id
+  is also the `X-Request-ID` header. FastAPI's validation errors become 422 `REQUEST_INVALID`
+  with the pydantic errors in `detail.errors`; an unknown route is 404 (405 for a wrong method)
+  `REQUEST_INVALID`; any unmapped exception is a 500 `UNEXPECTED`, logged with the request id.
+  `WORKER_TIMEOUT` is 504 and `WORKER_CRASH` 500 (the code table lists them only as job
+  reasons, which would have made an interactive timeout a 422).
+- **Pending.** Compute in progress is 202 `PendingOut {status, task_id, label, retry_after_s,
+  worker}` with a `Retry-After` header; the client retries the same URL (1 s doubling to 5 s,
+  for at most 180 s) and the task is deduplicated by key, so retries join it.
+- **Ids.** Every path or body id is checked against its pattern before any service runs
+  (`s` + 20 hex state, `p` + 20 hex node, `e`/`c` + 16 hex edge, `j` + 16 hex job, `w` + 12 hex
+  pathway, `pmechdb:pmechdb-<16 hex>` or `curated:<mid>:<k>` step refs, `donor`/`acceptor`);
+  a mismatch is a 404 with the endpoint's not-found code, so an id never reaches a file path.
+- **`POST /normalize`** answers the first preflight error as a 422 with its code; the per-row
+  badges travel in `error.detail.normalize.species[*].errors` and `detail.field` names the
+  field, so `NormalizeOut.ok` is always true on a 200.
+- **JSON never carries NaN or inf.** `_Out` sets `ser_json_inf_nan="null"` for
+  `model_dump_json` and a wrap serializer maps non-finite floats to null for
+  `model_dump(mode="json")` (hand-built responses, `jsonable_encoder`).
+- **Units and ranks.** eV, 1/eV, eV^2, Angstrom; cubes in bohr. Every rank in the API is
+  1-based (1 = top).
+- **Diagnostics.** Classifier labels (lone pair, sigma*, hybridization, ...) appear only in
+  `diagnostic` blocks and never feed scores or masks.
+- **`/pool/{id}` is addressed by `state_id`** (the mapped Lewis form), because the physics
+  depends on the Lewis form and the atom numbering, not only on the resonance pool key.
+
+### 2. Network keying, probabilities and the cycle rule
+
+- **Keys.** Species key = the map-free resonance key of the species' token key (a species key
+  can be a charge-separated form, for example benzene's `c1c[cH-]cc[cH+]1`, so display SMILES
+  come from token keys). Pool key = the sorted dot-join of species keys with repeats; `pool_id =
+  "p" + sha256("pool-v1|" + key)[:20]`; `state_id = "s" + sha256(mapped SMILES)[:20]`; edge ids
+  `"e"`/`"c"` + sha256(source | arrows | kind)[:16], so the same arrows from the same state give
+  the same edge.
+- **States.** Every pool state is a Kekule, explicit-H SMILES with a unique map number on every
+  atom (`IMPLICIT_H_IN_POOL` otherwise); maps are the only atom identity that survives a step.
+  The root uses `prepare_mol` record order per fragment, then Kekulize, then maps 1..N. Every
+  state the worker returns is saved before it becomes a node.
+- **Nodes** merge by pool key and keep the representative state first reached in the network
+  (deterministic BFS order, ties by lower state id), with aliases listed. Physics depends on
+  that representative, because QM and token keys are not resonance-invariant.
+- **Steps** come from `Predictor.propose(pool)`. A floor or gbdt step is one arrow (r, a, s, b)
+  at the oriented kernel's contact sites (main centre when the contact site is undefined);
+  `apply_predicted_arrows` supplies the implied sink. The stub uses its rule sites
+  (`site_source="rule"`), user arrows are `"user"`.
+- **Probabilities.** Cell probability = softmax over all valid cells at T (the floor's default
+  T = 1 eV = `KSParams.tau`). One edge per (source node, child pool key); its probability is the
+  sum over the scanned proposals that give that child, a lower bound (the true value is at most
+  p + the unscanned mass). The scan stops when the unscanned mass U < p_B - p_{B+1} (strict), which
+  fixes the kept set exactly; mass lost to failed or unscanned proposals is reported, never
+  renormalized. Path score = sum of log p; corrected edges contribute 0. A global beam per depth;
+  pruned nodes are kept. Every failed proposal is counted by reason (`APPLY_FAILED:<reason>`,
+  `RESONANCE_ONLY_STEP`, `SPECIES_KEY_FAILED`) and kept children whose dataset-arrow encoding
+  failed are counted as `ARROW_ENCODING_FAILED`.
+- **Cycles.** A recurrence closes when a step reaches a pool key already on its path; a turnover
+  when the catalyst is consumed and regenerated with the consumed species supplied in the root
+  (latest anchor). `stop_at_turnover` stops expansion at a turnover. Resonance-only steps are
+  dropped. A spectator is never a catalyst, and a one-step change is never a turnover. The
+  turnover's virtual edge reads like "−2 P +S" (count before the species when above 1).
+- **Pathways.** Best-first simple paths over active edges; a final recurrence edge is allowed
+  (`ends_with = RECURRENCE`). `closes_cycle` is true when a pathway ends with TURNOVER or
+  RECURRENCE, and `cycle_ids` are the final edge's cycles.
+- **Revision.** `Network.revision` goes up after each node expansion, at the end of each layer,
+  of a build or of a continuation, and at each override, so a client polling with
+  `since_revision` always receives the final network.
+- **Termination.** Every node still on the frontier at the end of a build becomes
+  TERMINAL(MAX_STEPS), or TERMINAL(CANCELLED) when the job was cancelled; a node whose expansion
+  failed while the job was being cancelled is TERMINAL(CANCELLED) with its failure recorded.
+- **Corrections** keep the original (`superseded_by`, `EdgeOut.original`); prediction continues
+  from the corrected pool with `max(1, max_steps - depth)` steps unless `continue_steps` is
+  given (0, or `continue_prediction=false`, leaves the target as it is). Re-applying an existing
+  correction is `OVERRIDE_NOOP`, unless it supersedes a different, still-active predicted edge.
+  A corrected edge carries the network's predictor and version, because its predictor view
+  (score, probability and rank of each user arrow, over every valid pair) was computed with it;
+  an unavailable predictor gives a `PREDICTOR_UNAVAILABLE` warning, not a failure. The override
+  may run on the partial network of a failed or cancelled job (for example after
+  `SERVER_RESTART`). No network yet is 409 `JOB_NOT_DONE`; a job queued or running on the
+  network is 409 `NETWORK_BUSY`.
+- The transformer step score will be recorded as provisional. None of these notions is in the
+  spec.
+
+### 3. Curation status semantics
+
+- **Statuses.** `predicted`, `validated`, `corrected`, `rejected`, with the transition table of
+  the curation service and the consistency rule: validated requires no corrected step, corrected
+  at least one (`STATUS_INCONSISTENT` otherwise). `POST /curate` takes an action (save,
+  validate, reject; validate becomes validated or corrected by itself); `PATCH` takes an explicit
+  status and applies notes, then status, then order groups, all in one transaction. A PATCH to
+  the current status is a no-op without an audit line. Steps are immutable; rejected mechanisms
+  are kept, never exported, and their order groups are frozen (409 `INVALID_TRANSITION`).
+- **Order groups.** Per-step `order_groups`, non-decreasing and contiguous, built from
+  "independent of the previous step" toggles. Within each map-continuous run every pair of steps
+  of one group must have disjoint touched maps (`NOT_INDEPENDENT`); each break in map continuity
+  adds an `INDEPENDENCE_UNCHECKED` warning, recomputed on every read.
+- **StepDoc.** `CuratedStep.arrows_json` is a self-contained StepDoc (`ksmech-serve/step-v1`):
+  the mapped reactants and products, the token arrows with sites, maps, elements and centre
+  maps, the dataset arrows and PMechDB code, the score, probability and rank, the predictor,
+  its version, the spec version and the physics fingerprint. Touched maps are taken against the
+  Kekule base the encoding used. The original of a corrected step comes from the superseded edge
+  when the network still holds it.
+- **Export.** A deterministic regeneration from the database plus a ledger
+  (`ExportedStep`, keyed by `[reactant_pool_key, product_pool_key]`) that reports withdrawn
+  and changed steps. Rows: `source = user_curated`, `step_id = make_step_id("user_curated",
+  "<reactants>>><products> <code>")`, `pathway_id = user_curated-path-<mid>`, `step_index =
+  order_group` (steps sharing a group are unordered; `read_training_steps` destroys these ties).
+  Dedupe by (reactant pool key, product pool key) against PMechDB (`DUPLICATE_OF_PMECHDB`; the
+  PMechDB index is built inside the export when missing) and within the export
+  (`DUPLICATE_IN_EXPORT`). Files are written into a scratch directory and moved in with
+  `os.replace`; a re-export of an unchanged database is byte-identical. The parquet keeps
+  explicit H; the PMechDB arrow-code CSV compacts every H the arrows do not name
+  (`COMPACT_FALLBACK` when that fails, counted in `skipped` while the step is still written).
+  Without PMechDB steps the export warns `PMECHDB_UNAVAILABLE`.
+- **Re-ingest and splits.** `ksmech-data ingest --source user_curated` reads the export through
+  `data/user_curated.py` and `write_outputs`. Curated steps are pinned to train per step at the
+  split-strategy level (`splits.TRAIN_ONLY_SOURCES`); unpinned steps split exactly as before.
+  In leave-one-class-out every curated step (class None) is excluded.
+
+### 4. Versioning of curated steps
+
+- `Mechanism.checkpoint_hash` holds the predictor version string: `floor/ks3+ks2/d2.3/<fp>`,
+  `gbdt/<sha16>/<fp>`, `stub/<rules sha12>/<fp>` or `transformer/<sha16>`. `spec_version` is
+  stored per mechanism and `physics_fingerprint` per step; none of them is ever rewritten.
+- **Stale** = any mismatch with the current registry, spec or fingerprint. The reasons read
+  `predictor_unavailable`, `predictor_version <old> != <new>`, `spec_version <old> != <new>` and
+  `physics_fingerprint <old> != <new>`.
+- **Re-check** (`POST /curate/recheck`, `POST /curate/{mid}/recheck`, `ksmech-serve recheck`)
+  featurizes every reactant species with the current code (one `featurize` task each), re-aligns
+  the atom-level dataset arrows (`align_step`), ranks the labelled pair with `label_rank` (a None
+  rank counts as a miss), replays the predictor's own top-1 `propose()` and checks the product
+  with `predicted_round_trip_step`, then appends a `Recheck` row. It never changes the status.
+  A step that cannot be evaluated gets a row with `product_match = UNCHECKED` and its reason.
+
+### 5. Supporting decisions
+
+**Thin adapters over qm / orbitals / physics / arrows** (the only places serve reaches into the
+upstream packages; private names are pinned to `ORIENTED_VERSION == 5` and checked at runtime):
+
+| # | Adapter | Wraps (file:line) | Why missing upstream | Private names |
+|---|---|---|---|---|
+| A1 | `keys.species_key_of`, `fragment_keys`, `pool_key_of` | `data/chem.py:85` `fragments`, `:100` `unmapped_canonical`; `data/resonance.py:56` `canonical_resonance_key` on `Chem.MolFromSmiles(token_key)` (map-free) | Resonance keys keep atom maps; no pool notion exists | none |
+| A2 | `pools.initial_state` | `qm/embed.py:32` `prepare_mol`; `qm/xtb_calc.py:69` `resolve_charge_spin`; `data/chem.py:50` `canonical_mapped_smiles`, `:28` `parse_mapped` | apply needs explicit H and full maps; global ids are renumbered per pool | none |
+| A3 | `loader.LayeredTokenLoader` | `orbitals/build.py:108` `tokens_path`; `orbitals/tokens.py:711` `load_tokens`, `:707` `TokenSchemaError` | `TokenCache` (`arrows/reactants.py:163`) reads one directory, memoizes misses and is not thread-safe | none |
+| A4 | `featurize.QMFeaturizer.ensure`, QM half | `qm/records.py:117` `cache_path`, `:137` `is_valid_cache_file`; `qm/batch.py:63` `MolTask`, `:132` `process_molecule`; `qm/xtb_calc.py:38` `QMConfig(cache_dir=serve_qm, timeout_s=settings.qm_timeout_s)` | No layered, crash-isolated get-or-compute for one species | `qm/batch.py:77` `_init_worker` (pool initializer) |
+| A5 | `featurize.QMFeaturizer.ensure`, tokens half | `orbitals/build.py:186` `process_molecule` with `BuildConfig(qm_cache_dir=<dir of the record>, out_dir=serve_tokens)` | Returns only a `BuildRow`; one QM directory per config | none |
+| A6 | `synthetic.eht_record`, `SyntheticFeaturizer.ensure` | `qm/ao.py:27` `gfn2_shells`, `:49` `element_ao_l`; `physics/gto.py:159` `overlap_matrix`; `qm/embed.py:117` `embed`; `qm/fukui.py`; `qm/sterics.py:13`; `orbitals/localize.py:55` `valence_electrons`; `orbitals/tokens.py:510` `build_molecule_tokens`, `:623` `save_tokens`; `qm/records.py:121` `save_record` | Tests and the e2e must run the real token, physics and arrows code without xTB | none |
+| A7 | `analysis.analyze_pool` | `arrows/reactants.py:236` `ReactantTokens.from_smiles`; `arrows/steps.py:155` `reactant_sample`; `physics/ranking.py:78` `pair_components`, `:49` `SCORERS`, `:65` `physical_pair_z`; `physics/cli.py:27` `UNTRAINED_SCORE`; `physics/contact_kernel.py:191` `beta_matrix`; `physics/pairs.py:87` `oriented_kernels` | The textbook path needs a `TextbookCase`; signed beta is not kept in samples | none |
+| A8 | `candidates.pair_reasons` | `orbitals/tokens.py:353` `donor_candidates`, `:363` `acceptor_candidates`, `:347` `is_d_type`, `:155` `CandidateConfig.is_fractional`, `:189` `is_antibonding_partner`, `:238` `site_excluded_matrix`; checked against `physics/pairs.py:245` `valid_pairs` | Upstream returns booleans only | none |
+| A9 | `physics_view.t_site_pairs` | `physics/oriented.py:655` `block_contacts(..., sites_F=[[a]], sites_G=[[b]])`; `orbitals/tokens.py:216` `site_pairs_excluded`; `physics/ks_terms.py:86` `token_gap_kernel` | `Contacts` keeps only the argmax site pair | none |
+| A10 | `physics_view.dominant_gap_pair`, `block_indices` | the expression and clamp of `physics/ks_terms.py:69` `gap_kernel` (`:42` `MIN_GAP_EV`), the sum asserted equal to `:86` `token_gap_kernel`; canonical indices per `orbitals/localize.py:255-256`; HOMO per `qm/fukui.py:48`; occupations by `np.load` of the QM npz | No argmax of the G terms anywhere | none |
+| A11 | `physics_view.frozen_head_weight` | `physics/ranking.py:51` `SCORERS["frozen_head"]` = `physics/pairs.py:348`; `physics/params.py:31` `KSParams.tau` | No model, so no attention weight: a softmax over the donor row's valid acceptors, labelled as an untrained stand-in | none |
+| A12 | `physics_view.floor_rank` | `physics/ranking.py:150` `label_rank` with a one-hot positive mask (mirrored, see below) | – | none |
+| A13 | `placement.reconstruct_contact` | mirrors `physics/oriented.py:632` `_evaluate_block` and `:604` `_site_pair_values` for one site pair, keeping the winning placement | Upstream discards the chosen placement (tier, slot, roll) | `oriented._Side.of` / `_Side.cap`, `_entries`, `_tier`, `_concat`, `_overlaps`, `_placed`, `TIER1` / `TIER2`, pinned to `ORIENTED_VERSION == 5` |
+| A14 | `placement.verify_placement` | `physics/oriented.py:655` `block_contacts`, `:753` `oriented_block`, `:508` `rotate_coeffs`; `physics/gto.py:159` `overlap_matrix` | Independent proof that the placement is what the kernel evaluated | none |
+| A15 | `cubes.*` | `physics/gto.py:175` `ao_values`; `physics/oriented.py:384` `cap_atoms`; `qm/geometry.py:22` `BOHR_ANG` | No grid or cube writer exists | none |
+| A16 | `geometry.species_geometry` | `orbitals/tokens.py:107` `AtomToken.position`; `qm/embed.py:32` `prepare_mol` | Only the private `qm/geometry.py` `_write_xyz` exists, and it writes a file | none (not used) |
+| A17 | `stepapply.check_arrows` | `arrows/reactants.py` `donor_ok` / `acceptor_ok` / `mol_atom` / `centres`; the A8 codes | `apply_predicted_arrows` silently accepts atom-token ids (negative indexing) and raises `IndexError` on ids that are too large | none |
+| A18 | `stepapply.apply_step`, `pools.state_from_mol` | `arrows/apply_predicted.py:62` `PredictedArrow`, `:243` `apply_predicted_arrows`; A1 | `ApplyResult` (`arrows/apply.py:212`) covers only the whole pool | none |
+| A19 | `stepapply.edit_diff` | `arrows/apply.py:40` `TYPE_TO_ORDER`, `:139` `nonbonding_electrons` | The `EditState` is not returned | none |
+| A20 | `stepapply.encode_dataset_arrows` | `data/schema.py:49` `Arrow`; `data/validation.py:146` `build_step` as verifier; `rdchem.ResonanceMolSupplier(mol, KEKULE_ALL, 64)` | Predicted arrows have no map-number encoding; the Kekule switch is hidden | none |
+| A21 | `predictors.GBDTPredictor` | `physics/baseline.py:410` `load_gbdt`, `:89` `candidate_set`, `:341` `GBDTRanker.score`, `:49` `FEATURE_NAMES`, `:232` `Tree` | No compatibility or version report | none |
+| A22 | `recheck.recheck_step` | `arrows/align.py:281` `align_step`; `arrows/steps.py:145` `make_sample`; `physics/ranking.py:124,138,150` `first_label` / `label_pairs` / `label_rank`; `arrows/roundtrip.py:90` `predicted_round_trip_step` | No single-step re-evaluation entry point | none |
+
+Two private conveniences are rejected: `ProcessPoolExecutor._processes` and `TokenCache._memo`.
+
+**Process model and host safety.**
+
+- One uvicorn process (`workers=1`, host fixed to 127.0.0.1, no `--host` option, no auth), one
+  "batch" job thread (predict, override, recheck, export; FIFO; the only writer of networks),
+  one "background" job thread (index jobs) and one dispatcher thread feeding a spawned
+  `ProcessPoolExecutor` (initializer `qm.batch._init_worker`, created inside
+  `orbitals.build.single_threaded_children()`); `KSMECH_SERVE_WORKERS` is clamped to [1, 2].
+- `ksmech-serve` sets `OMP/OPENBLAS/MKL_NUM_THREADS=1` with the standard library before anything
+  imports numpy (importing `settings` already loads numpy through `contracts`), then calls
+  `settings.pin_threads()`; `create_app` and every worker call it too, and torch gets one
+  thread wherever it is imported. The API process never imports torch at module level.
+- `data/serve/run/server.lock` is held with `flock(LOCK_EX | LOCK_NB)` by `run`, `recheck` and
+  `export`, so at most one worker pool exists per data root; `recheck` and `export` exit 2
+  ("server running: use the web UI or POST /api/curate/...") while a server runs, and `run`
+  checks the port first (exit 2 with a clear message when it is in use).
+- **Scheduler policy.** Priorities INTERACTIVE < JOB < BACKGROUND, FIFO within one; tasks with
+  the same key are deduplicated. A task past its deadline is SIGKILLed through the pid file its
+  `run_task` wrote (`WORKER_TIMEOUT`); a dead worker is `WORKER_CRASH`; in-flight siblings are
+  resubmitted once (a single in-flight task fails at once). A hard cancel is `CANCELLED` and
+  does not count toward the breaker; more than 5 timeouts or crashes in 10 minutes give
+  `WORKER_UNSTABLE` (503) until they age out. Only live children of the server are ever
+  signalled. The worker is recycled after 500 tasks, above 2048 MB RSS, or when a task reports
+  `ORIENTED_CACHE_WIPED`.
+- **Jobs.** Files only (`data/serve/jobs/<id>/job.json`, `network.json`, `result.json`,
+  `events.jsonl`); SQLite is for curation only. At startup every queued or running job becomes
+  failed(`SERVER_RESTART`) and keeps its partial network. Retention keeps the newest 200 jobs
+  plus every job a curated mechanism references (read from `curatedstep.arrows_json`; retention
+  is skipped when the database cannot be read). `TOKENS_STALE` worker events become job skips.
+- The PMechDB browse index (about 10 minutes on the worker) is built only on request (the
+  button, `POST /api/browse/index`, `--index-on-start` / `KSMECH_SERVE_AUTO_INDEX`, or an
+  export), because the host's heavy-process budget is already used. A search never starts it;
+  a pmechdb search while it is missing is 409 `INDEX_NOT_READY` with the build hint, and
+  curated-only searches always work.
+
+**Caches and fingerprints.**
+
+- Layered caches: the shared `data/cache/{qm,tokens}` under `KSMECH_SHARED_CACHE_ROOT` are read
+  only; serve writes only `data/serve/` and `data/curation/`, and `settings.assert_writable`
+  refuses `data/cache`, `data/processed/pmechdb` and `data/raw` of both roots after resolving
+  symlinks. A stale shared token file (another schema) is skipped as `TOKENS_STALE`.
+- Two fingerprints (sha256[:12] over sorted source files; a missing file counts as
+  `<missing>`): the **oriented** fingerprint (upstream physics, orbitals and qm sources and
+  their schema versions) namespaces the oriented-block cache `data/serve/oriented/<ofp>/`; the
+  **physics** fingerprint adds `SAMPLE_VERSION`, the QM method, the arrows sources and the serve
+  modules that decide scores, validity and products (`analysis`, `candidates`, `predictors`,
+  `expansion`, `stepapply`, `synthetic`). It keys analyses, predictor versions and curated-step
+  staleness. Display-only serve modules carry their own versions (`PLACEMENT_VERSION`,
+  `CUBE_VERSION`, `INDEX_VERSION`), so a display edit invalidates nothing.
+- Upstream oriented cache keys ignore token content, so `<ofp>/token_digests.json` records each
+  key's token digest; a change wipes that serve-owned directory and recycles the worker (its
+  private in-memory oriented caches would be stale otherwise).
+- Analyses: `pools/<state_id>/analysis-<physics fp>-<dig12>.npz` (+ `.json`), dig12 over the
+  fragments' token digests; a non-transient failure writes `analysis-failure-<fp>.json` and is
+  not retried while the digest is unchanged. Cubes are keyed by the oriented fingerprint, token
+  digest, spacing, padding and `CUBE_VERSION`; contacts by the physics fingerprint, digest,
+  `PLACEMENT_VERSION` and `CUBE_VERSION`. The PMechDB index file name hashes the index and
+  pool-key versions with the parquet bytes.
+
+**Physics display.**
+
+- Displayed equals scored: the analysis asserts `floor == -(ks3 + ks2)` bit for bit,
+  `(pair_reasons == VALID) == sample.pair_valid` and `beta^2 * G == KS3` (rtol 1e-12), else
+  `CONSISTENCY_FAILED`, never a number. The `beta2_d*` members are NaN where undefined, and
+  every log-derived comparison uses `atol = 1e-11` on defined entries (the log floor reads
+  3.06e-12 at K = 1.75).
+- `floor_rank` and `token_class` copy `physics.ranking.label_rank` and `token_class` (3-line
+  formulas) instead of importing them, because that module imports torch; tests check them
+  against upstream on every cell and on random tie-heavy cases.
+- The dominant (k, m) pair: `index_source` is `qm_occupations` only when both species had QM
+  occupations whose block sizes match the tokens, else `aufbau`; `_unchecked` is appended when
+  a token fails the `spectral_indices` cross-check. The frozen-head weight is an
+  acceptor-restricted softmax of the untrained kernel, labelled `untrained_kernel`.
+- User arrows: atom-token ids, out-of-range tokens or sites, undrawn sites and equal sites are
+  structural errors; a virtual donor or an occupied acceptor is `NOT_AN_ORBITAL_TOKEN`;
+  `DONOR_NOT_DONOR`, `ACCEPTOR_NOT_ACCEPTOR` and `PAIR_EXCLUDED` come from the cell's
+  `PairReason` (`detail.reason` = its name), with `allow_invalid` turning the last ones into
+  warnings. A user arrow off the contact sites carries the site-pair block of
+  `block_contacts` at its own sites (key `site_pair`, flag `user_sites_not_contact`).
+- Candidates: one tuple per (donor centre x acceptor centre) of each cell; valid tuples first,
+  by (cell rank, contact site pair first, w_a * w_b desc, a, b); the probability is the cell's
+  softmax over valid cells in scope, shared by its tuples. `candidate_scope = inter` is an
+  opt-in mask recorded in provenance; the physics is unchanged.
+- The contact placement replays `_evaluate_block` for one site pair with the pinned private
+  names and is verified on every request: S, beta and clash equal `block_contacts` and
+  `oriented_block` (hard checks), the distance is 2.3 A with antiparallel lobes, and the
+  analytic overlap is a soft check (`ANALYTIC_OVERLAP_DRIFT`, a note). Cubes sit on the token's
+  cap atoms +- 4 A at 0.2 A (at most 4e6 points, `CUBE_TOO_LARGE`), written in bohr; both
+  contact cubes share one grid over the donor cap and the placed acceptor cap.
+
+**Chemistry, predictors, depiction.**
+
+- Modes `real` (layered caches, xTB on a miss), `cached` (caches only, `FEATURIZATION_DISABLED`
+  on a miss) and `synthetic`: charge-iterated extended Hueckel on tblite's exported GFN2 shell
+  list with the STO-nG overlap of `physics.gto` (K = 1.75, omega = 2 eV, d level -2 eV, at most
+  50 damped rounds, tol 1e-6, warning `SYNTHETIC_SCC_NOT_CONVERGED`), method
+  `SYNTHETIC-EHT/v1`, ETKDG seed 0 with one MMFF-relaxed conformer, for tests, the e2e and UI
+  development, with a banner everywhere. Synthetic is a test vehicle, not GFN2 physics.
+- Predictors: `floor` (-(KS3 + KS2) at 2.3 A), `gbdt` (available only when the model's feature
+  names, count and tree indices match the current `candidate_set`; a sample-v5 warning; version
+  = file sha), `transformer` (registered, disabled with `TRANSFORMER_NOT_AVAILABLE` until a
+  checkpoint exists) and the diagnostic `stub` (floor plus rule bonuses; its version hashes a
+  canonical sorted rule description, because `repr` of frozensets changes with
+  `PYTHONHASHSEED`). A predictor whose `score()` raises during an analysis is recorded in the
+  analysis meta and skipped instead of failing the analysis.
+- Dataset-arrow encoding: the bases are the drawn state plus its `ResonanceMolSupplier
+  (KEKULE_ALL, 64)` alternatives with identical charges; construction from the bond and
+  lone-pair changes, a zero-leftover check, then `build_step(source=user_curated)` as verifier.
+  A failure is counted as `ARROW_ENCODING_FAILED` and the edge is still shown.
+- Depiction: RDKit CoordGen 2D coordinates; H atoms hidden except those whose maps the arrows
+  use, isotopes and lone or bridging H. RDKit.js 2026.9.1 writes no SVG atom metadata, so the
+  client fits atom positions only from exact single-bond stroke ends (within 0.16 px of
+  `GetDrawCoords`) and otherwise uses the server tier (`server_svg` plus `GetDrawCoords`
+  indexed by depiction index); step views always ship the server SVG.
+- Substructure search matches every token-key form recorded for a species across both sources
+  and reports `matched_forms`; the 20,000 cap counts unique `HasSubstructMatch` calls; an empty
+  query lists every step that passes the filters.
+
+**Storage details.** `db.py` stores naive UTC through a `UTCDateTime` type, returns aware UTC
+and refuses naive datetimes. SQLite runs in WAL mode with `busy_timeout = 30000`; foreign keys
+are declared but not enforced (SQLite's default), so no test that inserts rows directly
+breaks. Every serve file write is atomic (tmp file in the same directory, fsync, `os.replace`).
+
+**Frontend.** All selection state lives in the URL hash (rewritten with `history.replaceState`),
+including the job ids of batch jobs, so a reload rejoins them. The physics drawer is its own
+grid column and never covers the page. Correct returns to Predict with
+`?edge=<corrected>&override=<job>`, and the job view remounts to refetch the network.
+`override-continue` is the continue-steps input, `override-continue-prediction` the checkbox.
+Isosurfaces parse each cube once (`VolumeData`) and add +-iso surfaces; a viewer failure after
+a passing WebGL probe counts as `webgl-unavailable`. Candidates are paged by 200. Depictions
+keep a white background in dark mode. RDKit.js and 3Dmol load as classic scripts from
+`public/vendor/` (copied by `scripts/vendor.mjs`); `.wasm` is served as `application/wasm`.
+
+**Dependencies.** fastapi 0.142.2, uvicorn 0.54.0, sqlmodel 0.0.47, sqlalchemy 2.0.54, httpx
+0.28.1 (dev). The resolver picked starlette 1.9.0 and pydantic 2.14.1, newer than the
+2026-10-06 cutoff (releases at least two weeks old), so `starlette<=1.7.0` and
+`pydantic==2.13.5` are pinned, and `certifi<=2026.7.22` is a uv constraint. npm packages were
+installed with `--before=2026-10-06`; `@types/node` was added for the e2e specs, and cytoscape
+ships its own types.
+
+**Integration and serving.**
+
+- `create_app(settings, *, scheduler, chemistry, registry, jobs_inline, serve_ui)` wires
+  pin_threads, settings, the scheduler (a one-worker `ProcessScheduler` unless injected), the
+  `ApiContext`, the chemistry (`MolecularChemistry` unless injected; an injected stub chemistry
+  sets the reported chemistry to `stub`), the curation engine, the job store and runner,
+  `JobService`, `BrowseService` (with a job-status hook so a cancelled queued index job is
+  forgotten at once), `CurateService`, the export, recheck and index handlers, the routers, the
+  error handlers, gzip (at least 1024 bytes) and the frontend mount last. `serve_ui` (`--no-ui`)
+  is an addition to the designed signature. Shutdown closes the runner, then the scheduler.
+- Routes are thin: each checks its ids, calls one service function and returns a model (JSON)
+  or a str (`text/plain` cubes with `Content-Disposition: inline`). `/health` is an async
+  handler; every other route runs in the threadpool, where an interactive wait lasts at most
+  `interactive_wait_s` (15 s) before the 202.
+- The e2e harness (`apps/ui/playwright.config.ts`, `e2e/serve.mjs`, `e2e/smoke.spec.ts`) has no
+  globalSetup, because Playwright starts webServer first and empties `test-results/`: the
+  webServer command resets `apps/ui/.e2e-data`, builds `dist/` when missing, picks `cached`
+  when `probe-cache` finds real tokens for both reactants (else `synthetic`), and starts
+  `uv run --no-sync --project ../.. ksmech-serve --port 8765` with one worker (`--no-sync`, so a
+  test run never re-syncs the environment). It uses the system Chrome or Chromium and never
+  downloads browsers. The tests find the SN2 tuple through the candidates list, so they do not
+  depend on the untrained floor's rank of it.
+
+### 2026-10-21 — ksmech-serve review fixes
+
+- **Pathways and corrections.** `rank_pathways` walks the active edges of every kind: a
+  corrected edge that a later correction superseded is withdrawn like a superseded prediction,
+  so every listed pathway can be curated (POST /curate refuses superseded edges). A correction
+  of a correction keeps the original predicted step as `original` (its arrows, score,
+  probability, rank and predictor version), so the curated step's `original_arrows_json` stays
+  the predictor's step; the superseded correction keeps `status="superseded"` and
+  `superseded_by` for the audit trail. An override whose target the correction itself marks
+  TERMINAL(TURNOVER) (it closes a catalytic cycle under `stop_at_turnover`) is not continued:
+  `continued_from` is null and no node past the turnover is created (no featurization).
+- **Provenance and the schema additions.** `JobCreatedOut.provenance` (the 202 of POST /predict
+  and POST /jobs/{id}/override carries predictor, version or checkpoint hash and spec version;
+  null for export, recheck and index jobs, whose `Job.created_out()` leaves the key out),
+  `SitePairsOut.provenance` (predictor "none"), `PredictorInfoOut.spec_version`,
+  `ArrowOut.site_pair` (the site-pair row of user sites that differ from the contact sites,
+  which `apply_user_step` computed but the schema dropped) and `ExportReportOut.warnings`
+  (PMECHDB_UNAVAILABLE, COMPACT_FALLBACK, which JobOut.result and GET /curate/export/latest
+  dropped). `SitePairOut` moved above `ArrowOut`; `types.gen.ts` is regenerated. New codes:
+  REQUEST_FORBIDDEN (403), TOKENS_CHANGED (503, transient) and PMECHDB_UNAVAILABLE (a report
+  reason).
+- **Host allow-list and the cross-origin check.** There is still no authentication and the
+  server binds 127.0.0.1 only, but while the SSH tunnel is open any web page could send
+  CORS-simple POSTs (no body, or text/plain) to localhost:8000, and a DNS-rebinding page could
+  read and write everything. `TrustedHostMiddleware(allowed_hosts=["localhost", "127.0.0.1",
+  "testserver"])` is the outermost middleware (the port is ignored; "testserver" is the Host of
+  Starlette's TestClient; the Vite proxy keeps the browser's localhost / 127.0.0.1 Host): any
+  other Host gets 400. `api.SameOriginGuard` (pure ASGI, inside `RequestContext`, so the body
+  carries the request id) answers 403 REQUEST_FORBIDDEN (detail.origin) to a POST, PATCH, PUT
+  or DELETE whose Origin header is "null", does not parse, or names a host other than
+  localhost / 127.0.0.1, before any route runs, so no job is created. Requests without an
+  Origin header (curl, scripts, the test client) pass; GETs are not checked (the browser keeps
+  their responses from a foreign page, and the Host check stops rebinding). `[::1]` is not
+  allowed: the server never binds it.
+- **SPA fallback.** `static.SPAStaticFiles` serves `index.html` for a 404 path that is not under
+  `api/` and whose last segment has no dot, so a typed or bookmarked `/predict`, `/curate/12`
+  or `/browse` opens the app (design 6.1). Unknown `/api/...` routes and missing assets
+  (`/assets/missing.js`) keep their JSON 404 through the error envelope.
+- **Site-pair cache.** `t_site_pairs` writes its block as `site-pairs-<sha16>.json` next to the
+  analysis npz it read (sha256 of `<npz name>|donor|acceptor|donor_site|acceptor_site`, None
+  for "every centre of that side"); `pool_service` reads that file before submitting the
+  task, as `view3d` does for cubes and contacts. The npz name holds the physics fingerprint
+  and the token digest, so a new analysis never reads an old block. Before, a finished result
+  was dropped from the scheduler and nothing persisted it, so while the single worker ran long
+  job tasks every retry of /physics at non-contact sites or of /site_pairs queued again and
+  could end in PENDING_TIMEOUT. An unreadable file is logged (CONSISTENCY_FAILED) and
+  recomputed.
+- **Token rebuilds while the server runs (package A).** The token-derived caches (the loader
+  memo, the worker's rt and sample caches, the API's `rt_lru`) are checked against the token
+  file digest. An analysis whose tokens changed mid-computation fails with the transient
+  TOKENS_CHANGED (503), so it is never saved under the new digest. On ORIENTED_CACHE_WIPED the
+  worker also clears the upstream in-memory oriented caches (`_BLOCKS` and `_CANDIDATES`,
+  private names, as adapters A13 and A14 already use) and rebuilds its kernels. Stored
+  predictor scores are used only when the analysis meta records the current predictor
+  version, and the GBDT file is re-checked when its mtime or size changes. The worker and the
+  API forget a state's loader keys only when that state was built before under another
+  digest: on the first sight a forget would only force reloads, and the loader re-stats its
+  files on every hit anyway.
+- **Export, Browse and re-check (package C).** The export marks a pool-key pair as taken only
+  by a row that passes the re-ingest check, so a winner that fails ingest no longer blocks a
+  valid duplicate; a second identical rejected copy (same step_id) is DUPLICATE_IN_EXPORT of
+  the first. Browse shows `exported_step_id` only for ledger rows of the latest export.
+  A `stale_only` re-check skips the mechanisms whose every step already has a clean re-check
+  at the current predictor version, spec version and physics fingerprint (skip code
+  RECHECKED_AT_CURRENT_VERSIONS); the `stale` flag keeps its section 9.4 meaning.

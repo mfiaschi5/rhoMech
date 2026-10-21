@@ -16,6 +16,14 @@ dependencies = [
     "hydra-core",
     "tqdm",
     "rich",
+    "fastapi==0.142.2",
+    "uvicorn==0.54.0",
+    "sqlmodel==0.0.47",
+    "sqlalchemy==2.0.54",
+    # the resolver picked starlette 1.9.0 (2026-10-18) and pydantic 2.14.1 (2026-10-11), both
+    # newer than the 2026-10-06 cutoff (releases at least two weeks old), so both are pinned back
+    "starlette<=1.7.0",
+    "pydantic==2.13.5",
 ]
 
 [project.scripts]
@@ -24,13 +32,20 @@ ksmech-qm = "ksmech.qm.cli:main"
 ksmech-orbitals = "ksmech.orbitals.cli:main"
 ksmech-arrows = "ksmech.arrows.cli:main"
 ksmech-physics = "ksmech.physics.cli:main"
+ksmech-serve = "ksmech.serve.cli:main"
 
 [dependency-groups]
 dev = [
     "pytest",
     "ruff",
     "pre-commit",
+    "httpx==0.28.1",
 ]
+
+[tool.uv]
+# certifi (a dev-only transitive of httpx) resolved to 2026.10.19, released the day before; keep
+# the last release that is at least two weeks old
+constraint-dependencies = ["certifi<=2026.7.22"]
 
 [build-system]
 requires = ["uv_build>=0.12.16,<0.13.0"]
@@ -51,4 +66,6 @@ markers = [
     "realdata: runs on the real raw files in data/raw (skipped when absent)",
     "slow: runs GFN2 geometry optimizations (deselect with -m \"not slow\")",
     "diagnostic: checks the classifier's labels (lone pair, sigma, ...), which are never model input",
+    "serve: serve app tests: stubs or synthetic chemistry, never xTB",
+    "e2e: Playwright wrapper, skipped unless KSMECH_E2E=1",
 ]

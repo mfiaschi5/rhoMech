@@ -17,6 +17,7 @@ class Source(StrEnum):
     REACTMECH = "reactmech"
     MECH_USPTO = "mech_uspto"
     FLOWER = "flower"
+    USER_CURATED = "user_curated"  # steps validated or corrected in ksmech-serve (train-only)
 
 
 class SourceKind(StrEnum):

@@ -222,3 +222,120 @@ SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
 One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cache_path`,
 `status` (`ok` / `failed`), `reason` (a `ReasonCode`, empty when ok), `detail`, `warnings`,
 `seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`.
+
+## ksmech-serve outputs (inspected 2026-10-21)
+
+Everything below was read back from real files: a synthetic run (MeO- + MeCl with the stub
+predictor, beam 2, max steps 1; validate the SN2 pathway; override; export; re-check) through
+the FastAPI TestClient on a scratch data root, and an index build over the mini PMechDB fixture.
+The shared `data/cache/` and `data/processed/pmechdb/` are never written.
+
+### Export: `data/curation/export_raw/steps.parquet` and `data/processed/user_curated/steps.parquet`
+
+Both use the `STEP_SCHEMA` of `data/processed/<source>/steps.parquet` above (plus the
+`resonance_step` bool column `build_step` computes). The raw file is what the export writes;
+the processed one is its re-ingest through `ksmech.data.user_curated.load` and
+`write_outputs`, with identical rows. One row per exported curated step:
+
+| Column | Value |
+|---|---|
+| `step_id` | `user_curated-` + SHA-1[:16] of `"<reactants>>><products> <pmechdb code>"` |
+| `source` | `user_curated` |
+| `pathway_id` | `user_curated-path-<mechanism id>` |
+| `step_index` | int32: the step's `order_group` (steps that share it are independent / unordered) |
+| `reactants_smiles`, `products_smiles` | Kekule, every atom mapped and every H explicit, e.g. `[C:1]([O-:2])([H:3])([H:4])[H:5].[C:6]([Cl:7])([H:8])([H:9])[H:10]` |
+| `arrows` | the dataset arrows on map numbers, e.g. `[{lone_pair [2] -> atom [6]}, {bond [6, 7] -> atom [7]}]` |
+| `mechanism_class` | null |
+| `conditions` | the mechanism's conditions, or null |
+| `resonance_step` | recomputed by `build_step` (false for the SN2) |
+
+The same directory holds `rejections.csv` (header `step_id,reason,detail,raw`, empty for a
+clean export), `ingest_report.json` (`source`, `inputs`, `n_records`, `n_accepted`,
+`n_resonance_steps`, `n_rejected`, `rejected_fraction`, `rejections_by_reason`, `notes`),
+`export_report.json` (the `ExportReportOut` fields `export_id` (`x` + 16 hex), `created_at`,
+`spec_version`, `paths`, `n_mechanisms`, `n_steps_considered`, `n_steps_written`, `skipped`,
+`ingest_rejections`, `duplicates_pmechdb`, `duplicates_in_export`, `withdrawn`, `changed_ids`,
+`steps` (per step: `mechanism_id`, `step_index`, `step_id`, `code`, `detail`, `provenance`
+{edge_id, edge_kind, job_id, physics_fingerprint, predictor, predictor_version,
+spec_version}), `sha256` (of the processed `steps.parquet`), plus `warnings`, `statuses` and
+`withdrawn_steps`) and `pmechdb_arrow_codes.csv`: no header, every field quoted, one record per
+line in the PMechDB raw format with the H atoms the arrows do not name folded into their heavy
+atoms, e.g.
+
+```
+"[CH3:1][O-:2].[CH3:6][Cl:7]>>[CH3:1][O:2][CH3:6].[Cl-:7] 2=6;6,7=7"
+```
+
+### Curation database: `data/curation/curation.sqlite`
+
+SQLite in WAL mode; datetimes are stored as naive UTC and read back as aware UTC. Foreign keys
+are declared but not enforced.
+
+| Table | Columns (primary key first) |
+|---|---|
+| `mechanism` | `id` int; `created_at`; `reactants` (JSON list of SMILES); `stoichiometry` (JSON list of int); `conditions` (nullable); `predictor`; `checkpoint_hash` (the predictor version string, e.g. `stub/fce42b87c0cd/bf7faeb705a9` or `floor/ks3+ks2/d2.3/<fp>`); `spec_version`; `status` (predicted / validated / corrected / rejected); `notes`. Indexes on created_at, predictor, spec_version, status |
+| `curatedstep` | (`mechanism_id`, `step_index`); `order_group`; `reactant_pool_key`, `product_pool_key` (e.g. `CCl.C[O-]`, `COC.[Cl-]`; indexed); `arrows_json` (the StepDoc below); `was_corrected` bool; `original_arrows_json` (the original prediction's StepDoc of a corrected step, else null) |
+| `recheck` | `id`; `mechanism_id`, `step_index`, `created_at`, `predictor`, `predictor_version`, `spec_version`, `physics_fingerprint`, `aligned` bool, `first_arrow_rank` (1-based, nullable), `n_valid`, `top1`, `top5`, `product_match` (`exact`, ..., `UNCHECKED` when the replay could not run), `top1_reproduces_product`, `reason` (null when the step was evaluated) |
+| `exportrecord` | `export_id`; `created_at`, `path` (the processed steps.parquet), `sha256`, `n_steps`, `report_json` (the export report) |
+| `exportedstep` | `step_key` (JSON `[reactant_pool_key, product_pool_key]`); `step_id`, `mechanism_id`, `step_index`, `first_export_id`, `last_export_id` (the ledger; withdrawn keys stay) |
+
+The StepDoc (`arrows_json`, format `ksmech-serve/step-v1`) has the keys `format`, `job_id`,
+`edge_id`, `edge_kind` (predicted / corrected), `reactant_state_id`, `product_state_id`,
+`reactants_mapped`, `products_mapped`, `arrows` (per token arrow: `donor`, `donor_site`,
+`acceptor`, `acceptor_site` (global token and atom ids of the reactant state), `donor_site_map`,
+`acceptor_site_map`, `donor_element`, `acceptor_element`, `source_kind`, `source_partner_map`,
+`sink_partner_map`, `donor_centres_map`, `acceptor_centres_map` (map number -> centre
+weight)), `dataset_arrows`, `pmechdb_code` (e.g. `2=6;6,7=7`), `encode_reason`, `score`,
+`probability`, `rank`, `predictor`, `predictor_version`, `spec_version`,
+`physics_fingerprint` and `touched_maps` (e.g. `[2, 6, 7]`). An original StepDoc also has
+`target_pool_key`.
+
+### Serve-owned files: `data/serve/`
+
+| Path | Content |
+|---|---|
+| `qm/<sha256>.npz`, `tokens/<sha256>.npz` | QM records and token files in the formats of `data/cache/qm` and `data/cache/tokens`, for species the server computed (synthetic ones under the method `SYNTHETIC-EHT/v1`) |
+| `oriented/<oriented fp>/<block key>.npz` | oriented-block cache (upstream format) namespaced by the oriented fingerprint; `token_digests.json` maps each token key to the sha256[:16] of its token file |
+| `pools/<state_id>/state.json` | the `PoolState`: `state_id`, `mapped_smiles`, `pool_key`, `pool_id`, `species` (species_key, token_keys, count, charge, resonance_flag), `fragment_token_keys`, `n_atoms` |
+| `pools/<state_id>/analysis-<physics fp>-<dig12>.npz` and `.json` | the pool analysis (members below); the JSON holds `analysis_digest`, `candidate_config`, `chemistry`, `created_at`, `ks_params`, `n_non_finite`, `n_valid`, `physics_fingerprint`, `predictor_errors`, `predictor_versions`, `seconds`, `state_id`, `token_digests`, `versions` |
+| `pools/<state_id>/analysis-failure-<fp>.json` | a recorded analysis or featurization failure (`code`, `upstream`, `detail`, `error_detail`, `created_at`, `digest`, `stage`, `key`) |
+| `pools/<state_id>/scores-<sha12>.npz` | extra predictor scores (member `scores`) |
+| `cubes/<sha32>.cube`, `cubes/<sha32>-donor.cube`, `-acceptor.cube` | Gaussian cubes in bohr (an orbital, and the two cubes of a contact view on one grid) |
+| `contact/<sha32>.json` | the `ContactOut` fields of a placement plus `cube_paths`, `placement_version`, `created_at`, `acceptor_context_note` |
+| `jobs/<job_id>/job.json` | the `Job` (`id`, `kind`, `status`, `created_at`, `started_at`, `finished_at`, `request`, `progress`, `error`, `parent_job_id`, `network_id`, `result_path`, `label`, `skipped`, `provenance`, `cancel_requested`) |
+| `jobs/<job_id>/network.json` | predict jobs: `network_to_dict`, format `ksmech-serve/network-v1` (`network_id`, `revision`, `complete`, `root`, `nodes`, `edges`, `cycles`, `pathways`, `failed_proposals`, `skipped`, `params`, `predictor`, `chemistry`) |
+| `jobs/<job_id>/result.json`, `events.jsonl` | other kinds' results (override, export, recheck, index); one reason-coded skip per line (`time`, `code`, `detail`, `count`, where) |
+| `index/pmechdb-<sha12>.parquet` and `.json` | the PMechDB browse index (below) and its meta (`built_at`, `index_version`, `job_id`, `n_indexed`, `n_steps`, `pool_key_version`, `skipped`, `source`, `source_sha12`, `split_badges`) |
+| `logs/failures.jsonl` | every reason-coded skip of every job (`time`, `code`, `detail`, where) |
+| `run/server.lock`, `run/task-<seq>.pid` | the server lock (holder pid) and the pid of each running worker task |
+
+Members of an analysis npz (MeO- + MeCl, synthetic: 14 occupied x 13 virtual orbital tokens);
+every pair matrix is (n_occ, n_virt), row i is the occupied token `rows[i]`, column j the
+virtual token `cols[j]` (global token ids):
+
+| Member | dtype, shape | Meaning |
+|---|---|---|
+| `rows`, `cols` | int64, (n_occ,), (n_virt,) | global token id of each row / column |
+| `valid` | bool | `pair_valid` of the sample (the candidate masks) |
+| `reasons` | int8 | `candidates.PairReason` code of each cell (0 = valid) |
+| `contact_sites` | int64, (n_occ, n_virt, 2) | the oriented kernel's contact site pair (global atoms), -1 when undefined |
+| `gap_sign` | int8 | sign of G (`MechanismSample.pair_gap_sign`, bookkeeping) |
+| `ks1`, `ks2`, `ks3` | float64 | the three KS terms (eV), with `ks1_ok`, `ks2_ok` (bool) where defined |
+| `gap_kernel` | float64 | G (1/eV) |
+| `amp` | float64 | the contact overlap amplitude S (`kernel.amplitude_matrix`) |
+| `clash` | bool | the oriented placement's clash flag |
+| `inter` | bool | intermolecular pair (`scope_mask(rt, "inter")`) |
+| `comp_log_abs_ks1`, `comp_fbar` | float64 | the pair components the analysis rebuilds `pair_components` from |
+| `beta` | float64 | signed beta (eV) of the main 2.3 Angstrom kernel; KS3 = beta^2 G |
+| `beta2_d2.0`, `beta2_d2.3`, `beta2_d3.0` | float64 | beta^2 per contact distance (eV^2), NaN where undefined |
+| `floor` | float64 | -(KS3 + KS2), bit-equal to the floor scorer |
+| `frozen` | float64 | `SCORERS["frozen_head"]` of the components (the untrained frozen-head logit) |
+| `score_<predictor>` | float64 | every predictor available at analysis time (`score_floor`, `score_stub`, ...), -inf where not valid |
+| `fermi_smeared` | bool, () | any fragment flagged `fermi_smeared` |
+
+PMechDB browse index rows (`index/pmechdb-<sha12>.parquet`, one per accepted step of
+`data/processed/pmechdb/steps.parquet`): `step_id`, `reactants_smiles`, `products_smiles`,
+`pmechdb_code`, `n_arrows` (int32), `resonance_step`, `reactant_pool_key`, `product_pool_key`,
+`arrows_json` (the dataset arrows as JSON), `reactant_species`, `product_species`,
+`reactant_token_keys`, `product_token_keys`, `flags` (lists of string), `split_random`,
+`split_scaffold` (`train` / `val` / `test` / `resonance`, from `arrows.steps.split_ids`).

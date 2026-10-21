@@ -152,5 +152,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `ksmech-arrows samples` (stores the KS pair features, oriented kernel by default), then
   `ksmech-orbitals contact-table` and `contact-mlp` for the ablations, then `ks-rank`,
   `baseline`, `textbook`.
+- Serve: `uv run ksmech-serve --port 8000` (web app on 127.0.0.1 only; data under `data/serve/`,
+  curation DB `data/curation/curation.sqlite`, export `data/processed/user_curated/`; one
+  compute worker; `--chemistry real|cached|synthetic`, `--dev`, `--no-ui`, `--index-on-start`),
+  `uv run ksmech-serve recheck --stale-only`, `uv run ksmech-serve export`, `uv run ksmech-serve
+  schema-ts` (regenerate `apps/ui/src/api/types.gen.ts`), `uv run ksmech-serve probe-cache
+  --smiles 'C[O-]'` (exit 0 when the shared token cache holds every species); re-ingest an
+  export with `uv run ksmech-data ingest --source user_curated`
+- UI: `npm --prefix apps/ui run build | dev | e2e` (e2e: Playwright with the system Chrome,
+  `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`)
 - Training: _not yet_
 - Evaluation: _not yet_

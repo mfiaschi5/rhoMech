@@ -12,7 +12,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from ksmech.data import mech_uspto, pmechdb, reactmech
+from ksmech.data import mech_uspto, pmechdb, reactmech, user_curated
 from ksmech.data.ingest import IngestResult, write_outputs
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, source_dir, steps_path
 from ksmech.data.schema import Source
@@ -22,6 +22,7 @@ LOADERS: dict[Source, Callable[[Path | None], IngestResult]] = {
     Source.PMECHDB: pmechdb.load,
     Source.REACTMECH: reactmech.load,
     Source.MECH_USPTO: mech_uspto.load,
+    Source.USER_CURATED: user_curated.load,  # the ksmech-serve export (train-only)
 }
 
 

@@ -78,6 +78,81 @@ def test_step_ids_are_content_hashes(mini_result):
     assert len(set(got)) == 6
 
 
+# --- arrow-code writer ------------------------------------------------------------------------
+
+
+def test_format_arrow_code_round_trips_the_mini_fixture(mini_steps):
+    for label, step in mini_steps.items():
+        code = pmechdb.format_arrow_code(step.arrows)
+        assert pmechdb.parse_arrow_code(code) == step.arrows, label
+        assert not code.endswith(",") and not code.endswith(";")
+    assert pmechdb.format_arrow_code(mini_steps["e2"].arrows) == "10=20;20,21=21,22;22,23=23"
+
+
+def test_format_arrow_all_shapes():
+    assert pmechdb.format_arrow(Arrow(LP, (10,), ATOM, (20,))) == "10=20"
+    assert pmechdb.format_arrow(Arrow(BOND, (21, 20), ATOM, (21,))) == "20,21=21"
+    assert pmechdb.format_arrow(Arrow(BOND, (21, 20), SBOND, (22, 21))) == "20,21=21,22"
+
+
+def test_lone_pair_to_its_own_new_bond_is_written_as_atom_sink():
+    arrow = Arrow(LP, (9,), SBOND, (9, 1))  # a=a,b
+    assert pmechdb.format_arrow(arrow) == "9=1"
+    back = pmechdb.parse_arrow("9=1")
+    assert back == Arrow(LP, (9,), ATOM, (1,))
+    assert back.destination() == arrow.destination() == ("bond", (1, 9))
+
+
+def test_radical_arrow_has_no_code():
+    with pytest.raises(ValueError, match="radical"):
+        pmechdb.format_arrow(Arrow(SourceKind.RADICAL, (10,), ATOM, (20,)))
+    with pytest.raises(ValueError, match="radical"):
+        pmechdb.format_arrow_code(
+            [Arrow(LP, (10,), ATOM, (20,)), Arrow(SourceKind.RADICAL, (10,), ATOM, (20,))]
+        )
+
+
+def test_format_record(mini_steps):
+    sn2 = mini_steps["sn2"]
+    record = pmechdb.format_record(sn2)
+    assert record == f"{sn2.reactants_smiles}>>{sn2.products_smiles} 10=20;20,21=21"
+    again = pmechdb.parse_record(record, "id")
+    assert (again.reactants_smiles, again.products_smiles) == (
+        sn2.reactants_smiles,
+        sn2.products_smiles,
+    )
+    assert again.arrows == sn2.arrows
+
+
+def test_write_records_reloads_every_row(mini_result, tmp_path):
+    path = pmechdb.write_records(mini_result.steps, tmp_path / "out" / "codes.csv")
+    raw = path.read_bytes()
+    assert b"\r" not in raw and raw.endswith(b'"\n')
+    lines = raw.decode().split("\n")[:-1]
+    assert len(lines) == len(mini_result.steps) == 5
+    assert all(line.startswith('"') and line.endswith('"') for line in lines)
+    result = pmechdb.load(path)
+    assert result.n_records == 5 and result.rejections == []
+    assert result.notes["stray_trailing_comma"] == 0
+    for old, new in zip(mini_result.steps, result.steps, strict=True):
+        assert (new.reactants_smiles, new.products_smiles) == (
+            old.reactants_smiles,
+            old.products_smiles,
+        )
+        assert new.arrows == old.arrows and new.resonance_step == old.resonance_step
+
+
+def test_write_records_refuses_radicals_before_writing(mini_steps, tmp_path):
+    bad = mini_steps["sn2"]
+    radical = type(bad)(
+        **{**bad.__dict__, "arrows": [Arrow(SourceKind.RADICAL, (10,), ATOM, (20,))]}
+    )
+    path = tmp_path / "codes.csv"
+    with pytest.raises(ValueError, match="radical"):
+        pmechdb.write_records([mini_steps["e2"], radical], path)
+    assert not path.exists()
+
+
 # --- rejection reasons ------------------------------------------------------------------------
 
 SN2 = "[OH-:10].[CH3:20][Cl:21]>>[OH:10][CH3:20].[Cl-:21]"

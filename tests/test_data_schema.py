@@ -73,4 +73,11 @@ def test_parquet_round_trip(tmp_path):
 
 
 def test_source_enum_values():
-    assert {s.value for s in Source} == {"pmechdb", "rmechdb", "reactmech", "mech_uspto", "flower"}
+    assert {s.value for s in Source} == {
+        "pmechdb",
+        "rmechdb",
+        "reactmech",
+        "mech_uspto",
+        "flower",
+        "user_curated",
+    }

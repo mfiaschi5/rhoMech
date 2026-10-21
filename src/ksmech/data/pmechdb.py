@@ -4,13 +4,16 @@ Raw format, as inspected and documented in docs/data_schema.md: a headerless one
 Each line is one double-quoted field, `"<reactants>>products> <arrow code>"`. The arrow code is
 `;`-separated arrows of the form `source=sink`, where each side is one atom-map number (an atom)
 or two comma-separated map numbers (a bond).
+
+The writer (`format_arrow`, `format_arrow_code`, `format_record`, `write_records`) is the inverse
+of the reader, used to contribute curated steps upstream in the same format.
 """
 
 from __future__ import annotations
 
 import csv
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from functools import partial
 from pathlib import Path
 
@@ -79,6 +82,50 @@ def parse_arrow_code(code: str) -> list[Arrow]:
     if not code:
         raise StepRejected(RejectReason.ARROW_PARSE, "empty arrow code")
     return [parse_arrow(tok) for tok in code.split(";")]
+
+
+def _atoms_text(atoms: Iterable[int]) -> str:
+    return ",".join(str(a) for a in atoms)
+
+
+def format_arrow(arrow: Arrow) -> str:
+    """The `source=sink` token of one arrow, the inverse of `parse_arrow`.
+
+    A lone pair aimed at the bond it forms (`a=a,b`) is written in the dataset's own form `a=b`,
+    which parses back to the equivalent lone-pair-to-atom arrow (same destination); every other
+    arrow round-trips exactly. Radical arrows have no PMechDB code and raise ValueError.
+    """
+    if arrow.source_kind is SourceKind.RADICAL:
+        raise ValueError(f"radical arrows have no PMechDB arrow code: {arrow}")
+    sink = arrow.sink_atoms
+    if arrow.source_kind is SourceKind.LONE_PAIR and arrow.sink_kind is SinkKind.BOND:
+        sink = tuple(a for a in arrow.sink_atoms if a not in arrow.source_atoms)
+    return f"{_atoms_text(arrow.source_atoms)}={_atoms_text(sink)}"
+
+
+def format_arrow_code(arrows: Sequence[Arrow]) -> str:
+    """Arrows joined by `;` in order, with no trailing comma."""
+    return ";".join(format_arrow(a) for a in arrows)
+
+
+def format_record(step: ElementaryStep) -> str:
+    """One raw record, `<reactants>>products> <arrow code>`, as `load` reads it."""
+    return f"{step.reactants_smiles}>>{step.products_smiles} {format_arrow_code(step.arrows)}"
+
+
+def write_records(steps: Iterable[ElementaryStep], path: Path) -> Path:
+    """Write `steps` as a headerless one-column CSV, every field double-quoted (`load` input).
+
+    Raises ValueError on a step with a radical arrow before anything is written.
+    """
+    rows = [format_record(s) for s in steps]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh, quoting=csv.QUOTE_ALL, lineterminator="\n")
+        writer.writerows([r] for r in rows)
+    log.info("wrote %d PMechDB records to %s", len(rows), path)
+    return path
 
 
 def parse_record(raw: str, step_id: str) -> ElementaryStep:

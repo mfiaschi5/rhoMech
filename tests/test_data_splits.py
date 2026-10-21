@@ -112,3 +112,124 @@ def test_leave_one_class_out_needs_labels():
 def test_bad_fractions():
     with pytest.raises(ValueError):
         splits.split_by_pathway(STEPS, (0.8, 0.1, 0.2))
+
+
+# ---- train-only pinning (steps curated in ksmech-serve)
+
+
+def _pinned_steps(every: int = 7) -> list[ElementaryStep]:
+    """STEPS with every `every`-th step relabelled user_curated (train-only)."""
+    return [
+        replace(s, source=Source.USER_CURATED) if i % every == 0 else s for i, s in enumerate(STEPS)
+    ]
+
+
+PINNED_STEPS = _pinned_steps()
+PINNED_IDS = {s.step_id for s in PINNED_STEPS if s.source == Source.USER_CURATED}
+
+
+def test_split_off_pinned():
+    unpinned, pinned = splits.split_off_pinned(PINNED_STEPS)
+    assert set(pinned) == PINNED_IDS and len(pinned) == 9
+    assert all(s.source == Source.PMECHDB for s in unpinned)
+    assert frozenset({Source.USER_CURATED}) == splits.TRAIN_ONLY_SOURCES
+
+
+@pytest.mark.parametrize("fn", [splits.split_by_pathway, splits.split_by_scaffold])
+def test_pinned_steps_never_in_val_or_test(fn):
+    unpinned = [s for s in PINNED_STEPS if s.step_id not in PINNED_IDS]
+    for seed in range(10):
+        sp = fn(PINNED_STEPS, seed=seed)
+        _check_partition(sp)
+        assert not PINNED_IDS & (set(sp.val) | set(sp.test))
+        assert set(sp.train) >= PINNED_IDS
+        alone = fn(unpinned, seed=seed)  # the unpinned steps split as if the others were absent
+        assert (sp.val, sp.test, sp.excluded) == (alone.val, alone.test, alone.excluded)
+        assert sp.train == sorted(alone.train + sorted(PINNED_IDS))
+
+
+@pytest.mark.parametrize(
+    "fn, inner",
+    [
+        (splits.split_by_pathway, splits._split_by_pathway),
+        (splits.split_by_scaffold, splits._split_by_scaffold),
+    ],
+)
+def test_pure_lists_are_unchanged(fn, inner):
+    """No pinned step: the split equals the pre-pinning body (`_split_by_*`)."""
+    for seed in range(3):
+        assert fn(STEPS, seed=seed) == inner(STEPS, (0.8, 0.1, 0.1), seed)
+
+
+@pytest.mark.parametrize("fn", [splits.split_by_pathway, splits.split_by_scaffold])
+def test_all_pinned_gives_train_only(fn):
+    every = [replace(s, source=Source.USER_CURATED) for s in STEPS]
+    sp = fn(every, seed=0)
+    assert sp.train == sorted(ALL_IDS) and not (sp.val or sp.test or sp.excluded)
+
+
+def test_leave_one_class_out_with_pinned_steps():
+    steps = list(STEPS)
+    # a pinned held-out step, a pinned unlabelled step, a pinned step of another class
+    for i, cls in ((1, "A"), (2, "B"), (4, None)):
+        steps[i] = replace(
+            steps[i],
+            source=Source.USER_CURATED,
+            mechanism_class=cls,
+            pathway_id=f"user_curated-path-{i}",
+        )
+    pinned = {steps[i].step_id for i in (1, 2, 4)}
+    sp = splits.split_leave_one_class_out(steps, "A", val_fraction=0.2, seed=0)
+    _check_partition(sp)
+    assert not pinned & (set(sp.val) | set(sp.test))
+    assert steps[1].step_id in sp.excluded and steps[4].step_id in sp.excluded
+    assert steps[2].step_id in sp.train
+    unpinned = [s for s in steps if s.step_id not in pinned]
+    alone = splits.split_leave_one_class_out(unpinned, "A", val_fraction=0.2, seed=0)
+    assert (sp.val, sp.test) == (alone.val, alone.test)
+    assert set(sp.train) == set(alone.train) | {steps[2].step_id}
+
+
+def test_leave_one_class_out_pinned_shares_held_out_pathway():
+    steps = [
+        replace(s, pathway_id="user_curated-path-9") if i in (0, 3) else s
+        for i, s in enumerate(STEPS)
+    ]
+    steps[0] = replace(steps[0], source=Source.USER_CURATED, mechanism_class="A")
+    steps[3] = replace(steps[3], source=Source.USER_CURATED, mechanism_class="B")
+    sp = splits.split_leave_one_class_out(steps, "A", seed=0)
+    assert {steps[0].step_id, steps[3].step_id} <= set(sp.excluded)  # same pathway as an A step
+
+
+def test_leave_one_class_out_all_pinned():
+    every = [replace(s, source=Source.USER_CURATED) for s in STEPS]
+    sp = splits.split_leave_one_class_out(every, "A", seed=0)
+    _check_partition(sp)
+    assert not (sp.val or sp.test)
+    labelled = {s.step_id for s in every if s.mechanism_class in ("B", "C")}
+    assert set(sp.train) <= labelled
+    assert splits.leave_one_class_out_splits(every) == {}
+
+
+def test_loco_folds_take_classes_from_unpinned_steps():
+    steps = [
+        replace(s, source=Source.USER_CURATED) if s.mechanism_class == "C" else s for s in STEPS
+    ]
+    folds = splits.leave_one_class_out_splits(steps)
+    assert sorted(folds) == ["A", "B"]
+    pinned = {s.step_id for s in steps if s.source == Source.USER_CURATED}
+    for sp in folds.values():
+        assert not pinned & (set(sp.val) | set(sp.test))
+
+
+def test_split_ids_never_puts_pinned_in_val_or_test():
+    from ksmech.arrows.steps import split_ids
+
+    for strategy in ("random", "scaffold", "loco"):
+        for seed in (0, 1):
+            ids = split_ids(PINNED_STEPS, strategy, seed=seed)
+            for name, members in ids.items():
+                if name.endswith(("_val", "_test")):
+                    assert not PINNED_IDS & set(members), (strategy, name)
+            if strategy != "loco":
+                assert set(ids[f"{strategy}_train"]) >= PINNED_IDS
