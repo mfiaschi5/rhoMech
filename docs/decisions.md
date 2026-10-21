@@ -120,6 +120,59 @@ balance were not requested. They cost nothing, and 0 real records fail them.
 - Both modules carry `untested_on_real_data=True` and must be checked against the real file (and
   `docs/data_schema.md` filled in) before use.
 
+## 2026-10-19 — Proceeding without PMechDB pathway grouping
+
+- PMechDB steps keep `pathway_id = None` and `step_index = None`. Both stay nullable in
+  `STEP_SCHEMA`. Rebuilding pathways by chaining steps is deferred to the
+  `claude/adoring-edison-6a4f37` branch.
+- **Pathway-level metrics skip missing ids instead of reporting zero.**
+  - When no step has an id, `stats.pathway_stats` returns `n_pathways = None` and
+    `steps_per_pathway = None`, and counts the id-less steps in `n_steps_without_pathway`.
+  - `ksmech-data stats` then prints `n/a` and leaves out the steps-per-pathway table.
+  - When only some steps have ids, the metrics cover those steps only.
+- **Splits already fall back.** `split_by_pathway` makes every id-less step its own group. A
+  test now checks that an all-`None` set gives an exact per-step 48/6/6 split. The scaffold split
+  anchors an id-less step on itself.
+- **Cost, if `split_by_pathway` is used.** Without ids it is a per-step random split, so
+  consecutive steps of one reaction can land in different sets. Measured with the chaining links
+  from the grouping branch: 3,505 of 10,522 links cross sets at seed 0. The PMechDB default is
+  therefore `split_by_molecule` (next entry), which leaks none of them, with or without pathway
+  ids.
+- **Why.** Merging the grouping later only fills the two columns, and no metric or split code has
+  to change for it.
+
+## 2026-10-19 — `split_by_molecule` is the PMechDB default split
+
+- **Rule.** Steps that share any non-trivial molecule form one group, and so do steps that share a
+  pathway id (when there are ids). Groups are packed like every other strategy, so no molecule
+  appears in more than one of train/val/test. `splits.default_split("pmechdb")` returns this
+  split. Other sources still default to `split_by_pathway`.
+  - A molecule is a map-free canonical SMILES with stereo kept (`chem.nontrivial_species`).
+  - It must have more than 3 heavy atoms. Water, H3O+, OH-, halides, metal ions, MeOH and NH3
+    are ignored.
+  - Molecules are taken from **both reactants and products**.
+- **Why it is the default.** It prevents the cross-set leak whether or not pathways are known.
+  PMechDB has no pathway ids (entry above).
+- **Why products count.** The brief asked for reactant molecules only, which was measured first.
+  It leaves 3,383 of 10,522 chain links (32%) crossing sets, about the same as a random split.
+  Step X → Y and step Y → Z share no reactant, so it cannot keep them together. With products
+  included, 0 links cross.
+- **Cost.** Common reagents put 10,255 steps (78.3%) into one group. Above 200 steps each, the
+  most shared molecules are HSO4-, H2SO4, AcO-, AcOH, TsO-, Et3NH+, TFA- and pyridine. That
+  group lands in train. Val and test are drawn from the 21.7% of steps that share no molecule
+  with it: an out-of-distribution test, harder than a random one. Sizes at seed 0 with 80/10/10
+  are 10,472 / 1,309 / 1,310.
+- **Leakage at seed 0, 80/10/10.** The chain links come from the grouping branch's analysis.
+
+  | Split | chain links crossing sets | molecules in >1 set |
+  |---|---|---|
+  | `split_by_pathway`, no ids (per step) | 3,505 / 10,522 | 3,458 / 14,072 |
+  | `split_by_molecule` | 0 | 0 |
+
+- **Changed packing.** `_assign_groups` now puts a group larger than the whole train target into
+  train, with a warning, instead of letting it fall through to test. The 78% group would have
+  fallen through with fractions such as (0.7, 0.15, 0.15).
+
 ## 2026-10-19 — QM layer (`ksmech.qm`)
 
 ### Optimizer

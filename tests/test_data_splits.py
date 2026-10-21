@@ -39,7 +39,9 @@ def _check_partition(split: splits.Split, ids=ALL_IDS):
     assert set().union(*parts) == ids
 
 
-@pytest.mark.parametrize("fn", [splits.split_by_pathway, splits.split_by_scaffold])
+@pytest.mark.parametrize(
+    "fn", [splits.split_by_pathway, splits.split_by_scaffold, splits.split_by_molecule]
+)
 def test_deterministic_and_partition(fn):
     a, b = fn(STEPS, seed=7), fn(STEPS, seed=7)
     assert a == b
@@ -60,6 +62,14 @@ def test_pathway_split_never_breaks_a_pathway():
             if s.pathway_id is not None:
                 by_pathway.setdefault(s.pathway_id, set()).add(where[s.step_id])
         assert all(len(v) == 1 for v in by_pathway.values())
+
+
+def test_pathway_split_without_any_pathway_id_is_per_step():
+    bare = [replace(s, pathway_id=None, step_index=None) for s in STEPS]
+    sp = splits.split_by_pathway(bare, seed=0)
+    _check_partition(sp)
+    assert (len(sp.train), len(sp.val), len(sp.test)) == (48, 6, 6)  # 60 one-step groups
+    _check_partition(splits.split_by_scaffold(bare, seed=0))
 
 
 def test_pathway_split_fractions():
@@ -112,3 +122,47 @@ def test_leave_one_class_out_needs_labels():
 def test_bad_fractions():
     with pytest.raises(ValueError):
         splits.split_by_pathway(STEPS, (0.8, 0.1, 0.2))
+
+
+def _where(split: splits.Split) -> dict[str, str]:
+    return {i: name for name, ids in split.as_dict().items() for i in ids}
+
+
+def test_molecule_split_never_shares_a_molecule_or_pathway():
+    for seed in range(5):
+        where = _where(splits.split_by_molecule(STEPS, seed=seed))
+        seen: dict[str, set[str]] = {}
+        for s in STEPS:
+            tokens = set(splits.step_molecules(s.reactants_smiles, s.products_smiles))
+            tokens |= {f"pathway:{s.pathway_id}"} if s.pathway_id else set()
+            for tok in tokens:
+                seen.setdefault(tok, set()).add(where[s.step_id])
+        assert seen and all(len(v) == 1 for v in seen.values())
+
+
+def _plain(step_id: str, rxn: str) -> ElementaryStep:
+    reactants, products = rxn.split(">>")
+    return ElementaryStep(step_id, Source.PMECHDB, None, None, reactants, products)
+
+
+def test_molecule_groups_join_consecutive_steps_through_their_products():
+    steps = [
+        _plain("a", "CC(C)=O.[OH3+]>>CC(C)=[OH+].O"),  # makes protonated acetone
+        _plain("b", "CC(C)=[OH+].O>>CC(C)(O)[OH2+]"),  # shares no reactant with a
+        _plain("c", "CCOC(C)=O.[OH-]>>CCOC(C)([O-])O"),
+        _plain("d", "O.[OH3+]>>[OH3+].O"),  # trivial species only: its own group
+    ]
+    groups = sorted(splits.molecule_groups(steps).values())
+    assert groups == [["a", "b"], ["c"], ["d"]]
+
+
+def test_default_split_per_source():
+    assert splits.default_split("pmechdb") is splits.split_by_molecule
+    assert splits.default_split(Source.REACTMECH) is splits.split_by_pathway
+
+
+def test_group_bigger_than_train_target_still_goes_to_train(caplog):
+    big = [replace(s, pathway_id="big") for s in STEPS[:40]]
+    split = splits.split_by_pathway(big + STEPS[40:], (0.5, 0.25, 0.25), seed=0)
+    assert {s.step_id for s in big} <= set(split.train)
+    assert "train target" in caplog.text

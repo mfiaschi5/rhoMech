@@ -68,3 +68,15 @@ def test_parse_errors():
         chem.parse_mapped("C1CC")
     with pytest.raises(chem.SanitizeError):
         chem.parse_mapped("C(C)(C)(C)(C)C")
+
+
+@pytest.mark.parametrize("name", sorted(MOLECULES))
+def test_nontrivial_species_keeps_only_more_than_3_heavy_atoms(name, mols):
+    got = chem.nontrivial_species(_fully_mapped(MOLECULES[name]))
+    big = mols[name].GetNumHeavyAtoms() > chem.TRIVIAL_MAX_HEAVY_ATOMS
+    assert got == ([Chem.MolToSmiles(mols[name])] if big else [])
+
+
+def test_nontrivial_species_is_a_sorted_multiset_and_keeps_stereo():
+    side = "[CH3:1][C:2](C)=[O:3].O.[Cl-].[Na+].CC(C)=O.C[C@H](N)C(=O)O"
+    assert chem.nontrivial_species(side) == ["CC(C)=O", "CC(C)=O", "C[C@H](N)C(=O)O"]
