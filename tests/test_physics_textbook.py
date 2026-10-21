@@ -75,4 +75,13 @@ def test_textbook_cli(token_loader, monkeypatch, tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert code in (0, 1) and "untrained ks3+ks2" in out and "expected pairs in the top 3" in out
-    assert "baseline` first" in out  # no GBDT model in this processed dir
+    assert "run `ksmech-physics baseline`" in out  # no GBDT model in this processed dir
+
+
+def test_a_step_holds_a_pool_only_when_every_fragment_is_there():
+    from ksmech.physics.textbook import pools_in, textbook_pools
+
+    pools = textbook_pools()
+    assert len(pools) == 5 and pools["CN- + acrolein"] == ("C=CC=O", "[C-]#N")
+    assert pools_in(["[C-]#N", "C=CC=O", "O"]) == ["CN- + acrolein"]
+    assert pools_in(["[C-]#N", "O"]) == []  # half a pool is not the textbook case

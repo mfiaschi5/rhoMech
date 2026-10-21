@@ -2931,3 +2931,25 @@ Each step is counted once, under the first reason that applies, in this order:
     (site weight, then energy), and stored on the label (`teacher_donor` / `teacher_acceptor`,
     review A9). `ranking.teacher_cell` uses it.
 - `SAMPLE_VERSION` 9. The groups are reprinted on the IBO tokens at the rebuild.
+
+## 2026-10-22 — Textbook suite: a GBDT with the five reactant pools held out (fix item 7)
+
+- **Why.** Three of the five textbook reactant pools were in the GBDT's training samples as
+  exact steps (review R1): CN- + acrolein, MeNH2 + AcCl and H3O+ + acetone. So the "GBDT 4/5"
+  result and the suite's exit gate partly measured memorization.
+- **Pools.** `textbook.textbook_pools()` gives the case name and the sorted map-free fragments.
+  `pools_in(fragment_keys)` lists the cases whose whole pool (as a multiset) is among a step's
+  fragments; half a pool is not the case.
+- **`ksmech-physics baseline`** fits two GBDTs:
+  - `baseline_gbdt_<split>.npz` is fitted on all training samples. Its header records
+    `extra.textbook_pools_in_training`.
+  - `baseline_gbdt_<split>_textbook-held-out.npz` is fitted and selected with every train and
+    val sample that holds a pool removed (test untouched). Its header records `held_out` and an
+    empty in-training list.
+  - Both appear in the report and the table, and the report lists the pools seen in train with
+    counts.
+- **`ksmech-physics textbook`** runs the untrained scorer and both GBDTs. A case whose pool was
+  in a model's training data is marked "seen in training" in that model's table. Its pass is
+  printed separately as "not a test" and does not count. The exit code needs 4 passes among
+  held-out cases from one scorer.
+- The full textbook numbers come with the rebuild (new samples, molecule split).

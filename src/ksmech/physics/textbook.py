@@ -15,6 +15,7 @@ method and cache as the dataset) and tokens, both written to the caches.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +74,17 @@ CASES = (
 def fragment_keys(smiles: str) -> list[str]:
     mol = chem.parse_mapped(smiles)
     return [chem.unmapped_canonical(f) for f in Chem.GetMolFrags(mol, asMols=True)]
+
+
+def textbook_pools() -> dict[str, tuple[str, ...]]:
+    """Case name -> its reactant pool: the sorted map-free canonical SMILES of every fragment."""
+    return {c.name: tuple(sorted(fragment_keys(c.smiles))) for c in CASES}
+
+
+def pools_in(fragment_keys_of_step: list[str]) -> list[str]:
+    """The cases whose whole reactant pool (as a multiset) is among a step's fragments."""
+    have = Counter(fragment_keys_of_step)
+    return [name for name, pool in textbook_pools().items() if not Counter(pool) - have]
 
 
 def ensure_tokens(keys: list[str], tokens_dir: Path, qm: QMConfig | None = None) -> list[str]:

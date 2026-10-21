@@ -118,3 +118,10 @@ def test_baseline_cli(mini_processed, token_loader, pair_kernels, monkeypatch): 
     assert (out / "baseline_gbdt_molecule.npz").exists() and (
         out / "baseline_lr_molecule.npz"
     ).exists()
+    from ksmech.data.provenance import read_header
+
+    held = read_header(out / "baseline_gbdt_molecule_textbook-held-out.npz")
+    assert held.extra["textbook_pools_in_training"] == []
+    assert "GBDT ranker (textbook-held-out)" in report["results"]
+    seen = read_header(out / "baseline_gbdt_molecule.npz").extra["textbook_pools_in_training"]
+    assert seen == sorted(report["textbook_seen"])

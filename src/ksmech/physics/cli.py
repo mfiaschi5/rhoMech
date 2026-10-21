@@ -286,6 +286,47 @@ def _loco_note(args: argparse.Namespace) -> str:
     return "leave-one-class-out: not applicable (the source has no mechanism classes)"
 
 
+UNTRAINED_ROWS = ("ks3+ks2", "frozen_head", "ks3", "fbar2_g", "fbar2_g+ks2", "gap_kernel")
+HELD_OUT = "textbook-held-out"  # file tag of the GBDT fitted without the textbook pools
+
+
+def _results(bl, sets: dict, scores: dict) -> dict:
+    return {
+        name: {
+            part: {
+                k: v
+                for k, v in bl.evaluate_scores(sets[part], [fn(cs) for cs in sets[part]]).items()
+                if k != "ranks"
+            }
+            for part in ("train", "val", "test")
+        }
+        for name, fn in scores.items()
+    }
+
+
+def _textbook_split(parts: dict, sets: dict) -> tuple[dict, dict[str, int]]:
+    """The candidate sets without every sample whose reactants contain a textbook pool (train
+    and val only; test is untouched), and how many train samples held each pool."""
+    from ksmech.physics.textbook import pools_in
+
+    seen: dict[str, int] = {}
+    for s in parts["train"]:
+        for name in pools_in(s.fragment_keys):
+            seen[name] = seen.get(name, 0) + 1
+    held = {
+        p: [cs for s, cs in zip(parts[p], sets[p], strict=True) if not pools_in(s.fragment_keys)]
+        for p in ("train", "val")
+    }
+    return held | {"test": sets["test"]}, seen
+
+
+def _fit(bl, sets: dict, console: Console, tag: str):
+    lr, scan = bl.select_logistic(sets["train"], sets["val"])
+    gbdt = bl.fit_gbdt(sets["train"], sets["val"], bl.TreeConfig())
+    console.print(f"{tag}: logistic L2 {lr.l2}, GBDT {len(gbdt.trees)} trees")
+    return lr, scan, gbdt
+
+
 def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
     from ksmech.physics import baseline as bl
 
@@ -294,29 +335,19 @@ def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
         return 2
     loader = TokenCache(args.tokens_dir)
     sets = {p: [bl.candidate_set(s, loader) for s in xs] for p, xs in parts.items()}
-    n_rows = {p: int(sum(len(cs.X) for cs in v)) for p, v in sets.items()}
-    console.print(f"candidate pairs per part: {n_rows}")
-    results, scores = {}, {}
-    for name in ("ks3+ks2", "frozen_head", "ks3", "fbar2_g", "fbar2_g+ks2", "gap_kernel"):
-        scores[f"untrained {name}"] = lambda cs, n=name: bl.untrained_scores(cs)[n]
-    lr, scan = bl.select_logistic(sets["train"], sets["val"])
-    console.print(f"logistic regression: L2 {lr.l2} (validation scan {scan})")
-    gbdt = bl.fit_gbdt(sets["train"], sets["val"], bl.TreeConfig())
-    console.print(f"GBDT: {len(gbdt.trees)} trees (validation history {gbdt.history[-3:]})")
-    scores["logistic regression"] = lambda cs: lr.score(cs.X)
-    scores["GBDT ranker"] = lambda cs: gbdt.score(cs.X)
-    for name, fn in scores.items():
-        results[name] = {
-            part: {
-                k: v
-                for k, v in bl.evaluate_scores(sets[part], [fn(cs) for cs in sets[part]]).items()
-                if k != "ranks"
-            }
-            for part in ("train", "val", "test")
-        }
-    _baseline_table(
-        results, console, f"first-arrow ranking on {args.split}_test (n {len(sets['test'])})"
-    )
+    held, seen = _textbook_split(parts, sets)
+    console.print(f"textbook pools in {args.split}_train: {seen or 'none'}")
+    lr, scan, gbdt = _fit(bl, sets, console, "all training samples")
+    _, _, gbdt_held = _fit(bl, held, console, "textbook pools held out")
+    scores = {
+        f"untrained {n}": (lambda cs, n=n: bl.untrained_scores(cs)[n]) for n in UNTRAINED_ROWS
+    }
+    scores |= {"logistic regression": lambda cs: lr.score(cs.X)}
+    scores |= {"GBDT ranker": lambda cs: gbdt.score(cs.X)}
+    scores |= {f"GBDT ranker ({HELD_OUT})": lambda cs: gbdt_held.score(cs.X)}
+    results = _results(bl, sets, scores)
+    title = f"first-arrow ranking on {args.split}_test (n {len(sets['test'])})"
+    _baseline_table(results, console, title)
     note = _loco_note(args)
     console.print(note)
     out_dir = source_dir(args.source, args.processed_dir)
@@ -324,25 +355,26 @@ def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
     for part in ("train", "val"):
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         inputs |= prov.file_input(path)
-    bl.save_gbdt(gbdt, out_dir / f"baseline_gbdt_{args.split}.npz", inputs)
-    bl.save_logistic(lr, out_dir / f"baseline_lr_{args.split}.npz", inputs)
-    report = {
-        "split": args.split,
-        "results": results,
-        "loco": note,
-        "lr_scan": scan,
-        "gbdt_history": gbdt.history,
-        "n_candidates": n_rows,
-        "features": bl.FEATURE_NAMES,
-    }
-    (out_dir / f"baseline_report_{args.split}.json").write_text(
-        json.dumps(report, indent=1, default=str) + "\n"
+    seen_note = {"textbook_pools_in_training": sorted(seen)}
+    bl.save_gbdt(gbdt, out_dir / f"baseline_gbdt_{args.split}.npz", inputs, seen_note)
+    bl.save_gbdt(
+        gbdt_held,
+        out_dir / f"baseline_gbdt_{args.split}_{HELD_OUT}.npz",
+        inputs,
+        {"textbook_pools_in_training": [], "held_out": sorted(seen)},
     )
+    bl.save_logistic(lr, out_dir / f"baseline_lr_{args.split}.npz", inputs)
+    report = {"split": args.split, "results": results, "loco": note, "lr_scan": scan}
+    report |= {"gbdt_history": gbdt.history, "features": bl.FEATURE_NAMES, "textbook_seen": seen}
+    out = out_dir / f"baseline_report_{args.split}.json"
+    out.write_text(json.dumps(report, indent=1, default=str) + "\n")
     best_untrained = max(results[f"untrained {n}"]["test"]["top5"] for n in FLOORS)
     return 0 if results["GBDT ranker"]["test"]["top5"] > best_untrained else 1
 
 
-def print_textbook(results, console: Console, title: str) -> int:
+def print_textbook(results, console: Console, title: str, seen: frozenset = frozenset()) -> int:
+    """The suite's table; a case whose reactant pool was in the model's training data is
+    marked `seen in training`. Returns the number of held-out cases in the top 3."""
     table = Table(title=title, show_lines=True)
     for col in ("case", "expected", "rank", "top-3 predicted (donor @ site -> acceptor @ site)"):
         table.add_column(col)
@@ -357,14 +389,40 @@ def print_textbook(results, console: Console, title: str) -> int:
             better = "below" if score < res.expected_score else "ABOVE"
             expected += f"\nvs {alt.label}: rank {rank}, {score:.3g} ({better} expected)"
         mark = "[green]top-3[/green]" if res.passed else "[red]miss[/red]"
-        table.add_row(res.case.name, expected, f"{res.expected_rank} {mark}", "\n".join(lines))
+        name = res.case.name + (
+            "\n[yellow]seen in training[/yellow]" if res.case.name in seen else ""
+        )
+        table.add_row(name, expected, f"{res.expected_rank} {mark}", "\n".join(lines))
     console.print(table)
-    n = sum(r.passed for r in results)
-    console.print(f"{title}: {n}/{len(results)} expected pairs in the top 3")
+    held = [r for r in results if r.case.name not in seen]
+    n = sum(r.passed for r in held)
+    console.print(f"{title}: {n}/{len(held)} held-out expected pairs in the top 3")
+    if seen:
+        n_seen = sum(r.passed for r in results if r.case.name in seen)
+        console.print(f"  and {n_seen}/{len(seen)} of the cases seen in training (not a test)")
     return n
 
 
+def _gbdt_scorer(path: Path, allow_stale: bool):
+    """(scorer, the textbook cases whose pools the model was trained on) of a saved GBDT."""
+    from ksmech.physics import baseline as bl
+
+    gbdt = bl.load_gbdt(path, allow_stale=allow_stale)
+    header = prov.read_header(path)
+    seen = frozenset(header.extra.get("textbook_pools_in_training", [])) if header else frozenset()
+
+    def trained(sample, loader):
+        cs = bl.candidate_set(sample, loader)
+        out = np.full(sample.pair_valid.shape, -np.inf)
+        out[cs.rows, cs.cols] = gbdt.score(cs.X)
+        return out
+
+    return trained, seen
+
+
 def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
+    """The selectivity suite with the untrained scorer and both GBDTs. Only results on cases
+    the model never trained on count towards the exit code."""
     from ksmech.physics.pairs import oriented_kernels
     from ksmech.physics.ranking import ALL_SCORERS, pair_components
     from ksmech.physics.textbook import CASES, ensure_tokens, fragment_keys, run_suite
@@ -380,29 +438,23 @@ def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
     def untrained(sample, loader):
         return scorer(pair_components(sample, loader, kernels.main))
 
-    results = {f"untrained {args.untrained}": run_suite(untrained, loader, kernels)}
-    gbdt_path = (
-        args.gbdt or source_dir(args.source, args.processed_dir) / "baseline_gbdt_molecule.npz"
-    )
-    if gbdt_path.exists():
-        from ksmech.physics import baseline as bl
-
+    runs = {f"untrained {args.untrained}": (untrained, frozenset())}
+    out_dir = source_dir(args.source, args.processed_dir)
+    gbdts = {"GBDT ranker": args.gbdt or out_dir / "baseline_gbdt_molecule.npz"}
+    gbdts[f"GBDT ranker ({HELD_OUT})"] = out_dir / f"baseline_gbdt_molecule_{HELD_OUT}.npz"
+    for name, path in gbdts.items():
+        if not path.exists():
+            console.print(f"[yellow]{path} missing: run `ksmech-physics baseline`[/yellow]")
+            continue
         try:
-            gbdt = bl.load_gbdt(gbdt_path, allow_stale=args.allow_stale)
+            runs[name] = _gbdt_scorer(path, args.allow_stale)
         except StaleArtifact as exc:
             console.print(f"[red]{exc}[/red]; re-run `ksmech-physics baseline`")
             return 2
-
-        def trained(sample, loader):
-            cs = bl.candidate_set(sample, loader)
-            out = np.full(sample.pair_valid.shape, -np.inf)
-            out[cs.rows, cs.cols] = gbdt.score(cs.X)
-            return out
-
-        results["GBDT ranker"] = run_suite(trained, loader, kernels)
-    else:
-        console.print(f"[yellow]{gbdt_path} missing: run `ksmech-physics baseline` first[/yellow]")
-    passes = {name: print_textbook(res, console, name) for name, res in results.items()}
+    passes = {
+        name: print_textbook(run_suite(fn, loader, kernels), console, name, seen)
+        for name, (fn, seen) in runs.items()
+    }
     return 0 if max(passes.values()) >= 4 else 1
 
 

@@ -401,27 +401,33 @@ def fit_gbdt(train: list[CandidateSet], val: list[CandidateSet], cfg: TreeConfig
 BASELINE_VERSION = 1
 
 
-def _save_model(path: Path, arrays: dict, kind: str, inputs: dict[str, str] | None) -> Path:
+def _save_model(
+    path: Path, arrays: dict, kind: str, inputs: dict[str, str] | None, extra: dict | None = None
+) -> Path:
     """Write a fitted ranker with a provenance header: its inputs are the sample files it was
-    fitted and selected on, its config the feature list."""
+    fitted and selected on, its config the feature list; `extra` notes, e.g. which textbook
+    reactant pools its training data contains."""
     header = prov.stamp(
         "baseline",
         BASELINE_VERSION,
         inputs or {},
         {"model": kind, "features": FEATURE_NAMES},
         prov.array_digest(arrays),
+        extra,
     )
     return prov.save_npz(path, arrays, header, compressed=False)
 
 
-def save_gbdt(model: GBDTRanker, path: Path, inputs: dict[str, str] | None = None) -> Path:
+def save_gbdt(
+    model: GBDTRanker, path: Path, inputs: dict[str, str] | None = None, extra: dict | None = None
+) -> Path:
     arrays = {f"edge{i}": e for i, e in enumerate(model.edges)}
     for t, tree in enumerate(model.trees):
         for name in ("feature", "threshold", "left", "right", "value"):
             arrays[f"t{t}_{name}"] = getattr(tree, name)
     meta = {"n_trees": len(model.trees), "lr": model.learning_rate, "features": FEATURE_NAMES}
     arrays["meta"] = np.array(json.dumps(meta))
-    return _save_model(Path(path), arrays, "gbdt", inputs)
+    return _save_model(Path(path), arrays, "gbdt", inputs, extra)
 
 
 def save_logistic(model: LogisticRanker, path: Path, inputs: dict[str, str] | None = None):
