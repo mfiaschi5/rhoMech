@@ -28,7 +28,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -36,7 +36,7 @@ import numpy as np
 import torch
 from rich.console import Console
 
-from ksmech.arrows.align import ArrowLabel, align_step
+from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
 from ksmech.arrows.reactants import (
     CorrespondenceError,
     MissingTokens,
@@ -63,7 +63,7 @@ from ksmech.physics.params import REDUCED, KSParams, to_params
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 8
+SAMPLE_VERSION = 9
 PARTS = ("train", "val", "test")
 STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
@@ -75,6 +75,7 @@ class SkipReason(StrEnum):
     MISSING_TOKENS = "MISSING_TOKENS"  # a reactant fragment has no token file (yet)
     CORRESPONDENCE = "CORRESPONDENCE"  # drawn fragment cannot be matched onto its record
     UNALIGNED_ARROW = "UNALIGNED_ARROW"  # an arrow has no label (a lone heterolysis)
+    LABEL_FILTERED = "LABEL_FILTERED"  # a label has no pair left that pair_valid allows
 
 
 @dataclass
@@ -107,6 +108,8 @@ class MechanismSample:
     product_key: str = ""
     product_key_flag: str = ""
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
+    label_filter: dict[str, int] = field(default_factory=dict)  # labeled (donor, acceptor)
+    #   cells that pair_valid rejects, by group (`_filter_group`); never dropped silently
     inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file and
     #   contact block this sample was built from (`file:<path>` -> content sha256)
 
@@ -195,6 +198,61 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens, kernels: Pair
     )
 
 
+def _pair_index(sample: MechanismSample) -> tuple[dict[int, int], dict[int, int]]:
+    """Global token id -> row (occupied) / column (virtual) of the pair arrays."""
+    n = sample.n_atoms
+    occ = np.flatnonzero(sample.orbital_occupied)
+    virt = np.flatnonzero(~sample.orbital_occupied)
+    return {n + int(j): i for i, j in enumerate(occ)}, {n + int(j): i for i, j in enumerate(virt)}
+
+
+def _symbol(rt: ReactantTokens, atom: int) -> str:
+    f = int(np.searchsorted(rt.atom_offsets, atom, side="right")) - 1
+    return rt.fragments[f].tokens.symbol(atom - rt.atom_offsets[f])
+
+
+def _filter_group(rt: ReactantTokens, lab: ArrowLabel, r: int, s: int, w: float) -> str:
+    """Why a labeled cell is invalid: which side carries >= w on the other's site."""
+    sym = f"{_symbol(rt, lab.donor_site)}->{_symbol(rt, lab.acceptor_site)}"
+    if rt.centres(s).get(lab.donor_site, 0.0) >= w:
+        return f"{sym}: acceptor on the donor site"
+    if rt.centres(r).get(lab.acceptor_site, 0.0) >= w:
+        return f"{sym}: donor on the acceptor site"
+    return f"{sym}: other"
+
+
+def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabel] | None:
+    """The labels restricted to the pairs `pair_valid` allows (the bonded-site filter and the
+    antibonding-partner rule). A donor (acceptor) with no valid partner in the other set leaves
+    its set and the label is flagged LABEL_FILTERED; every rejected cell is counted by group in
+    `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells. None when a
+    label has no valid cell left (the step is skipped as LABEL_FILTERED)."""
+    row, col = _pair_index(sample)
+
+    def valid(r: int, s: int) -> bool:
+        return r in row and s in col and bool(sample.pair_valid[row[r], col[s]])
+
+    out = []
+    w = rt.candidate.site_weight
+    for lab in sample.labels:
+        for r in lab.donor_ids:
+            for s in lab.acceptor_ids:
+                if not valid(r, s):
+                    key = _filter_group(rt, lab, r, s, w)
+                    sample.label_filter[key] = sample.label_filter.get(key, 0) + 1
+        donors = frozenset(r for r in lab.donor_ids if any(valid(r, s) for s in lab.acceptor_ids))
+        acceptors = frozenset(s for s in lab.acceptor_ids if any(valid(r, s) for r in donors))
+        if not donors or not acceptors:
+            return None
+        trimmed = donors != lab.donor_ids or acceptors != lab.acceptor_ids
+        lab = replace(lab, donor_ids=donors, acceptor_ids=acceptors)
+        if trimmed:
+            lab = replace(lab, flags=lab.flags | {AlignFlag.LABEL_FILTERED})
+        r, s = representatives(rt, lab, valid)
+        out.append(replace(lab, teacher_donor=r, teacher_acceptor=s))
+    return out
+
+
 def sample_for_step(
     step: ElementaryStep, loader: TokenLoader, kernels: PairKernels
 ) -> MechanismSample | SkipReason:
@@ -209,6 +267,11 @@ def sample_for_step(
         if not alignment.complete:
             return SkipReason.UNALIGNED_ARROW
         sample = make_sample(step, rt, alignment.labels, kernels)
+    labels = filter_labels(sample, rt)
+    if labels is None:
+        log.info("%s: a label has no valid pair: %s", step.step_id, sample.label_filter)
+        return SkipReason.LABEL_FILTERED
+    sample.labels = labels
     sample.inputs = dict(sorted(used.items()))
     return sample
 
@@ -302,6 +365,10 @@ def write_samples(
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
         "n_labels": sum(len(s.labels) for s in kept),
+        "n_labels_filtered": sum(
+            AlignFlag.LABEL_FILTERED in lab.flags for s in kept for lab in s.labels
+        ),
+        "label_filter": dict(sum((Counter(s.label_filter) for s in kept), Counter()).most_common()),
         "n_fermi_smeared": sum(s.fermi_smeared for s in kept),
     }
     all_inputs = dict(inputs or {})
@@ -371,6 +438,9 @@ def build_all_samples(
         "n_training_steps": len(steps),
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
+        "label_filter": dict(
+            sum((Counter(s.label_filter) for s in samples.values()), Counter()).most_common()
+        ),
         "splits": {},
         "strategies_not_applicable": {},
     }

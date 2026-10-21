@@ -152,6 +152,10 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
         f"{report['n_samples']} samples from {report['n_training_steps']} training steps; "
         f"skipped {report['skipped']}"
     )
+    if report["label_filter"]:
+        console.print("labeled pairs that pair_valid rejects, by group (LABEL_FILTERED):")
+        for group, n in report["label_filter"].items():
+            console.print(f"  {n:6d}  {group}")
     for split, r in report["splits"].items():
         console.print(f"  {split}: {r['n_samples']}/{r['n_steps']} samples, skipped {r['skipped']}")
     for strategy, why in report["strategies_not_applicable"].items():

@@ -288,3 +288,47 @@ def _species(step, side: str) -> list[str]:
     from ksmech.data.chem import nontrivial_species
 
     return nontrivial_species(getattr(step, side))
+
+
+def test_filtered_label_cells_are_counted_flagged_and_never_the_teacher(
+    mini_steps, token_loader, pair_kernels
+):
+    from dataclasses import replace
+
+    from ksmech.arrows.align import AlignFlag
+    from ksmech.arrows.reactants import ReactantTokens
+    from ksmech.arrows.steps import _pair_index, filter_labels
+
+    step = mini_steps["e2"]
+    s = sample_for_step(step, token_loader, pair_kernels)
+    rt = ReactantTokens.from_smiles(step.reactants_smiles, token_loader)
+    lab = max(s.labels, key=lambda x: len(x.donor_ids) * len(x.acceptor_ids))
+    row, col = _pair_index(s)
+    fresh = replace(s, labels=[lab], label_filter={}, pair_valid=s.pair_valid.copy())
+    # every pair of the teacher donor rejected: it must leave the set, the label is flagged
+    r0 = lab.teacher_donor
+    for a in lab.acceptor_ids:
+        fresh.pair_valid[row[r0], col[a]] = False
+    if len(lab.donor_ids) > 1:
+        (out,) = filter_labels(fresh, rt)
+        assert r0 not in out.donor_ids and AlignFlag.LABEL_FILTERED in out.flags
+        assert out.teacher_donor != r0
+        assert fresh.pair_valid[row[out.teacher_donor], col[out.teacher_acceptor]]
+        assert sum(fresh.label_filter.values()) == len(lab.acceptor_ids)
+    # no valid cell left at all: the step is skipped, not kept with a dead label
+    for r in lab.donor_ids:
+        for a in lab.acceptor_ids:
+            fresh.pair_valid[row[r], col[a]] = False
+    assert filter_labels(replace(fresh, label_filter={}), rt) is None
+
+
+def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader, pair_kernels):
+    from ksmech.arrows.steps import _pair_index
+
+    for step in mini_steps.values():
+        s = sample_for_step(step, token_loader, pair_kernels)
+        if not isinstance(s, MechanismSample):
+            continue
+        row, col = _pair_index(s)
+        for lab in s.labels:
+            assert s.pair_valid[row[lab.teacher_donor], col[lab.teacher_acceptor]]

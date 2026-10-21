@@ -2900,3 +2900,34 @@ Each step is counted once, under the first reason that applies, in this order:
     recomputing the smallest rotation.
 - **Rebuild.** `ORIENTED_VERSION` 5 → 6, so every block on disk is stale (provenance) and is
   recomputed at the rebuild.
+
+## 2026-10-22 — Labeled pairs that the site filter removes: counted, flagged, never the teacher (fix item 6)
+
+- **Groups first.** The 2026-10-21 samples (PM tokens, random split) had 706 labels and 3,614
+  labeled (donor, acceptor) cells; `pair_valid` rejected 115 of them. Grouped by which side
+  carries at least the site weight (0.20) on the other's site:
+
+  | cells | group |
+  |---|---|
+  | 41 | C → C, the acceptor on the donor site (both two-centre) |
+  | 18 + 17 + 16 + 3 + 1 | O → C / O → S, the acceptor on the donor site (one-, two- and three-centre donors) |
+  | 8 + 5 + 1 | O → C, the donor on the acceptor site |
+  | 4 + 1 | O → C, other (weights 0.18-0.20, at the threshold) |
+
+  - Every group is the antibonding partner of the bond the arrow forms, e.g. n(O) →
+    σ*/π*(C–O) of the very C–O bond. That is the interaction the filter exists to exclude, so
+    the rule is **not** narrowed.
+  - No label had all of its cells removed. In 2 / 549 train labels the old teacher pair was
+    one of the removed cells.
+- **Rule** (`arrows.steps.filter_labels`, run on every sample):
+  - A donor (acceptor) with no valid partner in the other set leaves its set, and the label is
+    flagged `LABEL_FILTERED`.
+  - Every rejected cell is counted by group in `MechanismSample.label_filter`. The counts reach
+    the per-split reports (`n_labels_filtered`, `label_filter`) and `samples_report.json`, and
+    `ksmech-arrows samples` prints the groups.
+  - A label with no valid cell skips its step as `SkipReason.LABEL_FILTERED`. It is counted
+    and logged, never dropped silently.
+  - The teacher pair (r*, s*) is chosen among valid cells, with the alignment's tie-breaks
+    (site weight, then energy), and stored on the label (`teacher_donor` / `teacher_acceptor`,
+    review A9). `ranking.teacher_cell` uses it.
+- `SAMPLE_VERSION` 9. The groups are reprinted on the IBO tokens at the rebuild.

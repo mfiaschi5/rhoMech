@@ -223,6 +223,9 @@ def teacher_cell(sample: MechanismSample) -> tuple[int, int] | None:
     representatives), when that pair is valid; else the first valid labeled pair."""
     lab = first_label(sample)
     row, col = orbital_positions(sample)
+    if lab.teacher_donor >= 0 and lab.teacher_acceptor >= 0:  # chosen among valid cells
+        n = sample.n_atoms
+        return int(row[lab.teacher_donor - n]), int(col[lab.teacher_acceptor - n])
     donors = [t for t in lab.donor_ids if t >= sample.n_atoms]
     acceptors = [t for t in lab.acceptor_ids if t >= sample.n_atoms]
     if not donors or not acceptors:

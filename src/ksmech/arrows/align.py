@@ -49,6 +49,7 @@ class AlignFlag(StrEnum):
     RESONANCE_FORM = "RESONANCE_FORM"  # lone pair drawn where no one-centre token sits
     ALIGN_FALLBACK = "ALIGN_FALLBACK"  # an empty set filled by centroid distance
     SINK_ONLY_D = "SINK_ONLY_D"  # every virtual token on the sink atom is d-type
+    LABEL_FILTERED = "LABEL_FILTERED"  # set members with no valid partner (pair_valid) removed
 
 
 class UnalignedReason(StrEnum):
@@ -72,6 +73,8 @@ class ArrowLabel:
     donor_partner: int = -1  # c of a bond source, -1 for a lone pair
     sink_partners: tuple[int, ...] = ()  # d of every bond breaking at the sink
     absorbed: tuple[int, ...] = ()  # heterolysis arrows folded into this acceptor set
+    teacher_donor: int = -1  # r*: set by the sample builder, a valid pair with teacher_acceptor
+    teacher_acceptor: int = -1  # s*
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +88,8 @@ class ArrowLabel:
             "donor_partner": self.donor_partner,
             "sink_partners": list(self.sink_partners),
             "absorbed": list(self.absorbed),
+            "teacher_donor": self.teacher_donor,
+            "teacher_acceptor": self.teacher_acceptor,
         }
 
     @classmethod
@@ -100,6 +105,8 @@ class ArrowLabel:
             d["donor_partner"],
             tuple(d["sink_partners"]),
             tuple(d["absorbed"]),
+            d.get("teacher_donor", -1),
+            d.get("teacher_acceptor", -1),
         )
 
 
@@ -302,15 +309,19 @@ def align_arrows(step: ElementaryStep, reactant_tokens: ReactantTokens) -> list[
     return align_step(step, reactant_tokens).labels
 
 
-def representatives(rt: ReactantTokens, label: ArrowLabel) -> tuple[int, int]:
+def representatives(rt: ReactantTokens, label: ArrowLabel, valid=None) -> tuple[int, int]:
     """Teacher representatives (r*, s*): the donor and the acceptor with the largest weight on
-    their site; ties go to the higher donor and the lower acceptor energy."""
+    their site; ties go to the higher donor and the lower acceptor energy. `valid(r, s)`, when
+    given, restricts the choice to valid pairs (s* among r*'s valid partners)."""
+    ok = valid or (lambda r, s: True)
+    donors = [t for t in label.donor_ids if any(ok(t, s) for s in label.acceptor_ids)]
     r = max(
-        label.donor_ids,
+        donors or label.donor_ids,
         key=lambda t: (rt.centres(t).get(label.donor_site, 0.0), rt.orbital(t).energy_ev, -t),
     )
+    acceptors = [s for s in label.acceptor_ids if ok(r, s)]
     s = max(
-        label.acceptor_ids,
+        acceptors or label.acceptor_ids,
         key=lambda t: (rt.centres(t).get(label.acceptor_site, 0.0), -rt.orbital(t).energy_ev, -t),
     )
     return r, s
