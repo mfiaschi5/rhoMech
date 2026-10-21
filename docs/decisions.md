@@ -2325,19 +2325,37 @@ version 7.
   | N+1 / N-1 single points (finite-difference Fukui) | 5.7 | 1.4% |
   | final single point with integrals + record assembly | 2.3 | 0.5% |
 
-  The optimization is the whole cost, and it grows steeply with size (1 s at 24 atoms, 50-70 s
-  at 50-75).
-- **The manifest's 2,531 finished molecules:** median 2.6 s, mean 23.9 s, 90th percentile
-  44.5 s, maximum 905 s (the 900 s timeout). Molecules over 300 s take 41% of the time.
-- **Projection:** the 11,929 pending molecules need about 70-80 CPU-hours, roughly 18-20 h at 4
-  workers. The batch walks its queue in SMILES order, so its instantaneous rate swings with the
-  molecules in flight (10 molecules in 28 minutes on one heavy stretch).
+  The optimization is the whole cost. It grows with size but scatters widely: 0.1-1.5 s below
+  30 atoms, 11-67 s at 50-75 atoms (a 71-atom molecule took 11 s, a 52-atom one 51 s).
+- **The manifest's 2,241 timed molecules:** median 3.6 s, mean 27.0 s, 90th percentile 55.4 s,
+  maximum 905 s (the 900 s timeout). Molecules over 300 s take 41% of the time. Another 290 rows
+  are cache-hit placeholders with no timing.
+- **Projection:** the pending molecules need about 70-90 CPU-hours, roughly 17-22 h at 4
+  workers (the profile's mean and the manifest's).
 - **Workers: 4 (unchanged).** The user asked for nproc - 2 = 14 with OMP_NUM_THREADS=1. That
   is the configuration that hard-rebooted the host three times within 1-2 minutes on
   2026-10-19: the batch already spawned its workers with `OMP_NUM_THREADS=1` then (Batch
   section above). 8 workers rebooted it once after 34 minutes. The BLAS-oversubscription cause
   found on 2026-10-20 was `ksmech-orbitals build`, not the QM batch. The ramp was put back to the
-  user before running it.
+  user before running it, and **the user chose to stay at 4 workers.**
+- **Restarts were re-running the known failures.**
+  - The batch retries failed molecules by default, and in SMILES order every earlier molecule
+    that succeeded is already done. So the head of the queue was 67 of the 69 known failures:
+    29 OPT_NOT_CONVERGED, 19 SPIN_PARITY, 12 SCF_NOT_CONVERGED, 7 TIMEOUT, 4.4 CPU-h when they
+    first failed. Most of them fail deterministically.
+  - The other 2 sit deeper in the queue: a 300 s-timeout pilot TIMEOUT and one SPIN_PARITY.
+  - Each of tonight's restarts re-ran them from the start: 10 molecules in 28 minutes at 2
+    workers, 7 in 15 minutes at 4, all of them known failures.
+  - **Stopping the batch must use SIGINT.** The manifest is written every 500 molecules and on
+    exit (the `finally` of `featurize_dataset`). But `systemctl --user stop` sends SIGTERM,
+    which kills Python without running it, so the four stops left the manifest at its 01:01
+    flush. The records themselves are safe: they are cached per molecule, and the next run
+    counts them as done. Only the manifest rows (timings, warnings) of those runs are missing.
+    Stop with `systemctl --user kill --signal=SIGINT <unit>.scope`.
+  - **Relaunched with `--no-retry-failed`** (2026-10-21 02:45). It skips all 69 failures and
+    did 102 molecules in 15 minutes at 4 workers (8.8 s a molecule), with 11,860 left: about
+    29 h at this rate, 17-22 h at the mean costs above. The failures are to be retried once, at
+    the end, by a plain run.
 
 ### Re-run on samples version 7 (d = 2.3)
 
