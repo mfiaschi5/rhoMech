@@ -105,14 +105,16 @@ def test_baseline_cli(mini_processed, token_loader, pair_kernels, monkeypatch): 
     from ksmech.arrows.steps import build_all_samples
 
     build_all_samples(
-        "pmechdb", pair_kernels, ["random"], mini_processed, missing_iodide(token_loader)
+        "pmechdb", pair_kernels, ["molecule"], mini_processed, missing_iodide(token_loader)
     )
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
     quick = bl.TreeConfig(max_rounds=20, check_every=5)
     monkeypatch.setattr(bl, "TreeConfig", lambda: quick)
     code = cli.main(["baseline", "--source", "pmechdb", "--processed-dir", str(mini_processed)])
     out = mini_processed / "pmechdb"
-    report = json.loads((out / "baseline_report_random.json").read_text())
+    report = json.loads((out / "baseline_report_molecule.json").read_text())
     assert code in (0, 1) and "GBDT ranker" in report["results"]
     assert "not applicable" in report["loco"] or "found" in report["loco"]
-    assert (out / "baseline_gbdt_random.npz").exists() and (out / "baseline_lr_random.npz").exists()
+    assert (out / "baseline_gbdt_molecule.npz").exists() and (
+        out / "baseline_lr_molecule.npz"
+    ).exists()

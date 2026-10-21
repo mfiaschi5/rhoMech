@@ -65,7 +65,10 @@ log = logging.getLogger(__name__)
 
 SAMPLE_VERSION = 8
 PARTS = ("train", "val", "test")
-STRATEGIES = ("random", "scaffold", "loco")
+STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
+# what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
+# which leaks molecules across sets on PMechDB (no pathway ids; docs/review_2026-10-21.md, D1)
+DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
 
 
 class SkipReason(StrEnum):
@@ -232,7 +235,11 @@ def split_ids(steps: list[ElementaryStep], strategy: str, seed: int = 0) -> dict
     """Split name (`<strategy>_<part>`) -> step ids. Raises ValueError when the strategy
     cannot run on these steps (leave-one-class-out without class labels)."""
     if strategy == "random":
-        per = {"random": splits.split_by_pathway(steps, seed=seed)}
+        raise ValueError("the per-step split is now `random_leaky` and must be asked for by name")
+    if strategy == "molecule":
+        per = {"molecule": splits.split_by_molecule(steps, seed=seed)}
+    elif strategy == "random_leaky":
+        per = {"random_leaky": splits.split_by_pathway(steps, seed=seed)}
     elif strategy == "scaffold":
         per = {"scaffold": splits.split_by_scaffold(steps, seed=seed)}
     elif strategy == "loco":
@@ -330,7 +337,7 @@ def build_samples(
     loader: TokenLoader | None = None,
     seed: int = 0,
 ) -> Path:
-    """Write `samples_<split>.pt` for one split, e.g. `build_samples("pmechdb", "random_train")`."""
+    """Write `samples_<split>.pt` for one split (e.g. split `molecule_train`)."""
     steps = read_training_steps(steps_path(source, processed_dir))
     strategy = split.rsplit("_", 1)[0].split("-", 1)[0]
     ids = split_ids(steps, strategy, seed)
@@ -349,7 +356,7 @@ def build_samples(
 def build_all_samples(
     source: str,
     kernels: PairKernels,
-    strategies: Iterable[str] = STRATEGIES,
+    strategies: Iterable[str] = DEFAULT_STRATEGIES,
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
     loader: TokenLoader | None = None,
     seed: int = 0,

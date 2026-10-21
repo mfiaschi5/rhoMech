@@ -131,15 +131,15 @@ def test_ks_rank_cli(mini_processed, token_loader, pair_kernels, monkeypatch):  
     import ksmech.physics.cli as cli
 
     build_all_samples(
-        "pmechdb", pair_kernels, ["random"], mini_processed, missing_iodide(token_loader)
+        "pmechdb", pair_kernels, ["molecule"], mini_processed, missing_iodide(token_loader)
     )
-    assert samples_path("pmechdb", "random_test", mini_processed).exists()
+    assert samples_path("pmechdb", "molecule_test", mini_processed).exists()
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
     base = ["ks-rank", "--source", "pmechdb", "--processed-dir", str(mini_processed)]
     cache = ["--oriented-cache", str(mini_processed / "oriented")]
     code = cli.main([*base, *cache, "--distance", "2.3", "2.6"])
     for d in ("2.3", "2.6"):
-        path = mini_processed / "pmechdb" / f"ks_rank_report_random_oriented_d{d}.json"
+        path = mini_processed / "pmechdb" / f"ks_rank_report_molecule_oriented_d{d}.json"
         report = json.loads(path.read_text())
         assert set(report["scorers"]) == set(ALL_SCORERS) | {"frozen_head"}
         assert report["distance"] == float(d)

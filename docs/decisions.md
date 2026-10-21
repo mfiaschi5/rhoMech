@@ -2706,3 +2706,29 @@ Each step is counted once, under the first reason that applies, in this order:
 - **Not stamped.** `contact_table.json` (table ablation), the MLP kernel (deleted in item 9),
   `pair_feature_stats_*.json` (read by nothing yet; it will be with the trainer) and the
   reports.
+
+## 2026-10-22 — The molecule split is the default; the per-step split is `random_leaky` (fix item 2)
+
+- **Strategies.** `ksmech-arrows samples` now builds `molecule`, `scaffold` and `loco` by
+  default.
+  - `molecule` is `splits.split_by_molecule` (2026-10-19 entry): no non-trivial molecule
+    (maps stripped, canonical, more than 3 heavy atoms), reactant or product, in two of
+    train / val / test.
+  - The per-step split (`split_by_pathway` without pathway ids) is renamed `random_leaky`.
+    It is built only when named (`--strategy random_leaky`). The old name `random` raises,
+    so a script cannot fall back to it silently.
+  - `ksmech-physics ks-rank` and `baseline` default to `--split molecule`. `textbook` reads
+    `baseline_gbdt_molecule.npz` by default.
+- **Measured on the real parquet** (12,840 training steps, seed 0, 80/10/10):
+
+  | strategy | train / val / test | test steps whose largest reactant (by SMILES length) is in train |
+  |---|---|---|
+  | `molecule` | 10,272 / 1,284 / 1,284 | 0 |
+  | `random_leaky` | 10,272 / 1,284 / 1,284 | 457 |
+
+  `test_no_reactant_molecule_is_in_two_parts_of_the_real_molecule_split` (realdata) asserts
+  the property on both sides of every step.
+- **What the molecule test set is.** Common reagents chain about 78% of the steps into one
+  group, which goes to train. Val and test are the steps that share no non-trivial molecule
+  with it. They are out of distribution by construction, so numbers on them are expected to
+  drop relative to the leaky split; that is the point of the change.

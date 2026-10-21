@@ -143,14 +143,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
   BE-matrix edit per step vs. the annotated products, `arrows_roundtrip.json`), `uv run
   ksmech-arrows align --source pmechdb` (arrow-to-orbital labels by atom, unaligned groups,
   predicted-arrow round trip, `alignment_report.json`), `uv run ksmech-arrows samples --source
-  pmechdb` (`samples_<strategy>_<part>.pt` for every split strategy; re-run both after a token
-  rebuild)
-- Physics: `uv run ksmech-physics ks-rank --source pmechdb [--split random|scaffold] [--kernel
+  pmechdb` (`samples_<strategy>_<part>.pt` for the `molecule`, `scaffold` and `loco` splits; the per-step
+  `random_leaky` split only with `--strategy random_leaky`; re-run both after a token rebuild)
+- Physics: `uv run ksmech-physics ks-rank --source pmechdb [--split molecule|scaffold] [--kernel
   oriented|table|mlp|analytic] [--distance 2.0 2.3 ...]` (untrained KS ranking of each step's
   first arrow: the floor -(KS3 + KS2) and the frozen head on train + val and test, scorer
   table, failure classes, per-class table, `ks_rank_report_<split>_<kernel>[_d<d>].json`;
   oriented blocks are cached under `data/cache/oriented/`), `uv run ksmech-physics baseline
-  --source pmechdb [--split random|scaffold]` (logistic regression + GBDT ranker,
+  --source pmechdb [--split molecule|scaffold]` (logistic regression + GBDT ranker,
   `baseline_report_<split>.json` and the models), `uv run ksmech-physics textbook` (five
   textbook selectivity cases, expected vs top-3; builds missing QM records and tokens), `uv
   run ksmech-physics contact-mlp --source pmechdb` (the MLP ablation kernel,

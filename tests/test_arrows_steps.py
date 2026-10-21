@@ -10,6 +10,7 @@ import torch
 
 from ksmech.arrows.cli import main as arrows_main
 from ksmech.arrows.steps import (
+    PARTS,
     SAMPLE_VERSION,
     MechanismSample,
     SkipReason,
@@ -103,7 +104,7 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pa
     assert not report["strategies_not_applicable"]
     assert report["skipped"] == {"MISSING_TOKENS": 1}
     names = set(report["splits"])
-    assert {"random_train", "scaffold_test"} <= names
+    assert {"molecule_train", "scaffold_test"} <= names
     assert any(n.startswith("loco-substitution_") for n in names)
     for split, r in report["splits"].items():
         path = samples_path("pmechdb", split, mini_processed)
@@ -114,10 +115,10 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pa
 
 
 def test_build_samples_writes_one_split(mini_processed, token_loader, pair_kernels):
-    path = build_samples("pmechdb", "random_train", pair_kernels, mini_processed, token_loader)
-    assert path.name == "samples_random_train.pt"
+    path = build_samples("pmechdb", "molecule_train", pair_kernels, mini_processed, token_loader)
+    assert path.name == "samples_molecule_train.pt"
     report = json.loads(path.with_suffix(".json").read_text())
-    assert report["split"] == "random_train" and report["n_samples"] >= 1
+    assert report["split"] == "molecule_train" and report["n_samples"] >= 1
     with pytest.raises(ValueError):
         build_samples("pmechdb", "random_bogus", pair_kernels, mini_processed, token_loader)
 
@@ -160,12 +161,13 @@ def test_loader_and_cli(mini_processed, token_loader, contact_tables, monkeypatc
     table = ["--contact-table", str(save_tables(contact_tables, mini_processed / "contact.json"))]
     missing = ["--kernel", "table", "--contact-table", str(mini_processed / "none.json")]
     assert arrows_main(["samples", *args, *missing]) == 2  # no contact table: refused, not guessed
-    assert arrows_main(["samples", *args, "--kernel", "table", *table, "--strategy", "random"]) == 0
+    leaky = ["--strategy", "random_leaky"]
+    assert arrows_main(["samples", *args, "--kernel", "table", *table, *leaky]) == 0
     oriented = ["--oriented-cache", str(mini_processed / "oriented")]  # the default kernel
-    assert arrows_main(["samples", *args, *oriented, "--strategy", "random", "scaffold"]) == 0
+    assert arrows_main(["samples", *args, *oriented, "--strategy", "molecule", "scaffold"]) == 0
     assert arrows_main(["roundtrip", *args]) == 0
     assert "100.00%" in capsys.readouterr().out
-    loader = make_loader(samples_path("pmechdb", "random_train", mini_processed), batch_size=2)
+    loader = make_loader(samples_path("pmechdb", "molecule_train", mini_processed), batch_size=2)
     batch = next(iter(loader))
     assert batch["donor_sets"].dtype == torch.bool and len(batch["step_id"]) <= 2
 
@@ -217,8 +219,8 @@ def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: missing_iodide(token_loader))
     args = ["--source", "pmechdb", "--processed-dir", str(mini_processed)]
     cache = ["--oriented-cache", str(tmp_path / "oriented")]
-    assert arrows_main(["samples", *args, *cache, "--strategy", "random"]) == 0
-    path = samples_path("pmechdb", "random_train", mini_processed)
+    assert arrows_main(["samples", *args, *cache, "--strategy", "molecule"]) == 0
+    path = samples_path("pmechdb", "molecule_train", mini_processed)
     assert load_samples(path)
     parquet = steps_path("pmechdb", mini_processed)
     header = prov.read_header(path)
@@ -248,3 +250,41 @@ def test_sample_stores_the_contact_sites_and_clash_flags(mini_steps, token_loade
         for k in range(n_virt):
             a, b = s.pair_contact_sites[i, k]
             assert a in centres[occ[i]] and b in centres[virt[k]]
+
+
+def test_the_per_step_split_is_random_leaky_and_never_a_default(mini_processed):
+    from ksmech.arrows.steps import DEFAULT_STRATEGIES, split_ids
+    from ksmech.data.io import read_training_steps
+
+    steps = read_training_steps(steps_path("pmechdb", mini_processed))
+    assert "random_leaky" not in DEFAULT_STRATEGIES and DEFAULT_STRATEGIES[0] == "molecule"
+    with pytest.raises(ValueError, match="random_leaky"):
+        split_ids(steps, "random")
+    assert set(split_ids(steps, "random_leaky")) == {f"random_leaky_{p}" for p in PARTS}
+
+
+@pytest.mark.realdata
+def test_no_reactant_molecule_is_in_two_parts_of_the_real_molecule_split():
+    """The PMechDB molecule split: no reactant (maps stripped, canonical, > 3 heavy atoms) in
+    two of train / val / test. Products are checked too, as `split_by_molecule` promises."""
+    from ksmech.arrows.steps import split_ids
+    from ksmech.data.io import read_training_steps
+
+    path = steps_path("pmechdb")
+    if not path.exists():
+        pytest.skip("PMechDB steps missing")
+    steps = {s.step_id: s for s in read_training_steps(path)}
+    ids = split_ids(list(steps.values()), "molecule")
+    for side in ("reactants_smiles", "products_smiles"):
+        seen = {
+            p: {m for i in ids[f"molecule_{p}"] for m in _species(steps[i], side)} for p in PARTS
+        }
+        for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
+            assert not seen[a] & seen[b], (side, a, b, sorted(seen[a] & seen[b])[:5])
+    assert sum(len(v) for v in ids.values()) == len(steps)
+
+
+def _species(step, side: str) -> list[str]:
+    from ksmech.data.chem import nontrivial_species
+
+    return nontrivial_species(getattr(step, side))

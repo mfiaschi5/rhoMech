@@ -13,7 +13,7 @@ from rich.table import Table
 
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.roundtrip import evaluate_alignment, run_round_trip
-from ksmech.arrows.steps import STRATEGIES, build_all_samples
+from ksmech.arrows.steps import DEFAULT_STRATEGIES, STRATEGIES, build_all_samples
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps, source_dir
 from ksmech.data.io import steps_path as _steps_path
 from ksmech.data.schema import Source
@@ -42,7 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--contact-table", type=Path, default=DEFAULT_TABLE_PATH)
     s.add_argument("--contact-mlp", type=Path, default=DEFAULT_MLP_PATH)
     a.add_argument("--no-member-check", action="store_true", help="skip the set-member swap")
-    s.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=STRATEGIES)
+    s.add_argument(
+        "--strategy",
+        nargs="+",
+        default=list(DEFAULT_STRATEGIES),
+        choices=STRATEGIES,
+        help="random_leaky (the per-step split) only when named",
+    )
     s.add_argument("--seed", type=int, default=0)
     return parser
 

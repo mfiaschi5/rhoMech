@@ -35,21 +35,21 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("ks-rank", help="rank first arrows by the untrained KS terms")
     m = sub.add_parser("contact-mlp", help="fit the descriptor contact kernel (kernel=mlp)")
     b = sub.add_parser("baseline", help="train the logistic-regression and GBDT rankers")
-    b.add_argument("--split", default="random", help="split strategy of the sample files")
+    b.add_argument("--split", default="molecule", help="split strategy of the sample files")
     t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
     t.add_argument("--source", default="pmechdb", help="where the trained GBDT model lives")
     t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     t.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
     t.add_argument("--untrained", default=UNTRAINED_SCORE, help="untrained scorer name")
     t.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
-    t.add_argument("--gbdt", type=Path, default=None, help="GBDT model (default: random split)")
+    t.add_argument("--gbdt", type=Path, default=None, help="GBDT model (default: molecule split)")
     for p in (r, t):  # diagnostic commands only: read stale artifacts with a warning
         p.add_argument("--allow-stale", action="store_true", help="read stale artifacts (warns)")
     for p in (r, m, b):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
-    r.add_argument("--split", default="random", help="split strategy of the sample files")
+    r.add_argument("--split", default="molecule", help="split strategy of the sample files")
     r.add_argument("--kernel", choices=KERNELS, default="oriented")
     r.add_argument(
         "--distance",
@@ -382,7 +382,7 @@ def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
 
     results = {f"untrained {args.untrained}": run_suite(untrained, loader, kernels)}
     gbdt_path = (
-        args.gbdt or source_dir(args.source, args.processed_dir) / "baseline_gbdt_random.npz"
+        args.gbdt or source_dir(args.source, args.processed_dir) / "baseline_gbdt_molecule.npz"
     )
     if gbdt_path.exists():
         from ksmech.physics import baseline as bl
