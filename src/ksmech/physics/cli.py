@@ -19,11 +19,11 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir
 from ksmech.data.provenance import StaleArtifact
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
+from ksmech.physics.contact.legacy_fixed23 import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
+from ksmech.physics.contact.legacy_fixed23 import OrientedConfig
 from ksmech.physics.contact_kernel import KERNELS
 from ksmech.physics.contact_mlp import DEFAULT_MLP_PATH
 from ksmech.physics.contact_table import DEFAULT_TABLE_PATH
-from ksmech.physics.oriented import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
-from ksmech.physics.oriented import OrientedConfig
 
 # the untrained physics floor: KS3 + KS2 at d = 2.3 (user decision, docs/decisions.md)
 UNTRAINED_SCORE = "ks3+ks2"

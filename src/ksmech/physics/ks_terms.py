@@ -34,8 +34,8 @@ from __future__ import annotations
 import numpy as np
 
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
+from ksmech.physics.contact.legacy_fixed23 import ao_energies
 from ksmech.physics.contact_kernel import ContactKernel
-from ksmech.physics.oriented import ao_energies
 from ksmech.physics.params import KSParams
 from ksmech.qm.fukui import HARTREE_TO_EV
 

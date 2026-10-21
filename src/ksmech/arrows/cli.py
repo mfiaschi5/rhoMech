@@ -18,10 +18,10 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_step
 from ksmech.data.io import steps_path as _steps_path
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
+from ksmech.physics.contact.legacy_fixed23 import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
 from ksmech.physics.contact_kernel import KERNELS, ContactConfig, ContactKernel
 from ksmech.physics.contact_mlp import DEFAULT_MLP_PATH, load_contact_mlp
 from ksmech.physics.contact_table import DEFAULT_TABLE_PATH, load_tables
-from ksmech.physics.oriented import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
 from ksmech.physics.pairs import PairKernels, oriented_kernels, single_kernel
 
 

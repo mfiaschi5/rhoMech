@@ -8,7 +8,7 @@ from ksmech.orbitals.tokens import (
     site_excluded_matrix,
     site_pairs_excluded,
 )
-from ksmech.physics import oriented as O
+from ksmech.physics.contact import legacy_fixed23 as O
 from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
 from ksmech.physics.gto import ao_values, atom_ao_slices, atom_pair_blocks, element_shells
 from ksmech.physics.params import KSParams
@@ -72,14 +72,14 @@ def test_site_lobe_rules(sp_record):
     for ch in sigma_stars(t, {"C", "H"}):  # H site: an s function, outward beyond H
         h = next(a for a in leading(ch) if t.symbol(a) == "H")
         c = next(a for a in leading(ch) if t.symbol(a) == "C")
-        lobes, opposite = cands[_at(t.orbitals, ch), h]
+        lobes, opposite, _ = cands[_at(t.orbitals, ch), h]
         assert len(lobes) == 1 and _angle(t, h, lobes[0], c) > 170
         assert np.allclose(opposite, -lobes[0])
     acetone = build_molecule_tokens(sp_record("CC(C)=O"))
     pi_star = min(acetone.virtual(), key=lambda o: o.energy_ev)
     c1 = next(a for a in leading(pi_star) if acetone.symbol(a) == "C")
     o3 = next(a for a in leading(pi_star) if acetone.symbol(a) == "O")
-    lobes, _ = O.molecule_candidates(acetone)[_at(acetone.orbitals, pi_star), c1]
+    lobes, _, _ = O.molecule_candidates(acetone)[_at(acetone.orbitals, pi_star), c1]
     assert len(lobes) == 2  # the two faces of the pi* lobe tie
     assert all(85 < _angle(acetone, c1, n, o3) < 120 for n in lobes)
     assert lobes[0] @ lobes[1] < -0.8
@@ -88,12 +88,13 @@ def test_site_lobe_rules(sp_record):
 def test_candidates_respect_the_hemisphere(sp_record):
     t = build_molecule_tokens(sp_record("C=CC=O"))
     pos = np.array([a.position for a in t.atoms])
-    for (k, site), (lobes, _) in O.molecule_candidates(t).items():
+    for (k, site), (lobes, _, frame) in O.molecule_candidates(t).items():
         o = t.orbitals[k]
         others = [int(c) for c in o.descriptors.all_center_atoms if int(c) != site]
-        ok = O.admissible(o, t, site)
+        dirs = O.frame_directions(frame)
+        ok = O.admissible(o, t, site, dirs)
         for n in lobes:
-            if others and ok[np.argmin(np.linalg.norm(O.sphere_directions() - n, axis=1))]:
+            if others and ok[np.argmin(np.linalg.norm(dirs - n, axis=1))]:
                 assert all(n @ (pos[c] - pos[site]) <= 1e-6 for c in others)
 
 
@@ -110,8 +111,8 @@ def _shell_means(t) -> np.ndarray:
     return out
 
 
-def _brute(t_F, r, a, u, t_G, s, b, v, d, with_beta=False):
-    """l_r^T S l_s with the acceptor's cap moved rigidly (site b to x_a + d u, lobe v onto -u),
+def _brute(t_F, r, a, u, t_G, s, b, R, d, with_beta=False):
+    """l_r^T S l_s with the acceptor's cap moved rigidly by R (site b to x_a + d u),
     its LMO truncated to the cap atoms, every block computed directly. `with_beta`: also the
     AO-level sum l_r^T [S (F_mu,mu + F_nu,nu) / 2] l_s (eV, K = 1), each AO energy carried by
     its own molecule's AO through the rotation."""
@@ -120,7 +121,6 @@ def _brute(t_F, r, a, u, t_G, s, b, v, d, with_beta=False):
     zG = np.array([x.atomic_number for x in t_G.atoms])
     xF = np.array([x.position for x in t_F.atoms]) / BOHR_ANG
     xG = np.array([x.position for x in t_G.atoms]) / BOHR_ANG
-    R = O.rotation_to(v[None], -u[None])[0]
     placed = (xG - xG[b]) @ R.T + xF[a] + d / BOHR_ANG * u
     c = t_G.orbitals[s].coeff_vector.copy()
     f_G, f_F = _shell_means(t_G), _shell_means(t_F)
@@ -197,8 +197,9 @@ def test_placed_overlaps_equal_the_brute_force(sp_record, case):
     assert len(pl.sp) and np.abs(values).max() > 1e-4
     for k in range(len(pl.sp)):
         u = (pl.shift[k] - F.xyz[a]) / (2.3 / BOHR_ANG)
-        v = -(pl.rot[k].T @ u)
-        brute, beta = _brute(t_F, r, a, u, t_G, s, b, v, 2.3, with_beta=True)
+        faces = [np.allclose(pl.rot[k] @ v, -u) for v in EG.dirs[0][EG.valid[0]]]
+        assert any(faces)  # an acceptor lobe faces the donor lobe
+        brute, beta = _brute(t_F, r, a, u, t_G, s, b, pl.rot[k], 2.3, with_beta=True)
         assert values[k] == pytest.approx(abs(brute), rel=1e-9, abs=1e-12)
         assert betas[k] == pytest.approx(beta * np.sign(brute), rel=1e-9, abs=1e-11)
 
@@ -216,7 +217,7 @@ def test_site_contact_places_the_cap(sp_record, case):
     brute = []
     for k in range(len(pl.sp)):
         u = (pl.shift[k] - F.xyz[a]) / (2.3 / BOHR_ANG)
-        brute.append(abs(_brute(t_F, r, a, u, t_G, s, b, -(pl.rot[k].T @ u), 2.3)))
+        brute.append(abs(_brute(t_F, r, a, u, t_G, s, b, pl.rot[k], 2.3)))
     config = O.OrientedConfig(distance=2.3, clash=0.0, tol=0.0)
     value, clash = O.site_contact(t_F, r, a, t_G, s, b, config)
     assert not clash and value == pytest.approx(max(brute), rel=1e-9, abs=1e-12)

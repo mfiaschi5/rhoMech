@@ -65,7 +65,7 @@ from ksmech.qm.geometry import BOHR_ANG
 
 log = logging.getLogger(__name__)
 
-ORIENTED_VERSION = 5  # bump when the lobe rules, placement, integrals or stored fields change
+ORIENTED_VERSION = 6  # bump when the lobe rules, placement, integrals or stored fields change
 DEFAULT_CACHE_DIR = Path("data/cache/oriented")
 SPHERE_RADIUS_ANG = 1.5
 N_DIRECTIONS = 200
@@ -275,11 +275,10 @@ def away_direction(o: OrbitalToken, t: MoleculeTokens, site: int) -> np.ndarray 
     return v / norm if norm > 1e-6 else None
 
 
-def admissible(o: OrbitalToken, t: MoleculeTokens, site: int) -> np.ndarray:
+def admissible(o: OrbitalToken, t: MoleculeTokens, site: int, dirs: np.ndarray) -> np.ndarray:
     """(n_dir,) the hemisphere rule: n . (x_c - x_site) <= 0 for every other centre c; for a
     one-centre token, the hemisphere away from the population-weighted bonded neighbours.
     When no direction satisfies every centre, the least-violating ones (within 0.05)."""
-    dirs = sphere_directions()
     atoms, _ = _other_centres(o, site)
     if len(atoms):
         pos = _positions(t)
@@ -291,16 +290,70 @@ def admissible(o: OrbitalToken, t: MoleculeTokens, site: int) -> np.ndarray:
     return dirs @ away >= 0 if away is not None else np.ones(len(dirs), dtype=bool)
 
 
-def site_candidates(o, t, site: int, sphere_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+FRAMES_WITHOUT_LOCAL_AXES: Counter = Counter()  # (token, site) frames that fell back to lab axes
+
+
+def _token_p_vector(o: OrbitalToken, t: MoleculeTokens, site: int) -> np.ndarray:
+    """The token's p coefficients on `site` as a Cartesian vector (tblite's (py, pz, px))."""
+    from ksmech.orbitals.localize import P_AXIS_ORDER
+
+    aos = np.flatnonzero((t.ao_atom == site) & (np.asarray(t.ao_l) == 1))
+    v = np.zeros(3)
+    if len(aos) == 3:
+        v[list(P_AXIS_ORDER)] = o.coeff_vector[aos]
+    return v
+
+
+def _frame_axes(o: OrbitalToken, t: MoleculeTokens, site: int) -> list[np.ndarray]:
+    """Candidate frame axes at `site`, in order: bonds to its neighbours (by atom index), then
+    second-shell bonds, then the token's own p vector. All rotate with the molecule."""
+    pos = _positions(t)
+    first = [int(n) for n in bonded_neighbours(t, site) if n != site]
+    axes = [pos[n] - pos[site] for n in first]
+    for n in first:
+        second = [m for m in bonded_neighbours(t, n) if m != site and m not in first]
+        axes += [pos[m] - pos[site] for m in second]
+    return [*axes, _token_p_vector(o, t, site)]
+
+
+def site_frame(o: OrbitalToken, t: MoleculeTokens, site: int) -> np.ndarray:
+    """(3, 3) orthonormal rows (e1, e2, e3) of the local frame of token `o` at `site`: e3 along
+    the first axis of `_frame_axes`, e1 the next axis made perpendicular to it. The direction
+    grid and the roll reference live in this frame, so the kernel is invariant to a rigid
+    rotation of either record (spec v7.2, legacy fixed-distance placement). Lab axes complete
+    the frame only when the site has no non-collinear axis at all (counted)."""
+    axes = [a for a in _frame_axes(o, t, site) if np.linalg.norm(a) > 1e-8]
+    if not axes:
+        FRAMES_WITHOUT_LOCAL_AXES[t.smiles] += 1
+        return np.eye(3)
+    e3 = axes[0] / np.linalg.norm(axes[0])
+    for v in axes[1:]:
+        w = v - (v @ e3) * e3
+        if np.linalg.norm(w) > 1e-3 * np.linalg.norm(v):
+            e1 = w / np.linalg.norm(w)
+            return np.stack([e1, np.cross(e3, e1), e3])
+    FRAMES_WITHOUT_LOCAL_AXES[t.smiles] += 1
+    return local_frames(e3[None])[0][[0, 1, 2]]
+
+
+def frame_directions(frame: np.ndarray) -> np.ndarray:
+    """The Fibonacci grid expressed in the local frame, as lab unit vectors."""
+    return sphere_directions() @ frame
+
+
+def site_candidates(
+    o, t, site: int, sphere_values: np.ndarray, frame: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     """(tied lobes (m, 3), m = 1 or 2; the opposite face of the first) of token `o` at `site`.
-    `sphere_values`: (n_dir, nao_site) the site's AO values on the 1.5 Angstrom sphere."""
-    dirs = sphere_directions()
+    `sphere_values`: (n_dir, nao_site) the site's AO values on the 1.5 Angstrom sphere, at the
+    directions of `frame_directions(frame)`."""
+    dirs = frame_directions(frame)
     amp = np.abs(sphere_values @ o.coeff_vector[t.ao_atom == site])
     if amp.max() <= ISOTROPIC * max(amp.min(), 1e-300):  # an s function: no lobe of its own
         away = away_direction(o, t, site)
         if away is not None:
             return away[None], -away
-    masked = np.where(admissible(o, t, site), amp, -np.inf)
+    masked = np.where(admissible(o, t, site, dirs), amp, -np.inf)
     local = np.isfinite(masked) & (masked >= masked[_direction_neighbours()].max(axis=1))
     order = np.flatnonzero(local)[np.argsort(-masked[local])]
     best = int(order[0]) if len(order) else int(np.argmax(masked))
@@ -310,22 +363,23 @@ def site_candidates(o, t, site: int, sphere_values: np.ndarray) -> tuple[np.ndar
     return np.array(cands), -dirs[best]
 
 
-def molecule_candidates(t: MoleculeTokens) -> dict[tuple[int, int], tuple[np.ndarray, np.ndarray]]:
-    """(token position in t.orbitals, site atom) -> `site_candidates`, for every centre of every
-    token; the site's AO values on its sphere computed once per atom."""
+def molecule_candidates(t: MoleculeTokens) -> dict[tuple[int, int], tuple]:
+    """(token position in t.orbitals, site atom) -> (lobes, opposite face, local frame), for
+    every centre of every token; the site's AO values on its sphere computed once per frame."""
     from ksmech.physics.gto import ao_values
 
-    values: dict[int, np.ndarray] = {}
+    values: dict[tuple[int, bytes], np.ndarray] = {}
     out = {}
     for k, o in enumerate(t.orbitals):
         for site in np.asarray(o.descriptors.all_center_atoms, dtype=int):
             site = int(site)
-            if site not in values:
+            frame = site_frame(o, t, site)
+            key = (site, frame.tobytes())
+            if key not in values:
                 z = np.array([t.atoms[site].atomic_number])
-                values[site] = ao_values(
-                    z, np.zeros((1, 3)), SPHERE_RADIUS_ANG * sphere_directions()
-                )
-            out[k, site] = site_candidates(o, t, site, values[site])
+                points = SPHERE_RADIUS_ANG * frame_directions(frame)
+                values[key] = ao_values(z, np.zeros((1, 3)), points)
+            out[k, site] = (*site_candidates(o, t, site, values[key], frame), frame)
     return out
 
 
@@ -405,22 +459,39 @@ class _Entries:
     site: np.ndarray
     dirs: np.ndarray  # (E, 3, 3)
     valid: np.ndarray  # (E, 3)
+    refs: np.ndarray  # (E, 3, 3) per slot: a unit vector of the local frame perpendicular to it
 
 
 def _entries(t: MoleculeTokens, index: list[int], sites=None) -> _Entries:
     cands = _candidates(t)
-    tok, site, dirs, valid = [], [], [], []
+    tok, site, dirs, valid, refs = [], [], [], [], []
     for i, k in enumerate(index):
         centres = sites[i] if sites is not None else t.orbitals[k].descriptors.all_center_atoms
         for a in np.asarray(centres, dtype=int):
-            lobes, opposite = cands[k, int(a)]
+            lobes, opposite, frame = cands[k, int(a)]
             slots = np.zeros((3, 3))
             slots[: len(lobes)], slots[2] = lobes, opposite
+            slots[1] = slots[1] if len(lobes) > 1 else slots[0]
             tok.append(i), site.append(int(a)), dirs.append(slots)
+            refs.append([_perpendicular(frame, u) for u in slots])
             valid.append([True, len(lobes) > 1, True])
     return _Entries(
-        np.array(tok), np.array(site), np.array(dirs).reshape(-1, 3, 3), np.array(valid)
+        np.array(tok),
+        np.array(site),
+        np.array(dirs).reshape(-1, 3, 3),
+        np.array(valid),
+        np.array(refs).reshape(-1, 3, 3),
     )
+
+
+def _perpendicular(frame: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """The frame's e1 (or e2, if e1 is nearly along u) made perpendicular to the unit vector u:
+    the roll reference of a lobe."""
+    for e in frame[:2]:
+        w = e - (e @ u) * u
+        if np.linalg.norm(w) > 0.1:
+            return w / np.linalg.norm(w)
+    return local_frames(u[None])[0][0]
 
 
 @dataclass
@@ -432,7 +503,7 @@ class _Placements:
     tok_r: np.ndarray
     tok_s: np.ndarray
     axis: np.ndarray  # (P, 3) the donor lobe u, the approach axis
-    roll: np.ndarray  # (P,) roll step about the axis (0: the smallest rotation)
+    roll: np.ndarray  # (P,) roll step about the axis (0: the two local frames aligned)
 
 
 N_ROLLS = 6  # roll angles tried about the approach axis when a placement clashes
@@ -460,6 +531,15 @@ def _rolled(pl: _Placements, which: np.ndarray) -> _Placements:
     return _Placements(**fields)
 
 
+def frame_rotation(v, f, u, e) -> np.ndarray:
+    """(P, 3, 3) rotations taking each orthonormal pair (v, f) to (u, e): the acceptor lobe v
+    onto -donor lobe u, the acceptor's roll reference f onto the donor's e. Roll 0 is thus
+    defined by the two local frames, not by the records' orientations."""
+    A = np.stack([v, f, np.cross(v, f)], axis=-1)
+    B = np.stack([u, e, np.cross(u, e)], axis=-1)
+    return B @ np.swapaxes(A, -1, -2)
+
+
 def _placements(F, G, EF, EG, sp: np.ndarray, combos, d_bohr: float) -> _Placements:
     ef, eg = sp // len(EG.tok), sp % len(EG.tok)
     parts = []
@@ -468,7 +548,7 @@ def _placements(F, G, EF, EG, sp: np.ndarray, combos, d_bohr: float) -> _Placeme
         parts.append((sp[keep], ef[keep], eg[keep], np.full(keep.sum(), p), np.full(keep.sum(), q)))
     sp, ef, eg, p, q = (np.concatenate(x).astype(int) for x in zip(*parts, strict=True))
     u, v = EF.dirs[ef, p], EG.dirs[eg, q]
-    rot = rotation_to(v, -u)
+    rot = frame_rotation(v, EG.refs[eg, q], -u, EF.refs[ef, p])
     shift = F.xyz[EF.site[ef]] + d_bohr * u
     zero = np.zeros(len(sp), dtype=int)
     return _Placements(sp, rot, G.xyz[EG.site[eg]], shift, EF.tok[ef], EG.tok[eg], u, zero)
@@ -730,7 +810,7 @@ def _block_config(block: str, config: OrientedConfig, intra: bool) -> dict:
     """The configuration a contact block is stamped with (contact mode, direction count,
     distance, filter threshold)."""
     return {
-        "contact_mode": f"oriented_v{ORIENTED_VERSION}",
+        "contact_mode": f"legacy_fixed23_v{ORIENTED_VERSION}",
         "block": block,
         "n_directions": N_DIRECTIONS,
         "n_rolls": N_ROLLS,

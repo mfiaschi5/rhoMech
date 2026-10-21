@@ -6,14 +6,15 @@ Default kernel `oriented` (Phase 5b, brought forward 2026-10-20):
 
 the spec's AO-level Wolfsberg-Helmholz sum, with S^c the AO overlaps of the two LMOs placed with
 their lobes antiparallel, the acceptor's site at distance d from the donor's site
-(`ksmech.physics.oriented`, tblite's own basis, the acceptor on its local cap), and F_mu,mu each
-molecule's own AO Fock diagonal (eV). The placement is the one with the largest |S_rs|,
-maximized over the donor's centres x the acceptor's centres (the pair-track value; the argmax
-sites and the CLASH flag are in `oriented_details`), and beta is taken in the phase that makes
-S_rs positive. The amplitude a(r, s) is |S_rs|. (Until 2026-10-20 beta was K S_rs (E_r + E_s)/2
-with the LMO energies: a virtual LMO above 0 eV, such as sigma*(H-Br) at +8.8 eV, cancelled the
-occupied one's energy and gave a near-zero beta.) Pass `same=True` for a pair of one molecule:
-the oriented block then applies the intramolecular site rule (`oriented.block_contacts`).
+(`ksmech.physics.contact.legacy_fixed23`, tblite's own basis, the acceptor on its local cap,
+directions and rolls in local frames), and F_mu,mu each molecule's own AO Fock diagonal (eV).
+The placement is the one with the largest |S_rs|, maximized over the donor's centres x the
+acceptor's centres (the pair-track value; the argmax sites and the CLASH flag are in
+`oriented_details`), and beta is taken in the phase that makes S_rs positive. The amplitude
+a(r, s) is |S_rs|. (Until 2026-10-20 beta was K S_rs (E_r + E_s)/2 with the LMO energies: a
+virtual LMO above 0 eV, such as sigma*(H-Br) at +8.8 eV, cancelled the occupied one's energy
+and gave a near-zero beta.) Pass `same=True` for a pair of one molecule: the oriented block
+then applies the intramolecular site rule (`legacy_fixed23.block_contacts`).
 
 Ablation kernels, kept for comparison only:
 
@@ -42,9 +43,9 @@ import numpy as np
 
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalKind, OrbitalToken
 from ksmech.physics.contact import contact_coupling
+from ksmech.physics.contact.legacy_fixed23 import OrientedConfig, oriented_block
 from ksmech.physics.contact_mlp import ContactMLP, descriptor_matrix
 from ksmech.physics.contact_table import ContactTable, contact_key
-from ksmech.physics.oriented import OrientedConfig, oriented_block
 from ksmech.physics.params import KSParams, shell_fock_ev
 
 KERNELS = ("oriented", "table", "mlp", "analytic")

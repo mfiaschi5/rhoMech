@@ -2864,3 +2864,39 @@ Each step is counted once, under the first reason that applies, in this order:
   The fixture tests (acetone, chloromethane, methylamine, acetonitrile and the slow sanity
   set) pass unchanged.
 - **Rebuild.** Token `SCHEMA_VERSION` 8 → 9. Nothing has been rebuilt yet.
+
+## 2026-10-22 — The fixed-2.3 kernel is frozen as `physics/contact/legacy_fixed23.py`, rotation-invariant (fix item 5)
+
+- **Move.** `physics/oriented.py` is now `physics/contact/legacy_fixed23.py` (git history kept),
+  and `physics/contact.py` became the package `physics/contact/__init__.py`, unchanged. Imports
+  were repointed. The CLI kernel name stays `oriented`; the contact mode stamped in the block
+  provenance is `legacy_fixed23_v6`.
+- **What depended on the lab frame** (review PK1: rotating both records by one R moved |S| by
+  up to 4.8%, beta by up to 13%, and 25% of the argmax sites):
+  1. the lobe of a site was the best of 200 Fibonacci directions fixed in the lab frame;
+  2. the cap's roll about the approach axis was the smallest rotation taking the acceptor lobe
+     onto the donor lobe. That depends on the two records' relative orientation, so rotating
+     only one record changed it.
+- **Fix** (spec v7.2, "Legacy fixed-distance placement": directions and rolls in a local frame
+  built from the site and its bonded neighbours):
+  - Each (token, site) gets `site_frame`. e3 is along the bond to the first bonded neighbour
+    (by atom index); e1 is the next bond made perpendicular, else a second-shell bond, else
+    the token's own p vector on the site.
+    - Lab axes complete the frame only when none of these exists; such cases are counted in
+      `FRAMES_WITHOUT_LOCAL_AXES`.
+    - All of these vectors rotate with the molecule, so the frame does too.
+  - The 200-direction grid is laid out in that frame (`frame_directions`).
+  - Roll 0 maps the acceptor's (lobe, frame reference) onto the donor's (−lobe, frame
+    reference) (`frame_rotation`). The six rolls are counted from there.
+- **Tests** (`tests/test_legacy_fixed23.py`):
+  - Rotating each fragment by its own random rotation leaves S and beta unchanged (rtol 1e-7)
+    and the sites and CLASH flags identical, for C[O-] × CCl and C=C × C=O. Rotating acrolein
+    leaves its intramolecular block unchanged.
+  - With the lab frame patched back in, all three tests fail, so they detect the bug.
+  - The outputs of the three pairs at 2.3 Å are pinned in
+    `tests/fixtures/legacy_fixed23_pinned.npz` (version 6). Any change to them needs a new
+    version.
+  - The brute-force checks now take the placement rotation from the kernel instead of
+    recomputing the smallest rotation.
+- **Rebuild.** `ORIENTED_VERSION` 5 → 6, so every block on disk is stale (provenance) and is
+  recomputed at the rebuild.

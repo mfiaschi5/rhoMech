@@ -45,11 +45,11 @@ from ksmech.orbitals.tokens import (
     is_antibonding_partner,
     site_excluded_matrix,
 )
+from ksmech.physics.contact.legacy_fixed23 import ORIENTED_VERSION, OrientedConfig
 from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
 from ksmech.physics.contact_table import vdw_sum
 from ksmech.physics.coulomb import coulomb_matrix
 from ksmech.physics.ks_terms import cross_center_coupling_matrix, gap_kernel_matrix, wh_matrix
-from ksmech.physics.oriented import ORIENTED_VERSION, OrientedConfig
 from ksmech.physics.params import COULOMB_EV_ANG, KSParams
 from ksmech.physics.repulsion import contact_repulsion_matrix, neighbourhood, repulsion_matrix
 
