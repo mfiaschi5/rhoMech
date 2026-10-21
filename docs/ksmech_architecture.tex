@@ -129,16 +129,20 @@ whose sign tells whether the orbital is bonding ($\Pi>0$) or antibonding ($\Pi<0
 \subsection{Invariance and the freedom it leaves}
 A single-determinant wavefunction is invariant under any unitary rotation of its occupied orbitals among themselves: for $\vb{L}_{\occ}=\vb{C}_{\occ}\vb{U}$ with $\vb{U}$ orthogonal, the determinant, the density matrix, the energy and all observables are unchanged. The same holds separately for the virtual space. The canonical MOs are one choice inside this freedom (the one that diagonalizes $\vb{F}$); they are typically delocalized over the whole molecule. Curved arrows, however, speak of \emph{this} lone pair and \emph{that} $\sigma$ bond. Localization chooses, inside the same subspace, the rotation that makes each orbital as atom-local as possible. It is a change of basis, not an approximation and not a chemical assumption: the set of localized orbitals spans exactly the occupied (or virtual) space.
 
-\subsection{The Pipek--Mezey criterion}
-Pipek and Mezey \cite{pm} define locality through Mulliken populations: maximize
+\subsection{Population-based localization: Pipek--Mezey and intrinsic bond orbitals}
+Pipek and Mezey \cite{pm} define locality through atomic populations: maximize
 \begin{equation}
-\mathcal{P}(\vb{U})=\sum_{r}\sum_{A}\big(Q^{(r)}_A\big)^2,
+\mathcal{P}_p(\vb{U})=\sum_{r}\sum_{A}\big(Q^{(r)}_A\big)^p,\qquad p=2,
 \label{eq:pm}
 \end{equation}
-the sum over orbitals of the sum of squared atomic populations. $\mathcal{P}$ is largest when each orbital's population is concentrated on as few atoms as possible (one atom for a lone pair, two for a bond). Unlike Foster--Boys localization it does not mix $\sigma$ and $\pi$ into ``banana'' bonds, which is why it is the natural choice when the descriptors must separate in-plane from out-of-plane character; and it needs only $\vb{S}$, not dipole integrals. The maximum is found by successive $2\times2$ Jacobi rotations (Appendix~\ref{app:pm}). Two features of the solution matter for the model:
+the sum over orbitals of the atomic populations raised to a power. $\mathcal{P}$ is largest when each orbital's population is concentrated on as few atoms as possible (one atom for a lone pair, two for a bond). Unlike Foster--Boys localization it does not mix $\sigma$ and $\pi$ into ``banana'' bonds, which is why it is the natural choice when the descriptors must separate in-plane from out-of-plane character; and it needs only $\vb{S}$, not dipole integrals. The maximum is found by successive $2\times2$ Jacobi rotations (Appendix~\ref{app:pm}).
+
+With Mulliken populations and $p=2$ the method has a known weakness that matters here: inside the $\pi$ space of an aromatic ring the functional is nearly flat, Kekul\'e-like and delocalized solutions have almost the same value, the sweeps stall against the iteration cap, and the returned orbitals are an arbitrary point on a plateau. Knizia's \emph{intrinsic bond orbitals} (IBO) \cite{ibo} fix this with two changes: the populations are those of intrinsic atomic orbitals (IAO), which are free of the pathologies of Mulliken charges, and the exponent is $p=4$, which breaks the near-degeneracy and strongly prefers the localized solution. Benzene then converges in a few tens of sweeps to three two-centre $\pi$ bonds. In a minimal valence basis such as GFN2-xTB's the IAO construction reduces to the symmetrically orthogonalized AOs, $\vb{S}^{1/2}\vb{C}$, so the IAO populations are L\"owdin populations and the method needs no reference basis. The model uses IBO ($p=4$, L\"owdin populations) on the occupied, virtual and singly occupied blocks separately, started from a pivoted Cholesky decomposition of each block's density matrix, which is itself localized and non-iterative \cite{cholesky}. Pipek--Mezey with Mulliken populations is retained only as a comparison.
+
+Two features of the solution matter for the model:
 \begin{itemize}[nosep]
 \item Where the subspace has a strongly preferred local basis ($\sigma$ bonds, lone pairs, isolated $\pi$ bonds) the maximum is sharp and unique up to permutation.
-\item Where it does not, as inside the $\pi$ space of an aromatic ring, the functional is nearly flat and the returned orbitals are an arbitrary point on a plateau. Any physical quantity derived from a single such orbital, including its diagonal energy $\vb{l}_r^{\!\top}\vb{F}\vb{l}_r$, is then arbitrary too. The remedy is not a better localizer but the spectral decomposition of the next section.
+\item In an aromatic ring the localized solution is one of two equivalent Kekul\'e structures; the deterministic start selects one. This symmetry breaking is harmless for the model: labels are aligned by atom (every token with weight on the site), tokens carry no name, and the spectral decomposition of the next section makes every energy-dependent quantity invariant to the choice.
 \end{itemize}
 
 \subsection{Spectral decomposition of a localized orbital}
@@ -148,7 +152,7 @@ A localized orbital $\vb{l}_r=\sum_k U_{kr}\vb{c}_k$ is not an eigenfunction of 
 p_{rk}=U_{kr}^2,\qquad \sum_k p_{rk}=1,
 \label{eq:spectral-theory}
 \end{equation}
-so that $\langle\vb{l}_r|\vb{F}|\vb{l}_r\rangle=\sum_k p_{rk}\epsilon_k$ and, more importantly, any second-order expression with an energy denominator can be written exactly as a sum over canonical pairs weighted by $p_{rk}p_{sm}$ (Section~\ref{sec:pt-lmo}). The weights depend on the localization, but the set of canonical energies does not, and sums over a complete localized set reduce to canonical sums. This is what makes an aromatic ring unproblematic: three ring $\pi$ LMOs, however Pipek--Mezey chose to mix them, carry total weight exactly one on each of the three canonical $\pi$ orbitals.
+so that $\langle\vb{l}_r|\vb{F}|\vb{l}_r\rangle=\sum_k p_{rk}\epsilon_k$ and, more importantly, any second-order expression with an energy denominator can be written exactly as a sum over canonical pairs weighted by $p_{rk}p_{sm}$ (Section~\ref{sec:pt-lmo}). The weights depend on the localization, but the set of canonical energies does not, and sums over a complete localized set reduce to canonical sums. This is what makes an aromatic ring unproblematic: three ring $\pi$ LMOs, whichever Kekul\'e structure the localization selected, carry total weight exactly one on each of the three canonical $\pi$ orbitals.
 
 \section{Perturbation theory of the interaction between two molecules}
 \label{sec:pt}
@@ -396,7 +400,7 @@ Per-atom buried volume $V^{\mathrm{bur}}_a$ (sphere radius $3.5$~\AA, hydrogens 
 \label{sec:tokens}
 
 \subsection{Localization}
-Pipek--Mezey localization (Section~\ref{sec:loc}, Appendix~\ref{app:pm}) is applied separately to the occupied valence block and to the virtual block of $\vb{C}$, by Jacobi $2\times2$ rotations swept until the change in $\mathcal{P}$ is below $10^{-8}$ or $200$ sweeps, started deterministically from the canonical MOs so that a given QM record always yields the same LMOs. Singly occupied orbitals (open-shell species) form their own sub-block and are localized separately, so that a radical centre yields one token with occupation $1$ rather than contaminating the doubly occupied and virtual blocks. Fractional occupations from Fermi smearing in vanishing-gap species are kept as the continuous occupation descriptor; such molecules are flagged and their partially occupied tokens are excluded from the candidate sets. Because $\vb{U}$ is orthogonal, the LMOs remain $\vb{S}$-orthonormal and span exactly the occupied (or virtual) space.
+Intrinsic-bond-orbital localization (Section~\ref{sec:loc}, Appendix~\ref{app:pm}: L\"owdin populations, exponent 4) is applied separately to the occupied valence block and to the virtual block of $\vb{C}$, by Jacobi $2\times2$ rotations swept until the change in $\mathcal{P}_4$ is below $10^{-8}$ or $200$ sweeps, started deterministically from a pivoted Cholesky factorization of each block's density matrix so that a given QM record always yields the same LMOs. Singly occupied orbitals (open-shell species) form their own sub-block and are localized separately, so that a radical centre yields one token with occupation $1$ rather than contaminating the doubly occupied and virtual blocks. Fractional occupations from Fermi smearing in vanishing-gap species are kept as the continuous occupation descriptor; such molecules are flagged and their partially occupied tokens are excluded from the candidate sets. Because $\vb{U}$ is orthogonal, the LMOs remain $\vb{S}$-orthonormal and span exactly the occupied (or virtual) space.
 
 \subsection{Spectral decomposition}
 Each LMO carries its decomposition over the canonical MOs of its block, Eq.~\eqref{eq:spectral-theory}:
@@ -929,9 +933,9 @@ with element- and shell-specific exponents $\zeta$ and $n_g$ between 3 and 6 (ST
 
 The converged calculation provides: $\vb{S}$ (analytic overlaps in this basis), $\vb{F}$ (the self-consistent Hamiltonian, i.e.\ $\vb{H}^{(0)}$ plus the charge-dependent shifts), $\vb{C}$ and $\vb{\epsilon}$ from \eqref{eq:roothaan}, occupations, Mulliken charges and shell populations, and the atom and angular momentum of every AO. The ordering of $p$ functions is $(p_y,p_z,p_x)$ in the real-spherical convention of the library and is fixed by a test on a diatomic aligned with each axis.
 
-\section{Pipek--Mezey localization by Jacobi rotations}
+\section{Population localization by Jacobi rotations}
 \label{app:pm}
-For a pair of orbitals $(i,j)$ in the current localized set, define for each atom $A$ the $2\times2$ population block $Q^A_{ij}=\sum_{\mu\in A}\sum_\nu L_{\mu i}S_{\mu\nu}L_{\nu j}$ (symmetrized). Rotating the pair by an angle $\gamma$,
+Populations are L\"owdin populations, $Q^A_{ij}=\sum_{\mu\in A}\tilde L_{\mu i}\tilde L_{\mu j}$ with $\tilde{\vb L}=\vb{S}^{1/2}\vb{L}$ (for the Pipek--Mezey comparison, Mulliken populations $Q^A_{ij}=\sum_{\mu\in A}\sum_\nu L_{\mu i}S_{\mu\nu}L_{\nu j}$, symmetrized). For a pair of orbitals $(i,j)$ in the current localized set, the exponent-2 case is handled in closed form: Rotating the pair by an angle $\gamma$,
 \[
 \vb{l}_i'=\cos\gamma\,\vb{l}_i+\sin\gamma\,\vb{l}_j,\qquad \vb{l}_j'=-\sin\gamma\,\vb{l}_i+\cos\gamma\,\vb{l}_j ,
 \]
@@ -940,7 +944,7 @@ changes the functional \eqref{eq:pm} by $\Delta\mathcal{P}=A_{ij}+\sqrt{A_{ij}^2
 A_{ij}=\sum_A\Big[\big(Q^A_{ij}\big)^2-\tfrac14\big(Q^A_{ii}-Q^A_{jj}\big)^2\Big],\qquad
 B_{ij}=\sum_A Q^A_{ij}\big(Q^A_{ii}-Q^A_{jj}\big),
 \end{equation}
-and the optimal angle given by $\cos4\gamma=-A_{ij}/\sqrt{A_{ij}^2+B_{ij}^2}$, $\sin4\gamma=B_{ij}/\sqrt{A_{ij}^2+B_{ij}^2}$ \cite{pm}. A sweep applies this to every pair; disjoint pairs can be rotated simultaneously, which is how the implementation vectorizes a sweep without changing the sequence of rotations. Convergence is declared when $\Delta\mathcal{P}$ summed over a sweep falls below $10^{-8}$. Starting from the canonical orbitals with a fixed pair order makes the result deterministic. On a plateau (aromatic $\pi$ space) the sweep cap is reached with the functional changing by $10^{-8}$--$10^{-6}$ per sweep and a residual gain of at most $5\times10^{-4}$; the orbitals are localized for every practical purpose and are flagged rather than rejected.
+and the optimal angle given by $\cos4\gamma=-A_{ij}/\sqrt{A_{ij}^2+B_{ij}^2}$, $\sin4\gamma=B_{ij}/\sqrt{A_{ij}^2+B_{ij}^2}$ \cite{pm}. For the exponent-4 functional of the intrinsic bond orbitals the gain is a trigonometric polynomial of degree four in $4\gamma$ and the optimal angle is obtained from the closed form given by Knizia \cite{ibo} (or, equivalently, by a bracketed one-dimensional maximization per pair). A sweep applies this to every pair; disjoint pairs can be rotated simultaneously, which is how the implementation vectorizes a sweep without changing the sequence of rotations. Convergence is declared when $\Delta\mathcal{P}$ summed over a sweep falls below $10^{-8}$. The start is a pivoted Cholesky factorization of the block's density matrix in the L\"owdin basis, $\vb{P}=\vb{R}^{\!\top}\vb{R}$ with the pivot order fixed by the largest remaining diagonal, which yields a localized, non-iterative initial set \cite{cholesky}; with a fixed pair order the result is deterministic. With the exponent-2 Mulliken functional the aromatic $\pi$ space reached the sweep cap with the functional changing by $10^{-8}$--$10^{-6}$ per sweep; with the exponent-4 L\"owdin functional it converges.
 
 \section{Derivation sketch of the Klopman--Salem equation}
 \label{app:ks}
@@ -1002,6 +1006,8 @@ Here O carries three lone pairs (6 electrons) in the reactant and two in the pro
 \bibitem{gfn2} C.~Bannwarth, S.~Ehlert, S.~Grimme, \emph{J. Chem. Theory Comput.} \textbf{15}, 1652 (2019). GFN2-xTB.
 \bibitem{alpb} S.~Ehlert, M.~Stahn, S.~Spicher, S.~Grimme, \emph{J. Chem. Theory Comput.} \textbf{17}, 4250 (2021). ALPB solvation.
 \bibitem{pm} J.~Pipek, P.~G. Mezey, \emph{J. Chem. Phys.} \textbf{90}, 4916 (1989).
+\bibitem{ibo} G.~Knizia, \emph{J. Chem. Theory Comput.} \textbf{9}, 4834 (2013). Intrinsic atomic orbitals and intrinsic bond orbitals.
+\bibitem{cholesky} F.~Aquilante, T.~B. Pedersen, A.~S\'anchez de Mer\'as, H.~Koch, \emph{J. Chem. Phys.} \textbf{125}, 174101 (2006). Cholesky localization.
 \bibitem{klopman} G.~Klopman, \emph{J. Am. Chem. Soc.} \textbf{90}, 223 (1968).
 \bibitem{salem} L.~Salem, \emph{J. Am. Chem. Soc.} \textbf{90}, 543 (1968).
 \bibitem{fleming} I.~Fleming, \emph{Molecular Orbitals and Organic Chemical Reactions}, Wiley (2010).
