@@ -142,6 +142,7 @@ def print_stats(stats: dict, console: Console) -> None:
     heavy = stats["heavy_atoms_per_step"]
     quant = ", ".join(f"{k}={heavy[k]:g}" for k in ("min", "p25", "median", "p75", "max", "mean"))
     console.print(_hist_table(f"Heavy atoms per step ({quant})", heavy["hist"], "heavy atoms"))
+    console.print(_hist_table("Removed from the target at ingest", stats["domain"], "reason"))
     elems = stats["elements"]
     console.print("Elements (steps containing): " + ", ".join(f"{e}:{n}" for e, n in elems.items()))
 

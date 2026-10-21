@@ -136,9 +136,16 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 | `arrows` | list<struct<source_kind, source_atoms: list<int32>, sink_kind, sink_atoms: list<int32>>> | in written order |
 | `mechanism_class` | string, nullable | null for PMechDB (not in the release) |
 | `conditions` | string, nullable | null for PMechDB (not in the release) |
+| `resonance_step` | bool | reactants and products are resonance structures; dropped from the training target |
+| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL` or `CHARGE_UNREPAIRED` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). Null otherwise |
+| `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an explicit ingest rule changed a formal charge (`CHARGE_REPAIRED`; the step stays); the SMILES columns hold the repaired sides |
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
-`reason`, `detail` and `raw`.
+`reason`, `detail` and `raw`. Charge repairs are also listed one per row in
+`data/processed/<source>/charge_repairs.csv` (`step_id`, `side`, `rule`, `before`, `after`,
+`domain_exclusion`; fragments as map-free canonical SMILES). `ingest_report.json` counts
+`domain_exclusions` by code and `n_charge_repaired`; `stats.json` has the same counts under
+`domain`, with `RESONANCE_STEP`, and `n_training_steps` excludes both.
 
 ## Processed: `data/processed/<source>/samples_<split>.pt`
 

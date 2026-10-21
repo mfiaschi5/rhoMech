@@ -2304,8 +2304,9 @@ version 7.
 - **The version-3 oriented blocks were deleted:** 4,381 files, 72.7 MB. They were the files
   older than the start of the version-4 warm-up (2026-10-20 21:17:30), when no later version
   existed. `data/cache/oriented/` now holds only version 5.
-  - The one-molecule blocks at site weight 0.25 (three distances) and 0.30 (2.3) are kept:
-    they reproduce the margin table of the previous entry.
+  - The one-molecule blocks at site weight 0.25 (three distances) and 0.30 (2.3), kept at first
+    to reproduce the margin table, were deleted at the user's request (2026-10-21; 1,912 files,
+    83.5 MB). The table stays in the previous entry.
 
 ### Host load and QM throughput (user request)
 
@@ -2373,3 +2374,190 @@ Top-1 / 3 / 5 on the test split; the trained models' val in parentheses:
 - **Textbook:** floor 2 / 5, frozen head 1 / 5, GBDT 4 / 5. The GBDT misses cyanide +
   acrolein (rank 4) and again puts 1,4 above 1,2 (rank 4 against 5).
 - **CLASH** on the floor's top-ranked pairs: 8.2%.
+
+## 2026-10-21 — Domain exclusions: what removes a PMechDB step from the training target
+
+This is the single place that lists every reason a step is not a training sample, with counts,
+so that the covered fraction of PMechDB is one number. Ingest-level reasons are final. The QM
+and token rows are a snapshot taken while the QM batch runs; they will be refreshed when the
+batch and its retry run have finished.
+
+### The closed-shell screen at ingest (`ksmech.data.domain`, user decisions)
+
+- **Trigger.** A fragment, on either side of a step, whose electron count (sum Z - charge) is
+  odd while RDKit marks no radical electron. GFN2 cannot compute it closed-shell as written
+  (the QM layer's SPIN_PARITY).
+- **How many.** A survey of all 14,382 unique PMechDB fragments found 100, not only the 20
+  SPIN_PARITY failures the QM batch had reached. All but one carry a metal.
+- **Rules,** applied per fragment in this order:
+  1. **METAL_PLACEHOLDER** (step excluded): a metal other than an alkali or alkaline-earth
+     metal with at most one neighbour, counting H. These are Lewis-acid catalysts drawn
+     without their ligands (`C=[O+][Ti]`, `C[O][Fe]`, `COC(=O)[C](=[Cu])c1ccccc1`): 34
+     fragments. s-block atoms are left out because O-Na and C-Li are drawn covalently in
+     real molecules (a sodium phosphonate on a Cu(II) complex).
+  2. **CHARGE_REPAIRED** (step kept), one change per fragment. A repair is kept only if the
+     electron count becomes even and the whole repaired step still validates: charge
+     balance, maps and arrow replay.
+     - R1: remove a -1 on a four-bonded group-14 atom.
+     - R2: read an onium -> d0 / d10 acceptor bond (Ti, Zr, Hf, Sc, Al, B, Zn, Cd; the
+       acceptor's charge not negative) as dative, with the acceptor taking the -1.
+     - Never for Cu, Fe, Co, Ni.
+     - Every change is logged in `charge_repairs.csv` and in the step's `charge_repair`
+       column (both sides as drawn).
+  3. **OPEN_SHELL_METAL** (step excluded): any other odd fragment with a metal outside the
+     d0 / d10 set, mostly Cu(II) and Fe(III) halide adducts: 61 fragments. No spin table;
+     it is outside the closed-shell domain until the radical extension.
+  4. **CHARGE_UNREPAIRED** (step excluded, added here): an odd fragment whose metals are all
+     d0 / d10 and that no rule repairs consistently. It is a charge error, not an open shell:
+     2 fragments.
+  - The one odd fragment without a metal, `O=[P-](Cl)(Cl)Cl`, gets no code. The QM layer
+    reports it (SPIN_PARITY).
+- **Outcome for the molecules discussed:**
+  - **#19** (the beta-silyl cation with a spurious Si(-)) is repaired by R1 on both sides of
+    its step (pmechdb-c7de295e11f86278). The step validates and stays; its two repaired
+    fragments enter the QM retry queue.
+  - **#4 is not repaired.** It occurs only as the product of pmechdb-bec502e1804f7d61,
+    whose reactant `C[O][Ti](Cl)4` carries the same missing Ti(-) on a Ti alkoxide, with no
+    onium, so neither rule applies to it. Repairing the product alone leaves the step
+    unbalanced (reactants +1, products 0), so the repair is dropped. Both fragments are
+    CHARGE_UNREPAIRED and the step is excluded. That is the only CHARGE_UNREPAIRED step;
+    a third rule for d0 alkoxides would be the user's decision.
+  - **#10** (O+ -> Cu triflate) is OPEN_SHELL_METAL, as decided.
+- **Implementation.**
+  - `ElementaryStep` gained `domain_exclusion` and `charge_repair`.
+  - `validation.build_step` runs the screen after validating the step as drawn.
+  - `read_training_steps` drops resonance steps, renumbers `step_index`, then drops
+    domain-excluded steps without renumbering, so a pathway keeps the gap.
+  - Every builder of alignment, round-trip and sample data, and so every metric
+    denominator, reads through it.
+  - `stats.json` counts the steps per code under `domain`.
+- **Re-ingest of 2026-10-21.**
+  - Accepted and rejected records are unchanged: 13,090 and 14, rejection reasons
+    identical.
+  - Only pmechdb-c7de295e11f86278 changed its SMILES.
+  - None of the 576 current samples is in an excluded step, so the samples did not change.
+  - `n_training_steps` 12,840.
+  - No QM was run.
+
+### Where the 13,090 accepted steps are (snapshot 2026-10-21 18:20)
+
+Each step is counted once, under the first reason that applies, in this order:
+
+| reason | steps | level |
+|---|---|---|
+| RESONANCE_STEP | 147 | ingest |
+| OPEN_SHELL_METAL | 78 | ingest |
+| METAL_PLACEHOLDER | 24 | ingest |
+| CHARGE_UNREPAIRED | 1 | ingest |
+| QM failed: OPT_NOT_CONVERGED | 88 | QM (a reactant fragment has no record) |
+| QM failed: SCF_NOT_CONVERGED | 51 | QM |
+| QM failed: TIMEOUT | 21 | QM |
+| QM failed: EMBED_FAILED | 2 | QM |
+| QM pending (batch running) | 1,828 | QM |
+| tokens pending (`ksmech-orbitals build` not re-run since the batch) | 10,202 | tokens |
+| sample skipped: CORRESPONDENCE / UNALIGNED_ARROW | 72 | alignment |
+| **sample (covered)** | **576** | |
+
+- **Covered fraction now: 576 / 13,090 = 4.4%.** Almost all of the remainder waits for the QM
+  batch and a token rebuild, so this number is not yet meaningful. The final one needs the
+  batch, its retry run, `ksmech-orbitals build`, `ksmech-arrows align` and `samples`.
+- **FERMI_SMEARED** marks 3 of the 648 tokenized steps (a sub-count of the last two rows).
+  Today the sample builder keeps such steps as flagged samples (`fermi_smeared`), with the
+  fractional tokens masked; it does not drop them. Removing them from the target is a change
+  in `arrows.steps`, outside this data-layer change, and is left for the user to confirm.
+- SPIN_PARITY no longer appears among the QM failures. Every step with a metal-bearing odd
+  fragment is excluded at ingest. The metal-free one, `O=[P-](Cl)(Cl)Cl` (failed SPIN_PARITY
+  in the batch), is only a product (pmechdb-e57aaee9d354b63c), so it does not block that
+  step's sample. The table follows the reactant fragments, as the sample builder does.
+
+### QM retry of the 69 known failures (2026-10-21)
+
+- **The run.** After the main batch finished (FINISHED 0), a plain `ksmech-qm run --source
+  pmechdb --workers 4` (failures retried) ran from 18:32 to 22:06. It had 284 molecules to
+  compute: every failure, plus the two fragments repaired at ingest.
+- **Of the 69 known failures, 1 recovered:** `CCCCC12CCC(OP(c3ccccc3)(c3ccccc3)(c3ccccc3)N(NC(=O)OCC)C(=O)OCC)C(OC)(CCC3C1CC3(C)C)C2` (was TIMEOUT, > 300s).
+- **68 still fail.** Every reason code is unchanged from the first attempt.
+  - The 20 SPIN_PARITY molecules fail the electron-parity check before any QM; their steps
+    are excluded at ingest (above).
+  - #19's pre-repair SMILES is listed but is no longer in `steps.parquet`.
+  - The other failures are geometry optimizations still not converged after 500 L-BFGS
+    iterations, SCF failures in 250 cycles, or the 900 s timeout. These are mostly
+    hypervalent iodine, Ti / Sn / B Lewis-acid adducts and large silyl ethers.
+- **The two repaired #19 fragments** were computed for the first time and failed too:
+  reactant SCF_NOT_CONVERGED, product OPT_NOT_CONVERGED. The repaired reactant SMILES was
+  already one of the known failures (it occurs elsewhere in PMechDB).
+- **The main run's own failures, after the retry:** 217 molecules, SPIN_PARITY 80, OPT_NOT_CONVERGED 69, SCF_NOT_CONVERGED 46, TIMEOUT 16, EMBED_FAILED 6.
+  - The SPIN_PARITY ones are the odd-electron fragments of the domain screen.
+- **QM records:** 14097 of 14382 molecules in the manifest.
+  The manifest still lists the two pre-repair SMILES of #19.
+
+| reason now (first attempt) | SMILES |
+|---|---|
+| SPIN_PARITY | `Br[Br+][Fe-]([Br])([Br])[Br]` |
+| SPIN_PARITY | `Brc1cccc([NH2+][Fe-]([Br])([Br])[Br])c1` |
+| SPIN_PARITY | `C=CCC(c1cccc(Cl)c1)[N](S(=O)(=O)c1ccc(C)cc1)[Fe-]([Cl])([Cl])[Cl]` |
+| SPIN_PARITY | `C=[C+]C[Si-](C)(C)(C)[O+](C)[Ti]([Cl])([Cl])([Cl])[Cl]` |
+| SPIN_PARITY | `C=[NH+][Cu-]([Br])[Br]` |
+| SPIN_PARITY | `C=[NH+][Cu-]([Cl])[Cl]` |
+| SPIN_PARITY | `C=[NH+][Cu-]([F])[F]` |
+| SPIN_PARITY | `C=[NH+][CuH2-]` |
+| SPIN_PARITY | `C=[O+][Cu-]` |
+| SPIN_PARITY | `C=[O+][Cu][O]S(=O)(=O)C(F)(F)F` |
+| SPIN_PARITY | `C=[O+][Fe]` |
+| SPIN_PARITY | `C=[O+][Sc-]` |
+| SPIN_PARITY | `C=[O+][Ti]` |
+| SPIN_PARITY | `C=[O+][Zn]` |
+| SPIN_PARITY | `CC#[N+][Cu-]([Br])[Br]` |
+| SPIN_PARITY | `CC#[N+][Cu-]([Cl])[Cl]` |
+| SPIN_PARITY | `CC#[N+][Cu-]([F])[F]` |
+| SPIN_PARITY | `CC#[N+][Cu-]([I])[I]` |
+| SPIN_PARITY | `CC(=[C+]CC(CCc1ccccc1)[O][Ti-]([Cl])([Cl])([Cl])[Cl])[Si-](C)(C)C` |
+| SPIN_PARITY | `COC=[NH+][CuH2-]` |
+| OPT_NOT_CONVERGED | `C#CC=CCC1OC(CC)C=CC=CC1OP(Cl)(CCCCCCCC)(CCCCCCCC)CCCCCCCC` |
+| OPT_NOT_CONVERGED | `C=C(C)C1OC2(C)CCC3C(=C2CC1O[I+]1(OC(C)=O)OC(=O)c2ccccc21)CCC1COC(=O)C13C` |
+| OPT_NOT_CONVERGED | `C=C(COCc1ccccc1)CC(C)CC(O[Si](C(C)C)(C(C)C)C(C)C)C(C=[O+][Li-][O]C(=C)C(C)CC(C)CN=[N+]=[N-])O[Si](C)(C)C` |
+| OPT_NOT_CONVERGED | `C=C1CC(C(=O)OC)(C(=O)OC)C[C+]1C[Si-](CC)(CC)(CC)OC(=O)C(F)(F)F` |
+| OPT_NOT_CONVERGED | `C=C1CC(C=C(C)Br)OC(CC[OH+]P(c2ccccc2)(c2ccccc2)(c2ccccc2)N(NC(=O)OCC)C(=O)OCC)C1` |
+| OPT_NOT_CONVERGED | `C=C1CCC2(OCOCCOC)C(=CCC3(C)C(O[Si](C)(C)C(C)(C)C)CCC23)C=C1C(OC(C)=O)C(CO[I+]1(OC(C)=O)OC(=O)c2ccccc21)OC(C)=O` |
+| OPT_NOT_CONVERGED | `C=C1CCC23CC1C(O[Si-](CC)(CC)(CC)OS(=O)(=O)C(F)(F)F)=CC2CCC3C` |
+| OPT_NOT_CONVERGED | `C=CC(Oc1ccccc1)=[O+][Al-]([O]c1ccccc1)([O]c1ccccc1)[N](S(=O)(=O)C(F)(F)F)S(=O)(=O)C(F)(F)F` |
+| OPT_NOT_CONVERGED | `C=CCC(OC(CCc1ccc(OCc2ccccc2)cc1)OC(C)=[O+][Sn-]([Br])([Br])([Br])[Br])c1ccc(OS(=O)(=O)c2ccc(C)cc2)cc1` |
+| OPT_NOT_CONVERGED | `C=CCC([OH+][Ti-]([OH])([O]C(C)C)([O]C(C)C)[O]C(C)C)C(C)=Cc1csc(C)n1` |
+| OPT_NOT_CONVERGED | `C=CCC(c1ccccc1)[O+]([Zn-]([Cl])[Cl])[Sn-]([Cl])([CH2]C)([CH2]C)[CH2]C` |
+| OPT_NOT_CONVERGED | `C=CCOC(=O)N1CCCC1C(=O)NC=Cc1cc(OC2CCN(C(=O)OC(C)(C)C)C2COI2(OC(C)=O)(OC(C)=O)OC(=O)c3ccccc32)ccc1OC` |
+| OPT_NOT_CONVERGED | `C=CCOC(=O)N1CCCC1C(=O)NC=Cc1cc(OC2CCN(C(=O)OC(C)(C)C)C2CO[I+]2(OC(C)=O)OC(=O)c3ccccc32)ccc1OC` |
+| OPT_NOT_CONVERGED | `C=Cc1cccc2c1C(C(=O)N(C)C(=O)C(N=N[N-]S(C)(=O)=O)C(=O)OC)CN2C(=O)c1ccccc1` |
+| OPT_NOT_CONVERGED | `CC(=O)CCC([O-])([NH2+]c1ccc(F)cc1)c1ccc(S(C)(=O)=O)cc1` |
+| OPT_NOT_CONVERGED | `CC(=O)NC1C=CC([OH+]I2(OC(C)=O)(OC(C)=O)OC(=O)c3ccccc32)CC1NC(=O)OC(C)(C)C` |
+| OPT_NOT_CONVERGED | `CC(=O)OCC1OC(C=[C+]C[Si-](C)(C)(C)[O+]=C(C)O[Si](C)(C)C)C=CC1OC(C)=O` |
+| OPT_NOT_CONVERGED | `CC(=O)OCC1OC(C=[C+]C[Si-](C)(C)(C)[O+]=C(C)[O][Sn-]([Cl])([Cl])([Cl])[Cl])C=CC1OC(C)=O` |
+| OPT_NOT_CONVERGED | `CC(=O)OCC1OC(C[CH+]C[Si-](C)(C)(C)[O+]=C(C)O[Si](C)(C)C)C=CC1OC(C)=O` |
+| OPT_NOT_CONVERGED | `CC(=O)OCC1OC=CC(OC(C)=[O+][Si-](C)(C)(C)OS(=O)(=O)C(F)(F)F)C1OC(C)=O` |
+| OPT_NOT_CONVERGED | `CC(=O)OI1(OC(C)=O)([OH+]CC2CCCN2C(=O)c2ccc[nH]2)OC(=O)c2ccccc21` |
+| OPT_NOT_CONVERGED | `CC(=O)OI1(OCC(=CC=C(C=O)SCC[Si](C)(C)C)SCC[Si](C)(C)C)(OC(C)=O)OC(=O)c2ccccc21` |
+| OPT_NOT_CONVERGED | `CC(=O)OI1(OCC(=CC=C(CO)SCC[Si](C)(C)C)SCC[Si](C)(C)C)(OC(C)=O)OC(=O)c2ccccc21` |
+| OPT_NOT_CONVERGED | `CC(=O)O[I+]1(OC(C2=CCCN3C(=O)CCC23)C2C(=O)C=CCC2C)OC(=O)c2ccccc21` |
+| OPT_NOT_CONVERGED | `CC(=O)O[I+]1(OCC(=CC=C(CO)SCC[Si](C)(C)C)SCC[Si](C)(C)C)OC(=O)c2ccccc21` |
+| OPT_NOT_CONVERGED | `CC(=O)O[I+]1(OCC2CCCN2C(=O)c2ccc[nH]2)OC(=O)c2ccccc21` |
+| OPT_NOT_CONVERGED | `CC(=[C+]CC(C)([O][Ti-]([Cl])([Cl])([Cl])[Cl])C(C)C)[Si](C)(C)C` |
+| OPT_NOT_CONVERGED | `CC(=[C+]CC1C=C([O][Ti-]([Cl])([Cl])([Cl])[Cl])CCCC1C)[Si](C)(C)C` |
+| OPT_NOT_CONVERGED | `CC(C(=O)O[Si-](C)(C)(C)O[P+](CCCCc1ccccc1)(CC(=O)O[Si](C)(C)C)O[Si](C)(C)C)c1ccccc1` |
+| SCF_NOT_CONVERGED | `BO` |
+| SCF_NOT_CONVERGED | `Br[C-]=C(c1ccccc1)c1ccccc1` |
+| SCF_NOT_CONVERGED | `C=CC1C[Br+]1` |
+| SCF_NOT_CONVERGED | `C=CCC1([O+]([Si-](C)(C)(C)Cl)[Ti-]([Cl])([Cl])([Cl])[Cl])C=CCCC1` |
+| SCF_NOT_CONVERGED | `C=[O+][Zn-]` |
+| SCF_NOT_CONVERGED | `CC#CCC(CCc1ccccc1)[O+]([Si](C)(C)C)[Ti-]([Cl])([Cl])([Cl])[Cl]` |
+| SCF_NOT_CONVERGED | `CC(=C[O-])C1CCC(C)C1C=[N+](C)c1ccccc1` |
+| SCF_NOT_CONVERGED | `CC(=O)CC(C)[O+]([Si](C)(C)C)[Ti-]([Cl])([Cl])([Cl])[Cl]` |
+| SCF_NOT_CONVERGED | `CC(=O)OCC1OC(C=[C+]C[Si-](C)(C)(C)OC(C)=[O+][Ti-]([Cl])([Cl])([Cl])[Cl])C=CC1OC(C)=O` |
+| SCF_NOT_CONVERGED | `CC(=O)O[I+]1(OCC(=CC=C(C=O)SCC[Si](C)(C)C)SCC[Si](C)(C)C)OC(=O)c2ccccc21` |
+| SCF_NOT_CONVERGED | `CC(=[C+]CC(CCc1ccccc1)[O][Ti-]([Cl])([Cl])([Cl])[Cl])[Si](C)(C)C` |
+| SCF_NOT_CONVERGED | `CC(=[O+][Ti-]([Cl])([Cl])([Cl])[Cl])c1ccccc1` |
+| TIMEOUT | `C=C1CCC2(OCOCCOC)C(=CCC3(C)C(O[Si](C)(C)C(C)(C)C)CCC23)C=C1C(OC(C)=O)C(C[OH+]I1(OC(C)=O)(OC(C)=O)OC(=O)c2ccccc21)OC(C)=O` |
+| TIMEOUT | `C=CC1C=CCC(CC(C)CC(=C)CC(C=CCC(O[Si](C)(C)C(C)(C)C)C(C=CC2CC(C)=CCO2)O[Si](C)(C)C(C)(C)C)O[B-]2(c3cc(C(F)(F)F)cc(C(F)(F)F)c3)OC(=O)C(C(OC(=O)c3c(OC(C)C)cccc3OC(C)C)C(=O)O)O2)O1` |
+| TIMEOUT | `C=CC1C=CCC(CC(C)C[C+](CC(C=CCC(O[Si](C)(C)C(C)(C)C)C(C=CC2CC(C)=CCO2)O[Si](C)(C)C(C)(C)C)O[B-]2(c3cc(C(F)(F)F)cc(C(F)(F)F)c3)OC(=O)C(C(OC(=O)c3c(OC(C)C)cccc3OC(C)C)C(=O)O)O2)C[Si-](C)(C)(C)[O+]=C(O)CC)O1` |
+| TIMEOUT | `C=CC1C=CCC(CC(C)C[C+](CC(C=CCC(O[Si](C)(C)C(C)(C)C)C(C=CC2CC(C)=CCO2)O[Si](C)(C)C(C)(C)C)O[B-]2(c3cc(C(F)(F)F)cc(C(F)(F)F)c3)OC(=O)C(C(OC(=O)c3c(OC(C)C)cccc3OC(C)C)C(=O)O)O2)C[Si](C)(C)C)O1` |
+| TIMEOUT | `CC(=O)OI1(OC(C)=O)([OH+]C(C(OCc2ccccc2)C(C=Cc2ccccc2)O[Si](C)(C)C(C)(C)C)C2(C(=O)OC(C)(C)C)OC3(CCCC3)OC2C(=O)OC(C)(C)C)OC(=O)c2ccccc21` |
+| TIMEOUT | `CC(=O)O[I+]1(OC(C(OCc2ccccc2)C(C=Cc2ccccc2)O[Si](C)(C)C(C)(C)C)C2(C(=O)OC(C)(C)C)OC3(CCCC3)OC2C(=O)OC(C)(C)C)OC(=O)c2ccccc21` |
+| TIMEOUT | `CC(=O)[O][Sn-]([Br])([Br])([Br])[Br+]C1CC(CCc2ccc(OCc3ccccc3)cc2)OC(c2ccc(OS(=O)(=O)c3ccc(C)cc3)cc2)C1` |

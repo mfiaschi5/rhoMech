@@ -10,6 +10,7 @@ import numpy as np
 from rdkit import Chem
 
 from ksmech.data import chem
+from ksmech.data.domain import PRECEDENCE
 from ksmech.data.schema import ElementaryStep
 
 NO_CLASS = "<none>"
@@ -83,7 +84,8 @@ def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
         "sources": sorted({str(s.source) for s in steps}),
         "n_steps": n,
         "n_resonance_steps": sum(s.resonance_step for s in steps),
-        "n_training_steps": n - sum(s.resonance_step for s in steps),
+        "n_training_steps": sum(not s.resonance_step and s.domain_exclusion is None for s in steps),
+        "domain": domain_counts(steps),
         "n_pathways": len({s.pathway_id for s in steps if s.pathway_id is not None}),
         "n_steps_without_pathway": sum(s.pathway_id is None for s in steps),
         "steps_per_class": dict(classes.most_common()),
@@ -112,6 +114,18 @@ def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
     }
 
 
+def domain_counts(steps: Sequence[ElementaryStep]) -> dict:
+    """Steps removed from the training target at ingest, by reason (a step can carry both a
+    resonance flag and a domain code; each is counted), and the steps whose SMILES were
+    charge-repaired (they stay)."""
+    codes = Counter(s.domain_exclusion for s in steps if s.domain_exclusion)
+    return {
+        "RESONANCE_STEP": sum(s.resonance_step for s in steps),
+        **{str(c): codes.get(str(c), 0) for c in PRECEDENCE},
+        "CHARGE_REPAIRED (kept)": sum(s.charge_repair is not None for s in steps),
+    }
+
+
 def _frac(num: int, den: int) -> float | None:
     return num / den if den else None
 
@@ -123,6 +137,10 @@ DEFINITIONS = {
     "intermolecular_fraction": "steps with >=1 arrow whose atoms lie in >=2 reactant fragments, "
     "over steps that have arrows",
     "elements": "number of steps whose reactants contain the element (H incl. implicit)",
+    "n_training_steps": "steps that are neither resonance steps nor outside the closed-shell "
+    "domain (`domain`)",
+    "domain": "steps removed from the target at ingest, by reason; QM-level reasons (failed "
+    "records, Fermi smearing) are in docs/decisions.md, 'Domain exclusions'",
     "charged.steps_with_charged_reactant": "steps with >=1 reactant fragment of nonzero net charge",
     "charged.unique_reactants_charged": "unique reactant molecules with nonzero net charge",
 }

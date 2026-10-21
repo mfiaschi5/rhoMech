@@ -59,6 +59,10 @@ class IngestResult:
             "n_records": self.n_records,
             "n_accepted": len(self.steps),
             "n_resonance_steps": sum(s.resonance_step for s in self.steps),
+            "domain_exclusions": dict(
+                Counter(s.domain_exclusion for s in self.steps if s.domain_exclusion).most_common()
+            ),
+            "n_charge_repaired": sum(s.charge_repair is not None for s in self.steps),
             "n_rejected": len(self.rejections),
             "rejected_fraction": self.rejected_fraction,
             "rejections_by_reason": dict(self.reason_counts().most_common()),
@@ -74,11 +78,19 @@ def write_outputs(result: IngestResult, processed_dir: Path) -> dict[str, Path]:
         "steps": write_steps(result.steps, out / "steps.parquet"),
         "rejections": out / "rejections.csv",
         "report": out / "ingest_report.json",
+        "repairs": out / "charge_repairs.csv",
     }
     with open(paths["rejections"], "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["step_id", "reason", "detail", "raw"])
         for r in result.rejections:
             writer.writerow([r.step_id, str(r.reason), r.detail, r.raw])
+    with open(paths["repairs"], "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["step_id", "side", "rule", "before", "after", "domain_exclusion"])
+        for s in result.steps:
+            for r in json.loads(s.charge_repair)["repairs"] if s.charge_repair else []:
+                row = [r["side"], r["rule"], r["before"], r["after"], s.domain_exclusion or ""]
+                writer.writerow([s.step_id, *row])
     paths["report"].write_text(json.dumps(result.report(), indent=2) + "\n")
     return paths

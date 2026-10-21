@@ -101,7 +101,14 @@ def is_resonance_step(
 
 
 def training_steps(steps: list[ElementaryStep]) -> list[ElementaryStep]:
-    """Drop resonance steps and renumber `step_index` 0.. within each pathway (input order)."""
+    """The training target: drop resonance steps and renumber `step_index` 0.. within each
+    pathway (input order), then drop the steps outside the closed-shell domain
+    (`domain_exclusion`, `data.domain`) without renumbering, so a pathway that lost one keeps
+    the gap in its indices."""
+    return [s for s in _renumbered(steps) if s.domain_exclusion is None]
+
+
+def _renumbered(steps: list[ElementaryStep]) -> list[ElementaryStep]:
     kept = [s for s in steps if not s.resonance_step]
     counters: dict[str, int] = {}
     out = []

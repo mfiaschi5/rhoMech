@@ -118,6 +118,8 @@ class ElementaryStep:
     mechanism_class: str | None = None
     conditions: str | None = None
     resonance_step: bool = False  # reactants and products are resonance structures
+    domain_exclusion: str | None = None  # `data.domain.DomainCode`: outside the closed shell
+    charge_repair: str | None = None  # JSON of the ingest charge repairs (`data.domain`)
 
     def __post_init__(self) -> None:
         self.source = Source(self.source)
@@ -134,6 +136,8 @@ class ElementaryStep:
             "mechanism_class": self.mechanism_class,
             "conditions": self.conditions,
             "resonance_step": bool(self.resonance_step),
+            "domain_exclusion": self.domain_exclusion,
+            "charge_repair": self.charge_repair,
         }
 
     @classmethod
@@ -149,6 +153,8 @@ class ElementaryStep:
             mechanism_class=d["mechanism_class"],
             conditions=d["conditions"],
             resonance_step=bool(d.get("resonance_step") or False),
+            domain_exclusion=d.get("domain_exclusion"),
+            charge_repair=d.get("charge_repair"),
         )
 
 
@@ -173,5 +179,7 @@ STEP_SCHEMA = pa.schema(
         pa.field("mechanism_class", pa.string()),
         pa.field("conditions", pa.string()),
         pa.field("resonance_step", pa.bool_()),
+        pa.field("domain_exclusion", pa.string()),
+        pa.field("charge_repair", pa.string()),
     ]
 )

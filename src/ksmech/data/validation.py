@@ -13,6 +13,7 @@ from rdkit import Chem
 from ksmech.arrows.apply import apply_arrows
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
 from ksmech.data import chem
+from ksmech.data.domain import Screen, screen_step
 from ksmech.data.resonance import is_resonance_step
 from ksmech.data.schema import Arrow, ElementaryStep, Source, SourceKind
 
@@ -163,6 +164,11 @@ def build_step(
     r_smi, p_smi = split_reaction(rxn_smiles)
     reactants, products = parse_side(r_smi, "reactants"), parse_side(p_smi, "products")
     validate(reactants, products, arrows, require_arrows)
+    screen = screened(reactants, products, arrows, require_arrows)
+    note = screen.repair_note(
+        chem.canonical_mapped_smiles(reactants), chem.canonical_mapped_smiles(products)
+    )
+    reactants, products = screen.reactants, screen.products
     resonance, _ = is_resonance_step(reactants, products)
     return ElementaryStep(
         step_id=step_id,
@@ -175,4 +181,22 @@ def build_step(
         mechanism_class=mechanism_class,
         conditions=conditions,
         resonance_step=resonance,
+        domain_exclusion=None if screen.code is None else str(screen.code),
+        charge_repair=note,
     )
+
+
+def screened(
+    reactants: Chem.Mol, products: Chem.Mol, arrows: list[Arrow], require_arrows: bool
+) -> Screen:
+    """`domain.screen_step`, keeping its charge repairs only if the repaired step validates
+    (charge balance, maps, arrow replay); otherwise the step is screened without repairs."""
+    screen = screen_step(reactants, products)
+    if not screen.repairs:
+        return screen
+    try:
+        validate(screen.reactants, screen.products, arrows, require_arrows)
+    except StepRejected as exc:
+        log.info("charge repair dropped (%s): %s", exc.reason, exc.detail)
+        return screen_step(reactants, products, repair=False)
+    return screen
