@@ -7,9 +7,28 @@
 \usepackage{enumitem}
 \usepackage{microtype}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,calc}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric}
+% ---- ChemDraw-style TikZ styles for reaction schemes
+\tikzset{
+  chem/.style={font=\sffamily\small, inner sep=1.2pt},
+  atom/.style={chem, fill=white, inner sep=1pt},
+  bond/.style={line width=0.8pt, shorten <=2pt, shorten >=2pt},
+  dbond/.style={bond, double, double distance=2.2pt},
+  lp/.style={fill=black, inner sep=0pt, minimum size=1.6pt, circle},
+  arrow/.style={-{Stealth[length=2.2mm]}, line width=0.75pt, red!70!black, shorten <=1pt, shorten >=1pt},
+  tag/.style={font=\scriptsize\itshape, text=blue!60!black},
+  lobe/.style={fill=blue!15, draw=blue!50, line width=0.4pt},
+  lobestar/.style={fill=red!15, draw=red!50, line width=0.4pt},
+  rxn/.style={-{Stealth[length=2.5mm]}, line width=0.9pt},
+  loopbox/.style={draw, rounded corners=2pt, fill=gray!8, font=\scriptsize, inner sep=3pt, align=center},
+  looparr/.style={-{Latex[length=1.8mm]}, gray!60!black},
+}
+\newcommand{\lonepair}[2]{%
+  \node[lp] at ($#1+(#2:0.30)+(#2+90:0.07)$) {};
+  \node[lp] at ($#1+(#2:0.30)+(#2-90:0.07)$) {};}
 \usepackage[hidelinks]{hyperref}
 \usepackage{xcolor}
+\usepackage{graphicx}
 
 \newcommand{\R}{\mathbb{R}}
 \newcommand{\occ}{\mathrm{occ}}
@@ -21,40 +40,318 @@
 \newcommand{\RBF}{\operatorname{RBF}}
 \newcommand{\LN}{\operatorname{LN}}
 \newcommand{\set}[1]{\{#1\}}
+\newcommand{\dd}{\mathrm{d}}
 \newtheorem{definition}{Definition}
 \newtheorem{remark}{Remark}
 
-\title{\textbf{ksmech}: a Klopman--Salem-biased transformer\\for elementary-step reaction mechanism prediction\\[4pt]\large Architecture specification}
+\title{\textbf{ksmech}: a Klopman--Salem-biased transformer\\for elementary-step reaction mechanism prediction\\[4pt]\large Theoretical framework and architecture specification}
 \author{Project design document}
-\date{19 October 2026}
+\date{20 October 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-We specify a deep-learning model that predicts organic reaction mechanisms as sequences of elementary steps. Each step is a set of curved arrows, and each arrow is a pointer from an occupied localized molecular orbital (the donor) to a virtual localized molecular orbital (the acceptor). Molecules are featurized with GFN2-xTB and represented as two token families, atoms and localized orbitals; an orbital token carries only continuous physical descriptors and its spectral decomposition over the canonical orbitals, never a chemist's label such as $\sigma$ or $\pi$. A two-track transformer (a token track and a pair track) scores donor--acceptor pairs; its attention logits are biased by the three terms of the Klopman--Salem perturbation equation, computed from the xTB overlap and Fock matrices. One attention head is frozen to the pure Klopman--Salem kernel, so every prediction carries a physical decomposition and the contribution of the physics can be ablated. A pointer decoder emits arrows autoregressively as (donor orbital, site atom, acceptor orbital, site atom); the arrows are applied as bond--electron matrix edits, the intermediate is re-featurized, and the loop continues until a stop token. This document fixes notation, the featurization pipeline, the mathematical form of every module, the losses, inference, and the evaluation protocol.
+We specify a deep-learning model that predicts organic reaction mechanisms as sequences of elementary steps. Each step is a set of curved arrows, and each arrow is a pointer from an occupied localized molecular orbital (the donor) to a virtual localized molecular orbital (the acceptor), together with the atom on each orbital where the new bond forms. Molecules are featurized with the GFN2-xTB tight-binding Hamiltonian and represented as two token families, atoms and localized orbitals; an orbital token carries only continuous physical descriptors and its spectral decomposition over the canonical orbitals, never a chemist's label such as $\sigma$ or $\pi$. A two-track transformer (a token track and a pair track) scores donor--acceptor pairs; its attention logits are biased by the three terms of the Klopman--Salem perturbation equation, computed from the xTB overlap and Fock matrices. One attention head is frozen to the pure Klopman--Salem kernel, so every prediction carries a physical decomposition and the contribution of the physics can be ablated. A pointer decoder emits arrows autoregressively; the arrows are applied as bond--electron matrix edits, the intermediate is re-featurized, and the loop continues until a stop token.
+
+The document is in three parts. Part~I sets out the physical theory the model is built on: the tight-binding electronic-structure problem, orbital localization, second-order perturbation theory of intermolecular interaction, conceptual density-functional descriptors, and the bond--electron matrix formalism of curved arrows. Part~II gives the minimum of deep-learning theory needed to read the architecture. Part~III is the specification proper. Appendices fix the derivations and numerical techniques.
 \end{abstract}
 
 \tableofcontents
+\clearpage
+
+%======================================================================
+\part{Physical foundations}
+%======================================================================
+
+\section{Scope of the physical model}
+\label{sec:scope}
+The quantity the model must rank is \emph{which pair of electrons moves where} in an elementary step. The physical theory that speaks about exactly this object is molecular-orbital perturbation theory: two closed-shell fragments approach, their orbitals begin to overlap, and the energy change to second order is a sum over pairs of a filled orbital on one fragment and an empty orbital on the other. Everything in Part~I serves that one equation. We need (i) orbitals and their energies for a molecule of any size and charge, cheaply (Section~\ref{sec:es}); (ii) a way to make those orbitals local, so that a pair of them can be pointed at like a curved arrow (Section~\ref{sec:loc}); (iii) the perturbation expression itself and the approximations that make it evaluable from the quantities we have (Section~\ref{sec:pt}); (iv) atom-resolved reactivity descriptors that complement it (Section~\ref{sec:cdft}); and (v) a bookkeeping formalism that turns a chosen pair of orbitals into a product molecule (Section~\ref{sec:be}).
+
+\section{Electronic structure in a finite basis}
+\label{sec:es}
+
+\subsection{The Roothaan problem}
+Within the Born--Oppenheimer approximation the electronic ground state of a closed-shell molecule with fixed nuclei is approximated by a single Slater determinant of doubly occupied molecular orbitals (MOs) $\psi_k$. Expanding each MO in a finite set of atom-centred basis functions (atomic orbitals, AOs) $\chi_\mu$,
+\begin{equation}
+\psi_k(\vb{r})=\sum_{\mu} C_{\mu k}\,\chi_\mu(\vb{r}),
+\end{equation}
+the variational condition becomes the generalized eigenvalue problem
+\begin{equation}
+\vb{F}\vb{C}=\vb{S}\vb{C}\vb{\epsilon},\qquad S_{\mu\nu}=\langle\chi_\mu|\chi_\nu\rangle,\qquad \vb{C}^{\!\top}\vb{S}\vb{C}=\vb{I},
+\label{eq:roothaan}
+\end{equation}
+where $\vb{F}$ is the Fock matrix, the one-electron effective Hamiltonian that depends on the occupied orbitals through the density matrix $\vb{P}=2\vb{C}_{\occ}\vb{C}_{\occ}^{\!\top}$, so that \eqref{eq:roothaan} is solved self-consistently (SCF). The eigenvectors $\vb{C}$ are the \emph{canonical} MOs and the eigenvalues $\epsilon_k$ their orbital energies. Two properties of the converged solution are used throughout:
+
+\begin{itemize}[nosep]
+\item \textbf{Koopmans' theorem.} $-\epsilon_{\mathrm{HOMO}}$ approximates the ionization energy and $-\epsilon_{\mathrm{LUMO}}$ the electron affinity, so orbital energies are the natural scale for donor and acceptor strength.
+\item \textbf{Brillouin's condition.} At convergence the Fock matrix has no matrix elements between occupied and virtual canonical orbitals, $F_{kv}=0$ for $k\in\occ$, $v\in\virt$. The occupied and virtual spaces of a converged molecule are already fully mixed; nothing within one molecule remains to be ``perturbed'' at first order. This is why the intermolecular perturbation theory of Section~\ref{sec:pt} applies to \emph{separate} fragments, and why its evaluation inside a converged molecule is identically zero (Section~\ref{sec:contact}).
+\end{itemize}
+
+\subsection{The GFN2-xTB tight-binding Hamiltonian}
+Solving \eqref{eq:roothaan} with a first-principles Fock operator is too expensive for tens of thousands of molecules and all their intermediates. Semi-empirical tight-binding methods keep the structure of \eqref{eq:roothaan}, a minimal valence basis, and an explicit overlap matrix, but build $\vb{F}$ from parametrized atomic quantities. GFN2-xTB \cite{gfn2} is the method used here. Its total energy is
+\begin{equation}
+E=E_{\mathrm{rep}}+E_{\mathrm{EHT}}+E_{\mathrm{IES+IXC}}+E_{\mathrm{AES}}+E_{\mathrm{AXC}}+E_{\mathrm{disp}}+E_{\mathrm{solv}},
+\end{equation}
+with a pairwise repulsion, an extended-H\"uckel-type band energy, isotropic and anisotropic (multipole) electrostatics and exchange--correlation terms expanded to second (and partly third) order in atomic charge fluctuations, a D4 dispersion correction, and an implicit-solvation term (ALPB \cite{alpb}, used here with water parameters). The zeroth-order Hamiltonian has the extended-H\"uckel form
+\begin{equation}
+H^{(0)}_{\mu\nu}=\tfrac12\,K_{\ell\ell'}\,\big(h_\mu+h_\nu\big)\,S_{\mu\nu}\,\Pi(R_{AB})\,X(\mathrm{EN}_A,\mathrm{EN}_B),
+\label{eq:eht}
+\end{equation}
+where $h_\mu$ are atomic-shell energy levels, $K_{\ell\ell'}$ shell-pair scaling constants, and $\Pi$, $X$ distance- and electronegativity-dependent scaling functions; the charge-dependent terms add diagonal and off-diagonal shifts that depend on the Mulliken charges and are iterated to self-consistency. The basis consists of Slater-type orbitals approximated by contracted Gaussians (STO-$n$G): one $1s$ function on hydrogen, $ns$ and $np$ on main-group elements, and an added polarization $d$ shell on heavier $p$-block elements (S, P, Cl, Br, I among them). Because the basis is minimal and valence-only, the number of MOs equals the number of valence AOs, there are no core orbitals, and every virtual orbital has a simple interpretation as the antibonding or empty counterpart of an occupied one.
+
+What the method exports at convergence, and what the model uses, is: $\vb{S}$, $\vb{F}$, $\vb{C}$, $\vb{\epsilon}$, the occupations $n_k$, the atomic partial charges, and the AO-to-atom map with each AO's angular momentum. The structure of \eqref{eq:eht} also justifies the Wolfsberg--Helmholz approximation used for resonance integrals in Section~\ref{sec:pt}: in a tight-binding Hamiltonian the off-diagonal element between two AOs is, to leading order, proportional to their overlap times their mean diagonal energy.
+
+\subsection{Open shells and fractional occupation}
+For radicals the $\alpha$ and $\beta$ spin orbitals are solved separately (unrestricted formalism); the singly occupied orbital is the $\alpha$ orbital with no $\beta$ partner. GFN2-xTB applies a finite electronic temperature (Fermi smearing) to aid convergence; for molecules with a vanishing HOMO--LUMO gap this leaves fractional occupations $0<n_k<2$. Such molecules are outside the closed-shell perturbative picture and are flagged rather than forced.
+
+\subsection{Population analysis}
+\label{sec:mulliken}
+The Mulliken partition assigns the electron density to atoms through the AO basis. The gross population of AO $\mu$ is $(\vb{P}\vb{S})_{\mu\mu}$, and the partial charge of atom $A$ is
+\begin{equation}
+q_A=Z^{\mathrm{val}}_A-\sum_{\mu\in A}(\vb{P}\vb{S})_{\mu\mu}.
+\end{equation}
+The same partition applied to a single orbital $\psi_k$ gives its \emph{population on atom $A$},
+\begin{equation}
+Q^{(k)}_A=\sum_{\mu\in A}\sum_\nu C_{\mu k}S_{\mu\nu}C_{\nu k},\qquad \sum_A Q^{(k)}_A=1,
+\label{eq:orbpop}
+\end{equation}
+and between two atoms the \emph{overlap population}
+\begin{equation}
+\Pi^{(k)}_{AB}=2\sum_{\mu\in A}\sum_{\nu\in B}C_{\mu k}S_{\mu\nu}C_{\nu k},
+\label{eq:overlappop}
+\end{equation}
+whose sign tells whether the orbital is bonding ($\Pi>0$) or antibonding ($\Pi<0$) between $A$ and $B$. Equations~\eqref{eq:orbpop} and \eqref{eq:overlappop} are the only tools used to describe what an orbital \emph{is}: where it sits, how it is shared, and whether it binds. They are basis-dependent, which is acceptable because the basis is fixed for the whole project.
+
+\section{Localized molecular orbitals}
+\label{sec:loc}
+
+\subsection{Invariance and the freedom it leaves}
+A single-determinant wavefunction is invariant under any unitary rotation of its occupied orbitals among themselves: for $\vb{L}_{\occ}=\vb{C}_{\occ}\vb{U}$ with $\vb{U}$ orthogonal, the determinant, the density matrix, the energy and all observables are unchanged. The same holds separately for the virtual space. The canonical MOs are one choice inside this freedom (the one that diagonalizes $\vb{F}$); they are typically delocalized over the whole molecule. Curved arrows, however, speak of \emph{this} lone pair and \emph{that} $\sigma$ bond. Localization chooses, inside the same subspace, the rotation that makes each orbital as atom-local as possible. It is a change of basis, not an approximation and not a chemical assumption: the set of localized orbitals spans exactly the occupied (or virtual) space.
+
+\subsection{The Pipek--Mezey criterion}
+Pipek and Mezey \cite{pm} define locality through Mulliken populations: maximize
+\begin{equation}
+\mathcal{P}(\vb{U})=\sum_{r}\sum_{A}\big(Q^{(r)}_A\big)^2,
+\label{eq:pm}
+\end{equation}
+the sum over orbitals of the sum of squared atomic populations. $\mathcal{P}$ is largest when each orbital's population is concentrated on as few atoms as possible (one atom for a lone pair, two for a bond). Unlike Foster--Boys localization it does not mix $\sigma$ and $\pi$ into ``banana'' bonds, which is why it is the natural choice when the descriptors must separate in-plane from out-of-plane character; and it needs only $\vb{S}$, not dipole integrals. The maximum is found by successive $2\times2$ Jacobi rotations (Appendix~\ref{app:pm}). Two features of the solution matter for the model:
+\begin{itemize}[nosep]
+\item Where the subspace has a strongly preferred local basis ($\sigma$ bonds, lone pairs, isolated $\pi$ bonds) the maximum is sharp and unique up to permutation.
+\item Where it does not, as inside the $\pi$ space of an aromatic ring, the functional is nearly flat and the returned orbitals are an arbitrary point on a plateau. Any physical quantity derived from a single such orbital, including its diagonal energy $\vb{l}_r^{\!\top}\vb{F}\vb{l}_r$, is then arbitrary too. The remedy is not a better localizer but the spectral decomposition of the next section.
+\end{itemize}
+
+\subsection{Spectral decomposition of a localized orbital}
+\label{sec:spectral}
+A localized orbital $\vb{l}_r=\sum_k U_{kr}\vb{c}_k$ is not an eigenfunction of $\vb{F}$. Its exact content in terms of eigenfunctions is given by the weights
+\begin{equation}
+p_{rk}=U_{kr}^2,\qquad \sum_k p_{rk}=1,
+\label{eq:spectral-theory}
+\end{equation}
+so that $\langle\vb{l}_r|\vb{F}|\vb{l}_r\rangle=\sum_k p_{rk}\epsilon_k$ and, more importantly, any second-order expression with an energy denominator can be written exactly as a sum over canonical pairs weighted by $p_{rk}p_{sm}$ (Section~\ref{sec:pt-lmo}). The weights depend on the localization, but the set of canonical energies does not, and sums over a complete localized set reduce to canonical sums. This is what makes an aromatic ring unproblematic: three ring $\pi$ LMOs, however Pipek--Mezey chose to mix them, carry total weight exactly one on each of the three canonical $\pi$ orbitals.
+
+\section{Perturbation theory of the interaction between two molecules}
+\label{sec:pt}
+
+\subsection{Setting}
+Let fragments $A$ and $B$, each a converged closed-shell molecule, approach to a geometry where their orbitals overlap weakly. Treat the orbitals of the combined system as linear combinations of the fragment orbitals $\set{\psi_r}$ of $A$ and $\set{\psi_s}$ of $B$, and the interaction through the matrix elements $H_{rs}=\langle\psi_r|\hat H|\psi_s\rangle$ and overlaps $S_{rs}=\langle\psi_r|\psi_s\rangle$, both small. Three kinds of pairs contribute (Appendix~\ref{app:ks} gives the derivation):
+\begin{enumerate}[nosep]
+\item two \emph{filled} orbitals, one on each fragment: four electrons in two orbitals that mix; the net effect is a destabilization of order $S_{rs}^2$ (closed-shell or ``steric'' repulsion);
+\item a \emph{filled} orbital on one fragment and an \emph{empty} one on the other: two electrons in the lower of two mixed orbitals; a stabilization of order $H_{rs}^2/(E_r-E_s)$;
+\item the electrostatic interaction of the unperturbed charge distributions, which does not need orbital mixing at all.
+\end{enumerate}
+
+\subsection{The Klopman--Salem equation}
+\label{sec:ks-theory}
+Expanding the fragment MOs in AOs, $\psi_r=\sum_a c_{ra}\chi_a$, writing the AO interaction elements as resonance integrals $\beta_{ab}$ and keeping terms to second order, Klopman \cite{klopman} and Salem \cite{salem} obtained
+\begin{equation}
+\small
+\Delta E
+=\underbrace{-\sum_{a,b}\big(q_a+q_b\big)\,\beta_{ab}\,S_{ab}}_{\text{(1) filled--filled repulsion}}
+\;+\;\underbrace{\sum_{k<l}\frac{Q_kQ_l}{\varepsilon R_{kl}}}_{\text{(2) Coulomb}}
+\;+\;\underbrace{\sum_{r\in\occ(A)}\sum_{s\in\virt(B)}\frac{2\big(\sum_{a,b}c_{ra}\,c_{sb}\,\beta_{ab}\big)^2}{E_r-E_s}
++\big(A\leftrightarrow B\big)}_{\text{(3) filled--empty orbital interaction}} ,
+\label{eq:ks-theory}
+\end{equation}
+where $q_a$ are AO populations of the occupied orbitals, $Q_k$ atomic charges, $R_{kl}$ interatomic distances and $\varepsilon$ a local dielectric constant. Each term has a reading that organic chemists use daily:
+\begin{itemize}[nosep]
+\item \textbf{Term (1)} is always repulsive and grows with overlap between filled orbitals: it is the quantitative content of steric hindrance.
+\item \textbf{Term (2)} favours the approach of oppositely charged atoms irrespective of orbitals: \emph{charge control}. It dominates when the gap $|E_r-E_s|$ is large (hard reagents).
+\item \textbf{Term (3)} is stabilizing and dominated by the pair of orbitals with the smallest gap and the largest coefficients on the atoms that meet: \emph{orbital control}. Restricted to the single pair HOMO($A$)/LUMO($B$) it is Fukui's frontier-orbital theory; it dominates when the gap is small (soft reagents).
+\end{itemize}
+Klopman's hard/soft classification of nucleophiles and electrophiles is the statement of which of (2) and (3) wins. The equation is pairwise in orbitals, and Term~(3) is pairwise in exactly the objects a curved arrow names: one filled orbital and one empty one. That is the whole reason it is the backbone of this model.
+
+\subsection{The resonance integral}
+The AO interaction elements $\beta_{ab}$ between two fragments are not available from either fragment's own calculation. The Wolfsberg--Helmholz approximation \cite{wh}, which is also the structure of the tight-binding Hamiltonian \eqref{eq:eht}, sets
+\begin{equation}
+\beta_{ab}=K\,S_{ab}\,\tfrac12\big(H_{aa}+H_{bb}\big),\qquad K\approx1.75,
+\label{eq:wh-theory}
+\end{equation}
+so that everything reduces to one overlap integral between the two AOs and their diagonal energies. With the MO coefficients inserted, the coupling in Term~(3) becomes $\sum_{ab}c_{ra}c_{sb}\beta_{ab}\approx K\,\bar F_{rs}\,S_{rs}$ where $S_{rs}$ is the overlap of the two \emph{orbitals} at the geometry of approach. The overlap is the only geometry-dependent factor; the energies and coefficients are intrinsic to each fragment.
+
+\subsection{Evaluation with localized orbitals}
+\label{sec:pt-lmo}
+The derivation of \eqref{eq:ks-theory} assumes fragment orbitals that are eigenfunctions of their fragment Hamiltonians. For localized orbitals this is not true, but the second-order expression is bilinear in the two orbitals and can be re-expanded. Writing $\vb{l}_r=\sum_k U_{kr}\vb{c}_k$, $\vb{l}_s=\sum_m U_{ms}\vb{c}_m$ and neglecting cross terms between different canonical pairs (which vanish on average under the arbitrary phases of a plateau localization) gives
+\begin{equation}
+\Delta E^{(3)}_{rs}\approx\big(K\,\bar F_{rs}\,S_{rs}\big)^2\;\sum_{k\in\occ}\sum_{m\in\virt}\frac{2\,p_{rk}\,p_{sm}}{\epsilon_k-\epsilon_m}
+\;=:\;\big(K\,\bar F_{rs}\,S_{rs}\big)^2\,G(r,s),
+\label{eq:ks3-theory}
+\end{equation}
+a product of a \emph{coupling} that depends on how the two local lobes overlap, and a \emph{spectral gap factor} $G$ that depends only on canonical energies and localization weights. $G$ is negative, and for one-component orbitals reduces to $2/(\epsilon_{k_0}-\epsilon_{m_0})$.
+
+\subsection{What is defined inside one molecule and what is not}
+\label{sec:contact-theory}
+Equation~\eqref{eq:ks-theory} describes two systems not yet mixed. Inside a converged molecule, Brillouin's condition makes the occupied--virtual Fock block zero and the localized occupied and virtual orbitals $\vb{S}$-orthogonal, so Term~(3) evaluated with the molecule's own $\vb{S}$ and $\vb{F}$ is identically zero. This is not a statement that intramolecular reactions do not occur; it is a statement that the reactant geometry is not the reactive geometry. A chain that cyclizes must first fold until the two lobes meet, exactly as two separate molecules must diffuse together. In both cases what decides reactivity is the overlap \emph{at contact}, in the pose the reaction adopts, and the model therefore evaluates the coupling of \eqref{eq:ks3-theory} for every pair, intra- and intermolecular, by placing the two localized orbitals at a contact geometry and computing their overlap analytically (Appendix~\ref{app:overlap}). What remains specific to intramolecular pairs, the distance the chain must span and the residual coupling already present in the reactant pose, enters as separate descriptors.
+
+\subsection{Beyond the perturbative picture: distance, strain and the transition state}
+\label{sec:beyond}
+Equation~\eqref{eq:ks-theory} is an expansion in small overlaps around separated fragments. Four facts limit how far it can be pushed toward the transition state, and each fixes one ingredient of the contact construction of Part~III.
+
+\paragraph{No intrinsic contact distance.} Terms~(1) and~(3) are both of second order in the overlap: the repulsion scales as $\beta S\propto S^2$ and the stabilization as $\beta^2\propto S^2$. Their ratio does not depend on distance to leading order, so perturbation theory alone has no minimum along the approach coordinate. The distance at which two fragments interact is set by what the expansion leaves out, the short-range exchange (Pauli) repulsion between closed shells. The model therefore never fixes a contact distance: it samples relative configurations, includes the short-range repulsion in the energy of each, and lets a Boltzmann weight decide where the lobes meet (Section~\ref{sec:contact}). A diffuse or hindered pair is then weighted further out, with a smaller overlap, and a compact unhindered pair closer in, without a universal length and without a geometric rule.
+
+\paragraph{Partial bonds at the transition state.} Pauling's relation between bond length and bond order, $d(n)=d_1-0.6\log_{10}n$~\AA\ \cite{pauling}, places a forming bond of order $n^\ddagger\approx0.3$--$0.5$ at roughly $1.2$--$1.4$ times its equilibrium length. The Hammond postulate \cite{hammond}, and its quantitative form in Marcus theory \cite{marcus}, $x^\ddagger\approx\tfrac12(1+\Delta E/\lambda)$, move the transition state earlier (longer forming bond, smaller overlap) for exothermic steps. These relations are consistency checks on the free-energy profiles along the site--site distance and on approximate transition states.
+
+\paragraph{Strain and interaction.} The activation-strain (distortion/interaction) model \cite{bickelhaupt} writes the energy along a reaction coordinate $\zeta$ as $\Delta E(\zeta)=\Delta E_{\mathrm{strain}}(\zeta)+\Delta E_{\mathrm{int}}(\zeta)$: the cost of deforming each reactant to its geometry at $\zeta$ plus the interaction between the deformed reactants. Klopman--Salem estimates $\Delta E_{\mathrm{int}}$ early on the coordinate between rigid fragments; the pyramidalization of an attacked carbon, the stretching of a leaving bond and the folding of a chain toward ring closure are strain and are invisible to it. In the configurational treatment the strain of a linker is counted exactly (it is the conformer energy); the deformation of the reacting centres is not, and returns through relaxation of the most heavily weighted configurations and through computed transition states.
+
+\paragraph{The coupling read from the complex.} In natural bond orbital analysis the second-order donor--acceptor stabilization is $E^{(2)}=-q_iF_{ij}^2/(\epsilon_j-\epsilon_i)$, with $F_{ij}$ the Fock element between the two localized orbitals in the interacting system \cite{nbo}. It has the form of Term~(3), with the resonance integral read off the Hamiltonian of the complex instead of estimated by Wolfsberg--Helmholz, and so it includes polarization and charge transfer at contact. It is the natural refinement of the Wolfsberg--Helmholz coupling for the most heavily weighted configurations of a pair, when a complex calculation is affordable.
+
+\section{Conceptual density-functional descriptors}
+\label{sec:cdft}
+Conceptual DFT \cite{parryang} defines reactivity indices as derivatives of the energy with respect to electron number $N$ at fixed external potential. With finite differences over $N\pm1$ and Koopmans' theorem:
+\begin{equation}
+\mu=\Big(\frac{\partial E}{\partial N}\Big)_v\approx\tfrac12(\epsilon_{\mathrm{HOMO}}+\epsilon_{\mathrm{LUMO}}),\qquad
+\eta=\Big(\frac{\partial^2E}{\partial N^2}\Big)_v\approx\tfrac12(\epsilon_{\mathrm{LUMO}}-\epsilon_{\mathrm{HOMO}}),\qquad
+\omega=\frac{\mu^2}{2\eta},
+\end{equation}
+the chemical potential, the hardness, and the electrophilicity index. The Fukui function $f(\vb{r})=(\partial\rho(\vb{r})/\partial N)_v$ localizes the response; condensed to atoms \cite{yangmortier} it reads
+\begin{equation}
+\tilde f^{+}_A=q_A(N)-q_A(N{+}1),\qquad \tilde f^{-}_A=q_A(N{-}1)-q_A(N),\qquad \Delta f_A=\tilde f^+_A-\tilde f^-_A,
+\end{equation}
+for nucleophilic attack on $A$, electrophilic attack on $A$, and the dual descriptor \cite{morell} whose sign separates electrophilic from nucleophilic sites. In the frozen-orbital approximation the added or removed electron occupies the LUMO or HOMO without relaxation, and the condensed Fukui functions become orbital populations,
+\begin{equation}
+f^{+}_A=Q^{(\mathrm{LUMO})}_A,\qquad f^{-}_A=Q^{(\mathrm{HOMO})}_A,
+\end{equation}
+with $Q$ from \eqref{eq:orbpop}. The two families answer different questions: the finite-difference form includes the relaxation of the whole density (and in a minimal basis is dominated by it), the frozen-orbital form is the shape of the frontier orbital itself, which is the quantity Term~(3) depends on. Generalizing the latter to the $K$ orbitals nearest the gap gives the per-atom frontier weights $\omega_{A,k}=Q^{(k)}_A$ used as atom descriptors; these carry regiochemical information (ortho/para versus meta) that no single localized orbital can.
+
+\section{Curved arrows as bond--electron matrix edits}
+\label{sec:be}
+Dugundji and Ugi \cite{ugi} represent a Lewis structure of $n$ atoms by the symmetric \emph{bond--electron matrix} $\vb{B}\in\mathbb{N}^{n\times n}$: $B_{ij}$ ($i\ne j$) is the formal bond order between atoms $i$ and $j$, and $B_{ii}$ the number of free (non-bonding) valence electrons on atom $i$. The total valence-electron count is $\sum_i B_{ii}+\sum_{i\ne j}B_{ij}$, and the formal charge of atom $i$ is $Z^{\mathrm{val}}_i-B_{ii}-\sum_{j\ne i}B_{ij}$. A reaction is a \emph{reaction matrix} $\vb{R}=\vb{B}_{\mathrm{prod}}-\vb{B}_{\mathrm{reac}}$ with integer entries; electron conservation is $\sum_{ij}R_{ij}=0$. A curved arrow is the smallest such edit:
+\begin{itemize}[nosep]
+\item lone pair on $i$ $\to$ atom $j$: $R_{ii}=-2$, $R_{ij}=R_{ji}=+1$;
+\item bond $(i,k)$ $\to$ atom $j$ with the new bond at $i$: $R_{ik}=R_{ki}=-1$, $R_{ij}=R_{ji}=+1$;
+\item bond $(i,k)$ $\to$ lone pair on $k$ (a leaving group): $R_{ik}=R_{ki}=-1$, $R_{kk}=+2$.
+\end{itemize}
+An elementary step is the sum of its arrows' matrices applied at once; formal charges follow from the definition and need no separate rule. Two consequences shape the model. First, the product of a step is a \emph{function} of the chosen arrows, so a model that outputs arrows never has to generate a molecule, and mass and charge conservation hold by construction. Second, resonance structures are distinct $\vb{B}$ matrices of the same molecule; the quantum-mechanical state is their superposition, which is what the wavefunction of Section~\ref{sec:es} already represents. The model therefore works on the wavefunction and treats resonance only as an equivalence relation on $\vb{B}$ matrices when comparing products (Section~\ref{sec:resonance}). Appendix~\ref{app:be} gives a worked example.
+
+\section{Steric descriptors}
+The repulsive Term~(1) of \eqref{eq:ks-theory} needs the overlap of filled orbitals at the reactive geometry, which no fragment calculation provides. The percent buried volume $V^{\mathrm{bur}}_A$ \cite{vbur}, the fraction of a sphere of radius $3.5$~\AA\ centred on atom $A$ that is occupied by the van der Waals volume of the rest of the molecule, is used as a geometric proxy for how much filled electron density surrounds a site. It is an input descriptor, not a prior on reactivity.
+
+%======================================================================
+\part{Learning background}
+%======================================================================
+
+\section{What is being learned}
+\label{sec:learn}
+The model is a conditional probability distribution $P_\theta(A_t\mid\mathcal{M}_{t-1})$ over elementary steps given the current molecules, with parameters $\theta$ fitted by maximizing the log-likelihood of annotated steps. An elementary step is a short sequence of arrows, and each arrow is a choice from a finite candidate set (the occupied orbitals, then the virtual ones), so the problem is a sequence of \emph{classifications over sets whose size varies with the molecule}. The per-choice loss is the cross-entropy $-\log P_\theta(\text{label})$. When several candidates are physically equivalent (two lone pairs on the same oxygen) the label is a set $\mathcal{D}$ and the loss is the negative log of the total probability mass on the set, $-\log\sum_{r\in\mathcal{D}}P_\theta(r)$: the model is rewarded for putting probability on any equivalent choice and never forced to prefer one.
+
+\section{Attention and the transformer}
+\label{sec:attn}
+A transformer \cite{vaswani} maps a set of $N$ input vectors $\set{\vb{h}_i}$ to a set of $N$ output vectors by stacking layers of \emph{attention}. In one head, each token forms a query $\vb{q}_i=\vb{W}_Q\vb{h}_i$, a key $\vb{k}_j=\vb{W}_K\vb{h}_j$ and a value $\vb{v}_j=\vb{W}_V\vb{h}_j$; the output for token $i$ is a weighted average of all values,
+\begin{equation}
+\vb{a}_i=\sum_j \alpha_{ij}\vb{v}_j,\qquad \alpha_{ij}=\softmax_j(\ell_{ij}),\qquad \ell_{ij}=\frac{\vb{q}_i^{\!\top}\vb{k}_j}{\sqrt{d}} ,
+\label{eq:attn}
+\end{equation}
+where the \emph{logits} $\ell_{ij}$ measure how relevant token $j$ is to token $i$ and the softmax turns them into a distribution. Several heads with independent projections run in parallel and are concatenated; a residual connection, layer normalization and a small position-wise feed-forward network complete the layer. Because \eqref{eq:attn} treats the input as an unordered set, the architecture is permutation-equivariant, which is the right symmetry for atoms and orbitals: nothing depends on the order in which they are listed.
+
+\subsection{Attention bias and the pair track}
+The logit $\ell_{ij}$ in \eqref{eq:attn} depends on $i$ and $j$ only through their separate vectors. When something is known about the \emph{pair} (a distance, whether two atoms are bonded, a physical interaction energy) it can be added directly to the logit,
+\begin{equation}
+\ell_{ij}=\frac{\vb{q}_i^{\!\top}\vb{k}_j}{\sqrt{d}}+b_{ij},
+\end{equation}
+an \emph{attention bias}. This is how molecular transformers encode geometry: Graphormer \cite{graphormer} adds biases from graph distance and edges, AlphaFold's Evoformer \cite{alphafold} maintains a full pair representation $\vb{p}_{ij}$ that is updated layer by layer and projected into a bias for every head, Uni-Mol \cite{unimol} does the same with 3D distances. The design in Part~III follows the two-track pattern (token vectors $\vb{h}_i$ and pair vectors $\vb{p}_{ij}$) and uses the bias to inject the three Klopman--Salem terms. A bias is a prior in the strict sense: before any training, attention is already shaped like the physics, and training learns corrections. Setting one head's logits to the physical term alone and never updating them turns that head into a fixed physical kernel, which is used here both as a control and as an explanation channel.
+
+\subsection{Invariance to rigid motion}
+A network that consumes raw coordinates learns a function that changes when the molecule is rotated. Using only pairwise distances (expanded in a bank of radial basis functions) as geometric input makes the output exactly invariant to rotations and translations with no equivariant machinery. Reflections must then be handled explicitly, since distances cannot distinguish enantiomers: a signed-volume feature per stereocentre restores chirality.
+
+\subsection{Set encoders}
+A variable-length, unordered collection of items (the spectral entries of an orbital) is embedded as $\sum_k\phi(\vb{x}_k)$ with a shared small network $\phi$; any permutation-invariant function of a set can be written this way \cite{deepsets}, so no ordering or padding convention leaks into the representation.
+
+\section{Decoding a step}
+\label{sec:decode}
+\paragraph{Pointer networks.} When the output is an element of the input set, the natural output layer is a \emph{pointer} \cite{pointer}: a query vector is compared with every candidate's encoded vector and the softmax over candidates is the distribution. The candidate set can have any size, no vocabulary is needed, and a mask can remove invalid candidates by setting their logits to $-\infty$.
+
+\paragraph{Autoregressive decoding and teacher forcing.} A step with several arrows is emitted one arrow at a time, each conditioned on those already emitted. During training the conditioning uses the \emph{annotated} previous arrows (teacher forcing), so every arrow is a separate classification with the correct context; at inference the model's own previous choices are used.
+
+\paragraph{Beam search.} Instead of taking the single most probable arrow at each point, the $B$ most probable partial sequences are kept and extended; this recovers high-probability steps that start with a locally less probable arrow and yields a ranked list of alternatives.
+
+\section{Ablation as method}
+Every design choice that is claimed to matter is paired with a configuration flag that removes it, and the model is retrained with and without. The quantity of interest is the difference in held-out accuracy, with several random seeds so the difference can be compared to its own noise. In particular the physical prior is tested three ways: by removing the bias from all heads, by removing each of its three terms, and by comparing the trained model with the ranking that the untrained physical kernel alone produces (the ``physics floor'').
+
+%======================================================================
+\part{Model specification}
+%======================================================================
 
 \section{Problem statement}
 
 \subsection{Task}
-Given a set of reactant molecules $\mathcal{M}_0=\set{M_1,\dots,M_F}$ (fragments), predict a mechanism
+The state of a reacting system is the \emph{pool} $\mathcal{M}$: the multiset of all molecular species present, reactants, intermediates, by-products and spectators, each with its multiplicity. An \emph{elementary step} $A$ is an ordered list of arrows $A=(a_1,\dots,a_n)$ that together pass through a single transition state and map one pool to the next, $\mathcal{M}\xrightarrow{A}\mathcal{M}'$. Each arrow is a 4-tuple
 \[
-\mathcal{M}_0 \xrightarrow{\;A_1\;} \mathcal{M}_1 \xrightarrow{\;A_2\;} \cdots \xrightarrow{\;A_T\;} \mathcal{M}_T ,
+a=(r,\,a,\,s,\,b),\qquad r\in\mathcal{O}^{\occ}(\mathcal{M}),\quad s\in\mathcal{O}^{\virt}(\mathcal{M}),\quad a\in\mathcal{A}_r,\ b\in\mathcal{A}_s,
 \]
-where each $A_t$ is an \emph{elementary step}: an ordered list of arrows $A_t=(a_{t,1},\dots,a_{t,n_t})$ that together pass through a single transition state. Each arrow is a pair
-\[
-a=(r,s),\qquad r\in\mathcal{O}^{\occ}(\mathcal{M}_{t-1}),\quad s\in\mathcal{O}^{\virt}(\mathcal{M}_{t-1}),
-\]
-i.e.\ an electron pair flows from an occupied localized orbital $r$ into a virtual localized orbital $s$. Applying $A_t$ to $\mathcal{M}_{t-1}$ with the bond--electron matrix rules of Section~\ref{sec:apply} yields $\mathcal{M}_t$ deterministically. The model therefore has to learn only \emph{which} orbitals interact, never how to write the product.
+i.e.\ an electron pair flows from occupied localized orbital $r$ into virtual localized orbital $s$, and the new bond forms between atom $a$ (a centre of $r$) and atom $b$ (a centre of $s$). Applying $A$ with the bond--electron matrix rules of Section~\ref{sec:apply} yields $\mathcal{M}'$ deterministically.
+
+A \emph{mechanism} is a reaction network: a directed graph whose nodes are pool states and whose edges are elementary steps. It is not a chain. Two steps that touch disjoint atoms are independent and may occur in either order; a species formed late in one turnover (a regenerated catalyst, a by-product acid) can enter an early step of the next; competing steps from the same pool branch. A \emph{pathway} is one path through the network, and an annotated mechanism in the datasets is one such path in one arbitrary order of its independent steps.
+
+The model is therefore a \emph{policy}: a conditional distribution $P_\theta(A\mid\mathcal{M})$ over elementary steps given the current pool. Because every species present is in the pool, a step can involve anything formed earlier; because the policy is defined on any pool, it defines the whole network, not one trajectory. The model has to learn only \emph{which} orbitals interact and where, never how to write the product.
+
+Three consequences follow for data, inference and evaluation. (i)~Training: from an annotated pathway the dependency DAG of its steps is derived (step $j$ depends on $i$ if it consumes a product of $i$ or touches an atom $i$ changed); every topological order is a valid trajectory and all are used as training sequences, so the model does not learn an arbitrary order as if it were chemistry. (ii)~Inference: the search is over pool states keyed by the multiset of resonance keys, beams reaching the same pool are merged, and a pool that recurs up to the stoichiometric products closes a cycle (catalyst turnover); the output is the network with step probabilities on its edges. (iii)~Evaluation at pathway level compares the \emph{set} of steps and the final pool, never the sequence.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[atom] (C1) at (0,0) {H$_3$C};
+\node[atom] (O1) at (1.1,0) {O};
+\draw[bond] (C1) -- (O1);
+\lonepair{(1.1,0)}{90}\lonepair{(1.1,0)}{0}\lonepair{(1.1,0)}{270}
+\node[chem] at (1.62,-0.42) {$\ominus$};
+\node[chem] at (2.3,0) {+};
+\node[atom] (C2) at (3.3,0) {C};
+\node[atom] (H2a) at (3.3,0.75) {H};
+\node[atom] (H2b) at (2.75,-0.5) {H};
+\node[atom] (H2c) at (3.85,-0.5) {H};
+\node[atom] (Cl2) at (4.6,0) {Cl};
+\draw[bond] (C2)--(H2a); \draw[bond] (C2)--(H2b); \draw[bond] (C2)--(H2c); \draw[bond] (C2)--(Cl2);
+\draw[arrow] (1.45,0.1) .. controls (2.0,0.9) and (2.8,0.9) .. (3.1,0.25);
+\draw[arrow] (3.95,0.12) .. controls (4.1,0.6) and (4.5,0.6) .. (4.65,0.3);
+\node[tag, anchor=south east] at (1.3,0.95) {donor $r$ (O lone pair), site $a=\mathrm{O}$};
+\node[tag, anchor=north] at (3.9,-0.8) {acceptor $s=\sigma^*$(C--Cl), site $b=\mathrm{C}$};
+\draw[rxn] (5.4,0) -- node[above,font=\scriptsize]{$(r,a,s,b)$} node[below,font=\scriptsize]{apply $\vb{R}$} (7.2,0);
+\node[atom] (C3) at (8.0,0) {H$_3$C};
+\node[atom] (O3) at (9.1,0) {O};
+\node[atom] (C4) at (10.2,0) {CH$_3$};
+\draw[bond] (C3)--(O3); \draw[bond] (O3)--(C4);
+\lonepair{(9.1,0)}{90}\lonepair{(9.1,0)}{270}
+\node[chem] at (11.0,0) {+};
+\node[atom] (Cl4) at (11.8,0) {Cl};
+\lonepair{(11.8,0)}{0}\lonepair{(11.8,0)}{90}\lonepair{(11.8,0)}{180}\lonepair{(11.8,0)}{270}
+\node[chem] at (12.35,0.38) {$\ominus$};
+\end{tikzpicture}
+
+\vspace{4pt}
+\begin{tikzpicture}[font=\footnotesize]
+\node[draw,rounded corners,fill=blue!6,align=left,text width=5.2cm] (d) at (0,0) {$r$: occupied, $n_r=2$, one centre (O)\\$s/p$ fraction $\approx0.1/0.9$, no partner\\spectral set: mostly HOMO ($\epsilon\approx-12.4$~eV)};
+\node[draw,rounded corners,fill=orange!10,align=left,text width=5.2cm] (ac) at (8.6,0) {$s$: virtual, $n_s=0$, two centres (C $0.65$, Cl $0.35$)\\$\chi_{\mathrm C}>0.7$ ($\sigma$-like), $\Pi_{\mathrm{CCl}}<0$ (antibonding)\\spectral set: mostly LUMO ($\epsilon\approx-2.1$~eV)};
+\draw[-{Latex[length=2mm]},thick] (d) -- node[above,align=center]{$\KS_3=\beta_{rs}^2\,G(r,s)$\\$\KS_2(\mathrm{O},\mathrm{C})$} (ac);
+\end{tikzpicture}
+\caption{An S$_\mathrm{N}$2 step as the model represents it. The two curved arrows of the textbook drawing are one tuple $(r,a,s,b)$: a donor orbital, the atom on it where the bond forms, an acceptor orbital, and the atom on it that is attacked. The bond--electron matrix edit $\vb{R}$ (Section~\ref{sec:be}) then produces the product with no further learning. The boxes list the descriptors the model actually sees for the two orbitals (values from the GFN2-xTB run on the fixture molecules); the words ``lone pair'' and ``$\sigma^*$'' appear only in this caption, never in the input.}
+\label{fig:sn2}
+\end{figure}
 
 \subsection{Why orbitals}
-In curved-arrow notation every arrow already starts at a filled orbital (lone pair, $\sigma$, $\pi$) and ends at an empty one ($\sigma^*$, $\pi^*$, empty $p$). The Klopman--Salem equation (Section~\ref{sec:ks}) scores exactly such filled--empty pairs. Choosing localized orbitals as the unit of prediction therefore makes the physics and the labels speak the same language: the quantity the model ranks is the quantity the perturbation theory evaluates.
+In curved-arrow notation every arrow already starts at a filled orbital and ends at an empty one. Term~(3) of the Klopman--Salem equation scores exactly such filled--empty pairs. Choosing localized orbitals as the unit of prediction therefore makes the physics and the labels speak the same language: the quantity the model ranks is the quantity the perturbation theory evaluates.
 
 \subsection{Scope}
-Polar (two-electron) mechanisms are the primary target. Radical steps (one-electron arrows) are supported by a singly-occupied orbital type that may act as donor or acceptor; they are a later extension and do not change the architecture.
+Polar (two-electron) mechanisms are the primary target. Radical steps (one-electron arrows) are supported by singly occupied orbital tokens that may act as donor or acceptor; they are a later extension and do not change the architecture.
 
 \section{Notation}
 \begin{center}
@@ -64,13 +361,14 @@ Polar (two-electron) mechanisms are the primary target. Radical steps (one-elect
 a,b,k,l & atom indices; $Z_a$ atomic number; $\vb{x}_a\in\R^3$ position (\AA)\\
 \mu,\nu & atomic-orbital (AO) indices in the GFN2-xTB valence basis, $N_{\mathrm{AO}}$ total\\
 \vb{S},\vb{F}\in\R^{N_{\mathrm{AO}}\times N_{\mathrm{AO}}} & AO overlap and Fock (Hamiltonian) matrices\\
-\vb{C}\in\R^{N_{\mathrm{AO}}\times N_{\mathrm{MO}}},\ \epsilon_p & canonical MO coefficients and energies, $\vb{C}^{\!\top}\vb{S}\vb{C}=\vb{I}$\\
+\vb{C}\in\R^{N_{\mathrm{AO}}\times N_{\mathrm{MO}}},\ \epsilon_k & canonical MO coefficients and energies, $\vb{C}^{\!\top}\vb{S}\vb{C}=\vb{I}$\\
 \vb{U}^{\occ},\vb{U}^{\virt} & orthogonal localization rotations of the occupied and virtual blocks\\
 \vb{L}=\vb{C}\vb{U} & localized MO (LMO) coefficients; $\vb{l}_r$ the column of LMO $r$\\
+p_{rk} & spectral weight of canonical MO $k$ in LMO $r$\\
 \mathcal{O}^{\occ},\mathcal{O}^{\virt} & sets of occupied and virtual LMO tokens, $N_O=|\mathcal{O}^{\occ}|+|\mathcal{O}^{\virt}|$\\
-E_r & energy of LMO $r$ (eV)\\
+\mathcal{A}_r,\ m(r) & centres of LMO $r$ and its main centre\\
 q_a & Mulliken partial charge of atom $a$\\
-f^{+}_a,f^{-}_a,\Delta f_a & condensed Fukui functions and dual descriptor\\
+f^{+}_a,f^{-}_a,\Delta f_a,\ \omega_{a,k} & condensed Fukui functions, dual descriptor, per-atom frontier weights\\
 \vb{h}_i\in\R^{d} & token-track vector of token $i$ ($d=256$)\\
 \vb{p}_{ij}\in\R^{d_p} & pair-track vector of token pair $(i,j)$ ($d_p=64$)\\
 H & number of attention heads ($H=8$); $h=0$ is the frozen Klopman--Salem head\\
@@ -86,26 +384,10 @@ Tokens are indexed by $i,j$ regardless of family; $N=N_A+N_O$ is the total numbe
 Each molecule is embedded with RDKit ETKDGv3 (explicit hydrogens, MMFF pre-relaxation, RMSD pruning, three candidates), then optimized at the GFN2-xTB level with ALPB implicit water solvation. The lowest-energy xTB conformer is kept. A geometry is accepted only if every input bond $(a,b)$ satisfies $\|\vb{x}_a-\vb{x}_b\|\le 1.3\,(R^{\mathrm{cov}}_a+R^{\mathrm{cov}}_b)$; new contacts are allowed and bonds to Li, Na, K, Mg are not checked. Geometries that break a bond are re-optimized with a flat-bottom harmonic wall on every input bond (penalty beyond $1.2\times$ the covalent-radii sum) and flagged \texttt{RESTRAINED\_GEOM}. Atom order is preserved so that atom-map numbers from the dataset survive.
 
 \subsection{Electronic structure}
-A GFN2-xTB single point at the final geometry provides $\vb{S}$, $\vb{F}$, $\vb{C}$, $\epsilon_p$, occupations, Mulliken charges $q_a$, and the AO-to-atom map with per-AO angular momentum. The total charge is the sum of RDKit formal charges; the number of unpaired electrons is the number of RDKit radical electrons.
+A GFN2-xTB single point at the final geometry provides $\vb{S}$, $\vb{F}$, $\vb{C}$, $\epsilon_k$, occupations, Mulliken charges $q_a$, and the AO-to-atom map with per-AO angular momentum. The total charge is the sum of RDKit formal charges; the number of unpaired electrons is the number of RDKit radical electrons.
 
 \subsection{Conceptual-DFT descriptors}
-Global descriptors from frontier energies:
-\[
-\mu=\tfrac12(\epsilon_{\mathrm{HOMO}}+\epsilon_{\mathrm{LUMO}}),\qquad
-\eta=\tfrac12(\epsilon_{\mathrm{LUMO}}-\epsilon_{\mathrm{HOMO}}),\qquad
-\omega=\mu^2/(2\eta).
-\]
-Two families of condensed Fukui functions are stored per atom. The frozen-orbital form, which is the one used in the token features,
-\[
-f^{+}_a=\sum_{\mu\in a}\sum_{\nu} C_{\mu,\mathrm{LUMO}}\,S_{\mu\nu}\,C_{\nu,\mathrm{LUMO}},\qquad
-f^{-}_a=\sum_{\mu\in a}\sum_{\nu} C_{\mu,\mathrm{HOMO}}\,S_{\mu\nu}\,C_{\nu,\mathrm{HOMO}},
-\]
-and the finite-difference form from $N\pm1$ electron single points at the same geometry,
-\[
-\tilde f^{+}_a=q_a(N)-q_a(N{+}1),\qquad \tilde f^{-}_a=q_a(N{-}1)-q_a(N),\qquad
-\Delta f_a=\tilde f^{+}_a-\tilde f^{-}_a .
-\]
-The frozen-orbital form reflects frontier-orbital shape, which is what the Klopman--Salem orbital term depends on; the finite-difference form is relaxation-dominated and kept as a secondary descriptor.
+Global descriptors $\mu,\eta,\omega$ and the two Fukui families of Section~\ref{sec:cdft} are stored per molecule and per atom. The frozen-orbital $f^\pm_a$ and the per-atom frontier weights $\omega_{a,k}$ for the four orbitals nearest the gap, HOMO$-1$ to LUMO$+1$ (degenerate blocks within $0.05$~eV summed), are model inputs; the finite-difference $\tilde f^\pm_a,\Delta f_a$ are secondary descriptors.
 
 \subsection{Sterics}
 Per-atom buried volume $V^{\mathrm{bur}}_a$ (sphere radius $3.5$~\AA, hydrogens included) is computed on the optimized geometry.
@@ -114,129 +396,243 @@ Per-atom buried volume $V^{\mathrm{bur}}_a$ (sphere radius $3.5$~\AA, hydrogens 
 \label{sec:tokens}
 
 \subsection{Localization}
-Pipek--Mezey localization is applied separately to the occupied valence block and to the virtual block of $\vb{C}$. The functional maximized is the sum of squared Mulliken populations,
-\[
-\mathcal{P}(\vb{U})=\sum_{r}\sum_{a}\big(Q_{a}^{(r)}\big)^2,\qquad
-Q_{a}^{(r)}=\sum_{\mu\in a}\sum_{\nu} L_{\mu r}\,S_{\mu\nu}\,L_{\nu r},
-\]
-by Jacobi $2\times2$ rotations swept until the change is below $10^{-8}$ or $200$ sweeps, started deterministically from the canonical MOs so that a given QM record always yields the same LMOs. GFN2-xTB uses a valence-only basis, so no core orbitals need to be excluded. Because $\vb{U}$ is orthogonal, the LMOs remain $\vb{S}$-orthonormal and span exactly the occupied (or virtual) space.
-
-Localization is a choice of basis inside a fixed subspace, not a chemical assumption: it supplies the \emph{locality} that curved arrows require (an electron pair that can be pointed at) without naming what the pair is.
+Pipek--Mezey localization (Section~\ref{sec:loc}, Appendix~\ref{app:pm}) is applied separately to the occupied valence block and to the virtual block of $\vb{C}$, by Jacobi $2\times2$ rotations swept until the change in $\mathcal{P}$ is below $10^{-8}$ or $200$ sweeps, started deterministically from the canonical MOs so that a given QM record always yields the same LMOs. Singly occupied orbitals (open-shell species) form their own sub-block and are localized separately, so that a radical centre yields one token with occupation $1$ rather than contaminating the doubly occupied and virtual blocks. Fractional occupations from Fermi smearing in vanishing-gap species are kept as the continuous occupation descriptor; such molecules are flagged and their partially occupied tokens are excluded from the candidate sets. Because $\vb{U}$ is orthogonal, the LMOs remain $\vb{S}$-orthonormal and span exactly the occupied (or virtual) space.
 
 \subsection{Spectral decomposition}
-An LMO is not an eigenstate of $\vb{F}$. Instead of a single energy, each LMO carries its decomposition over the canonical MOs of its block,
+Each LMO carries its decomposition over the canonical MOs of its block, Eq.~\eqref{eq:spectral-theory}:
 \begin{equation}
-p_{rk}=U_{kr}^2,\qquad \sum_k p_{rk}=1,\qquad E_r:=\sum_k p_{rk}\,\epsilon_k ,
+p_{rk}=U_{kr}^2,\qquad \sum_k p_{rk}=1,\qquad E_r:=\sum_k p_{rk}\,\epsilon_k .
 \label{eq:spectral}
 \end{equation}
-stored as the set $\set{(\epsilon_k,p_{rk}):p_{rk}\ge0.01}$ (at most eight entries, renormalized). The scalar $E_r$ is kept only as a diagnostic. This is what makes the orbital-interaction term (Section~\ref{sec:ks}) independent of the particular mixture Pipek--Mezey returns inside a flat subspace such as the $\pi$ space of a benzene ring: the mixture changes $p_{rk}$ for individual LMOs, but every energy that enters a denominator is a canonical eigenvalue, and the sum over the ring is invariant.
+The full vector $\vb{p}_r$ is used wherever a physical quantity is computed (the gap factor $G$); for the model input, the set $\set{(\epsilon_k,p_{rk}):p_{rk}\ge0.01}$ (at most eight entries, renormalized) is encoded together with the spectral mean, variance and retained fraction. The scalar $E_r$ is a diagnostic.
 
-\subsection{Centers and continuous descriptors}
-Let $w^{(r)}_a=Q^{(r)}_a/\sum_{a'}Q^{(r)}_{a'}$ be the normalized population of LMO $r$ on atom $a$, and $\mathcal{A}_r$ the set of \emph{centers}, the atoms with $w^{(r)}_a\ge\tau_{\mathrm{atom}}$ ($\tau_{\mathrm{atom}}=0.15$), ordered by decreasing weight. The main center is $m(r)=\arg\max_a w^{(r)}_a$. For the two leading centers $a,b$ let $\hat{\vb{e}}_{ab}$ be the unit vector between them and $\vb{c}^{(r)}_a\in\R^3$ the $p$-coefficient vector of $r$ on $a$. The token is described by continuous quantities only:
+\subsection{Centres and continuous descriptors}
+Let $w^{(r)}_a=Q^{(r)}_a/\sum_{a'}Q^{(r)}_{a'}$ be the normalized population \eqref{eq:orbpop} of LMO $r$ on atom $a$, and $\mathcal{A}_r$ the set of \emph{centres}, the atoms with $w^{(r)}_a\ge\tau_{\mathrm{atom}}$ ($\tau_{\mathrm{atom}}=0.15$), ordered by decreasing weight. The main centre is $m(r)=\arg\max_a w^{(r)}_a$. For the two leading centres $a,b$ let $\hat{\vb{e}}_{ab}$ be the unit vector between them and $\vb{c}^{(r)}_a\in\R^3$ the $p$-coefficient vector of $r$ on $a$. The token is described by continuous quantities only:
 \begin{itemize}[nosep]
-\item occupation $n_r\in\set{2,0}$ (1 reserved for singly occupied orbitals);
+\item occupation $n_r$ ($2$, $0$, $1$ for singly occupied, fractional when smeared);
 \item $|\mathcal{A}_r|$ and the four largest weights $w^{(r)}_a$, zero-padded;
-\item per-center $s$, $p$, $d$ fractions of the orbital's population (four leading centers);
+\item per-centre $s$, $p$, $d$ fractions of the orbital's population (four leading centres);
 \item $\sigma$-versus-$\pi$ character as a number: $\chi_a=|\cos\angle(\vb{c}^{(r)}_a,\hat{\vb{e}}_{ab})|$ and $\chi_b$;
-\item the overlap population between $a$ and $b$, $\Pi^{(r)}_{ab}=2\sum_{\mu\in a,\nu\in b}L_{\mu r}S_{\mu\nu}L_{\nu r}$, whose sign distinguishes bonding from antibonding, and the distance $R_{ab}$;
-\item spatial extent: the population-weighted radius of gyration of the centers about the centroid $\bar{\vb{x}}_r=\sum_a w^{(r)}_a\vb{x}_a$;
-\item the spectral set of Eq.~\eqref{eq:spectral}.
+\item the overlap population $\Pi^{(r)}_{ab}$ of Eq.~\eqref{eq:overlappop}, whose sign distinguishes bonding from antibonding, and the distance $R_{ab}$;
+\item spatial extent: the population-weighted radius of gyration of the centres about the centroid $\bar{\vb{x}}_r=\sum_a w^{(r)}_a\vb{x}_a$;
+\item the spectral set of Eq.~\eqref{eq:spectral} with its summary statistics.
 \end{itemize}
-A categorical label (lone pair, $\sigma$, $\pi$, $\sigma^*$, $\pi^*$, empty $p$) is still computed from these same quantities by a rule-based classifier, but it is marked as not a model input and is used only in unit tests, alignment diagnostics and the user interface. The rationale is that orbital \emph{character} must generalize across elements: a $\sigma^*(\mathrm{C{-}Cl})$, a $\sigma^*(\mathrm{C{-}Br})$ and a $\sigma^*(\mathrm{C{-}I})$ should look to the model like the same kind of acceptor at different energies, and a nitrogen lone pair and a carbanion like the same kind of donor; a label would hide that, the descriptors expose it. Delocalized orbitals need no special treatment: a ring $\pi$ orbital spread over four carbons is simply a token with four centers.
+A categorical label (lone pair, $\sigma$, $\pi$, $\sigma^*$, $\pi^*$, empty $p$) is still computed from these same quantities by a rule-based classifier, but it is marked as not a model input and is used only in unit tests, alignment diagnostics and the user interface. The rationale is that orbital \emph{character} must generalize across elements: a $\sigma^*(\mathrm{C{-}Cl})$, a $\sigma^*(\mathrm{C{-}Br})$ and a $\sigma^*(\mathrm{C{-}I})$ should look to the model like the same kind of acceptor at different energies, and a nitrogen lone pair and a carbanion like the same kind of donor; a label would hide that, the descriptors expose it. Delocalized orbitals need no special treatment: a ring $\pi$ orbital spread over four carbons is simply a token with four centres.
 
 \subsection{Token features}
 \begin{definition}[Atom token]
 \begin{align*}
 \vb{u}_a=\big[&Z_a,\ \text{formal charge},\ \text{chirality sign},\ q_a,\ f^+_a,\ f^-_a,\ \Delta f_a,\\
-&\omega_{a,\mathrm{HOMO-1}},\ \omega_{a,\mathrm{HOMO}},\ \omega_{a,\mathrm{LUMO}},\ \omega_{a,\mathrm{LUMO+1}},\ V^{\mathrm{bur}}_a\big],\quad\text{plus the position }\vb{x}_a ,
+&\omega_{a,\mathrm{HOMO-1}},\ \omega_{a,\mathrm{HOMO}},\ \omega_{a,\mathrm{LUMO}},\ \omega_{a,\mathrm{LUMO+1}},\ V^{\mathrm{bur}}_a\big],\quad\text{plus the position }\vb{x}_a .
 \end{align*}
-where $\omega_{a,k}=\sum_{\mu\in a}\sum_\nu C_{\mu k}S_{\mu\nu}C_{\nu k}$ is the frozen-orbital weight of canonical MO $k$ on atom $a$ (degenerate blocks within $0.05$~eV summed). Hybridization, aromaticity flags and functional-group ids are computed and stored for tests, the interface and ablations, but are not model inputs: they are chemists' taxonomies, derivable from geometry, angular composition and the $\pi$ spectrum, and injecting them would contradict the treatment of orbital tokens.
+Hybridization, aromaticity flags and functional-group ids are computed and stored for tests, the interface and ablations, but are not model inputs: they are chemists' taxonomies, derivable from geometry, angular composition and the $\pi$ spectrum, and injecting them would contradict the treatment of orbital tokens.
 \end{definition}
 \begin{definition}[Orbital token]
 \begin{align*}
 \vb{v}_r=\big[&n_r,\ |\mathcal{A}_r|,\ (w^{(r)}_a)_{a\in\mathcal{A}_r},\ (s,p,d)\text{-fractions},\ \chi_a,\chi_b,\\
-&\Pi^{(r)}_{ab},\ R_{ab},\ R_{\mathrm{gyr}},\ \set{(\epsilon_k,p_{rk})}\big],\quad\text{plus }\bar{\vb{x}}_r,\ \mathcal{A}_r\text{ and }\vb{l}_r .
+&\Pi^{(r)}_{ab},\ R_{ab},\ R_{\mathrm{gyr}},\ \set{(\epsilon_k,p_{rk})}\big],\quad\text{plus }\bar{\vb{x}}_r,\ \mathcal{A}_r,\ \vb{p}_r\text{ and }\vb{l}_r .
 \end{align*}
 \end{definition}
-The coefficient vector $\vb{l}_r$ is kept on the token only to evaluate the Klopman--Salem overlaps; it is not embedded directly.
+The coefficient vector $\vb{l}_r$ and the full spectral vector $\vb{p}_r$ are kept on the token only to evaluate the Klopman--Salem terms; they are not embedded directly.
 
 \begin{remark}
-The per-atom frontier weights $\omega_{a,k}$ carry exactly the cross-LMO information that a token-level spectral marginal cannot: the ortho/para preference of anisole's HOMO lives in $\omega_{a,\mathrm{HOMO}}$ and reaches the orbital tokens through their center embeddings (Section~\ref{sec:model}).
+The per-atom frontier weights $\omega_{a,k}$ carry exactly the cross-LMO information that a token-level spectral marginal cannot: the ortho/para preference of anisole's HOMO lives in $\omega_{a,\mathrm{HOMO}}$ and reaches the orbital tokens through their centre embeddings (Section~\ref{sec:model}).
 \end{remark}
+
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[x=1.3cm,y=1.3cm]
+\node[atom] (C) at (0,0) {C};
+\node[atom] (O) at (0,1.15) {O};
+\draw[dbond] (C)--(O);
+\lonepair{(0,1.15)}{50}\lonepair{(0,1.15)}{130}
+\node[atom] (M1) at (-1.05,-0.55) {H$_3$C};
+\node[atom] (M2) at (1.05,-0.55) {CH$_3$};
+\draw[bond] (C)--(M1); \draw[bond] (C)--(M2);
+\node[lobe] at (-0.42,0.58) [ellipse, minimum width=3mm, minimum height=7mm] {};
+\node[lobe] at (0.42,0.58) [ellipse, minimum width=3mm, minimum height=7mm] {};
+\node[tag] at (-0.95,0.6) {B};
+\node[tag] at (0.8,1.5) {A};
+\node[tag] at (-0.4,-0.6) {C};
+\node[tag] at (0.95,0.65) {D};
+\node[tag] at (0.45,-0.55) {E};
+\node[font=\scriptsize, align=center, text=gray!60!black] at (0,-1.3) {A: $n_{\mathrm O}$\quad B: $\pi$\quad C: $\sigma_{\mathrm{CC}}$\quad D: $\pi^*$\quad E: $\sigma^*_{\mathrm{CC}}$\\ (names for the reader only)};
+\end{tikzpicture}
+
+\vspace{6pt}
+\begin{tabular}{@{}lccccl@{}}
+\toprule
+token & $n_r$ & centres (weights) & $\chi$ & $\Pi$ & spectral set $(\epsilon_k,p_{rk})$\\
+\midrule
+A & 2 & O (0.96) & -- & -- & $(-12.4,\,0.9)$\\
+B & 2 & O (0.68), C (0.32) & $0.1$ & $>0$ & $(-14.1,\,0.8),\,(-15.0,\,0.1)$\\
+C & 2 & C (0.53), C (0.49) & $0.9$ & $>0$ & $(-15.0,\,0.7),\,(-13.9,\,0.2)$\\
+D & 0 & C (0.62), O (0.31) & $0.1$ & $<0$ & $(-6.3,\,0.9)$\\
+E & 0 & C (0.5), C (0.5) & $0.9$ & $<0$ & $(4.9,\,0.8)$\\
+\bottomrule
+\end{tabular}
+\caption{Tokenization of acetone. Left: the localized orbitals a chemist would name. Right: what the model receives for five of them, the continuous descriptors of Section~\ref{sec:tokens} (energies in eV, from the GFN2-xTB fixture run; $\chi$ is the cosine between the $p$ vector on the main centre and the inter-centre axis, $\Pi$ the overlap population). Token A is a one-centre occupied orbital on O; B is two-centre, perpendicular ($\chi\approx0.1$), bonding; D is its virtual counterpart with the weight shifted to carbon and $\Pi<0$. The names in the left panel are recoverable from the right panel, which is the point: the model gets the physics the names summarize, not the names.}
+\label{fig:tokens}
+\end{figure}
 
 \section{The Klopman--Salem decomposition}
 \label{sec:ks}
+This section specifies how the three terms of Eq.~\eqref{eq:ks-theory} are evaluated for a pair of tokens. The physics is in Section~\ref{sec:pt}; here only the operational definitions are fixed.
 
-\subsection{The equation}
-For two closed-shell fragments brought into interaction, second-order perturbation theory in an AO basis gives
+\subsection{Resonance integrals and physical constants}
 \begin{equation}
-\small
-\Delta E
-=\underbrace{-\sum_{a,b}\big(q_a+q_b\big)\,\beta_{ab}\,S_{ab}}_{\text{(1) filled--filled repulsion}}
-\;+\;\underbrace{\sum_{k<l}\frac{Q_kQ_l}{\varepsilon R_{kl}}}_{\text{(2) Coulomb}}
-\;+\;\underbrace{\sum_{r\in\occ}\sum_{s\in\virt}\frac{2\big(\sum_{a,b}c_{ra}\,c_{sb}\,\beta_{ab}\big)^2}{E_r-E_s}}_{\text{(3) filled--empty orbital interaction}} ,
-\label{eq:ks}
+\beta_{\mu\nu}=K\,S_{\mu\nu}\,\tfrac12\big(F_{\mu\mu}+F_{\nu\nu}\big),\qquad K=1.75 \text{ at initialization},
 \end{equation}
-where in term (1) the sum runs over AO pairs of doubly occupied orbitals on the two fragments, term (2) over atom pairs, and term (3) over all occupied orbitals of one fragment and virtual orbitals of the other (both directions). Term (1) is the four-electron closed-shell repulsion (sterics), term (2) is the charge-controlled contribution, and term (3) is the orbital-controlled (frontier) contribution; the last is dominated by the pairs with the smallest gap $|E_r-E_s|$, which is the HOMO--LUMO argument.
+with the converged Fock diagonal as the AO energy. $K$ and the dielectric $\varepsilon$ of the Coulomb term are the only empirical constants in the physics. They are treated as shared learnable scalars initialized at their textbook values: the prior is the functional form of Eq.~\eqref{eq:ks-theory}, not two numbers, and the frozen head uses the learned values.
 
-\subsection{Resonance integrals}
-The resonance integral is approximated with the Wolfsberg--Helmholz relation on the GFN2 Fock diagonal,
+\subsection{Orbital term}
+\label{sec:ks3}
+For a donor $r\in\mathcal{O}^{\occ}$ and an acceptor $s\in\mathcal{O}^{\virt}$, following Eq.~\eqref{eq:ks3-theory},
 \begin{equation}
-\beta_{\mu\nu}=K\,S_{\mu\nu}\,\tfrac12\big(F_{\mu\mu}+F_{\nu\nu}\big),\qquad K=1.75 \text{ at initialization}.
-\end{equation}
-$K$ and the dielectric $\varepsilon$ of the Coulomb term are the only empirical constants in the physics. They are treated as shared learnable scalars initialized at their textbook values: the prior is the functional form of Eq.~\eqref{eq:ks}, not two numbers, and the frozen head uses the learned values.
-
-\subsection{Pairwise evaluation on tokens}
-Equation~\eqref{eq:ks} is a sum over pairs, so each term can be evaluated for one pair of tokens and used as a pair feature. With LMO coefficient vectors, the double AO sum in term (3) collapses to the few atoms carrying the two orbitals.
-
-\paragraph{Orbital term, pair $(r,s)$, $r\in\mathcal{O}^{\occ}$, $s\in\mathcal{O}^{\virt}$.}
-Because LMOs are not eigenstates, the second-order energy is evaluated through their spectral decompositions of Eq.~\eqref{eq:spectral}:
-\begin{equation}
-\KS_3(r,s)=\big(\vb{l}_r^{\!\top}\,\vb{B}\,\vb{l}_s\big)^2\,G(r,s),\qquad
-G(r,s)=\sum_{k\in\occ}\sum_{m\in\virt}\frac{2\,p_{rk}\,p_{sm}}{\epsilon_k-\epsilon_m},
+\begin{split}
+\KS_3(r,s)&=\beta_{rs}^2\,G(r,s),\qquad
+G(r,s)=\sum_{k\in\occ}\sum_{m\in\virt}\frac{2\,p_{rk}\,p_{sm}}{\epsilon_k-\epsilon_m},\\
+\beta_{rs}&=\sum_{\mu\nu} l_{\mu r}\,l_{\nu s}\,K\,S^{\mathrm{c}}_{\mu\nu}\,\tfrac12\big(F_{\mu\mu}+F_{\nu\nu}\big),
+\end{split}
 \label{eq:ks3}
 \end{equation}
-with $B_{\mu\nu}=\beta_{\mu\nu}$ for AOs on different atoms and $0$ otherwise.
-The coupling uses the localized coefficients (it is the overlap of the two lobes that meet), while every denominator is a difference of canonical eigenvalues. Since $\epsilon_k<\epsilon_m$, $G<0$ and $\KS_3<0$; more negative means more stabilizing. The numerator $\big(\vb{l}_r^{\!\top}\vb{B}\vb{l}_s\big)^2$ and $G$ are stored separately as well, so the network can reweight them, and the dominant pair $(k,m)$ in $G$ is reported as the physical explanation of a predicted arrow. For a one-component LMO ($p_{rk}=\delta_{kk_0}$, $p_{sm}=\delta_{mm_0}$) Eq.~\eqref{eq:ks3} reduces to the textbook form $2(\cdot)^2/(\epsilon_{k_0}-\epsilon_{m_0})$.
+where $G$ is computed from the \emph{full} spectral vectors and $S^{\mathrm{c}}_{\mu\nu}$ is the AO overlap matrix at the \emph{contact} geometry of the two orbitals, defined in Section~\ref{sec:contact} and evaluated identically for every pair. The resonance integral is contracted at the AO level, with the AO diagonal energies $F_{\mu\mu}$, which are negative for every valence shell. The orbital-level shortcut $K\,S^{\mathrm c}_{rs}\,\tfrac12(F_{rr}+F_{ss})$ must not be used: for an antibonding acceptor $F_{ss}>0$, the mean cancels against $F_{rr}<0$ and the coupling vanishes spuriously (this was observed for $\sigma^*$(H--Br), whose diagonal energy is $+8.8$~eV in GFN2). An optional refinement, not part of the default pipeline, reads the coupling from a GFN2-xTB calculation on a placed complex (Section~\ref{sec:beyond}), $\beta^{\mathrm F}_{rs}=\vb{l}_r^{\!\top}\vb{F}_{\mathrm c}\,\vb{l}_s-\tfrac12(E_r+E_s)\,\vb{l}_r^{\!\top}\vb{S}_{\mathrm c}\,\vb{l}_s$, for the most heavily weighted configurations of a pair. $G<0$ and $\KS_3<0$; more negative means more stabilizing. $\beta_{rs}^2$ and $G$ are stored separately as well, so the network can reweight them, and the dominant pair $(k,m)$ in $G$ is reported as the physical explanation of a predicted arrow.
 
-\paragraph{Coulomb term, atom pair $(k,l)$.}
+\subsection{Coulomb term}
 \begin{equation}
-\KS_2(k,l)=\frac{q_k\,q_l}{\varepsilon\,R_{kl}},\qquad \varepsilon=4.0 .
+\KS_2(k,l)=\frac{q_k\,q_l}{\varepsilon\,R_{kl}},\qquad \varepsilon=4.0 \text{ at initialization},
 \end{equation}
-For an orbital pair $(r,s)$ the Coulomb feature is $\KS_2(m(r),m(s))$ between the two main centers.
+between atoms. For an orbital pair $(r,s)$ the Coulomb feature is taken between the two site atoms in \emph{difference form}, as the change in electrostatic energy on going from the reactant geometry to contact,
+\begin{equation}
+\KS_2(r,s)=\frac{q_a\,q_b}{\varepsilon}\Big(\frac{1}{R_{\mathrm c}}-\frac{1}{R^{\mathrm{reac}}_{ab}}\Big),
+\end{equation}
+with $R^{\mathrm{reac}}_{ab}=\infty$ across fragments (the plain contact value) and the actual distance within a fragment. For bonded or geminal sites the two terms nearly cancel, so a bond's own polarity is not counted as an attraction; for a chain that must fold, the full contact value is recovered. This is the perturbative $\Delta E$ reading of Eq.~\eqref{eq:ks-theory}, consistent with the treatment of the orbital term.
 
-\paragraph{Repulsion term, pair $(r,r')$ of occupied orbitals.}
+\subsection{Repulsion term}
 \begin{equation}
 \KS_1(r,r')=-\sum_{\mu\in r,\ \nu\in r'}\big(q_{a(\mu)}+q_{a(\nu)}\big)\,\beta_{\mu\nu}\,S_{\mu\nu}\,l_{\mu r}\,l_{\nu r'} ,
 \end{equation}
-where $a(\mu)$ is the atom of AO $\mu$. For a donor--acceptor pair $(r,s)$ the steric feature is the repulsion between $r$ and the occupied orbitals in the neighbourhood of $s$: $\KS_1(r,s):=\sum_{r'\in\mathcal{N}(s)}\KS_1(r,r')$, with $\mathcal{N}(s)$ the occupied LMOs whose main center is within $3.5$~\AA\ of $m(s)$.
+for two occupied orbitals in one fragment, where $a(\mu)$ is the atom of AO $\mu$. The expression is evaluated as a magnitude per orbital pair: the LMO coefficient products $l_{\mu r}l_{\nu r'}$ carry the arbitrary overall sign of each localized orbital, and summing signed contributions lets them cancel at random. For a donor--acceptor pair $(r,s)$ the steric feature is the repulsion between $r$ and the occupied orbitals in the neighbourhood of $s$: $\KS_1(r,s):=\sum_{r'\in\mathcal{N}(s)}\KS_1(r,r')$, with $\mathcal{N}(s)$ the occupied LMOs whose main centre is within $3.5$~\AA\ of $m(s)$. At contact, for intra- and intermolecular pairs alike, the same expression is evaluated between the donor's occupied LMOs within $4.5$~\AA\ of its site and the acceptor side's occupied LMOs at the placed geometry; together with the pairwise repulsion of GFN2-xTB it forms the short-range wall that fixes the contact distance (Section~\ref{sec:contact}). With this sign convention $\KS_1\ge0$ is a destabilization, and the total Klopman--Salem estimate is $\Delta E_{\KS}=\KS_1+\KS_2+\KS_3$. As for the Coulomb term, the pair feature is the change on going to contact, $\KS_1(\text{placed})-\KS_1(\text{reactant pose})$ over the same orbital pairs: the closed-shell repulsion already present between neighbouring orbitals of one molecule at their equilibrium distances does not depend on the step and is not counted. No buried-volume factor enters.
 
-\subsection{Intramolecular versus intermolecular pairs}
+\subsection{Contact geometry: a configurational treatment}
 \label{sec:contact}
-When $\phi(r)=\phi(s)$ (same fragment) the geometry is known and $S_{\mu\nu}$, $\beta_{\mu\nu}$, $R_{kl}$ are taken from the xTB matrices. When $\phi(r)\ne\phi(s)$ no geometry exists: the reactants have not met. The geometry-dependent factors are then replaced by \emph{contact} values, while the energy gap and the orbital coefficients on the reacting atoms remain exact.
-
-\paragraph{Contact overlap table.} A scalar $\bar S[\kappa]$ indexed by the dominant atomic shells of the two orbitals,
-\[
-\kappa=\big(Z_{m(r)},\ \ell_r,\ Z_{m(s)},\ \ell_s\big),
-\]
-where $\ell_r$ is the angular momentum of the AO carrying most of $r$'s population on its main center, is built once from intramolecular statistics: for every non-bonded atom pair $(a,b)$ in the cache whose separation is within $\pm0.3$~\AA\ of $R^{\mathrm{vdW}}_a+R^{\mathrm{vdW}}_b$, and every occupied $r$ with $m(r)=a$ and virtual $s$ with $m(s)=b$, record $|\vb{l}_r^{\!\top}\vb{S}_{ab}\vb{l}_s|$ restricted to the AOs on $a$ and $b$; $\bar S[\kappa]$ is the median over the group. Unseen keys back off to $(Z_a,Z_b)$, then to $(\ell_r,\ell_s)$, then to a global median. No orbital label enters the key. For an intermolecular pair the orbital term becomes
+As argued in Sections~\ref{sec:contact-theory} and~\ref{sec:beyond}, the coupling of two orbitals must be evaluated where their lobes meet, and that geometry is unknown for intermolecular pairs (no complex exists) and for intramolecular pairs (the reactant conformer is not the reactive one). Rather than choosing an approach geometry by rule, the model integrates over it. For each pair a set of relative configurations $\set{x_i}$ of the two local fragments is sampled and weighted by
 \begin{equation}
-\KS_3^{\mathrm{inter}}(r,s)=\Big(K\,\bar S[\kappa]\,\tfrac12(F_{rr}+F_{ss})\,w^{(r)}_{m(r)}\,w^{(s)}_{m(s)}\Big)^2\,G(r,s),
+w_i\propto\exp\!\big(-E_i/\tau\big),\qquad E_i=\KS_3(x_i)+\KS_2(x_i)+\KS_1(x_i)+E_{\mathrm{link}}(x_i),
 \end{equation}
-the Coulomb term uses $R_{kl}=R^{\mathrm{vdW}}_k+R^{\mathrm{vdW}}_l$, and the repulsion term uses the product $V^{\mathrm{bur}}_{m(r)}V^{\mathrm{bur}}_{m(s)}$ together with the occupied--occupied contact overlap.
+where $E_{\mathrm{link}}$ is the cost of realizing the configuration: the short-range pairwise repulsion of GFN2-xTB for two separate molecules, the conformational strain of the linker for two sites of one molecule. The quantity assigned to the pair is the \emph{configurational free energy}
+\begin{equation}
+F_{rs}=-\tau\log\Big\langle e^{-E_i/\tau}\Big\rangle_i ,
+\label{eq:Frs}
+\end{equation}
+together with the weighted averages and variances of the four terms, the free-energy profile along the site--site distance, the effective pose and the fraction of accessible configurations. $F_{rs}$ includes the orientational entropy of the approach: a hindered site has few low-energy configurations and a higher $F$ even when its best configuration is good. The only parameter is $\tau$, which is also the temperature scale of the frozen head, whose logit is $-F_{rs}/\tau$: attention between two orbitals is then a ratio of partition functions.
 
-\paragraph{Orbital-descriptor kernel and analytic overlap.} Behind a configuration flag the table is replaced by $\bar S(r,s)=\MLP([\vb{v}_r,\vb{v}_s])$ over the continuous descriptors, fitted by regression on the same contact statistics; the two are compared in the ablation study. The intended long-term replacement for both is the analytic overlap of the two LMOs placed at contact distance along their main lobes, computed from $\vb{l}_r$, $\vb{l}_s$ and the GFN2 basis functions: a genuine orbital--orbital quantity with no fitted parameters.
+\paragraph{Why the construction is cheap.} Localized orbitals are local, so a cap (the orbital's centres and their first neighbours) can be transported rigidly with its LMO coefficients into any configuration (a Kabsch fit on the cap atoms); no electronic-structure calculation is repeated. For intermolecular pairs the configurations are rigid poses of the two caps, and they are sampled once per \emph{site pair}: one AO overlap matrix between the caps per pose serves every orbital pair on those sites by contraction. For intramolecular pairs the configurations are the conformers of the molecule, generated once per \emph{molecule} (distance-geometry embedding and force-field minimization, 20--30 conformers), with $E_{\mathrm{link}}=E_{\mathrm{conf}}-E_{\min}$; ring strain enters through the distribution of the site--site distance in the ensemble, extrapolated harmonically beyond the sampled range (the one modelling assumption). Pairs whose sites never come within $4$~\AA\ in the ensemble receive the extrapolated penalty and a flag. Bonded sites (Section~\ref{sec:bonded}) are not sampled.
+
+\paragraph{Bonded sites.}\label{sec:bonded} When the two sites are already bonded the step raises a bond order instead of forming a bond: the collapse of a tetrahedral intermediate ($n_{\mathrm O^-}\to\sigma^*_{\mathrm{C-LG}}$ with O--C bonded), an E1cB elimination, a fragmentation. There is no approach to sample, and a pose at a distance longer than the existing bond would turn the attraction into a spurious penalty. For such pairs $\KS_3$ is computed from the cross-centre coupling in the reactant pose (AO blocks between the donor's and the acceptor's centres), which carries the antiperiplanar requirement of negative hyperconjugation, and $\KS_2$, $\KS_1$ and $E_{\mathrm{link}}$ are zero.
+
+\paragraph{What is left out, and where it returns.} The reacting centres are rigid, so their deformation (pyramidalization, stretching of a leaving bond) is not counted, and a force-field ensemble does not sample the strained conformers that some ring closures require. Both return as refinements of the most heavily weighted configurations with a machine-learned potential, and ultimately through computed transition states (Section~\ref{sec:beyond}); neither changes the estimator.
+
+\paragraph{Baselines.} The fixed-distance oriented overlap ($2.3$~\AA\ along the lobe axis) and two statistical kernels (a table of median overlaps at van der Waals contact indexed by dominant shells, and a small network over the two tokens' descriptors) are kept only as ablation baselines; the statistical kernels systematically favour contacts with hydrogen and $s$ shells, because random-orientation van der Waals contacts are not reactive approaches.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[atom] (Nu) at (0,0) {Nu};
+\lonepair{(0,0)}{0}
+\node[chem] at (-0.45,0.3) {$\ominus$};
+\node[lobe] at (0.75,0) [ellipse, minimum width=9mm, minimum height=5mm] {};
+\node[atom] (C) at (2.4,0) {C};
+\node[atom] (Ha) at (2.1,0.7) {H};\node[atom] (Hb) at (2.3,-0.75) {H};\node[atom] (Hc) at (2.9,0.65) {H};
+\draw[bond] (C)--(Ha);\draw[bond] (C)--(Hb);\draw[bond] (C)--(Hc);
+\node[atom] (Cl) at (3.7,0) {Cl};
+\draw[bond] (C)--(Cl);
+\node[lobestar] at (1.75,0) [ellipse, minimum width=8mm, minimum height=4.5mm] {};
+\node[lobestar] at (3.15,0) [ellipse, minimum width=4mm, minimum height=2.5mm] {};
+\draw[-{Latex[length=1.8mm]}, blue!70!black, thick] (0.35,0.55) -- node[above,font=\scriptsize]{$\hat{\vb n}_r$} (1.5,0.55);
+\draw[-{Latex[length=1.8mm]}, red!70!black, thick] (2.1,-0.55) -- node[below,font=\scriptsize]{$\hat{\vb n}_s$} (1.1,-0.55);
+\draw[<->, gray] (0,-1.1) -- node[below,font=\scriptsize]{$d$} (2.4,-1.1);
+\node[font=\scriptsize, align=center] at (1.85,-1.75) {(A) $\sigma^*$ acceptor, site C: the backside lobe,\\ $\hat{\vb n}_s=-\hat{\vb n}_r$, one sampled pose at distance $d$};
+\begin{scope}[xshift=8.0cm]
+\node[atom] (Cc) at (0,0) {C};
+\node[atom] (Oc) at (1.2,0) {O};
+\draw[dbond] (Cc)--(Oc);
+\lonepair{(1.2,0)}{60}\lonepair{(1.2,0)}{-60}
+\node[atom] (R1) at (-0.75,-0.65) {H$_3$C};
+\node[atom] (R2) at (-1.15,0.25) {H$_3$C};
+\draw[bond] (Cc)--(R1);\draw[bond] (Cc)--(R2);
+\node[lobestar] at (0,0.85) [ellipse, minimum width=4.5mm, minimum height=7mm] {};
+\node[lobestar] at (1.2,0.65) [ellipse, minimum width=3mm, minimum height=4.5mm] {};
+\node[atom] (Nu2) at (-0.95,2.7) {Nu};
+\lonepair{(-0.95,2.7)}{-65}
+\node[lobe] at (-0.45,1.85) [ellipse, minimum width=4.5mm, minimum height=7mm, rotate=-25] {};
+\draw[-{Latex[length=1.8mm]}, blue!70!black, thick] (-1.35,2.35) -- (-0.7,1.4);
+\draw[dashed] (0,0) -- (0,2.6);
+\draw[dashed] (0,0) -- (-1.0,2.55);
+\node[font=\scriptsize] at (0.55,2.2) {$\sim107^\circ$};
+\node[font=\scriptsize, align=center] at (0.3,-1.75) {(B) $\pi^*$ acceptor, site C: the lobe perpendicular\\ to the plane at C; the B\"urgi--Dunitz angle emerges};
+\end{scope}
+\end{tikzpicture}
+\caption{The oriented contact construction (Appendix~\ref{app:overlap}). The lobe direction of each orbital is found from its own AO coefficients on the site atom, restricted to the hemisphere pointing away from the orbital's other centres; shown here is one high-weight configuration of the sampled set: the acceptor cap placed where the lobes meet, with the overlap computed analytically. The configurational treatment of Section~\ref{sec:contact} weights many such poses instead of selecting one. Blue: donor lobe; red: acceptor lobes, the larger one on the site atom.}
+\label{fig:contact}
+\end{figure}
+
+Intramolecular pairs carry additional features that intermolecular pairs cannot have: the centroid distance $\|\bar{\vb{x}}_r-\bar{\vb{x}}_s\|$ (how far the chain must fold); the \emph{cross-centre coupling} $\vb{l}_r^{\!\top}\vb{B}\vb{l}_s$ restricted to AO blocks between the centres of $r$ and the centres of $s$ in the reactant pose, which is non-zero and measures pre-organization; the \emph{stereoelectronic alignment}, the cosine between the donor and acceptor lobe axes in the reactant pose and, when the two orbitals sit on adjacent bonds, the cosine of the site--partner--partner--site dihedral (the antiperiplanar requirement of eliminations and migrations); and, for refined candidates, $\Delta G_{\mathrm{fold}}$.
 
 \begin{remark}
 Pairs are ordered (donor first). The diene$\to$dienophile and dienophile$\to$diene interactions of a Diels--Alder reaction are distinct candidates and both are enumerated.
 \end{remark}
 
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+% methoxide
+\node[atom] (C1) at (0,0) {H$_3$C};
+\node[atom] (O1) at (1.1,0) {O};
+\draw[bond] (C1)--(O1);
+\lonepair{(1.1,0)}{90}\lonepair{(1.1,0)}{0}\lonepair{(1.1,0)}{270}
+\node[chem] at (1.6,0.38) {$\ominus$};
+% ethyl bromide
+\node[atom] (Ca) at (3.4,0) {C};
+\node[atom] (Cb) at (4.6,0) {C};
+\node[atom] (Br) at (5.7,0) {Br};
+\node[atom] (Ha1) at (3.05,0.62) {H};\node[atom] (Ha2) at (2.7,-0.25) {H};\node[atom] (Ha3) at (3.3,-0.7) {H};
+\node[atom] (Hb1) at (4.6,0.78) {H};\node[atom] (Hb2) at (4.6,-0.78) {H};
+\draw[bond] (Ca)--(Cb);\draw[bond] (Cb)--(Br);
+\draw[bond] (Ca)--(Ha1);\draw[bond] (Ca)--(Ha2);\draw[bond] (Ca)--(Ha3);
+\draw[bond] (Cb)--(Hb1);\draw[bond] (Cb)--(Hb2);
+% candidate A: SN2
+\draw[arrow] (1.45,0.15) .. controls (2.2,1.5) and (4.0,1.6) .. (4.5,0.3);
+\node[tag, anchor=south] at (3.0,1.35) {A: $r=n_{\mathrm O}$, $a=\mathrm{O}$; $s=\sigma^*$(C--Br), $b=\mathrm{C}_\alpha$};
+% candidate B: E2 first arrow
+\draw[arrow, blue!60!black] (1.4,-0.25) .. controls (1.7,-1.0) and (2.2,-1.0) .. (2.55,-0.4);
+\node[tag, anchor=north, text=blue!60!black] at (2.6,-1.25) {B: $r=n_{\mathrm O}$, $a=\mathrm{O}$; $s=\sigma^*$(C$_\beta$--H), $b=\mathrm{H}$};
+\end{tikzpicture}
+
+\vspace{6pt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & candidate A (S$_\mathrm{N}$2) & candidate B (E2, first arrow)\\
+\midrule
+$G(r,s)$ & $\sigma^*$(C--Br) low: large $|G|$ & $\sigma^*$(C--H) high: small $|G|$\\
+$S^{\mathrm c}_{rs}$ & backside lobe at C$_\alpha$, $p$-type & lobe beyond H, $s$-type\\
+$\KS_2$ & O$^{\delta-}$ / C$^{\delta+}$: attractive & O$^{\delta-}$ / H$^{\delta+}$: attractive, larger\\
+$\KS_1$ & crowded C$_\alpha$ & exposed H\\
+\bottomrule
+\end{tabular}
+\caption{Two of the $\sim$60 candidate tuples for methoxide + ethyl bromide, and how the three Klopman--Salem terms see them. Orbital control (large $|G|$) favours A, charge control ($\KS_2$ on a polarized C--H) and sterics favour B. The untrained ranking by $\KS_3$ alone puts A first; which one wins experimentally depends on base strength, hindrance and temperature, and that residual is what the learned heads must supply. The classifier labels in the table are for the reader; the model works from the descriptors.}
+\label{fig:sn2e2}
+\end{figure}
+
 \subsection{Pair feature vector}
-For an ordered pair of tokens $(i,j)$ the physics features are
-\begin{equation}
-\vb{z}_{ij}=\big[\KS_3,\ (\vb{l}^{\!\top}\vb{B}\vb{l})^2,\ G,\ \KS_2,\ \KS_1,\ \mathbb{1}[\phi(i)\ne\phi(j)],\ \tilde R_{ij}\big]\in\R^7,
-\end{equation}
-with undefined entries set to zero and $\tilde R_{ij}$ the centroid distance (intramolecular) or the vdW contact distance (intermolecular). All entries are standardized with training-set statistics.
+For an ordered pair of tokens $(i,j)$ the pair features are
+\begin{itemize}[nosep]
+\item geometry-free (stage A): $G$ and $\log|G|$; $\mathbb{1}[\phi(i)\ne\phi(j)]$; bonded flag, bond order, graph distance; centroid distance and its RBF expansion (intramolecular); cross-centre coupling and stereoelectronic alignment cosines in the reactant pose;
+\item configurational (stage B, zero and masked in stage A): $F_{rs}$; $\langle\KS_3\rangle,\langle\KS_2\rangle,\langle\KS_1\rangle,\langle E_{\mathrm{link}}\rangle$ and their variances; $F$ per distance shell; effective distance; accessible fraction; flags.
+\end{itemize}
+All entries are standardized with training-set statistics for the learned heads; the frozen head uses $-F_{rs}/\tau$ in eV.
 
 \section{Model architecture}
 \label{sec:model}
@@ -250,16 +646,19 @@ with undefined entries set to zero and $\tilde R_{ij}$ the centroid distance (in
 \node[box, fill=blue!6] (tok) {Token track $\vb{h}_i$\\ \scriptsize atom + orbital embeddings};
 \node[box, fill=green!8, right=of tok] (pair) {Pair track $\vb{p}_{ij}$\\ \scriptsize RBF(dist), $\vb{z}_{ij}$, graph flags};
 \node[box, fill=gray!10, below=of $(tok)!0.5!(pair)$, minimum width=72mm] (enc) {$L=8$ encoder layers\\ \scriptsize logit$_{ij}^{(h)}=\vb{q}_i^{\!\top}\vb{k}_j/\sqrt{d_h}+\vb{w}_h^{\!\top}\vb{p}_{ij}+b^{\KS}_h(i,j)$;\ head 0 frozen to $b^{\KS}$};
-\node[box, fill=blue!6, below=of enc, minimum width=50mm] (dec) {Pointer decoder\\ \scriptsize donor $\to$ acceptor $\to$ stop};
+\node[box, fill=blue!6, below=of enc, minimum width=50mm] (dec) {Pointer decoder\\ \scriptsize donor $\to$ site $\to$ acceptor $\to$ site $\to$ stop};
 \node[box, fill=orange!10, right=of dec, minimum width=30mm] (app) {Apply arrows\\ \scriptsize BE-matrix edit};
 \draw[arr] (tok) -- (enc);
 \draw[arr] (pair) -- (enc);
 \draw[arr] (enc) -- (dec);
 \draw[arr] (dec) -- (app);
-\draw[arr] (app.east) -- ++(8mm,0) node[midway, above, font=\scriptsize, yshift=1mm, xshift=4mm]{} |- node[pos=0.25, right, font=\scriptsize, align=left]{re-featurize\\$\mathcal{M}_t$} (pair.east);
+\draw[arr] (app.east) -- ++(8mm,0) |- node[pos=0.25, right, font=\scriptsize, align=left]{re-featurize\\$\mathcal{M}_t$} (pair.east);
 \end{tikzpicture}
 \caption{Data flow for one elementary step. Both tracks are rebuilt from the re-featurized intermediate before the next step.}
 \end{figure}
+
+\subsection{Two training stages}
+The model is trained in two stages on the same data and the same input schema. \textbf{Stage A} uses orbital and atom tokens with geometry-free pair features only (the spectral gap factor $G$, graph and fragment flags, intramolecular centroid distances, the cross-centre coupling and the stereoelectronic alignment in the reactant pose); every contact-dependent slot is zero and masked, there is no Klopman--Salem bias and no frozen head, and all heads are learned. \textbf{Stage B} fills the contact slots with the configurational quantities of Section~\ref{sec:contact}, switches on the attention bias and the frozen head, and is trained both from scratch and from the stage-A checkpoint. The difference between the two stages, per class and out of distribution, is the measured contribution of the physics prior; the physics floor and the gradient-boosted baseline are the fixed references for both.
 
 \subsection{Token embeddings}
 \paragraph{Atom tokens.}
@@ -273,7 +672,7 @@ with undefined entries set to zero and $\tilde R_{ij}$ the centroid distance (in
 \begin{equation}
 \vb{h}^{(0)}_r=\MLP_O\big(\vb{v}^{\mathrm{cont}}_r\big)+\sum_{k}\MLP_{\Sigma}\big([\epsilon_k,\ p_{rk}]\big)+\sum_{a\in\mathcal{A}_r} w^{(r)}_a\,\vb{h}^{(0)}_a ,
 \end{equation}
-where $\vb{v}^{\mathrm{cont}}_r$ collects the continuous descriptors of Section~\ref{sec:tokens} (occupation, center count and weights, $s/p/d$ fractions, $\chi_a,\chi_b$, $\Pi^{(r)}_{ab}$, $R_{ab}$, $R_{\mathrm{gyr}}$), the second term is a permutation-invariant set encoder over the spectral entries, and the last term lets an orbital inherit its chemical environment from the atoms that carry it. No categorical orbital type is embedded; a unit test asserts that no model input tensor contains one. Every token also receives a fragment embedding $\vb{E}_{\mathrm{frag}}[\phi(i)\bmod 8]$, and one learned summary token $\vb{h}_{\mathrm{MECH}}$ is prepended. No absolute coordinates are embedded: geometry enters only through pairwise distances, so the model is invariant to rotations and translations by construction. Chirality is preserved through the per-atom signed-volume feature.
+where $\vb{v}^{\mathrm{cont}}_r$ collects the continuous descriptors of Section~\ref{sec:tokens}, the second term is a set encoder (Section~\ref{sec:attn}) over the spectral entries, and the last term lets an orbital inherit its chemical environment from the atoms that carry it. No categorical orbital type is embedded; a unit test asserts that no model input tensor contains one. Every token also receives a fragment embedding $\vb{E}_{\mathrm{frag}}[\phi(i)\bmod 8]$, and one learned summary token $\vb{h}_{\mathrm{MECH}}$ is prepended. No absolute coordinates are embedded: geometry enters only through pairwise distances, so the model is invariant to rotations and translations by construction. Chirality is preserved through the per-atom signed-volume feature.
 
 \subsection{Pair track initialization}
 \begin{equation}
@@ -290,28 +689,28 @@ Each of the $L=8$ layers performs, for $h=1,\dots,H-1$,
 \vb{q}^{(h)}_i&=\vb{W}^{(h)}_Q\LN(\vb{h}_i),\quad \vb{k}^{(h)}_j=\vb{W}^{(h)}_K\LN(\vb{h}_j),\quad \vb{v}^{(h)}_j=\vb{W}^{(h)}_V\LN(\vb{h}_j),\\
 \ell^{(h)}_{ij}&=\frac{\vb{q}^{(h)\top}_i\vb{k}^{(h)}_j}{\sqrt{d_h}}
 +\vb{w}_h^{\!\top}\vb{p}_{ij}
-+\underbrace{\alpha_h\,\widehat{\KS}_3(i,j)+\beta_h\,\widehat{\KS}_2(i,j)-\gamma_h\,\widehat{\KS}_1(i,j)}_{b^{\KS}_h(i,j)}
+\underbrace{-\big(\alpha_h\,\widehat{F}(i,j)+\beta_h\,\widehat{\langle\KS_2\rangle}(i,j)+\gamma_h\,\widehat{\langle\KS_1\rangle}(i,j)\big)}_{b^{\KS}_h(i,j)}
 + m_{ij},
 \label{eq:logit}\\
 \vb{a}^{(h)}_i&=\sum_j \softmax_j\big(\ell^{(h)}_{ij}\big)\,\vb{v}^{(h)}_j ,
 \end{align}
-where $\widehat{\KS}$ denotes the standardized term, $\alpha_h,\beta_h,\gamma_h$ are learnable scalars initialized to $1$ and multiplied by a global scale $\lambda_{\KS}$, and $m_{ij}\in\set{0,-\infty}$ is the padding mask. The head outputs are concatenated, projected, and added residually; a position-wise feed-forward block (width $4d$, GELU) follows. The pair track is then updated in $O(N^2)$,
+where $\widehat{\KS}$ denotes the standardized term, $\alpha_h,\beta_h,\gamma_h$ are learnable scalars initialized to $1$ and multiplied by a global scale $\lambda_{\KS}$ (so that at initialization the bias favours pairs with low configurational free energy and penalizes repulsion; in stage A $b^{\KS}_h\equiv0$), and $m_{ij}\in\set{0,-\infty}$ is the padding mask. The head outputs are concatenated, projected, and added residually; a position-wise feed-forward block (width $4d$, GELU) follows. The pair track is then updated in $O(N^2)$,
 \begin{equation}
 \vb{p}_{ij}\leftarrow\vb{p}_{ij}+\MLP_U\big([\vb{p}_{ij},\ \vb{h}_i,\ \vb{h}_j]\big),
 \end{equation}
 so later layers see pair features that have absorbed context from both endpoints.
 
 \subsection{The frozen Klopman--Salem head}
-Head $h=0$ has no projections and no pair weight:
+Head $h=0$ has no projections and no pair weight; its logits are the physical energies in eV, not standardized features, divided by one temperature-like scale:
 \begin{equation}
-\ell^{(0)}_{ij}=\widehat{\KS}_3(i,j)+\widehat{\KS}_2(i,j)-\widehat{\KS}_1(i,j)+m_{ij},\qquad
-\vb{a}^{(0)}_i=\sum_j\softmax_j\big(\ell^{(0)}_{ij}\big)\,\vb{W}^{(0)}_V\LN(\vb{h}_j).
+\ell^{(0)}_{ij}=-\frac{F_{ij}}{\tau}+m_{ij},\qquad
+\vb{a}^{(0)}_i=\sum_j\softmax_j\big(\ell^{(0)}_{ij}\big)\,\vb{W}^{(0)}_V\LN(\vb{h}_j),
 \end{equation}
-Only its value projection is trained. Its attention matrix is therefore exactly the Boltzmann-like weighting that the perturbation energy prescribes, in every layer and at every stage of training. This gives (i) an ablation axis with no confound, because the physics can be removed from the other heads while head 0 is left intact or removed altogether, and (ii) an interpretation signal, because $\softmax_j(\ell^{(0)}_{ij})$ at the chosen donor $i=r$, acceptor $j=s$ states how strongly the physics alone favoured the predicted arrow. Configuration flags allow disabling all $b^{\KS}$ terms, dropping any one term, or unfreezing head 0.
+with $F_{ij}$ the configurational free energy of Eq.~\eqref{eq:Frs} and $\tau>0$ the same learnable scalar (initialized at $1$~eV) that defines it; the head is active in stage B only. Only $\tau$ and the value projection are trained, and the head's ranking of candidates coincides by construction with the untrained physics floor. Standardization is a convenience for the learned heads; applied here it would reweight the three terms by their sample variances and destroy the Boltzmann reading. Its attention matrix is therefore exactly the Boltzmann-like weighting that the perturbation energy prescribes, in every layer and at every stage of training. This gives (i) an ablation axis with no confound, because the physics can be removed from the other heads while head 0 is left intact or removed altogether, and (ii) an interpretation signal, because $\softmax_j(\ell^{(0)}_{ij})$ at the chosen donor $i=r$, acceptor $j=s$ states how strongly the physics alone favoured the predicted arrow. Configuration flags allow disabling all $b^{\KS}$ terms, dropping any one term, or unfreezing head 0.
 
 \section{Pointer decoder}
 \label{sec:decoder}
-A step is decoded as a sequence of arrows with teacher forcing. Let $\vb{h}_i^{(L)}$ be the final token vectors and $\vb{p}^{(L)}_{ij}$ the final pair vectors.
+A step is decoded as a sequence of arrows with teacher forcing (Section~\ref{sec:decode}). Let $\vb{h}_i^{(L)}$ be the final token vectors and $\vb{p}^{(L)}_{ij}$ the final pair vectors.
 
 \paragraph{Step query.}
 \begin{equation}
@@ -319,18 +718,18 @@ A step is decoded as a sequence of arrows with teacher forcing. Let $\vb{h}_i^{(
 \end{equation}
 where $\vb{g}_t$ is the mean of the token vectors of arrows already emitted in this step (zero for the first arrow), so that concerted multi-arrow steps are decoded coherently.
 
-\paragraph{Donor selection.} Over occupied orbital tokens with validity mask $\mathcal{V}^{\occ}$ (occupation 2, not already used in this step):
+\paragraph{Donor selection.} Over occupied orbital tokens with validity mask $\mathcal{V}^{\occ}$ (occupation within $0.2$ of $2$, not already used in this step):
 \begin{equation}
 P(r\mid\cdot)=\softmax_{r\in\mathcal{V}^{\occ}}\big(\vb{s}_t^{\!\top}\vb{W}_D\,\vb{h}^{(L)}_r\big).
 \end{equation}
 
-\paragraph{Donor site.} An orbital with several centers must say on which atom the new bond forms (the terminal carbon of propene for Markovnikov addition; one of the four carbons of a ring $\pi$ orbital). Over the centers of the chosen donor, using the token-to-center incidence weights $w^{(r)}_a$:
+\paragraph{Donor site.} An orbital with several centres must say on which atom the new bond forms (the terminal carbon of propene for Markovnikov addition; one of the four carbons of a ring $\pi$ orbital). Over the centres of the chosen donor, using the token-to-centre incidence weights $w^{(r)}_a$:
 \begin{equation}
 P(a\mid r,\cdot)=\softmax_{a\in\mathcal{A}_r}\Big(\big(\vb{s}_t+\vb{h}^{(L)}_r\big)^{\!\top}\vb{W}_S\,\vb{h}^{(L)}_a+v_S\,w^{(r)}_a\Big),
 \end{equation}
-which is a one-entry softmax for a one-center orbital.
+which is a one-entry softmax for a one-centre orbital.
 
-\paragraph{Acceptor selection.} Conditioned on the donor $r$ and its site $a$, over virtual tokens with mask $\mathcal{V}^{\virt}(r)$ (occupation 0, not the antibonding partner of the donor's own bond, no $d$-type polarization orbitals unless configured):
+\paragraph{Acceptor selection.} Conditioned on the donor $r$ and its site $a$, over virtual tokens with mask $\mathcal{V}^{\virt}(r)$ (occupation within $0.2$ of $0$; no $d$-dominated polarization orbitals unless configured; and not a pair whose sites $a,b$ are bonded or identical while the donor site carries $\ge0.25$ of the acceptor's population or the acceptor site $\ge0.25$ of the donor's, which removes an orbital's own antibond and same-atom $n\to\sigma^*$ pairs but keeps the collapse of a tetrahedral intermediate, whose acceptor $\sigma^*$ carries the donor oxygen only as a minor centre):
 \begin{equation}
 P(s\mid r,a,\cdot)=\softmax_{s\in\mathcal{V}^{\virt}(r)}\Big(\big(\vb{s}_t+\vb{h}^{(L)}_r+\vb{h}^{(L)}_a\big)^{\!\top}\vb{W}_A\,\vb{h}^{(L)}_s+\vb{u}^{\!\top}\vb{p}^{(L)}_{rs}\Big).
 \end{equation}
@@ -342,7 +741,7 @@ The explicit pair term $\vb{u}^{\!\top}\vb{p}^{(L)}_{rs}$ is where the Klopman--
 
 \section{Training objective}
 \label{sec:loss}
-Dataset arrows are aligned to orbital tokens (Section~\ref{sec:align}); because several LMOs can be chemically equivalent (the two lone pairs of a carbonyl oxygen), each arrow carries label \emph{sets} $\mathcal{D}$ (donors) and $\mathcal{A}$ (acceptors). The per-arrow loss marginalizes over the sets:
+Dataset arrows are aligned to orbital tokens (Section~\ref{sec:align}); because several LMOs can be chemically equivalent, each arrow carries label \emph{sets} $\mathcal{D}$ (donors) and $\mathcal{A}$ (acceptors). The per-arrow loss marginalizes over the sets (Section~\ref{sec:learn}):
 \begin{equation}
 \begin{split}
 \mathcal{L}_{\mathrm{arrow}}={}&-\log\sum_{r\in\mathcal{D}}P(r\mid\cdot)\;-\;\log P(a^{\star}\mid r^{\star},\cdot)\\
@@ -353,7 +752,7 @@ with $r^\star,s^\star$ teacher representatives of the label sets and $a^\star,b^
 \begin{equation}
 \mathcal{L}=\sum_{\text{arrows}}\mathcal{L}_{\mathrm{arrow}}+\lambda_{\mathrm{stop}}\big(\mathrm{BCE}_{\texttt{END\_STEP}}+\mathrm{BCE}_{\texttt{END\_MECH}}\big),\qquad \lambda_{\mathrm{stop}}=0.5 .
 \end{equation}
-Each elementary step is an independent training sample; intermediates are featurized offline, so no gradient flows across steps.
+Each elementary step is an independent training sample, one per (step, topological order) of its pathway's dependency DAG; pools are featurized offline, so no gradient flows across steps.
 
 \section{Label alignment and step application}
 
@@ -362,23 +761,98 @@ Each elementary step is an independent training sample; intermediates are featur
 Datasets give arrows as atom-map indices; alignment is by \emph{atom}, never by orbital label. For an arrow whose electrons leave atom $a$ (a lone pair on $a$, or a bond $(a,c)$ whose pair forms the new bond at $a$) and arrive at atom $b$ (an atom, or a bond $(b,d)$ that breaks):
 \begin{itemize}[nosep]
 \item donor site $a^\star=a$; $\mathcal{D}=\set{r\in\mathcal{O}^{\occ}:\ w^{(r)}_a\ge\tau_{\mathrm{atom}}}$, restricted to tokens that also have weight on $c$ for a bond source (if that empties the set the restriction is dropped and the arrow flagged);
-\item acceptor site $b^\star=b$; $\mathcal{A}=\set{s\in\mathcal{O}^{\virt}:\ w^{(s)}_b\ge\tau_{\mathrm{atom}}}$, restricted to tokens with weight on $d$ for a bond sink, excluding the antibonding partner of the donor's own bond and $d$-type polarization orbitals;
-\item a carbanion drawn as a lone pair on an atom that carries no one-center occupied token (an enolate in its carbanion resonance form) aligns to the multi-center tokens on that atom;
+\item acceptor site $b^\star=b$; $\mathcal{A}=\set{s\in\mathcal{O}^{\virt}:\ w^{(s)}_b\ge\tau_{\mathrm{atom}}}$, restricted to tokens with weight on $d$ for a bond sink, excluding the antibonding partner of the donor's own bond and $d$-dominated polarization orbitals;
+\item a carbanion drawn as a lone pair on an atom that carries no one-centre occupied token (an enolate in its carbanion resonance form) aligns to the multi-centre tokens on that atom;
 \item an empty set falls back to the tokens nearest to the atom by centroid distance and is flagged.
 \end{itemize}
 Sets are multi-label and the loss marginalizes over them. Because sites and sets are defined by atoms and populations, two resonance forms of the same reactant yield the same labels.
 
 \subsection{Resonance}
 \label{sec:resonance}
-Products and labels are compared modulo resonance. The \emph{resonance key} of a molecule is the lexicographically smallest canonical SMILES over the RDKit resonance enumeration (capped at $1000$ structures, falling back to the plain canonical SMILES). It is used for the round-trip test, for step-level exact match, and for de-duplication. Dataset steps whose reactants and products share a key are resonance interconversions; they are removed from the training target and step indices are renumbered. Resonance structures are never enumerated as model input: the wavefunction already averages over them, and the tokens are built from it.
+Products and labels are compared modulo resonance. The \emph{resonance key} of a molecule is the lexicographically smallest canonical SMILES over the RDKit resonance enumeration (capped at $1000$ structures, falling back to the plain canonical SMILES). It is used for the round-trip test, for step-level exact match, and for de-duplication. Dataset steps whose reactants and products share a key are resonance interconversions; they are removed from the training target and step indices are renumbered. Resonance structures are never enumerated as model input: the wavefunction already averages over them (Section~\ref{sec:be}), and the tokens are built from it.
 
 \subsection{Applying a step}
 \label{sec:apply}
-Dataset arrows are applied jointly as one edit of the bond--electron matrix (Ugi--Dugundji): a lone pair $\to$ atom creates or increments a bond and shifts formal charges $(+1,-1)$; a bond $\to$ atom decrements the bond order and shifts charges; a lone pair $\to$ bond combines the two. Predicted arrows $(r,a,s,b)$ are applied from their sites alone: form the bond $a$--$b$; if $a$ carries a negative charge or a one-center occupied token the source is treated as a lone pair, otherwise the Lewis structure is kekulized so that $a$ has a multiple bond to some $c$, that bond is decremented and the charge moved to $c$; if $s$ is an antibonding two-center token on $(b,d)$ the bond $b$--$d$ is decremented and $d$ receives the leaving charge. The result is sanitized and reduced to its resonance key. Round-trip agreement, for dataset arrows and for the labeled $(r,a,s,b)$ tuples alike, is a hard requirement of the data pipeline ($\ge95\%$ on PMechDB).
+Dataset arrows are applied jointly as one bond--electron matrix edit (Section~\ref{sec:be}, Appendix~\ref{app:be}). Predicted arrows $(r,a,s,b)$ are applied from their sites alone: form the bond $a$--$b$; if $a$ carries a negative charge or a one-centre occupied token the source is treated as a lone pair, otherwise the Lewis structure is kekulized so that $a$ has a multiple bond to some $c$, that bond is decremented and the charge moved to $c$; if $s$ is an antibonding two-centre token on $(b,d)$ the bond $b$--$d$ is decremented and $d$ receives the leaving charge. The result is sanitized and reduced to its resonance key. Round-trip agreement, for dataset arrows and for the labeled $(r,a,s,b)$ tuples alike, is a hard requirement of the data pipeline ($\ge95\%$ on PMechDB).
 
 \section{Inference}
 \label{sec:inference}
-Given reactant SMILES: featurize (cached), encode, and run a beam search of width $B=5$ over $(r,a,s,b)$ tuples within a step, scoring by the sum of the four log-probabilities. Each completed step is applied from its sites, duplicate intermediates across beams are merged by resonance key, the intermediate is re-featurized, and decoding continues up to $T_{\max}=8$ steps or \texttt{END\_MECH}. Every returned pathway lists, per arrow, the intermediate SMILES, the step probability, the three $\KS$ values of the chosen pair, the dominant canonical MO pair $(k,m)$ in $G$ with its energies, and the frozen head's attention weight $\softmax_j(\ell^{(0)}_{rj})\big|_{j=s}$. A surrogate graph network can replace the xTB call at inference once trained on the cached records; it falls back to xTB for elements outside its training set.
+
+\begin{figure}[t]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[x=1cm,y=1cm]
+% ---- M0: MeNH2 + acetyl chloride
+\begin{scope}
+\node[atom] (N) at (0,0) {N};
+\node[atom] (NMe) at (-0.9,-0.4) {H$_3$C};
+\node[atom] (NH1) at (0.35,0.65) {H};\node[atom] (NH2) at (-0.35,0.65) {H};
+\draw[bond] (N)--(NMe);\draw[bond] (N)--(NH1);\draw[bond] (N)--(NH2);
+\lonepair{(0,0)}{-25}
+\node[atom] (Cac) at (2.3,0) {C};
+\node[atom] (Oac) at (2.3,1.0) {O};
+\draw[dbond] (Cac)--(Oac);
+\lonepair{(2.3,1.0)}{50}\lonepair{(2.3,1.0)}{130}
+\node[atom] (Me) at (3.1,-0.55) {CH$_3$};
+\node[atom] (Clac) at (1.5,-0.6) {Cl};
+\draw[bond] (Cac)--(Me);\draw[bond] (Cac)--(Clac);
+\draw[arrow] (0.45,-0.2) .. controls (1.0,-0.9) and (1.7,-0.9) .. (2.1,-0.25);
+\draw[arrow] (2.45,0.5) .. controls (2.9,0.6) and (2.95,1.0) .. (2.65,1.15);
+\node[font=\scriptsize] at (1.2,-1.45) {$\mathcal{M}_0$:\ $(n_{\mathrm N},\mathrm N,\ \pi^*_{\mathrm{CO}},\mathrm C)$};
+\end{scope}
+\draw[rxn] (3.9,0) -- (4.7,0);
+% ---- M1: tetrahedral intermediate
+\begin{scope}[xshift=6.1cm]
+\node[atom] (C) at (0,0) {C};
+\node[atom] (O) at (0,1.05) {O};
+\draw[bond] (C)--(O);
+\lonepair{(0,1.05)}{45}\lonepair{(0,1.05)}{135}\lonepair{(0,1.05)}{90}
+\node[chem] at (0.5,1.4) {$\ominus$};
+\node[atom] (Cl) at (-1.0,-0.45) {Cl};
+\node[atom] (Me) at (1.0,-0.45) {CH$_3$};
+\node[atom] (N) at (0,-1.05) {NH$_2$CH$_3$};
+\node[chem] at (0.95,-1.3) {$\oplus$};
+\draw[bond] (C)--(Cl);\draw[bond] (C)--(Me);\draw[bond] (C)--(N);
+\draw[arrow] (0.3,1.2) .. controls (0.75,1.1) and (0.75,0.6) .. (0.2,0.5);
+\draw[arrow] (-0.45,-0.2) .. controls (-0.9,0.15) and (-1.35,-0.1) .. (-1.3,-0.5);
+\node[font=\scriptsize] at (-0.2,-1.8) {$\mathcal{M}_1$:\ $(n_{\mathrm O},\mathrm O,\ \sigma^*_{\mathrm{CCl}},\mathrm C)$};
+\end{scope}
+\draw[rxn] (7.8,0) -- (8.7,0);
+% ---- M2: acylammonium + Cl-
+\begin{scope}[xshift=11.0cm]
+\node[atom] (C) at (0,0) {C};
+\node[atom] (O) at (0,1.05) {O};
+\draw[dbond] (C)--(O);
+\lonepair{(0,1.05)}{50}\lonepair{(0,1.05)}{130}
+\node[atom] (Me) at (1.0,-0.45) {CH$_3$};
+\node[atom] (N) at (-0.95,-0.5) {N};
+\node[chem] at (-0.55,-0.85) {$\oplus$};
+\node[atom] (NMe) at (-1.9,-0.1) {H$_3$C};
+\node[atom] (NH) at (-1.4,-1.2) {H};
+\draw[bond] (C)--(Me);\draw[bond] (C)--(N);\draw[bond] (N)--(NMe);\draw[bond] (N)--(NH);
+\node[atom] (Clm) at (-2.2,-2.1) {Cl};
+\lonepair{(-2.2,-2.1)}{180}\lonepair{(-2.2,-2.1)}{270}\lonepair{(-2.2,-2.1)}{0}
+\node[chem] at (-2.65,-1.75) {$\ominus$};
+\draw[arrow] (-2.0,-1.85) .. controls (-1.85,-1.5) and (-1.75,-1.45) .. (-1.6,-1.4);
+\draw[arrow] (-1.25,-0.95) .. controls (-1.05,-0.7) and (-1.0,-0.65) .. (-1.1,-0.6);
+\node[font=\scriptsize] at (0.1,-1.8) {$\mathcal{M}_2$:\ $(n_{\mathrm{Cl}},\mathrm{Cl},\ \sigma^*_{\mathrm{NH}},\mathrm H)$};
+\end{scope}
+\draw[rxn] (12.5,0) -- (13.2,0) node[right,font=\scriptsize,align=left]{$\mathcal{M}_3$:\\amide + HCl};
+% ---- the loop
+\begin{scope}[yshift=-4.0cm]
+\node[loopbox] (f) at (0.5,0) {featurize $\mathcal{M}_t$\\ \tiny xTB $\to$ PM $\to$ tokens};
+\node[loopbox] (e) at (3.6,0) {encode\\ \tiny two-track transformer};
+\node[loopbox] (dc) at (6.7,0) {decode arrows\\ \tiny pointer: $(r,a,s,b)^{\ast}$};
+\node[loopbox] (ap) at (9.8,0) {apply $\vb R$\\ \tiny BE-matrix edit};
+\node[loopbox] (st) at (12.4,0) {\texttt{END\_MECH}?};
+\draw[looparr] (f)--(e);\draw[looparr] (e)--(dc);\draw[looparr] (dc)--(ap);\draw[looparr] (ap)--(st);
+\draw[looparr] (st.south) |- ++(-0.3,-0.55) -| node[pos=0.25,below,font=\tiny]{no: $\mathcal{M}_{t+1}$, $t\leftarrow t+1$} (f.south);
+\end{scope}
+\end{tikzpicture}}
+\caption{A three-step mechanism (amide formation from methylamine and acetyl chloride) as a sequence of tuples, and the loop that produces it. At each step the current molecules are featurized from scratch (geometry, GFN2-xTB, localization, tokens), encoded, and the decoder emits the arrows of one elementary step; the bond--electron edit yields the next set of molecules, which is featurized again. Every step is also an independent training sample. The orbital names under the structures are the reader's shorthand for tuples of untyped tokens.}
+\label{fig:loop}
+\end{figure}
+Given reactant SMILES and their stoichiometry: featurize (cached; stage-1 contact for every candidate pair and stage-2 refinement for the best $K_{\mathrm{ref}}$), encode, and run a beam search of width $B=5$ over $(r,a,s,b)$ tuples within a step, scoring by the sum of the four log-probabilities. Each completed step is applied from its sites, the new pool is keyed by the sorted multiset of its resonance keys, beams reaching the same pool key are merged, a pool key that recurs up to the stoichiometric products closes a cycle, the pool is re-featurized, and decoding continues up to $T_{\max}=8$ steps or \texttt{END\_MECH}. The result is a reaction network (nodes: pool states; edges: steps with probabilities); pathways are reported as ranked paths through it. Every returned pathway lists, per arrow, the intermediate SMILES, the step probability, the three $\KS$ values of the chosen pair, the dominant canonical MO pair $(k,m)$ in $G$ with its energies, and the frozen head's attention weight $\softmax_j(\ell^{(0)}_{rj})\big|_{j=s}$. A surrogate graph network can replace the xTB call at inference once trained on the cached records; it falls back to xTB for elements outside its training set.
 
 \section{Complexity, invariances, and defaults}
 
@@ -399,9 +873,12 @@ $L$ & encoder layers & 8\\
 $H$ & heads (incl.\ frozen head 0) & 8\\
 $K$ & Wolfsberg--Helmholz constant (learnable) & init 1.75\\
 $\varepsilon$ & dielectric in $\KS_2$ (learnable) & init 4.0\\
-$\lambda_{\KS}$ & global scale of $b^{\KS}$ & 1.0\\
+$N$ & rigid poses per site pair (intermolecular) & 400\\
+$N_{\mathrm{conf}}$ & conformers per molecule (intramolecular) & 30\\
+$\tau$ & configurational temperature, frozen-head scale & swept, then learnable\\
+$\lambda_{\KS}$ & global scale of $b^{\KS}$ (learned heads) & 1.0\\
 $\tau_{\mathrm{atom}}$ & population threshold for $\mathcal{A}_r$ & 0.15\\
-$p_{\min}$ & spectral entry cutoff (max 8 entries) & 0.01\\
+$p_{\min}$ & spectral entry cutoff for the input set (max 8) & 0.01\\
 $\lambda_{\mathrm{stop}}$ & stop-loss weight & 0.5\\
 $B$ & beam width & 5\\
 $T_{\max}$ & max steps per mechanism & 8\\
@@ -413,13 +890,14 @@ batch & 32 steps, mixed precision, grad clip 1.0 & \\
 
 \section{Evaluation protocol}
 \begin{itemize}[nosep]
-\item \textbf{Arrow level}: top-$k$ accuracy of $(r,s)$ with set marginalization ($k=1,3,5$).
+\item \textbf{Arrow level}: top-$k$ accuracy of $(r,s)$ with set marginalization ($k=1,3,5$), and of the full tuple with sites.
 \item \textbf{Step level}: exact match of the intermediate's resonance key at top-$k$.
-\item \textbf{Pathway level}: full sequence recovery at beam 5; product recovered at any depth $\le8$.
+\item \textbf{Pathway level}: the annotated set of steps (as pool-key pairs) contained in the predicted network at beam 5, order ignored; final pool recovered at any depth $\le8$; for pathways with independent steps, recovery of at least one valid topological order.
 \item \textbf{Validity}: sanitizable steps; conservation of heavy atoms and charge.
 \item \textbf{Splits}: by reactant molecule (default, leak-proof), leave-one-mechanism-class-out, scaffold.
-\item \textbf{Ablations}: no $b^{\KS}$; each term removed; head 0 unfrozen; atom-only tokens; categorical orbital labels added back as input; hybridization, aromaticity and functional-group ids added back as input (both measure what the physical descriptors already carry); $K,\varepsilon$ fixed vs.\ learned; $d$-type acceptors allowed; table vs.\ MLP contact kernel; three seeds each.
-\item \textbf{Physics floor}: ranking by $\KS_3$ alone and by $\KS_3+\KS_2$ with no learned parameters; a trained model must beat it.
+\item \textbf{Domain coverage}: steps whose species fall outside the closed-shell domain (open-shell metal adducts the SMILES does not mark, bare-metal catalyst placeholders, vanishing-gap species with smeared occupations, resonance interconversions, molecules whose QM calculation failed) are excluded from the training target and from every metric denominator, and counted by reason code; the covered fraction of each dataset is reported as one number next to every accuracy. Charge errors in the source data are repaired at ingest only under explicit rules (a $-1$ on a four-bonded group-14 atom; an onium-to-metal bond read as dative when the metal is $d^0$ or $d^{10}$) and only when the repair yields an even electron count; every repair is logged.
+\item \textbf{Ablations}: no $b^{\KS}$; each term removed; head 0 unfrozen; atom-only tokens; categorical orbital labels added back as input; hybridization, aromaticity and functional-group ids added back as input (both measure what the physical descriptors already carry); $K,\varepsilon$ fixed vs.\ learned; $d$-type acceptors allowed; stage A vs.\ stage B (from scratch and from the stage-A checkpoint); fixed-distance vs.\ configurational contact; the statistical contact kernels; $\tau$ fixed vs.\ learned; three seeds each.
+\item \textbf{Physics floor}: ranking by $-F_{rs}$ (Eq.~\eqref{eq:Frs}) with no learned parameters, and for reference $G$ alone and the fixed-distance kernel; stage-B models are reported relative to it.
 \item \textbf{Interpretability}: Spearman correlation between head-0 attention at the chosen pair and the model's arrow probability, per mechanism class; selectivity suite (S$_\mathrm{N}$2 vs.\ E2, 1,2- vs.\ 1,4-addition, hard/soft alkylation, Markovnikov, EAS regiochemistry, Baldwin rules).
 \end{itemize}
 
@@ -428,11 +906,126 @@ batch & 32 steps, mixed precision, grad clip 1.0 & \\
 \item \emph{Orbitals as tokens} align the prediction unit with both the arrow formalism and the perturbation theory; \emph{untyped} tokens let orbital character generalize across elements instead of being fixed by a label.
 \item \emph{Pair track with physics initialization} lets the Klopman--Salem terms act as a prior on attention rather than as an auxiliary loss, so the network learns corrections to a physically shaped starting point.
 \item \emph{A frozen head} makes the contribution of the physics measurable and every prediction explainable.
-\item \emph{Spectral energies} make term (3) exact for localized orbitals and invariant to the arbitrary mixture a localization returns inside a flat subspace, which is what makes aromatic and conjugated systems unproblematic.
-\item \emph{Contact overlaps} keep the full structure of term (3) --- exact gaps, exact coefficients --- for intermolecular steps, replacing only the one factor that no geometry can provide.
-\item \emph{Sites} resolve where a multi-center orbital reacts, which is also the regiochemistry of additions to simple alkenes.
+\item \emph{Spectral energies} make Term~(3) exact for localized orbitals and invariant to the arbitrary mixture a localization returns inside a flat subspace, which is what makes aromatic and conjugated systems unproblematic.
+\item \emph{The approach geometry is integrated out, not chosen.} A configurational free energy over sampled poses (intermolecular) or conformers (intramolecular), weighted by the Klopman--Salem terms plus the cost of the pose, replaces every geometric rule with one temperature; orientational entropy and ring strain emerge from the numbers. All of this lives in the physics layer, and the model is trained first without it (stage A) and then with it (stage B), so its contribution is measured rather than assumed.
+\item \emph{Sites} resolve where a multi-centre orbital reacts, which is also the regiochemistry of additions to simple alkenes.
 \item \emph{Deterministic step application} removes product generation from the learning problem and guarantees mass and charge conservation.
 \item \emph{No chemist's taxonomy as input.} Neither orbital tokens nor atom tokens carry categorical labels ($\sigma/\pi$, hybridization, aromaticity, functional group); everything the model sees is a physical quantity or a Lewis-bookkeeping integer. The one deliberate prior is the frozen Klopman--Salem head, which is declared, measurable and removable.
 \end{enumerate}
+
+%======================================================================
+\appendix
+\part*{Appendices}
+\addcontentsline{toc}{part}{Appendices}
+%======================================================================
+
+\section{The GFN2-xTB basis and exported quantities}
+\label{app:gfn2}
+Each atomic shell $(n,\ell)$ is represented by one Slater-type orbital $\chi(r)\propto r^{n-1}e^{-\zeta r}Y_{\ell m}$, expanded as a fixed contraction of primitive Gaussians,
+\begin{equation}
+\chi_\mu(\vb{r})=\sum_{g=1}^{n_g} c_{g}\,N_g\,x^{l}y^{m}z^{n}\,e^{-\alpha_g|\vb{r}-\vb{A}|^2},\qquad l+m+n=\ell,
+\end{equation}
+with element- and shell-specific exponents $\zeta$ and $n_g$ between 3 and 6 (STO-$n$G). The exponents and contraction coefficients are part of the published parameter set and are the ones used for the analytic overlaps of Appendix~\ref{app:overlap}; no approximation to them is permitted. Shells per element: H $1s$; B--F $2s,2p$; Na--Cl $3s,3p$ with a $3d$ polarization shell on Si, P, S, Cl; similarly for the heavier $p$-block with $d$ on Br and I. Metals carry $s$, $p$ and (for transition metals) $d$ valence shells.
+
+The converged calculation provides: $\vb{S}$ (analytic overlaps in this basis), $\vb{F}$ (the self-consistent Hamiltonian, i.e.\ $\vb{H}^{(0)}$ plus the charge-dependent shifts), $\vb{C}$ and $\vb{\epsilon}$ from \eqref{eq:roothaan}, occupations, Mulliken charges and shell populations, and the atom and angular momentum of every AO. The ordering of $p$ functions is $(p_y,p_z,p_x)$ in the real-spherical convention of the library and is fixed by a test on a diatomic aligned with each axis.
+
+\section{Pipek--Mezey localization by Jacobi rotations}
+\label{app:pm}
+For a pair of orbitals $(i,j)$ in the current localized set, define for each atom $A$ the $2\times2$ population block $Q^A_{ij}=\sum_{\mu\in A}\sum_\nu L_{\mu i}S_{\mu\nu}L_{\nu j}$ (symmetrized). Rotating the pair by an angle $\gamma$,
+\[
+\vb{l}_i'=\cos\gamma\,\vb{l}_i+\sin\gamma\,\vb{l}_j,\qquad \vb{l}_j'=-\sin\gamma\,\vb{l}_i+\cos\gamma\,\vb{l}_j ,
+\]
+changes the functional \eqref{eq:pm} by $\Delta\mathcal{P}=A_{ij}+\sqrt{A_{ij}^2+B_{ij}^2}$ at the optimal angle, with
+\begin{equation}
+A_{ij}=\sum_A\Big[\big(Q^A_{ij}\big)^2-\tfrac14\big(Q^A_{ii}-Q^A_{jj}\big)^2\Big],\qquad
+B_{ij}=\sum_A Q^A_{ij}\big(Q^A_{ii}-Q^A_{jj}\big),
+\end{equation}
+and the optimal angle given by $\cos4\gamma=-A_{ij}/\sqrt{A_{ij}^2+B_{ij}^2}$, $\sin4\gamma=B_{ij}/\sqrt{A_{ij}^2+B_{ij}^2}$ \cite{pm}. A sweep applies this to every pair; disjoint pairs can be rotated simultaneously, which is how the implementation vectorizes a sweep without changing the sequence of rotations. Convergence is declared when $\Delta\mathcal{P}$ summed over a sweep falls below $10^{-8}$. Starting from the canonical orbitals with a fixed pair order makes the result deterministic. On a plateau (aromatic $\pi$ space) the sweep cap is reached with the functional changing by $10^{-8}$--$10^{-6}$ per sweep and a residual gain of at most $5\times10^{-4}$; the orbitals are localized for every practical purpose and are flagged rather than rejected.
+
+\section{Derivation sketch of the Klopman--Salem equation}
+\label{app:ks}
+Consider one orbital $\psi_r$ (energy $E_r$) on fragment $A$ and one orbital $\psi_s$ (energy $E_s$) on fragment $B$, with interaction element $H_{rs}$ and overlap $S_{rs}$, both small. The $2\times2$ secular problem
+\[
+\begin{vmatrix} E_r-E & H_{rs}-ES_{rs}\\ H_{rs}-ES_{rs} & E_s-E\end{vmatrix}=0
+\]
+has, to second order in the small quantities, the roots
+\begin{equation}
+E_\pm\approx E_{r,s}\pm\frac{(H_{rs}-E_{r,s}S_{rs})^2}{E_r-E_s}\quad\text{(lower root near }E_r\text{ if }E_r<E_s).
+\end{equation}
+\emph{Filled--empty pair.} Two electrons occupy the lower root; the stabilization is $2(H_{rs}-E_rS_{rs})^2/(E_r-E_s)$. Expanding $\psi_r=\sum_a c_{ra}\chi_a$, $\psi_s=\sum_b c_{sb}\chi_b$ gives $H_{rs}-E_rS_{rs}=\sum_{ab}c_{ra}c_{sb}(H_{ab}-E_rS_{ab})$, and with the Wolfsberg--Helmholz form $H_{ab}=K S_{ab}(H_{aa}+H_{bb})/2$ the combination is proportional to $S_{ab}$ and is written $\beta_{ab}$. Summing over all filled orbitals of $A$ with all empty orbitals of $B$ and vice versa gives Term~(3).
+
+\emph{Filled--filled pair.} Four electrons occupy both roots; the sum $2E_++2E_-$ differs from $2E_r+2E_s$ by a term proportional to $-(E_r+E_s)S_{rs}^2$ plus $2H_{rs}S_{rs}$-type corrections, which is positive (destabilizing) because $E_r,E_s<0$. Expanding in AOs and collecting the AO populations $q_a$ of the filled orbitals yields the form $-\sum_{ab}(q_a+q_b)\beta_{ab}S_{ab}$ of Term~(1).
+
+\emph{Electrostatics.} The interaction of the unperturbed charge densities of $A$ and $B$, approximated by point charges at the atoms screened by a dielectric $\varepsilon$, gives Term~(2). Exchange and higher-order terms are dropped. The result is Eq.~\eqref{eq:ks-theory}; full derivations are in Klopman \cite{klopman}, Salem \cite{salem}, and in textbook form in Fleming \cite{fleming}.
+
+\section{Analytic two-centre overlaps and the contact geometry}
+\label{app:overlap}
+\paragraph{Gaussian overlaps.} For two primitive Cartesian Gaussians $g_a=x_A^{l_a}y_A^{m_a}z_A^{n_a}e^{-\alpha|\vb{r}-\vb{A}|^2}$ and $g_b$ at $\vb{B}$ with exponent $\beta$, the Gaussian product theorem gives $p=\alpha+\beta$, $\vb{P}=(\alpha\vb{A}+\beta\vb{B})/p$, $\mu=\alpha\beta/p$, and the overlap factorizes into Cartesian components. The $s$--$s$ overlap is $(\pi/p)^{3/2}e^{-\mu|\vb{A}-\vb{B}|^2}$, and higher angular momenta follow the Obara--Saika recurrence \cite{os}
+\begin{equation}
+\langle a+1_i|b\rangle=(P_i-A_i)\langle a|b\rangle+\frac{1}{2p}\Big[N_i(a)\langle a-1_i|b\rangle+N_i(b)\langle a|b-1_i\rangle\Big],
+\end{equation}
+where $N_i(a)$ is the exponent of coordinate $i$ in $a$. Contracted overlaps are sums over primitive pairs weighted by contraction coefficients and normalization constants; spherical $d$ functions are obtained from the Cartesian set by the standard transformation. The implementation is vectorized over shell pairs and validated against the exported $\vb{S}$ of a molecule at its own geometry (agreement to $10^{-3}$).
+
+\paragraph{Lobe axis.} For orbital $r$ and its site atom $a$, evaluate the contribution of $a$'s own AOs to $\psi_r$ at $\vb{x}_a+\rho\hat{\vb{n}}$ on $\sim200$ directions at $\rho=1.5$~\AA, restricted to the hemisphere pointing away from every other centre of $r$ ($\hat{\vb n}\cdot(\vb{x}_c-\vb{x}_a)\le0$); the lobe axis $\hat{\vb{n}}_r$ is the argmax of the amplitude. For a $\pi$ orbital this selects the perpendicular lobe, for $\sigma$(C--H) with site H the direction beyond H, for $\sigma^*$(C--Cl) with site C the backside lobe. A hydrogen site, whose orbital is spherical, points away from the orbital's other centres. When a second, separate local maximum lies within 5\% (the two faces of a $\pi$ lobe) both are evaluated and the larger coupling kept.
+
+\paragraph{Legacy fixed-distance placement (baseline).} Only the acceptor's local \emph{cap} enters the overlap: its centre atoms and their first bonded neighbours, hydrogens included. The cap is placed so that the acceptor site sits at $\vb{x}_a+d\,\hat{\vb{n}}_r$ with $d=2.3$~\AA, the acceptor lobe antiparallel, at the best of six rolls about the axis; directions and rolls are defined in a local frame built from the site and its bonded neighbours, so the result is invariant to rigid rotation. The contact overlap is
+\begin{equation}
+S^{\mathrm{c}}_{rs}=\sum_{\mu\in A}\sum_{\nu\in B'}l_{\mu r}\,S_{\mu\nu}(\text{placed geometry})\,l_{\nu s},
+\end{equation}
+summed over the donor fragment's AOs and the cap's AOs, and $\beta_{rs}$ of Eq.~\eqref{eq:ks3} is contracted from the same AO overlaps with the AO diagonal energies. This kernel is frozen as a baseline.
+
+\paragraph{Configurational sampling.} For the treatment of Section~\ref{sec:contact}, intermolecular poses are drawn per site pair in the same local frame (site--site distance uniform in $[1.8,4.0]$~\AA, direction uniform on the sphere, orientation uniform in SO(3)); one AO overlap matrix between the two caps per pose serves every orbital pair on those sites. Intramolecular configurations are the conformers of the molecule, with the caps located by a Kabsch fit on their atoms and the LMO coefficients transported unchanged.
+
+\paragraph{Approximate transition states (deferred).} For the best candidates of a step, a relaxed complex with the site--site distance constrained, an activation-strain decomposition, and an IDPP-interpolated path \cite{idpp} to the product (nine images, single points, highest image as approximate transition state) are the planned refinements; they feed the transition-state verification of the later phases and do not enter the default pipeline.
+
+\section{Bond--electron matrices: a worked example}
+\label{app:be}
+Methoxide attacking chloromethane, atoms ordered $(\mathrm{O},\mathrm{C},\mathrm{Cl})$ with hydrogens omitted for brevity. Reactant and product $\vb{B}$ matrices and their difference:
+\[
+\vb{B}_{\mathrm{reac}}=\begin{pmatrix}6&0&0\\0&0&1\\0&1&6\end{pmatrix},\qquad
+\vb{B}_{\mathrm{prod}}=\begin{pmatrix}4&1&0\\1&0&0\\0&0&8\end{pmatrix},\qquad
+\vb{R}=\begin{pmatrix}-2&+1&0\\+1&0&-1\\0&-1&+2\end{pmatrix}.
+\]
+Here O carries three lone pairs (6 electrons) in the reactant and two in the product; Cl gains a lone pair. $\sum_{ij}R_{ij}=0$. The two arrows of the S$_\mathrm{N}$2 step are the two elementary matrices ``lone pair O $\to$ C'' ($R_{\mathrm{OO}}=-2$, $R_{\mathrm{OC}}=R_{\mathrm{CO}}=+1$) and ``bond C--Cl $\to$ Cl'' ($R_{\mathrm{CCl}}=R_{\mathrm{ClC}}=-1$, $R_{\mathrm{ClCl}}=+2$); their sum is $\vb{R}$. Formal charges follow: O goes from $6-6-1=-1$ (with its C--O bond included in the full matrix) to $0$; Cl from $0$ to $-1$. In the implementation the edit is performed on an RDKit molecule with explicit valence checks, which is equivalent to applying $\vb{R}$ and verifying that every row satisfies the octet constraints of its element.
+
+\section{Data sources}
+\label{app:data}
+\begin{itemize}[nosep]
+\item \textbf{PMechDB} \cite{pmechdb}: manually curated elementary polar steps with arrow annotations; development and validation set.
+\item \textbf{ReactMech}: $\sim$30k mechanisms in 67 classes, $\sim$105k elementary steps; class-wise out-of-distribution evaluation.
+\item \textbf{FlowER dataset}: $\sim$1.4M template-generated elementary steps from USPTO-Full; scale-up.
+\item \textbf{mech-USPTO-31K}: expert-validated mechanisms for the published-benchmark comparison.
+\item \textbf{QMugs}: $\sim$665k drug-like molecules with GFN2-xTB and DFT properties; encoder pretraining.
+\end{itemize}
+
+\begin{thebibliography}{99}
+\bibitem{gfn2} C.~Bannwarth, S.~Ehlert, S.~Grimme, \emph{J. Chem. Theory Comput.} \textbf{15}, 1652 (2019). GFN2-xTB.
+\bibitem{alpb} S.~Ehlert, M.~Stahn, S.~Spicher, S.~Grimme, \emph{J. Chem. Theory Comput.} \textbf{17}, 4250 (2021). ALPB solvation.
+\bibitem{pm} J.~Pipek, P.~G. Mezey, \emph{J. Chem. Phys.} \textbf{90}, 4916 (1989).
+\bibitem{klopman} G.~Klopman, \emph{J. Am. Chem. Soc.} \textbf{90}, 223 (1968).
+\bibitem{salem} L.~Salem, \emph{J. Am. Chem. Soc.} \textbf{90}, 543 (1968).
+\bibitem{fleming} I.~Fleming, \emph{Molecular Orbitals and Organic Chemical Reactions}, Wiley (2010).
+\bibitem{wh} M.~Wolfsberg, L.~Helmholz, \emph{J. Chem. Phys.} \textbf{20}, 837 (1952).
+\bibitem{parryang} R.~G. Parr, W.~Yang, \emph{Density-Functional Theory of Atoms and Molecules}, Oxford (1989).
+\bibitem{yangmortier} W.~Yang, W.~J. Mortier, \emph{J. Am. Chem. Soc.} \textbf{108}, 5708 (1986).
+\bibitem{morell} C.~Morell, A.~Grand, A.~Toro-Labb\'e, \emph{J. Phys. Chem. A} \textbf{109}, 205 (2005).
+\bibitem{ugi} J.~Dugundji, I.~Ugi, \emph{Top. Curr. Chem.} \textbf{39}, 19 (1973).
+\bibitem{os} S.~Obara, A.~Saika, \emph{J. Chem. Phys.} \textbf{84}, 3963 (1986).
+\bibitem{vbur} L.~Falivene et al., \emph{Nat. Chem.} \textbf{11}, 872 (2019). Percent buried volume.
+\bibitem{vaswani} A.~Vaswani et al., \emph{NeurIPS} (2017). Attention is all you need.
+\bibitem{graphormer} C.~Ying et al., \emph{NeurIPS} (2021). Graphormer.
+\bibitem{alphafold} J.~Jumper et al., \emph{Nature} \textbf{596}, 583 (2021). AlphaFold 2.
+\bibitem{unimol} G.~Zhou et al., \emph{ICLR} (2023). Uni-Mol.
+\bibitem{pointer} O.~Vinyals, M.~Fortunato, N.~Jaitly, \emph{NeurIPS} (2015). Pointer networks.
+\bibitem{deepsets} M.~Zaheer et al., \emph{NeurIPS} (2017). Deep Sets.
+\bibitem{pmechdb} M.~Tavakoli et al., \emph{J. Chem. Inf. Model.} \textbf{64}, 1975 (2024). PMechDB.
+\bibitem{bickelhaupt} F.~M. Bickelhaupt, K.~N. Houk, \emph{Angew. Chem. Int. Ed.} \textbf{56}, 10070 (2017). Activation strain model.
+\bibitem{pauling} L.~Pauling, \emph{J. Am. Chem. Soc.} \textbf{69}, 542 (1947). Bond length and bond order.
+\bibitem{hammond} G.~S. Hammond, \emph{J. Am. Chem. Soc.} \textbf{77}, 334 (1955).
+\bibitem{marcus} R.~A. Marcus, \emph{J. Phys. Chem.} \textbf{72}, 891 (1968). Theoretical relations among rate constants, barriers and Br\o nsted slopes.
+\bibitem{nbo} A.~E. Reed, L.~A. Curtiss, F.~Weinhold, \emph{Chem. Rev.} \textbf{88}, 899 (1988). Natural bond orbital analysis.
+\bibitem{idpp} S.~Smidstrup, A.~Pedersen, K.~Stokbro, H.~J\'onsson, \emph{J. Chem. Phys.} \textbf{140}, 214106 (2014). Image dependent pair potential.
+\bibitem{kayala} M.~A. Kayala, P.~Baldi, \emph{J. Chem. Inf. Model.} \textbf{52}, 2526 (2012). ReactionPredictor (source/sink orbital pairing).
+\end{thebibliography}
 
 \end{document}
