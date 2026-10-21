@@ -35,3 +35,36 @@ def test_missing_levels_are_nan(sp_record):
     )
     hydride = frontier_weights(sp_record("[H-]"))
     assert np.isclose(hydride[0, 1], 1.0) and np.isnan(hydride[0, [0, 2, 3]]).all()
+
+
+def test_frozen_orbital_fukui_is_symmetric_on_benzene(sp_record):
+    """One MO of the degenerate e1g pair gave the six carbons 0.27 / 0.22 / 0.00 (review Q1);
+    the block average gives each carbon the same value, and f sums to 1 over the atoms."""
+    from ksmech.orbitals.frontier import frozen_orbital_fukui_blocks
+
+    rec = sp_record("c1ccccc1")
+    f_plus, f_minus = frozen_orbital_fukui_blocks(rec)
+    carbons = rec.atomic_numbers == 6
+    for f in (f_plus, f_minus):
+        assert np.ptp(f[carbons]) < 1e-3, f[carbons]
+        assert abs(f.sum() - 1.0) < 1e-6
+
+
+def test_equivalent_tokens_get_one_spectral_set(sp_record):
+    """Methane's four C-H sigma LMOs split their weight differently over the degenerate t2
+    MOs; summed per level, their spectral sets are identical."""
+    from ksmech.orbitals.tokens import build_molecule_tokens
+
+    tokens = build_molecule_tokens(sp_record("C"))
+    sets = [
+        np.round(np.c_[o.descriptors.spectral_energies, o.descriptors.spectral_weights], 3)
+        for o in tokens.occupied()
+    ]
+    assert len(sets) == 4 and all(np.array_equal(sets[0], s) for s in sets[1:]), sets
+
+
+def test_degenerate_levels_use_the_anchor_rule():
+    from ksmech.orbitals.descriptors import degenerate_levels
+
+    e = np.array([-10.0, -9.97, -9.94, -5.0, -5.04])
+    assert degenerate_levels(e, 0.05).tolist() == [0, 0, 1, 2, 2]

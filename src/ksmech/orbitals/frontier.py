@@ -63,3 +63,17 @@ def frontier_weights(rec: QMRecord, tol: float = DEGENERACY_EV) -> np.ndarray:
             total += per_atom_sum(c * (rec.S @ c), rec.ao_atom, rec.n_atoms)
         out[:, j] = total
     return out
+
+
+def frozen_orbital_fukui_blocks(
+    rec: QMRecord, tol: float = DEGENERACY_EV
+) -> tuple[np.ndarray, np.ndarray]:
+    """(f+, f-) per atom: the LUMO / HOMO block populations of `frontier_weights` divided by the
+    block size, so each sums to 1 over the atoms like a Fukui function and symmetry-equivalent
+    atoms get equal values (one MO of a degenerate pair gave benzene's carbons 0.27 / 0.22 /
+    0.00). NaN when the level does not exist."""
+    fmo = frontier_weights(rec, tol)
+    blocks = frontier_blocks(rec.orbital_energies_ev, rec.occupations, tol)
+    f_plus = fmo[:, LEVELS.index("lumo")] / len(blocks["lumo"]) if "lumo" in blocks else fmo[:, 2]
+    f_minus = fmo[:, LEVELS.index("homo")] / len(blocks["homo"]) if "homo" in blocks else fmo[:, 1]
+    return f_plus, f_minus

@@ -33,6 +33,7 @@ class DescriptorConfig:
     top_centers: int = 4  # centres kept in the feature vector (zero-padded)
     spectral_min: float = 0.01  # spectral entries below this weight are dropped
     spectral_max: int = 8  # at most this many spectral entries per token, renormalized
+    degeneracy_ev: float = 0.05  # canonical MOs this close in energy form one spectral entry
     min_p_norm: float = ClassifyConfig.min_p_norm  # an atom with less p character has no axis
 
 
@@ -119,27 +120,51 @@ def feature_names(config: DescriptorConfig | None = None) -> list[str]:
     return names
 
 
+def degenerate_levels(energies_ev: np.ndarray, tol: float) -> np.ndarray:
+    """(n,) level id of each canonical MO: MOs within `tol` of the lowest energy of their level
+    share it (the anchor rule of `frontier_blocks`)."""
+    order = np.argsort(energies_ev, kind="stable")
+    level = np.empty(len(order), dtype=int)
+    current, anchor = -1, -np.inf
+    for k in order:
+        if energies_ev[k] - anchor > tol:
+            current, anchor = current + 1, energies_ev[k]
+        level[k] = current
+    return level
+
+
 def spectral_entries(
     u_column: np.ndarray, energies_ev: np.ndarray, mo_indices: np.ndarray, config: DescriptorConfig
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """(indices, energies, weights, retained) of the canonical MOs that make up one LMO.
+    """(indices, energies, weights, retained) of the canonical levels that make up one LMO.
 
-    Weights p_k = U_k^2 are kept when >= `spectral_min`, at most `spectral_max` of them (largest
-    first), renormalized to sum 1 and zero-padded to `spectral_max`. `retained` is their total
-    weight before renormalization.
+    Weights p_k = U_k^2 are first summed over each degenerate level (MOs within
+    `degeneracy_ev`): within a degenerate level the canonical MOs are an arbitrary basis, so
+    per-MO weights would give symmetry-equivalent LMOs different entries (methane's four C-H).
+    Levels are kept when >= `spectral_min`, at most `spectral_max` of them (largest first),
+    renormalized to sum 1 and zero-padded. A level's energy is its weight-averaged energy, its
+    index its heaviest MO. `retained` is the kept weight before renormalization.
     """
-    p = u_column**2
+    p_mo = u_column**2
+    level = degenerate_levels(energies_ev, config.degeneracy_ev)
+    n = int(level.max()) + 1
+    p = np.bincount(level, weights=p_mo, minlength=n)
+    e_sum = np.bincount(level, weights=p_mo * energies_ev, minlength=n)
+    e_mean = np.bincount(level, weights=energies_ev, minlength=n) / np.bincount(level, minlength=n)
+    energy = np.where(p > 0, e_sum / np.where(p > 0, p, 1.0), e_mean)
+    heaviest = np.zeros(n, dtype=int)
+    for k in np.argsort(p_mo, kind="stable"):  # ascending: the heaviest MO is written last
+        heaviest[level[k]] = k
     order = np.argsort(-p, kind="stable")
     keep = [k for k in order[: config.spectral_max] if p[k] >= config.spectral_min] or [order[0]]
     retained = float(p[keep].sum())
-    w = p[keep] / retained
     m = config.spectral_max
     idx = np.full(m, -1, dtype=np.int32)
     e = np.zeros(m)
     weights = np.zeros(m)
-    idx[: len(keep)] = mo_indices[keep]
-    e[: len(keep)] = energies_ev[keep]
-    weights[: len(keep)] = w
+    idx[: len(keep)] = mo_indices[heaviest[keep]]
+    e[: len(keep)] = energy[keep]
+    weights[: len(keep)] = p[keep] / retained
     return idx, e, weights, retained
 
 

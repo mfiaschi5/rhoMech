@@ -45,7 +45,7 @@ from ksmech.orbitals.descriptors import (
     feature_names,
 )
 from ksmech.orbitals.fgroups import FGVocab, default_vocab
-from ksmech.orbitals.frontier import LEVELS, frontier_weights
+from ksmech.orbitals.frontier import LEVELS, frontier_weights, frozen_orbital_fukui_blocks
 from ksmech.orbitals.localize import (
     LocalizedOrbitals,
     PMConfig,
@@ -55,7 +55,7 @@ from ksmech.orbitals.localize import (
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class OrbitalKind(StrEnum):
@@ -405,6 +405,7 @@ def _value(arr: np.ndarray, i: int) -> float:
 def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomToken]:
     out = []
     fmo = frontier_weights(rec)
+    f_plus_fmo, f_minus_fmo = frozen_orbital_fukui_blocks(rec)
     chirality = chirality_signs(mol, rec.coords_ang)
     for i, atom in enumerate(mol.GetAtoms()):
         out.append(
@@ -420,8 +421,8 @@ def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomTo
                 f_plus=_value(rec.fukui_plus, i),
                 f_minus=_value(rec.fukui_minus, i),
                 dual=_value(rec.fukui_dual, i),
-                f_plus_fmo=_value(rec.fukui_fmo_plus, i),
-                f_minus_fmo=_value(rec.fukui_fmo_minus, i),
+                f_plus_fmo=float(f_plus_fmo[i]),
+                f_minus_fmo=float(f_minus_fmo[i]),
                 vbur=_value(rec.buried_volume, i),
                 chirality=float(chirality[i]),
                 position=rec.coords_ang[i].copy(),

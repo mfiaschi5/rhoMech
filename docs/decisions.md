@@ -2762,3 +2762,32 @@ Each step is counted once, under the first reason that applies, in this order:
 - **To do at the rebuild.** `steps.parquet` stores `resonance_step` from ingest, so the rebuild
   starts with `ksmech-data ingest --source pmechdb`. Provenance then marks everything downstream
   stale.
+
+## 2026-10-22 — Degenerate canonical levels summed in f+/f-, omega and the spectral set (fix item 4)
+
+- **The rule** (one tolerance, 0.05 eV, the anchor rule of `frontier.frontier_blocks`):
+  canonical MOs within 0.05 eV of a level's anchor form one level. Inside a degenerate level
+  the canonical MOs are an arbitrary basis chosen by the eigensolver, so any per-MO quantity
+  is arbitrary and only the sum over the level is physical.
+- **omega** (`fmo_weights`, HOMO-1 … LUMO+1) was already summed over the block; unchanged.
+- **Frozen-orbital f+ / f-** (`AtomToken.f_plus_fmo` / `f_minus_fmo`, model inputs) now come from
+  `frontier.frozen_orbital_fukui_blocks`: the LUMO / HOMO block population divided by the block
+  size.
+  - So f sums to 1 over the atoms, like a Fukui function, and benzene's six carbons get equal
+    values (before: 0.273 / 0.224 / 0.002 from one MO of the e1g pair). 171 / 2,005 cached
+    molecules were affected (review Q1).
+  - The plain block sum would duplicate the omega HOMO / LUMO columns, hence the division.
+  - The QM record's own `fukui_fmo_plus/minus` (one MO each) are no longer read by the tokens.
+    They are left in the record rather than changing its schema.
+- **Spectral set** (`OrbitalDescriptors.spectral_*`, set-encoder input).
+  - p_rk is summed over each degenerate level before the 0.01 / top-8 cut. An entry's energy
+    is the weight-averaged energy of its level, its index the level's heaviest MO.
+  - Methane's four C-H tokens now carry one identical set, (-12.6 eV, 0.75), (-15.7 eV,
+    0.25) at the fixture geometry. Before, it was split differently over the t2 MOs per token
+    (review O1: 133 tokens in 9 of 400 cached molecules).
+  - G still uses the full per-MO vectors (`full_weights`), which it needs and which are
+    invariant inside a level anyway (G is linear in p).
+  - The tolerance is `DescriptorConfig.degeneracy_ev`, so it is part of the token provenance
+    config.
+- **Rebuild.** Token `SCHEMA_VERSION` 7 → 8. Every existing token file is now stale and
+  `ksmech-orbitals build` rebuilds it after the QM backfill. Nothing has been rebuilt yet.
