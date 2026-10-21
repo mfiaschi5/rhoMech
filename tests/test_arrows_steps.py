@@ -1,10 +1,10 @@
 """Training samples, split files and the collate function (`ksmech.arrows.steps`)."""
 
 import dataclasses
-import io
 import json
 import os
 
+import numpy as np
 import pytest
 import torch
 
@@ -15,13 +15,12 @@ from ksmech.arrows.steps import (
     MechanismSample,
     SkipReason,
     build_all_samples,
-    build_samples,
     collate_samples,
     load_samples,
     make_loader,
     sample_for_step,
     samples_path,
-    write_samples,
+    write_split_file,
 )
 from ksmech.data import provenance as prov
 from ksmech.data.io import steps_path, write_steps
@@ -72,12 +71,30 @@ def test_sample_holds_tokens_labels_and_product_key(mini_steps, token_loader, pa
     assert (w >= 0.15 - 1e-6).all() and j.max() < s.n_orbitals and g.max() < s.n_atoms
 
 
-def test_samples_round_trip_through_torch_save(mini_steps, token_loader, pair_kernels, tmp_path):
+def _stored(tmp_path, samples: dict, version=SAMPLE_VERSION):
+    """Write `samples` to a store in tmp_path and one view over all of them."""
+    from ksmech.arrows import store
+
+    parquet = tmp_path / "steps.parquet"
+    parquet.write_bytes(b"stand-in parquet")
+    split = write_split_file(tmp_path / "splits_x.json", "x", 0, {"x": sorted(samples)}, parquet)
+    index = store.write_store(tmp_path, samples, {}, parquet, version)
+    config = {"split": "x", "sample_version": version}
+    return store.write_view(tmp_path / "samples_x.json", sorted(samples), {}, index, split, config)
+
+
+def test_samples_round_trip_through_the_store(mini_steps, token_loader, pair_kernels, tmp_path):
     s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
-    write_samples(tmp_path / "x.pt", "x", [s.step_id], {s.step_id: s}, {})
-    (back,) = load_samples(tmp_path / "x.pt")
+    (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))
     assert back.labels == s.labels and back.product_key == s.product_key
     assert (back.orbital_features == s.orbital_features).all()
+    valid = s.pair_valid
+    assert np.array_equal(back.pair_valid, valid)
+    assert np.array_equal(back.pair_defined[valid], s.pair_defined[valid])
+    assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-6)  # float16
+    assert np.array_equal(back.pair_contact_sites[valid], s.pair_contact_sites[valid])
+    assert not back.pair_defined[~valid].any() and (back.pair_contact_sites[~valid] == -1).all()
+    assert back.pair_z.dtype == np.float32 and back.atom_coulomb.dtype == np.float32
 
 
 def test_skip_reasons(token_loader, pair_kernels):
@@ -112,15 +129,6 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pa
         assert r["n_samples"] + sum(r["skipped"].values()) == r["n_steps"]
     held_out = report["splits"]["loco-substitution_test"]
     assert held_out["n_steps"] == 2 and held_out["skipped"] == {"MISSING_TOKENS": 1}
-
-
-def test_build_samples_writes_one_split(mini_processed, token_loader, pair_kernels):
-    path = build_samples("pmechdb", "molecule_train", pair_kernels, mini_processed, token_loader)
-    assert path.name == "samples_molecule_train.pt"
-    report = json.loads(path.with_suffix(".json").read_text())
-    assert report["split"] == "molecule_train" and report["n_samples"] >= 1
-    with pytest.raises(ValueError):
-        build_samples("pmechdb", "random_bogus", pair_kernels, mini_processed, token_loader)
 
 
 def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
@@ -199,15 +207,13 @@ def test_sample_stores_the_physics_pair_block(mini_steps, token_loader, pair_ker
 
 def test_old_sample_versions_are_refused(mini_steps, token_loader, pair_kernels, tmp_path):
     s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
-    buf = io.BytesIO()
-    torch.save({"version": SAMPLE_VERSION - 1, "samples": [s.to_dict()]}, buf)
-    old = prov.stamp("samples", SAMPLE_VERSION - 1, content_sha256="x")
-    prov.write_framed(tmp_path / "old.pt", buf.getvalue(), old)
+    view = _stored(tmp_path, {s.step_id: s}, version=SAMPLE_VERSION - 1)
     with pytest.raises(prov.StaleArtifact, match="schema_version"):
-        load_samples(tmp_path / "old.pt")
-    torch.save({"version": SAMPLE_VERSION, "samples": [s.to_dict()]}, tmp_path / "bare.pt")
+        load_samples(view)
+    bare = tmp_path / "samples_bare.json"
+    bare.write_text(json.dumps({"ids": [s.step_id], "report": {}}))
     with pytest.raises(prov.StaleArtifact, match="no provenance header"):
-        load_samples(tmp_path / "bare.pt")  # written without a header: refused, never guessed
+        load_samples(bare)  # written without a header: refused, never guessed
 
 
 def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
@@ -223,9 +229,9 @@ def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
     path = samples_path("pmechdb", "molecule_train", mini_processed)
     assert load_samples(path)
     parquet = steps_path("pmechdb", mini_processed)
-    header = prov.read_header(path)
-    assert prov.file_input_name(parquet) in header.inputs
-    assert any("oriented" in name for name in header.inputs)  # the contact blocks it used
+    shard = prov.read_header(next((mini_processed / "pmechdb" / "samples").glob("shard_*.npz")))
+    assert prov.file_input_name(parquet) in shard.inputs
+    assert any("oriented" in name for name in shard.inputs)  # the contact blocks it used
     os.utime(parquet)  # a timestamp alone is not a change of content
     assert load_samples(path)
     steps = read_steps(parquet)

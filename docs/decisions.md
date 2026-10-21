@@ -2953,3 +2953,47 @@ Each step is counted once, under the first reason that applies, in this order:
   printed separately as "not a test" and does not count. The exit code needs 4 passes among
   held-out cases from one scorer.
 - The full textbook numbers come with the rebuild (new samples, molecule split).
+
+## 2026-10-22 — Sharded sample store, valid pairs only, float16 where safe (fix item 8)
+
+- **Layout** (`arrows.store`):
+  - Every step's sample is stored once in compressed `.npz` shards of 256 samples
+    (`data/processed/<source>/samples/shard_*.npz`) plus `index.json` (step id → shard).
+  - Each split is a small view `samples_<split>.json`: its ids and counts.
+  - Nothing is copied per split; before, random and scaffold each held a full copy, and loco
+    would have added one per class.
+  - Each layer has a provenance header:
+    - shard: the steps parquet and every token file and contact block its samples used;
+    - index: the shards;
+    - view: the index and the split file.
+  - `load_samples(view)` verifies the view, its split file (the parquet), the index and every
+    shard it reads.
+  - `build_samples` (one split, used only by tests) is gone; `ksmech-arrows samples` builds the
+    store and all views.
+- **What is stored per sample.** In memory a sample is unchanged: dense, float32.
+  - The pair arrays (`pair_z`, `pair_defined`, `pair_gap_sign`, `pair_contact_sites`) are kept
+    for the `pair_valid` cells only (89% of the cells on the old samples). Invalid cells come
+    back as 0 / undefined / -1.
+  - `ranking.refresh_validity` can therefore only narrow `pair_valid`, never widen it.
+  - The 0/1 features `inter` and `clash` and `pair_defined` are bit-packed. Contact sites are
+    int16, and the symmetric `atom_coulomb` keeps its upper triangle.
+  - `pair_z` (the other 9 features) and `atom_coulomb` are float16. Their bytes are stored
+    feature by feature, with the high and low bytes in separate planes. This is lossless and
+    compresses about 20% better under zlib.
+- **Why float16 is safe here.** Measured on the 670k valid cells of the old samples:
+  - the largest absolute float16 error on any pair feature is 5e-3, on log-features spanning
+    about 30 units;
+  - relative errors near 1 occur only below 1e-4 (`ks2`, `cross_coupling`), where float16 is
+    subnormal and the absolute error stays under 1e-7.
+
+  All of this is far below one standard deviation of any feature. Model inputs
+  (`orbital_features`, `orbital_spectra`, `atom_features`) stay float32.
+- **Size.** Re-encoding the 454 old samples: 67.3 MB as torch files → 15.2 MB stored (ratio
+  0.225; 0.209 on the larger half).
+  - The arrows reviewer projected 4.3 GB per copy for all 13,090 steps. One store at these
+    ratios is **0.90-0.97 GB**, against about 8.7 GB for the old two copies. The target was
+    < 1 GB.
+  - A 60-heavy-atom sample is about 0.32 MB on disk (1.8 MB before).
+  - The real number is measured at the rebuild.
+- `pair_feature_stats_<strategy>.json` is now fitted on the valid cells only (it never sees
+  the others), as the review asked (A11).

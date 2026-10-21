@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     r = sub.add_parser("roundtrip", help="apply dataset arrows, compare with the products")
     a = sub.add_parser("align", help="align arrows to tokens; predicted-arrow round trip")
-    s = sub.add_parser("samples", help="write samples_<split>.pt for every split strategy")
+    s = sub.add_parser("samples", help="sample store + samples_<split>.json views")
     for p in (r, a, s):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)

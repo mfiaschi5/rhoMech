@@ -143,8 +143,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   BE-matrix edit per step vs. the annotated products, `arrows_roundtrip.json`), `uv run
   ksmech-arrows align --source pmechdb` (arrow-to-orbital labels by atom, unaligned groups,
   predicted-arrow round trip, `alignment_report.json`), `uv run ksmech-arrows samples --source
-  pmechdb` (`samples_<strategy>_<part>.pt` for the `molecule`, `scaffold` and `loco` splits; the per-step
-  `random_leaky` split only with `--strategy random_leaky`; re-run both after a token rebuild)
+  pmechdb` (the sample store `samples/shard_*.npz` + `index.json`, one `samples_<strategy>_<part>.json`
+  view per split of `molecule`, `scaffold` and `loco`; the per-step `random_leaky` split only with
+  `--strategy random_leaky`; re-run both after a token rebuild)
 - Physics: `uv run ksmech-physics ks-rank --source pmechdb [--split molecule|scaffold] [--kernel
   oriented|table|mlp|analytic] [--distance 2.0 2.3 ...]` (untrained KS ranking of each step's
   first arrow: the floor -(KS3 + KS2) and the frozen head on train + val and test, scorer

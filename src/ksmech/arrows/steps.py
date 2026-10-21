@@ -14,15 +14,16 @@ the token files, and `MechanismSample.tokens(loader)` reloads them.
 A step becomes a sample only when every reactant fragment has tokens and every arrow is
 aligned or absorbed; every other step is skipped with a reason code and counted.
 
-`build_samples(source, split)` writes `data/processed/<source>/samples_<split>.pt`, with
-`split = "<strategy>_<part>"`: strategy `random` (by pathway), `scaffold`, or
-`loco-<class>` (leave one mechanism class out), part `train`, `val` or `test`.
+`build_all_samples(source, kernels)` writes the sample store (`arrows.store`) and one
+`data/processed/<source>/samples_<split>.json` view per split, with
+`split = "<strategy>_<part>"`: strategy `molecule` (the default), `scaffold`, `loco-<class>`
+(leave one mechanism class out) or, only when named, `random_leaky` (per step), part `train`,
+`val` or `test`.
 `collate_samples` pads a batch and builds the masks the model needs.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import re
@@ -36,6 +37,7 @@ import numpy as np
 import torch
 from rich.console import Console
 
+from ksmech.arrows import store
 from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
 from ksmech.arrows.reactants import (
     CorrespondenceError,
@@ -318,7 +320,8 @@ def split_ids(steps: list[ElementaryStep], strategy: str, seed: int = 0) -> dict
 
 
 def samples_path(source: str, split: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
-    return source_dir(source, processed_dir) / f"samples_{split}.pt"
+    """`samples_<split>.json`: the split's view over the sample store (`arrows.store`)."""
+    return source_dir(source, processed_dir) / f"samples_{split}.json"
 
 
 def splits_path(source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
@@ -345,21 +348,11 @@ def load_split_file(path: Path) -> dict[str, list[str]]:
     return json.loads(Path(path).read_text())["splits"]
 
 
-def write_samples(
-    path: Path,
-    split: str,
-    ids: list[str],
-    samples: dict,
-    skipped: dict,
-    inputs: dict[str, str] | None = None,
-    config: dict | None = None,
-) -> dict:
-    """Write the samples of `ids` with a provenance header and return the split's counts (also
-    written as JSON). The header's inputs are `inputs` (parquet, split file) plus every token
-    file and contact block the kept samples were built from."""
+def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> dict:
+    """The counts of one split: steps, samples, skip reasons, labels, filtered labels."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
-    report = {
+    return {
         "split": split,
         "n_steps": len(ids),
         "n_samples": len(kept),
@@ -371,53 +364,10 @@ def write_samples(
         "label_filter": dict(sum((Counter(s.label_filter) for s in kept), Counter()).most_common()),
         "n_fermi_smeared": sum(s.fermi_smeared for s in kept),
     }
-    all_inputs = dict(inputs or {})
-    for s in kept:
-        all_inputs.update(s.inputs)
-    buf = io.BytesIO()
-    torch.save({"version": SAMPLE_VERSION, **report, "samples": [s.to_dict() for s in kept]}, buf)
-    payload = buf.getvalue()
-    header = prov.stamp(
-        "samples", SAMPLE_VERSION, all_inputs, config or {}, prov.sha256_bytes(payload)
-    )
-    prov.write_framed(path, payload, header)
-    path.with_suffix(".json").write_text(json.dumps(report, indent=1) + "\n")
-    return report
-
-
-def _split_inputs(source, strategy, seed, ids, processed_dir) -> dict[str, str]:
-    parquet = steps_path(source, processed_dir)
-    out = splits_path(source, strategy, processed_dir)
-    path = write_split_file(out, strategy, seed, ids, parquet)
-    return {**prov.file_input(parquet), **prov.file_input(path)}
 
 
 def _config(split: str, kernels: PairKernels, seed: int) -> dict:
     return {"split": split, "seed": seed, "sample_version": SAMPLE_VERSION, **kernels.describe()}
-
-
-def build_samples(
-    source: str,
-    split: str,
-    kernels: PairKernels,
-    processed_dir: Path = DEFAULT_PROCESSED_DIR,
-    loader: TokenLoader | None = None,
-    seed: int = 0,
-) -> Path:
-    """Write `samples_<split>.pt` for one split (e.g. split `molecule_train`)."""
-    steps = read_training_steps(steps_path(source, processed_dir))
-    strategy = split.rsplit("_", 1)[0].split("-", 1)[0]
-    ids = split_ids(steps, strategy, seed)
-    if split not in ids:
-        raise ValueError(f"split {split!r} not produced by strategy {strategy!r}: {sorted(ids)}")
-    inputs = _split_inputs(source, strategy, seed, ids, processed_dir)
-    wanted = set(ids[split])
-    samples, skipped = build_step_samples(
-        (s for s in steps if s.step_id in wanted), loader or TokenCache(), kernels
-    )
-    path = samples_path(source, split, processed_dir)
-    write_samples(path, split, ids[split], samples, skipped, inputs, _config(split, kernels, seed))
-    return path
 
 
 def build_all_samples(
@@ -429,18 +379,19 @@ def build_all_samples(
     seed: int = 0,
     console: Console | None = None,
 ) -> dict:
-    """Build every step's sample once, then write one file per split of every strategy.
-    A strategy that cannot run on the source is reported, not raised."""
+    """Build every step's sample once into the store, then one split file per strategy and one
+    view per split. A strategy that cannot run on the source is reported, not raised."""
     console = console or Console()
-    steps = read_training_steps(steps_path(source, processed_dir))
+    parquet = steps_path(source, processed_dir)
+    steps = read_training_steps(parquet)
     samples, skipped = build_step_samples(steps, loader or TokenCache(), kernels)
+    out_dir = source_dir(source, processed_dir)
+    index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION)
     report = {
         "n_training_steps": len(steps),
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
-        "label_filter": dict(
-            sum((Counter(s.label_filter) for s in samples.values()), Counter()).most_common()
-        ),
+        "label_filter": split_report("all", sorted(samples), samples, {})["label_filter"],
         "splits": {},
         "strategies_not_applicable": {},
     }
@@ -450,11 +401,14 @@ def build_all_samples(
         except ValueError as exc:
             report["strategies_not_applicable"][strategy] = str(exc)
             continue
-        inputs = _split_inputs(source, strategy, seed, ids, processed_dir)
+        split_file = write_split_file(
+            splits_path(source, strategy, processed_dir), strategy, seed, ids, parquet
+        )
         for split, members in ids.items():
-            path = samples_path(source, split, processed_dir)
-            cfg = _config(split, kernels, seed)
-            counts = write_samples(path, split, members, samples, skipped, inputs, cfg)
+            counts = split_report(split, members, samples, skipped)
+            view = samples_path(source, split, processed_dir)
+            config = _config(split, kernels, seed)
+            store.write_view(view, members, counts, index, split_file, config)
             report["splits"][split] = counts
             if split.endswith("_train"):
                 train = [samples[i] for i in members if i in samples]
@@ -478,20 +432,11 @@ def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -
 
 
 def load_samples(path: Path, allow_stale: bool = False) -> list[MechanismSample]:
-    """The samples of one file. Its provenance header is verified first (parquet, split file,
-    token files, contact blocks); raises StaleArtifact naming what changed. `allow_stale` is
-    for diagnostic CLIs only: the mismatch is logged and the file is read anyway."""
-    try:
-        prov.verify(path, "samples", SAMPLE_VERSION)
-    except prov.StaleArtifact as exc:
-        if not allow_stale:
-            raise
-        log.warning("reading a stale sample file (--allow-stale): %s", exc)
-    _, payload_bytes = prov.read_framed(path)
-    payload = torch.load(io.BytesIO(payload_bytes), weights_only=True)
-    if payload.get("version") != SAMPLE_VERSION:
-        raise ValueError(f"{path}: sample version {payload.get('version')} != {SAMPLE_VERSION}")
-    return [MechanismSample.from_dict(d) for d in payload["samples"]]
+    """The samples of one split view (`samples_<split>.json`). The view, the store index and
+    every shard read are verified first (parquet, split file, token files, contact blocks);
+    StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs only: the mismatch
+    is logged and the store is read anyway."""
+    return store.load_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale)
 
 
 class SampleDataset(torch.utils.data.Dataset):

@@ -280,7 +280,7 @@ def _baseline_table(results: dict, console: Console, title: str) -> None:
 
 
 def _loco_note(args: argparse.Namespace) -> str:
-    found = sorted(source_dir(args.source, args.processed_dir).glob("samples_loco-*_test.pt"))
+    found = sorted(source_dir(args.source, args.processed_dir).glob("samples_loco-*_test.json"))
     if found:
         return f"{len(found)} leave-one-class-out splits found (evaluate with --split loco-<class>)"
     return "leave-one-class-out: not applicable (the source has no mechanism classes)"

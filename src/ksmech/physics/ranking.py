@@ -117,8 +117,10 @@ def pair_components(
 
 
 def refresh_validity(sample: MechanismSample, loader: TokenLoader) -> MechanismSample:
-    """The sample with `pair_valid` recomputed from its tokens (the current filter)."""
-    return dataclasses.replace(sample, pair_valid=valid_pairs(sample.tokens(loader)))
+    """The sample with `pair_valid` recomputed from its tokens (the current filter), never
+    widened: the store keeps pair features for the stored valid cells only."""
+    now = valid_pairs(sample.tokens(loader))
+    return dataclasses.replace(sample, pair_valid=sample.pair_valid & now)
 
 
 def first_label(sample: MechanismSample) -> ArrowLabel:
