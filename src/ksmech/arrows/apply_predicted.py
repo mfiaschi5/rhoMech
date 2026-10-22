@@ -1,44 +1,38 @@
 """Turn predicted (donor, donor site, acceptor, acceptor site) arrows into a graph edit.
 
-Only the sites and the descriptors of the chosen tokens are used, never the dataset arrows
-and never the classifier's orbital type. Each arrow, in order:
+Only the sites and the centres and descriptors of the chosen tokens are used, never the dataset
+arrows and never the classifier's orbital type (docs/decisions.md 2026-10-22, round-trip
+diagnosis). The arrows of a step build one bond-electron edit, sanitized once; each arrow
+reads the state left by the earlier ones (an atom that took a pair is negative for the next
+arrow: the E2 and enolization relays), and each electron pair moves once per step.
 
-1. source: if a carries a negative charge in the current state, or a one-centre occupied
-   token (`n_centers == 1`) sits on a, and the current Lewis structure gives a a lone pair
-   (at least 2 nonbonding electrons), the pair is a lone pair of a. Otherwise it comes from
-   a bond a-c, chosen in this order: a multiple bond to a centre of the donor token; the
-   same after switching to another Kekulé structure of the molecule; a single bond to a
-   centre of the donor token (a sigma donor, such as C-H in an E2); a drawn bond to a that
-   no occupied token spans (the wavefunction holds that pair on a: a beta-silicate C-Si);
-   a multiple bond to any neighbour; c is never the acceptor site b. That bond loses one
-   order and c takes the positive charge. When no bond qualifies but a has a lone pair in
-   the current Lewis structure (a delocalized amine N, drawn neutral), that pair is used;
-2. the bond a-b forms (or gains one order);
-3. sink: if b had an open valence shell before the new bond (fewer than 8 electrons, 2 for
-   H: a carbocation, H+, a borane), nothing else changes. Otherwise a bond b-d breaks and d
-   takes the leaving pair. d is a centre of the acceptor token bonded to b, when the
-   acceptor is antibonding (negative overlap population): multiple bonds first (pi*), then
-   by weight, never the donor site a. When the acceptor names no such centre, d is the
-   neighbour whose bond pair already sits mostly off b (smallest weight on b over the
-   occupied tokens spanning b-d; 0 for a drawn bond no token spans).
+Source, for donor r at site a:
+1. a has a pair and r is one-centre (a lone pair) or a is negative now: a lone pair of a;
+2. else the bond to the largest-weight centre c of r (c != a, b) bonded to a, if that bond is
+   multiple or r is a sigma pair (chi >= `SIGMA_CHI`: C-H in an E2, C-Si);
+3. else a drawn bond a-c that no occupied token spans (its pair sits on a: Na-H);
+4. else a lone pair of a; else, last, a Kekule structure in which a has a multiple bond
+   (flagged APPLY_KEKULE_FALLBACK).
 
-The spec's rule for step 3 ("a two-centre antibonding acceptor on (b, d) breaks b-d") is the
-special case of a full-shell b with a two-centre acceptor. Taken literally it breaks a C-C
-single bond when a carbocation's empty p is conjugated onto a neighbour (a two-centre token,
-C 0.60 / C 0.25, overlap -0.19) and breaks nothing when a protonated carbonyl pi* spreads over
-three centres; see docs/decisions.md.
+The bond a-b forms (or gains one order). Sink, for acceptor s at site b:
+5. b had an open shell before the new bond (a carbocation, H+, a borane): nothing breaks;
+6. b is in period 3 or beyond and s is one-centre (an empty d / p of its own, TiCl4, SnR3+):
+   nothing breaks (the octet may expand);
+7. else, if s is antibonding (negative overlap population), the bond to its centre d bonded to
+   b breaks (multiple bonds first, then weight) and d takes the pair; with no such centre, the
+   bond whose pair sits mostly off b (smallest weight on b over the occupied tokens spanning
+   it) breaks.
 
-Arrows are applied in sequence, so an atom that took a leaving pair from an earlier arrow of
-the step is negative when a later arrow starts there (the E2 and conjugate-addition relays).
-Each electron pair moves once per elementary step: a bond already decremented by an earlier
-arrow of the step is not decremented again. The result is sanitized and reduced to its
-resonance key (`ApplyResult.key`).
+Rule 7 is not decided by the tuple when b can expand its octet and s is a sigma*: PMechDB adds
+to Si without a leaving group (pentacoordinate silicates) but substitutes at Br and Cl, and P,
+S and I go both ways. Those steps stay below the round-trip gate (docs/decisions.md).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
 from rdkit import Chem, rdBase
 from rdkit.Chem import rdchem
 
@@ -66,6 +60,7 @@ class PredictedArrow:
     donor_site: int
     acceptor: int
     acceptor_site: int
+    breaks_bd: int | None = None  # the decoder's bond-break flag; None: the physical rules decide
 
 
 def _pair(i: int, j: int) -> tuple[int, int]:
@@ -106,6 +101,10 @@ class EditState:
         self.consumed.add(_pair(i, j))
 
 
+KEKULE_FALLBACK = "APPLY_KEKULE_FALLBACK"
+SIGMA_CHI = 0.5  # chi at or above: a sigma bond pair (chi 1 sigma, 0 pi)
+
+
 def _mol_index(tokens: ReactantTokens, site: int) -> int:
     idx = tokens.mol_atom.get(site)
     if idx is None:
@@ -115,17 +114,53 @@ def _mol_index(tokens: ReactantTokens, site: int) -> int:
     return idx
 
 
-def has_one_centre_donor(tokens: ReactantTokens, site: int) -> bool:
-    """A one-centre occupied token sits on `site` (a global atom)."""
-    return any(
-        tokens.occupied[t - tokens.n_atoms] and tokens.orbital(t).descriptors.n_centers == 1
-        for t in tokens.tokens_on_atom.get(site, [])
-    )
+def _bonded_centre(
+    tokens: ReactantTokens,
+    state: EditState,
+    tok: int,
+    site: int,
+    skip: int,
+    sigma_ok: bool,
+    multiple_first: bool = False,
+):
+    """The largest-weight centre c of token `tok` (not `site`, not `skip`) bonded to `site` in
+    the current state, with a bond this step has not consumed yet; with `sigma_ok` False only a
+    multiple bond qualifies; with `multiple_first` a multiple bond wins over any single one.
+    Mol indices; None when there is none."""
+    i = tokens.mol_atom[site]
+    found = []
+    for g, w in tokens.centres(tok).items():
+        j = tokens.mol_atom.get(g)
+        if g in (site, skip) or j is None or j not in state.neighbours(i):
+            continue
+        if sigma_ok or state.order(i, j) >= 2:
+            found.append((multiple_first and state.order(i, j) < 2, -w, g, j))
+    return min(found)[3] if found else None
 
 
-def _kekule_switch(state: EditState, a: int, centres: set[int]) -> int | None:
-    """Swap the base for another Kekulé structure (same charges) in which a has a multiple
-    bond to one of `centres`, keeping every accumulated bond change valid. Returns that c."""
+def bond_weight_on(tokens: ReactantTokens, b: int, x: int) -> float:
+    """Smallest weight on b over the occupied tokens spanning the global atoms b and x; 0 when
+    no occupied token spans them (the drawn bond's pair sits on one atom: an ionic Na-H)."""
+    spans = [
+        tokens.centres(t)[b]
+        for t in tokens.tokens_on_atom.get(b, [])
+        if tokens.occupied[t - tokens.n_atoms] and x in tokens.centres(t)
+    ]
+    return min(spans, default=0.0)
+
+
+def _tokenless_bond(state: EditState, tokens: ReactantTokens, a: int, b: int) -> int | None:
+    """A drawn bond a-c (c != b) that no occupied token spans: its pair already sits on a."""
+    glob = tokens.global_atom
+    for c in state.neighbours(a):
+        if c != b and bond_weight_on(tokens, glob[a], glob[c]) == 0.0:
+            return c
+    return None
+
+
+def _kekule_switch(state: EditState, a: int, b: int) -> int | None:
+    """Switch the base to another Kekule structure (same charges) in which a has a multiple
+    bond to a neighbour other than b, keeping the accumulated edit valid; returns it."""
     flags = int(rdchem.ResonanceFlags.KEKULE_ALL)
     with rdBase.BlockLogs():
         supplier = rdchem.ResonanceMolSupplier(state.base, flags, MAX_KEKULE)
@@ -138,70 +173,35 @@ def _kekule_switch(state: EditState, a: int, centres: set[int]) -> int | None:
         trial.base.UpdatePropertyCache(strict=False)
         Chem.Kekulize(trial.base, clearAromaticFlags=True)
         valid = all(0 <= trial.order(i, j) <= 3 for (i, j) in state.edit.bond_delta)
-        hits = [c for c in trial.neighbours(a) if c in centres and trial.order(a, c) >= 2]
+        hits = [c for c in trial.neighbours(a) if c != b and trial.order(a, c) >= 2]
         if valid and hits:
             state.base = trial.base
             return hits[0]
     return None
 
 
-def bond_weight_on(tokens: ReactantTokens, b: int, x: int) -> float:
-    """Smallest weight on b over the occupied tokens spanning the global atoms b and x; 0 when
-    no occupied token spans them (the drawn bond's pair sits on one atom)."""
-    spans = [
-        tokens.centres(t)[b]
-        for t in tokens.tokens_on_atom.get(b, [])
-        if tokens.occupied[t - tokens.n_atoms] and x in tokens.centres(t)
-    ]
-    return min(spans, default=0.0)
-
-
-def source_partner(
-    state: EditState, tokens: ReactantTokens, a: int, b: int, weights: dict[int, float]
-) -> int | None:
-    """The atom c whose bond to a donates the pair (see the module docstring for the order),
-    never the acceptor site b. `weights`: mol atom index -> population of the donor token's
-    centres."""
-    nbrs = [c for c in state.neighbours(a) if c != b]
-    by_weight = sorted((c for c in nbrs if c in weights), key=lambda c: -weights[c])
-    multiple = [c for c in by_weight if state.order(a, c) >= 2]
-    if multiple:
-        return multiple[0]
-    switched = _kekule_switch(state, a, set(weights) - {a}) if len(weights) > 1 else None
-    if switched is not None:
-        return switched
-    if by_weight:
-        return by_weight[0]
-    glob = tokens.global_atom
-    tokenless = [c for c in nbrs if bond_weight_on(tokens, glob[a], glob[c]) == 0.0]
-    if tokenless:
-        return tokenless[0]
-    any_multiple = [c for c in nbrs if state.order(a, c) >= 2]
-    return any_multiple[0] if any_multiple else None
-
-
-def _apply_source(
-    state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, a: int, b: int
-) -> None:
-    """Take the pair from a lone pair of a or from a bond a-c. When no bond qualifies, a lone
-    pair of the current Lewis structure (a delocalized amine N drawn neutral) is used."""
+def _source(state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, flags: set) -> None:
+    """Rules 1-3 of the module docstring for the donor side of one arrow."""
+    a, b = _mol_index(tokens, arrow.donor_site), _mol_index(tokens, arrow.acceptor_site)
     has_pair = state.nonbonding(a) >= 2
-    lone = state.charge(a) < 0 or has_one_centre_donor(tokens, arrow.donor_site)
-    if lone and has_pair:
+    one_centre = len(tokens.centres(arrow.donor)) == 1
+    if has_pair and (one_centre or state.charge(a) < 0):
         state.edit.add((a,), -1)
         return
-    weights = {
-        tokens.mol_atom[g]: w
-        for g, w in tokens.centres(arrow.donor).items()
-        if g in tokens.mol_atom
-    }
-    c = source_partner(state, tokens, a, b, weights)
+    sigma = tokens.orbital(arrow.donor).descriptors.cos_character() >= SIGMA_CHI
+    site, skip = arrow.donor_site, arrow.acceptor_site
+    c = _bonded_centre(tokens, state, arrow.donor, site, skip, sigma_ok=sigma)
+    c = c if c is not None else _tokenless_bond(state, tokens, a, b)
     if c is not None:
         state.decrement(a, c)
     elif has_pair:
         state.edit.add((a,), -1)
     else:
-        raise ArrowApplyError(ApplyReason.VALENCE, f"donor site {a} has no pair to give")
+        c = _kekule_switch(state, a, b)
+        if c is None:
+            raise ArrowApplyError(ApplyReason.VALENCE, f"donor site {a}: no bond and no lone pair")
+        flags.add(KEKULE_FALLBACK)
+        state.decrement(a, c)
 
 
 def open_shell(state: EditState, i: int) -> bool:
@@ -213,28 +213,28 @@ def open_shell(state: EditState, i: int) -> bool:
     return state.nonbonding(i) + 2 * bonds < capacity
 
 
-def sink_partner(
-    state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, a: int, b: int
-) -> int | None:
-    """The atom d whose bond to the full-shell sink b breaks (see the module docstring)."""
-    nbrs = [x for x in state.neighbours(b) if x != a]
-    glob = tokens.global_atom
-    centres = tokens.centres(arrow.acceptor)
-    if tokens.orbital(arrow.acceptor).descriptors.overlap_population < 0:
-        named = [x for x in nbrs if glob.get(x) in centres and glob[x] != arrow.acceptor_site]
-        named.sort(key=lambda x: (state.order(b, x) < 2, -centres[glob[x]]))
-        if named:
-            return named[0]
-    ranked = sorted(nbrs, key=lambda x: bond_weight_on(tokens, glob[b], glob[x]))
-    return ranked[0] if ranked else None
-
-
-def _apply_sink(
-    state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, a: int, b: int, room: bool
-) -> None:
-    if room:
+def _sink(state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, room: bool) -> None:
+    """Rules 5-7 of the module docstring for the acceptor side of one arrow; `room`: the
+    acceptor site had an open shell before the new bond. A set `arrow.breaks_bd` decides
+    whether a bond at b breaks; rule 7 still says which one."""
+    b = _mol_index(tokens, arrow.acceptor_site)
+    if arrow.breaks_bd == 0:
         return
-    d = sink_partner(state, tokens, arrow, a, b)
+    if arrow.breaks_bd is None:
+        if room:
+            return
+        expands = state.base.GetAtomWithIdx(b).GetAtomicNum() > 10  # period 3+: can exceed 8
+        if expands and len(tokens.centres(arrow.acceptor)) == 1:
+            return  # an empty orbital of its own (Ti, Sn d / p): the bond only forms
+    site, skip = arrow.acceptor_site, arrow.donor_site
+    d = None
+    if tokens.orbital(arrow.acceptor).descriptors.overlap_population < 0:
+        d = _bonded_centre(tokens, state, arrow.acceptor, site, skip, True, multiple_first=True)
+    if d is None:  # a full shell with no partner named: the bond whose pair sits mostly off b
+        a = _mol_index(tokens, arrow.donor_site)
+        glob = tokens.global_atom
+        nbrs = [x for x in state.neighbours(b) if x != a]
+        d = min(nbrs, key=lambda x: bond_weight_on(tokens, glob[b], glob[x]), default=None)
     if d is not None:
         state.decrement(b, d)
         state.edit.add((d,), +1)
@@ -244,27 +244,81 @@ def apply_predicted_arrows(
     mol: Chem.Mol, arrows: list[PredictedArrow], tokens: ReactantTokens
 ) -> ApplyResult:
     """Apply predicted arrows to `mol`, the molecule `tokens` was built from (same atom
-    indices). Returns the product or the reason code."""
+    indices), as one edit. Returns the product or the reason code."""
     if mol.GetNumAtoms() != tokens.mol.GetNumAtoms():
         return ApplyResult(None, ApplyReason.UNKNOWN_ARROW, "mol is not the tokens' molecule")
     state = EditState(Chem.Mol(mol))
+    flags: set[str] = set()
     try:
         for arrow in arrows:
-            a = _mol_index(tokens, arrow.donor_site)
             b = _mol_index(tokens, arrow.acceptor_site)
             room = open_shell(state, b)
-            _apply_source(state, tokens, arrow, a, b)
-            state.edit.add((a, b), +1)
-            _apply_sink(state, tokens, arrow, a, b, room)
-        return ApplyResult(sanitize_product(apply_edit(state.base, state.edit)))
+            _source(state, tokens, arrow, flags)
+            state.edit.add((_mol_index(tokens, arrow.donor_site), b), +1)
+            _sink(state, tokens, arrow, room)
+        product = sanitize_product(apply_edit(state.base, state.edit))
+        return ApplyResult(product, flags=frozenset(flags))
     except ArrowApplyError as exc:
-        return ApplyResult(None, exc.reason, exc.detail)
+        return ApplyResult(None, exc.reason, exc.detail, flags=frozenset(flags))
 
 
-def labeled_arrows(tokens: ReactantTokens, labels: list[ArrowLabel]) -> list[PredictedArrow]:
-    """The teacher representatives (r*, a*, s*, b*) of aligned labels, as predicted arrows."""
+def bond_break_label(tokens: ReactantTokens, label: ArrowLabel, s: int) -> tuple[int | None, bool]:
+    """(breaks_bd, forced) of an aligned arrow with acceptor s: does the bond from b to s's
+    partner d break in this step? Physics fixes it where it can:
+    - s is one-centre (an empty orbital of b's own) or b has an open shell: 0, forced;
+    - b is a full-shell atom of period 1-2 (H, C, N, O, ...): 1, forced;
+    - b is in period 3+ and s is antibonding with a centre d bonded to b: learned, 1 when the
+      annotated step breaks b-d (`label.sink_partners`), else 0;
+    - b is in period 3+ and s is antibonding but its partner is the donor's own atom (the
+      arrow turns that bond multiple): learned, 1 when the annotated step breaks any bond at b
+      (rule 7's weakest bond then says which), else 0;
+    - otherwise None (s not antibonding, or b bonded to nothing but the donor's atom)."""
+    b = tokens.mol_atom.get(label.acceptor_site)
+    if b is None:
+        return None, False
+    state = EditState(Chem.Mol(tokens.mol))
+    if len(tokens.centres(s)) == 1 or open_shell(state, b):
+        return 0, True
+    if state.base.GetAtomWithIdx(b).GetAtomicNum() <= 10:
+        return 1, True
+    if tokens.orbital(s).descriptors.overlap_population >= 0:
+        return None, False
+    site, skip = label.acceptor_site, label.donor_site
+    d = _bonded_centre(tokens, state, s, site, skip, True, multiple_first=True)
+    if d is None:
+        a = tokens.mol_atom.get(skip)
+        if not any(x != a for x in state.neighbours(b)):
+            return None, False
+        return int(bool(label.sink_partners)), False
+    d_global = next(g for g, i in tokens.mol_atom.items() if i == d)
+    return int(d_global in label.sink_partners), False
+
+
+def labeled_arrows(
+    tokens: ReactantTokens, labels: list[ArrowLabel], valid=None, with_breaks: bool = True
+) -> list[PredictedArrow]:
+    """The teacher representatives (r*, a*, s*, b*) of aligned labels, as predicted arrows;
+    with `valid(r, s)` the teacher pair is chosen among valid pairs, as the samples do; with
+    `with_breaks` each arrow carries its labeled bond-break flag where it is learned; a forced
+    flag is left to the physical rules, which apply it in the state the earlier arrows of the
+    step leave (`bond_break_label`)."""
     out = []
     for label in labels:
-        r, s = representatives(tokens, label)
-        out.append(PredictedArrow(r, label.donor_site, s, label.acceptor_site))
+        r, s = representatives(tokens, label, valid)
+        flag, forced = bond_break_label(tokens, label, s) if with_breaks else (None, True)
+        flag = None if forced else flag
+        out.append(PredictedArrow(r, label.donor_site, s, label.acceptor_site, flag))
     return out
+
+
+def valid_pair_test(tokens: ReactantTokens):
+    """valid(r, s) over global token ids: the samples' `pair_valid` (bonded-site filter and
+    antibonding-partner rule) of this reactant side."""
+    from ksmech.physics.pairs import valid_pairs
+
+    valid = valid_pairs([f.tokens for f in tokens.fragments], tokens.candidate)
+    occ = tokens.n_atoms + np.flatnonzero(tokens.occupied)
+    virt = tokens.n_atoms + np.flatnonzero(~tokens.occupied)
+    row = {int(t): i for i, t in enumerate(occ)}
+    col = {int(t): i for i, t in enumerate(virt)}
+    return lambda r, s: r in row and s in col and bool(valid[row[r], col[s]])

@@ -19,6 +19,7 @@ from ksmech.arrows.apply_predicted import (
     PredictedArrow,
     apply_predicted_arrows,
     labeled_arrows,
+    valid_pair_test,
 )
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
 from ksmech.arrows.reactants import (
@@ -97,7 +98,7 @@ def predicted_round_trip_step(
 ) -> RoundTrip:
     """Apply the labeled (token, site) tuples of a completely aligned step from the sites
     alone (`apply_predicted_arrows`) and compare with the annotated products."""
-    arrows = labeled_arrows(tokens, alignment.labels)
+    arrows = labeled_arrows(tokens, alignment.labels, valid_pair_test(tokens))
     result = apply_predicted_arrows(tokens.mol, arrows, tokens)
     status, pattern = compare_products(result, step)
     if status in MATCH_STATUSES:

@@ -76,6 +76,8 @@ class ArrowLabel:
     absorbed: tuple[int, ...] = ()  # heterolysis arrows folded into this acceptor set
     teacher_donor: int = -1  # r*: set by the sample builder, a valid pair with teacher_acceptor
     teacher_acceptor: int = -1  # s*
+    breaks_bd: int | None = None  # 1 / 0: the bond b-d to s*'s partner d breaks in this step
+    breaks_bd_forced: bool = False  # True: fixed by physics (`bond_break_label`), not learned
 
     def to_dict(self) -> dict:
         return {
@@ -91,6 +93,8 @@ class ArrowLabel:
             "absorbed": list(self.absorbed),
             "teacher_donor": self.teacher_donor,
             "teacher_acceptor": self.teacher_acceptor,
+            "breaks_bd": self.breaks_bd,
+            "breaks_bd_forced": self.breaks_bd_forced,
         }
 
     @classmethod
@@ -108,6 +112,8 @@ class ArrowLabel:
             tuple(d["absorbed"]),
             d.get("teacher_donor", -1),
             d.get("teacher_acceptor", -1),
+            d.get("breaks_bd"),
+            d.get("breaks_bd_forced", False),
         )
 
 

@@ -215,6 +215,7 @@ class ApplyResult:
     mol: Chem.Mol | None
     reason: ApplyReason | None = None
     detail: str = ""
+    flags: frozenset[str] = frozenset()  # e.g. APPLY_KEKULE_FALLBACK (predicted arrows)
 
     @property
     def ok(self) -> bool:

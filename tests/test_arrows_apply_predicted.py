@@ -172,3 +172,77 @@ def test_property_heavy_atoms_and_charge_are_conserved(token_loader):
         assert chem.formal_charge(out.mol) == chem.formal_charge(rt.mol)
         assert chem.hydrogen_count(out.mol) == chem.hydrogen_count(rt.mol)
     assert n_ok >= 30
+
+
+def test_an_empty_orbital_of_an_expanding_atom_takes_the_pair_without_losing_a_bond(token_loader):
+    """TiCl4 + a carbonyl O: the acceptor is Ti's own empty orbital (one centre); Ti (period 4)
+    may exceed the octet, so no Ti-Cl bond breaks (the old rule expelled a chloride)."""
+    rt = _rt("C=[O:10].[Cl][Ti:20]([Cl])([Cl])[Cl]", token_loader)
+    o, ti = rt.site_of_map(10), rt.site_of_map(20)
+    lone_pair = next(
+        t for t in rt.tokens_on_atom[o] if rt.occupied[t - rt.n_atoms] and len(rt.centres(t)) == 1
+    )
+    empty = next(
+        t
+        for t in rt.tokens_on_atom[ti]
+        if not rt.occupied[t - rt.n_atoms] and set(rt.centres(t)) == {ti}
+    )
+    out = apply_predicted_arrows(rt.mol, [PredictedArrow(lone_pair, o, empty, ti)], rt)
+    want = chem.canonicalize_mapped("C=[O+:10][Ti-:20]([Cl])([Cl])([Cl])[Cl]")
+    assert out.ok and out.smiles == want
+
+
+def test_a_hydride_gives_the_pair_of_its_ionic_bond(token_loader):
+    """NaH + an alcohol O-H: the hydride's pair sits on H (no occupied token spans Na-H), so the
+    drawn H-Na bond gives it; the O-H sigma* breaks at O."""
+    step = "CC[O:21][H:20].[H:10][Na:11]"
+    rt = _rt(step, token_loader)
+    h, hp, o = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
+    occupied_on_h = [t for t in rt.tokens_on_atom[h] if rt.occupied[t - rt.n_atoms]]
+    hydride = max(occupied_on_h, key=lambda t: rt.centres(t)[h])
+    sigma_star = _token(rt, False, {hp, o}, antibonding=True)
+    out = apply_predicted_arrows(rt.mol, [PredictedArrow(hydride, h, sigma_star, hp)], rt)
+    want = chem.canonicalize_mapped("CC[O-:21].[H:10][H:20].[Na+:11]")
+    assert out.ok and out.smiles == want
+
+
+def test_bond_break_labels_are_learned_only_where_the_tuple_cannot_decide(token_loader):
+    from ksmech.arrows.align import ArrowLabel
+    from ksmech.arrows.apply_predicted import bond_break_label
+
+    rt = _rt("C[O-:10].C[Si:20](C)(C)[Cl:21].[CH3:30][Cl:31]", token_loader)
+    o, si, cl = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
+    c, cl2 = rt.site_of_map(30), rt.site_of_map(31)
+    donor = next(
+        t for t in rt.tokens_on_atom[o] if rt.occupied[t - rt.n_atoms] and len(rt.centres(t)) == 1
+    )
+    si_star = _token(rt, False, {si, cl}, antibonding=True)
+    c_star = _token(rt, False, {c, cl2}, antibonding=True)
+
+    def label(site, s, partners=()):
+        return ArrowLabel(frozenset({donor}), o, frozenset({s}), site, sink_partners=partners)
+
+    # Si can expand its octet: the dataset decides, learned
+    assert bond_break_label(rt, label(si, si_star), si_star) == (0, False)  # pentacoordinate
+    assert bond_break_label(rt, label(si, si_star, (cl,)), si_star) == (1, False)  # SN2 at Si
+    # a full-shell carbon must lose a bond: forced, whatever the label says
+    assert bond_break_label(rt, label(c, c_star), c_star) == (1, True)
+
+
+def test_a_sigma_star_toward_the_donor_atom_learns_whether_b_loses_any_bond(token_loader):
+    from ksmech.arrows.align import ArrowLabel
+    from ksmech.arrows.apply_predicted import bond_break_label
+
+    rt = _rt("C[O:10][Si:20](C)(C)[Cl:21]", token_loader)
+    o, si, cl = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
+    donor = next(
+        t for t in rt.tokens_on_atom[o] if rt.occupied[t - rt.n_atoms] and len(rt.centres(t)) == 1
+    )
+    si_o_star = _token(rt, False, {si, o}, antibonding=True)
+
+    def label(partners=()):
+        return ArrowLabel(frozenset({donor}), o, frozenset({si_o_star}), si, sink_partners=partners)
+
+    # the arrow makes Si-O multiple; whether Si also loses a bond (Cl here) is the dataset's call
+    assert bond_break_label(rt, label(), si_o_star) == (0, False)
+    assert bond_break_label(rt, label((cl,)), si_o_star) == (1, False)

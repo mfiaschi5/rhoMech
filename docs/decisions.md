@@ -3079,3 +3079,119 @@ Each step is counted once, under the first reason that applies, in this order:
 - `test_site_lobe_rules` computed an angle with `arccos` and no clip. An H site's lobe points
   exactly away from its single neighbour, so the cosine came out as −1 − 1 ulp → NaN. The
   helper now clips.
+
+## 2026-10-22 — Predicted-arrow round trip: diagnosis and rules (fix-plan round-trip steps 1-4)
+
+- **The gate.** 95%, kept. It guards inference and evaluation, not sample building (user,
+  2026-10-22).
+- **Dataset arrows** (`apply_arrows` on the annotated arrows, compared by the map-free
+  resonance key): 12,830 / 12,830 training steps (12,829 exact, 1 modulo resonance). The
+  training labels are sound, so the sample build went ahead.
+- **Predicted tuples, before** (the 2026-10-20 rule, IBO tokens, all 11,865 completely aligned
+  steps): 11,045 = 93.09%. All 820 failures reproduce with dataset arrows, so they come from
+  turning a tuple into an edit, not from the data.
+  - Grouped by (donor centres, acceptor centres, sites bonded, intramolecular, arrows,
+    conjugated site, truncated):
+    - **470 at a hypervalent site:** a σ* at Si / P / S / Sn, where PMechDB forms the bond
+      without breaking b–d;
+    - **107 at a one-centre empty Ti / Sn orbital:** the old rule broke a Ti–Cl bond;
+    - **26 σ(O–C) donors treated as an O lone pair;**
+    - **30 own-bond teachers:** the round trip used the unfiltered teacher, σ*(S–O⁻).
+  - PM tokens give the same rate on a 1,391-step probe (92.0% vs 92.1%), so localization is
+    not the cause.
+- **The rule as first specified** (centres decide source and sink; tuples read on the unedited
+  molecule): 67.2% (IBO), 67.9% (PM probe). It fixed 131 old failures and broke about 3,200
+  steps:
+  - relays (E2, enolization), because reading every tuple on the unedited molecule moves the
+    C–H pair twice;
+  - carbocation sinks (no open-shell guard);
+  - conjugated carbanion donors (a single bond consumed).
+
+  The old code already built one edit sanitized once; its sequential reading is what made the
+  relays work.
+- **The rule now in `apply_predicted`** (v4, rules only, module docstring):
+  - the old reading order and pair accounting;
+  - source:
+    1. lone pair if r is one-centre or a is negative;
+    2. else the largest-weight bonded centre of r if the bond is multiple or r is σ-like
+       (χ ≥ 0.5);
+    3. else a bond no occupied token spans;
+    4. else a lone pair; else the flagged Kekulé fallback;
+  - sink:
+    5. open shell: nothing breaks;
+    6. a one-centre acceptor on a period-3+ atom: nothing breaks;
+    7. else a σ* breaks to its bonded centre (multiple bonds first, then weight), or the bond
+       whose pair sits mostly off b;
+  - the round-trip teacher is chosen among valid pairs (fix item 6).
+
+  | rule | IBO, all 11,865 | IBO probe 1,391 | PM probe 1,391 |
+  |---|---|---|---|
+  | 2026-10-20 | 93.09% | 92.09% | 92.02% |
+  | as first specified | 67.17% | 68.08% | 67.94% |
+  | refined (no tokenless / fallback / multiple-first) | 92.63% | 91.45% | 91.37% |
+  | v3 (+ those) | 93.38% | 92.52% | 92.52% |
+  | **v4 (+ octet capacity)** | **94.19%** | 93.46% | 93.31% |
+
+  The Kekulé fallback never fired.
+- **What remains (689 = 5.81%):** 615 have a σ* acceptor at a site that can expand its octet,
+  where the tuple (r, a, s, b) does not say whether b–d breaks:
+
+  | site | dataset keeps b–d | dataset breaks b–d |
+  |---|---|---|
+  | Si | 175 | 0 |
+  | P | 234 | 56 |
+  | S | 140 | 171 |
+  | I | 27 | 25 |
+  | Br, Cl | 0 | 178 |
+
+  The other 74 are scattered.
+  - Under the current rule about 577 of these fail (P 233, Si 175, S 140, I 27, Sn 2: the
+    dataset keeps the bond) and 38 more where it breaks a different bond.
+  - An element rule ("Si and P keep") would bring the rate to about 97% (projection: +175 Si,
+    +233 P, −49 P steps that break), but S and I stay split.
+  - One more decoder output per arrow (break b–d: yes / no) resolves all 615.
+  - Open: element rule or decoder pointer (user decision).
+- **Decision (user, 2026-10-22): a per-arrow bond-break flag, no element rule.** `ArrowLabel`
+  carries `breaks_bd` and `breaks_bd_forced` (`apply_predicted.bond_break_label`):
+  - forced 0 when s is one-centre (an empty orbital of b's own) or b has an open shell
+    (the open-shell case is an addition: rule 5 already decides it);
+  - forced 1 when b is a full-shell atom of period 1-2 (H, C, N, O, ...; H counts as period 1);
+  - learned when b is in period 3+ and s is antibonding with a centre d bonded to b: 1 when
+    the annotated step breaks b–d (`sink_partners`), else 0;
+  - learned too when b is in period 3+ and s is antibonding but its partner is the donor's
+    own atom (the arrow makes that bond multiple: σ(O–H) → P=O, O⁻ → S=O): 1 when the
+    annotated step breaks any bond at b, rule 7's weakest bond then says which. s is an
+    antibonding two-centre token there, so the user's definition gives it a flag; a first
+    version left it None and the rules kept it ambiguous (111 of the 206 failures at 98.26%);
+  - None otherwise (s not antibonding, or b bonded to nothing but the donor's atom).
+
+  Only learned flags drive the edit; forced flags are stored as masks and left to rules 5-7,
+  which already decide them. Applying the forced flags statically gave 91.16%: in a relay a
+  later arrow's sink is read on the edited state, where the forced value from the unedited
+  molecule can be wrong (an open shell that the previous arrow filled).
+
+  | rule | IBO, all 11,865 | IBO probe 1,391 | PM probe 1,391 |
+  |---|---|---|---|
+  | v4 + forced and learned flags applied | 91.16% | | |
+  | v4 + learned flags, partner = donor atom left None | 98.26% (11,659) | 97.77% | 97.84% |
+  | **v4 + learned flags** | **99.03%** (11,750) | | |
+
+  At 98.26%, old failure groups fixed: Si 199/199, S own-bond teachers 58/58, and 33/33, 30/30, 29/29,
+  84/84, 26/26, 23/23 for the next six; the two-arrow P group 23/72; the intramolecular S/Cl
+  two-arrow group 1/30. The round trip passes the 95% gate.
+- **What still fails (115 = 0.97%).** None reproduces with the dataset arrows.
+  - **51 at a P / S sink that loses a bond the tuple does not name.** The flag says a bond
+    breaks, but not which one:
+    - 20: s is σ*(b–x) with x kept, and another bond at b breaks (the teacher s* is the σ*
+      with the largest weight on b, not the one toward the leaving group);
+    - 20: s is σ* toward the donor's atom and rule 7's weakest bond is not the leaving one
+      (sulfonyl chlorides: S–OR is chosen, S–Cl leaves);
+    - 11: s is one-centre (forced 0) but the step breaks a bond at S / P.
+
+    Underdetermined by (r, a, s, b, flag). Two remedies, user decision: a teacher rule that
+    picks σ*(b–leaving) as s* when it is a valid acceptor, or a pointer to d.
+  - **12 N–P (Mitsunobu betaine, intramolecular):** the P–N bond the dataset breaks is not the
+    one rule 7 picks.
+  - **About 18 C–Cl / C–Br, intramolecular two-arrow steps:** a full-shell C sink where the
+    weakest bond is not the leaving halide.
+  - The rest are scattered (Li–O 3, S–F 2, single cases).
