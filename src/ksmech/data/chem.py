@@ -107,6 +107,10 @@ def unmapped_canonical(mol: Chem.Mol) -> str:
         std = Chem.MolFromSmiles(smi)
     if std is None:
         raise SanitizeError(f"cannot standardize unmapped SMILES {smi!r}")
+    if all(a.GetAtomicNum() == 1 for a in std.GetAtoms()):
+        # H2 drawn as [HH] (one atom with an implicit H) and as [H][H] (two atoms, the form
+        # a record built with explicit hydrogens has) is one molecule and one cache key
+        std = Chem.AddHs(std)
     return Chem.MolToSmiles(std)
 
 

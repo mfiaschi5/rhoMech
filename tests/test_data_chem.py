@@ -80,3 +80,14 @@ def test_nontrivial_species_keeps_only_more_than_3_heavy_atoms(name, mols):
 def test_nontrivial_species_is_a_sorted_multiset_and_keeps_stereo():
     side = "[CH3:1][C:2](C)=[O:3].O.[Cl-].[Na+].CC(C)=O.C[C@H](N)C(=O)O"
     assert chem.nontrivial_species(side) == ["CC(C)=O", "CC(C)=O", "C[C@H](N)C(=O)O"]
+
+
+def test_molecular_hydrogen_has_one_key_however_it_is_drawn():
+    """[HH] (one atom with an implicit H) and [H][H] (two atoms, what a QM record built with
+    explicit hydrogens stores) are one molecule: one QM cache key, one token file."""
+    forms = ["[HH]", "[H][H]", "[H:1][H:2]"]
+    keys = {chem.unmapped_canonical(Chem.MolFromSmiles(s)) for s in forms}
+    keys |= {chem.unmapped_canonical(Chem.AddHs(Chem.MolFromSmiles(s))) for s in forms}
+    assert keys == {"[H][H]"}
+    for single in ("[H]", "[H+]", "[H-]"):  # one-atom species are left as they are
+        assert chem.unmapped_canonical(Chem.MolFromSmiles(single)) == single
