@@ -73,13 +73,19 @@ class Provenance:
     built_at: str
     content_sha256: str = ""  # hash of the artifact's own payload (everything but the header)
     extra: dict[str, Any] = field(default_factory=dict)  # tracing notes, never compared
+    code_dirty: bool = False  # built from a tree with uncommitted changes to tracked files
+    code_diff_sha256: str = ""  # sha256 of `git diff HEAD` at build time ("" when clean)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> Provenance:
-        return cls(**{k: d[k] for k in d if k in cls.__dataclass_fields__})
+        kw = {k: d[k] for k in d if k in cls.__dataclass_fields__}
+        head = str(kw.get("code_git_hash", ""))
+        if head.endswith("+dirty"):  # headers written before the flag existed
+            kw["code_git_hash"], kw["code_dirty"] = head.removesuffix("+dirty"), True
+        return cls(**kw)
 
     @classmethod
     def from_json(cls, text: str) -> Provenance:
@@ -115,24 +121,30 @@ def array_digest(arrays: Mapping[str, Any]) -> str:
     return h.hexdigest()
 
 
+def _git(*args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True, check=True
+    ).stdout
+
+
 @cache
-def code_git_hash() -> str:
-    """HEAD of the repository, with `+dirty` when tracked files differ from it."""
+def code_state() -> tuple[str, bool, str]:
+    """(HEAD, dirty, sha256 of `git diff HEAD`): dirty when tracked files differ from HEAD or
+    `src/` holds untracked files (a module the build may import); the hash covers the diff and
+    those files' contents, so it identifies the uncommitted change an artifact was built with."""
     try:
-        head = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=no"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
+        head = _git("rev-parse", "HEAD").strip()
+        diff = _git("diff", "HEAD")
+        untracked = _git("ls-files", "--others", "--exclude-standard", "--", "src").split()
     except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+        return "unknown", True, ""
+    for name in sorted(untracked):
+        diff += f"\n--- untracked {name}\n" + (REPO_ROOT / name).read_text(errors="replace")
+    return head, bool(diff), sha256_text(diff) if diff else ""
+
+
+def code_git_hash() -> str:
+    head, dirty, _ = code_state()
     return head + ("+dirty" if dirty else "")
 
 
@@ -155,10 +167,13 @@ def stamp(
     extra: Mapping[str, Any] | None = None,
 ) -> Provenance:
     """The provenance header of an artifact about to be written."""
+    head, dirty, diff_sha = code_state()
     return Provenance(
         kind=kind,
         schema_version=int(schema_version),
-        code_git_hash=code_git_hash(),
+        code_git_hash=head,
+        code_dirty=dirty,
+        code_diff_sha256=diff_sha,
         spec_sha256=spec_sha256(),
         inputs=dict(sorted((inputs or {}).items())),
         config=_normalized(dict(config or {})),
@@ -301,6 +316,19 @@ def verify(
     return header
 
 
+def require_clean(header: Provenance, path: Path | str) -> None:
+    """Training and evaluation read only artifacts built from committed code: StaleArtifact
+    (STALE_ARTIFACT) for a dirty build, naming its diff."""
+    if header.code_dirty:
+        raise StaleArtifact(
+            path,
+            [
+                f"built from a dirty tree (HEAD {header.code_git_hash[:12]}, "
+                f"diff sha256 {header.code_diff_sha256[:12] or 'unknown'})"
+            ],
+        )
+
+
 # ---- writers
 
 
@@ -389,7 +417,8 @@ def describe_chain(
     stale = _status(header)
     lines = [
         f"{pad}{path}: {header.kind} schema {header.schema_version}, built {header.built_at}, "
-        f"code {header.code_git_hash[:12]}, spec {header.spec_sha256[:12]}, "
+        f"code {header.code_git_hash[:12]}{'+dirty' if header.code_dirty else ''}, "
+        f"spec {header.spec_sha256[:12]}, "
         f"{'STALE' if stale else 'ok'}",
         f"{pad}  config {json.dumps(header.config, sort_keys=True)}",
     ]

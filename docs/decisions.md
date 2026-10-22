@@ -3195,3 +3195,25 @@ Each step is counted once, under the first reason that applies, in this order:
   - **About 18 C–Cl / C–Br, intramolecular two-arrow steps:** a full-shell C sink where the
     weakest bond is not the leaving halide.
   - The rest are scattered (Li–O 3, S–F 2, single cases).
+
+## 2026-10-22 — Provenance: a dirty-tree flag; training and evaluation refuse dirty builds
+
+- **Header fields.** `code_dirty` and `code_diff_sha256` sit next to `code_git_hash`
+  (`provenance.code_state`). The hash covers `git diff HEAD` plus the contents of untracked
+  files under `src/`: a build can import a module that is not committed yet, and that counts
+  as dirty too.
+- **Who refuses.** `require_clean` raises STALE_ARTIFACT for a dirty build. These loaders call
+  it:
+  - the sample store (view, index, every shard: `store._verify`);
+  - the contact sidecar;
+  - the GBDT (`load_gbdt`).
+
+  `--allow-stale` (diagnostic CLIs only: `ks-rank`, `textbook`) logs the refusal and reads on.
+- **Retroactive.** Headers written before the flag carry `+dirty` in `code_git_hash`.
+  `Provenance.from_dict` reads that as `code_dirty = True`, so the sample build started on
+  2026-10-22 from an uncommitted tree (`--workers`) is refused like any new dirty build. Its
+  oriented contact blocks stay in `data/cache/oriented/` as a cache. The samples used for
+  training are rebuilt from a committed tree.
+- **Tests.** Artifacts written in tests are stamped clean by an autouse fixture, since the
+  commit hook runs on a tree that differs from HEAD. `code_state` itself is tested on a
+  scratch repository.

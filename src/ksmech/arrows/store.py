@@ -207,10 +207,14 @@ def _load_shard(path: Path, members: list[int], cls, version: int, allow_stale: 
 
 
 def _verify(path: Path, kind: str, version: int, allow_stale: bool) -> prov.Provenance | None:
+    """The verified header; a sample artifact built from a dirty tree is refused too (it feeds
+    training and evaluation). `allow_stale` logs instead (diagnostic CLIs)."""
     import logging
 
     try:
-        return prov.verify(path, kind, version)
+        header = prov.verify(path, kind, version)
+        prov.require_clean(header, path)
+        return header
     except prov.StaleArtifact as exc:
         if not allow_stale:
             raise

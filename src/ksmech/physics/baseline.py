@@ -440,7 +440,7 @@ def load_gbdt(path: Path, allow_stale: bool = False) -> GBDTRanker:
     (StaleArtifact otherwise; `allow_stale` only logs it, for diagnostics)."""
     try:
         config = {"model": "gbdt", "features": FEATURE_NAMES}
-        prov.verify(path, "baseline", BASELINE_VERSION, config)
+        prov.require_clean(prov.verify(path, "baseline", BASELINE_VERSION, config), path)
     except prov.StaleArtifact as exc:
         if not allow_stale:
             raise

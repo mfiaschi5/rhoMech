@@ -8,6 +8,8 @@ import pytest
 from ksmech.data import provenance as prov
 from ksmech.data.cli import main as data_main
 
+REAL_CODE_STATE = prov.code_state  # conftest replaces it with a clean stub in every test
+
 
 def _stamped(path, config=None, inputs=None, schema=1):
     arrays = {"x": np.arange(4)}
@@ -131,3 +133,58 @@ def test_provenance_cli_prints_the_chain(tmp_path, capsys):
     assert data_main(["provenance", str(path)]) == 1
     assert "STALE" in capsys.readouterr().out
     assert data_main(["provenance", str(tmp_path / "none.npz")]) == 2
+
+
+def test_dirty_builds_are_flagged_and_refused_for_training(monkeypatch, tmp_path):
+    monkeypatch.setattr(prov, "code_state", lambda: ("a" * 40, True, "d" * 64))
+    path = _stamped(tmp_path / "a.npz")
+    header = prov.read_header(path)
+    assert header.code_dirty and header.code_diff_sha256 == "d" * 64
+    with pytest.raises(prov.StaleArtifact, match="dirty tree"):
+        prov.require_clean(header, path)
+    legacy = prov.Provenance.from_dict(
+        {**dataclasses.asdict(header), "code_git_hash": "b" * 40 + "+dirty", "code_dirty": False}
+    )
+    assert legacy.code_dirty and legacy.code_git_hash == "b" * 40  # pre-flag headers
+
+
+def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_path):
+    import subprocess
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    git("init", "-q")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x = 1\n")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a")
+    monkeypatch.setattr(prov, "REPO_ROOT", tmp_path)
+    state = REAL_CODE_STATE.__wrapped__
+    head, dirty, diff = state()
+    assert len(head) == 40 and not dirty and diff == ""
+    (tmp_path / "src" / "b.py").write_text("y = 2\n")  # an untracked module a build may import
+    _, dirty, diff_b = state()
+    assert dirty and len(diff_b) == 64
+    (tmp_path / "src" / "a.py").write_text("x = 3\n")
+    _, dirty, diff_ab = state()
+    assert dirty and diff_ab != diff_b
+
+
+def test_a_dirty_sample_store_is_refused_unless_allow_stale(
+    mini_steps, token_loader, pair_kernels, monkeypatch, tmp_path
+):
+    from ksmech.arrows import store
+    from ksmech.arrows.steps import SAMPLE_VERSION, load_samples, sample_for_step, write_split_file
+
+    s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
+    monkeypatch.setattr(prov, "code_state", lambda: ("a" * 40, True, "d" * 64))
+    parquet = tmp_path / "steps.parquet"
+    parquet.write_bytes(b"x")
+    split = write_split_file(tmp_path / "splits_x.json", "x", 0, {"x": [s.step_id]}, parquet)
+    index = store.write_store(tmp_path, {s.step_id: s}, {}, parquet, SAMPLE_VERSION)
+    config = {"split": "x", "sample_version": SAMPLE_VERSION}
+    view = store.write_view(tmp_path / "samples_x.json", [s.step_id], {}, index, split, config)
+    with pytest.raises(prov.StaleArtifact, match="dirty tree"):
+        load_samples(view)
+    assert len(load_samples(view, allow_stale=True)) == 1

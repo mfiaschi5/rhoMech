@@ -153,3 +153,13 @@ def token_loader(sp_record):
         return memo[key]
 
     return get
+
+
+@pytest.fixture(autouse=True)
+def clean_code_state(monkeypatch):
+    """Artifacts written by tests are stamped as built from a clean tree, whatever the state of
+    the working copy (the commit hook runs on a tree that differs from HEAD); the dirty path
+    has its own tests in test_provenance.py."""
+    from ksmech.data import provenance
+
+    monkeypatch.setattr(provenance, "code_state", lambda: ("0" * 40, False, ""))
