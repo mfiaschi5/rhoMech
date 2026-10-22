@@ -12,6 +12,7 @@ from ksmech.physics.params import (
     shell_fock_ev,
     to_params,
 )
+from ksmech.physics.stage_a import STAGE_A_FEATURES
 from ksmech.qm.fukui import HARTREE_TO_EV
 
 
@@ -19,7 +20,7 @@ def test_defaults_are_the_textbook_values():
     assert KSParams() == KSParams(K=1.75, eps=4.0)
     assert KSParams(K=1.0, eps=1.0) == REDUCED
     p = KSParams(K=2.0, eps=8.0)
-    assert set(SCALING) == set(PAIR_FEATURES)
+    assert set(SCALING) == set(PAIR_FEATURES) | set(STAGE_A_FEATURES)
     z = np.ones((2, 3, len(PAIR_FEATURES)))
     out = to_params(z, p, PAIR_FEATURES)
     k = {n: i for i, n in enumerate(PAIR_FEATURES)}

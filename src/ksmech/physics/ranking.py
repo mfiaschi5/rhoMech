@@ -64,7 +64,13 @@ ALL_SCORERS = {**SCORERS, **DIAGNOSTIC_SCORERS}
 
 def physical_pair_z(sample: MechanismSample, params: KSParams | None = None) -> np.ndarray:
     """The stored z (computed at K = eps = 1) at `params` (default: the physical values);
-    undefined entries stay 0."""
+    undefined entries stay 0. Needs the legacy contact features (`arrows.contacts.with_legacy`
+    on a stage-A sample)."""
+    if tuple(sample.pair_features) != PAIR_FEATURES:
+        raise ValueError(
+            f"{sample.step_id}: pair features {tuple(sample.pair_features)[:2]}...; the floor "
+            "and the GBDT read the legacy contact features (`ksmech-arrows contacts`)"
+        )
     z = to_params(sample.pair_z, params or KSParams(), PAIR_FEATURES)
     return np.where(sample.pair_defined, z, 0.0)
 

@@ -12,6 +12,7 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
+from ksmech.arrows import contacts
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.steps import PARTS, load_samples, samples_path
 from ksmech.data import provenance as prov
@@ -85,17 +86,37 @@ def make_kernel(args: argparse.Namespace, distance: float | None = None):
 
 
 def _load_parts(args: argparse.Namespace, console: Console) -> dict[str, list] | None:
+    """The samples of every part of `args.split`, joined with the legacy contact sidecar; the
+    training part is the sidecar's subsample. Steps without an entry are counted."""
+    allow_stale = getattr(args, "allow_stale", False)
     parts = {}
+    try:
+        legacy = contacts.load_contacts(
+            source_dir(args.source, args.processed_dir), args.split, allow_stale
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]; run `ksmech-arrows contacts --split {args.split}`")
+        return None
+    except StaleArtifact as exc:
+        console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows contacts`")
+        return None
     for part in PARTS:
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         if not path.exists():
             console.print(f"[red]{path} missing[/red]; run `ksmech-arrows samples`")
             return None
         try:
-            parts[part] = load_samples(path, allow_stale=getattr(args, "allow_stale", False))
+            samples = load_samples(path, allow_stale=allow_stale)
         except (StaleArtifact, ValueError) as exc:  # stale or old: rebuild, never reinterpret
             console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows samples`")
             return None
+        parts[part] = [
+            contacts.with_legacy(s, legacy[s.step_id]) for s in samples if s.step_id in legacy
+        ]
+        missing = len(samples) - len(parts[part])
+        console.print(
+            f"{args.split}_{part}: {len(parts[part])} samples with contacts, {missing} without"
+        )
     return parts
 
 
@@ -346,6 +367,8 @@ def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
     for part in ("train", "val"):
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         inputs |= prov.file_input(path)
+    side = contacts.contacts_dir(out_dir, args.split)
+    inputs |= prov.file_input(side / "index.json") | prov.file_input(side / "train_subsample.json")
     seen_note = {"textbook_pools_in_training": sorted(seen)}
     bl.save_gbdt(gbdt, out_dir / f"baseline_gbdt_{args.split}.npz", inputs, seen_note)
     bl.save_gbdt(

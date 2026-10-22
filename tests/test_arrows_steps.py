@@ -114,7 +114,6 @@ def test_skip_reasons(token_loader, pair_kernels):
 def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pair_kernels):
     report = build_all_samples(
         "pmechdb",
-        pair_kernels,
         processed_dir=mini_processed,
         loader=missing_iodide(token_loader),
     )
@@ -168,11 +167,15 @@ def test_loader_and_cli(mini_processed, token_loader, contact_tables, monkeypatc
     args = ["--source", "pmechdb", "--processed-dir", str(mini_processed)]
     table = ["--contact-table", str(save_tables(contact_tables, mini_processed / "contact.json"))]
     missing = ["--kernel", "table", "--contact-table", str(mini_processed / "none.json")]
-    assert arrows_main(["samples", *args, *missing]) == 2  # no contact table: refused, not guessed
-    leaky = ["--strategy", "random_leaky"]
-    assert arrows_main(["samples", *args, "--kernel", "table", *table, *leaky]) == 0
+    assert arrows_main(["contacts", *args]) == 2  # no split file yet: run `samples` first
+    assert arrows_main(["samples", *args, "--strategy", "random_leaky"]) == 0
+    leaky = ["--split", "random_leaky"]
+    assert arrows_main(["contacts", *args, *leaky, *missing]) == 2  # no table: refused, not guessed
+    assert arrows_main(["contacts", *args, *leaky, "--kernel", "table", *table]) == 0
+    assert arrows_main(["samples", *args, "--strategy", "molecule", "scaffold"]) == 0
     oriented = ["--oriented-cache", str(mini_processed / "oriented")]  # the default kernel
-    assert arrows_main(["samples", *args, *oriented, "--strategy", "molecule", "scaffold"]) == 0
+    assert arrows_main(["contacts", *args, *oriented]) == 0
+    assert (mini_processed / "pmechdb" / "contacts_report_molecule.json").exists()
     assert arrows_main(["roundtrip", *args]) == 0
     assert "100.00%" in capsys.readouterr().out
     loader = make_loader(samples_path("pmechdb", "molecule_train", mini_processed), batch_size=2)
@@ -224,14 +227,17 @@ def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
 
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: missing_iodide(token_loader))
     args = ["--source", "pmechdb", "--processed-dir", str(mini_processed)]
-    cache = ["--oriented-cache", str(tmp_path / "oriented")]
-    assert arrows_main(["samples", *args, *cache, "--strategy", "molecule"]) == 0
+    assert arrows_main(["samples", *args, "--strategy", "molecule"]) == 0
     path = samples_path("pmechdb", "molecule_train", mini_processed)
     assert load_samples(path)
     parquet = steps_path("pmechdb", mini_processed)
     shard = prov.read_header(next((mini_processed / "pmechdb" / "samples").glob("shard_*.npz")))
     assert prov.file_input_name(parquet) in shard.inputs
-    assert any("oriented" in name for name in shard.inputs)  # the contact blocks it used
+    cache = ["--oriented-cache", str(tmp_path / "oriented")]
+    assert arrows_main(["contacts", *args, *cache]) == 0
+    side = mini_processed / "pmechdb" / "samples" / "contacts_molecule"
+    side_shard = prov.read_header(next(side.glob("shard_*.npz")))
+    assert any("oriented" in name for name in side_shard.inputs)  # the contact blocks it used
     os.utime(parquet)  # a timestamp alone is not a change of content
     assert load_samples(path)
     steps = read_steps(parquet)
@@ -338,3 +344,20 @@ def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader, pair
         row, col = _pair_index(s)
         for lab in s.labels:
             assert s.pair_valid[row[lab.teacher_donor], col[lab.teacher_acceptor]]
+
+
+def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path):
+    from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+
+    s = sample_for_step(mini_steps["e2"], token_loader)  # no kernels: stage A
+    assert s.pair_features == STAGE_A_FEATURES
+    assert s.pair_z.shape[-1] == len(STAGE_A_FEATURES) and (s.pair_contact_sites == -1).all()
+    block = stage_a_block(s.tokens(token_loader))
+    assert np.allclose(s.pair_z, block.z, rtol=1e-6, atol=1e-6)
+    (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))
+    assert back.pair_features == STAGE_A_FEATURES
+    valid = s.pair_valid
+    assert np.array_equal(back.pair_defined[valid], s.pair_defined[valid])
+    assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-3)  # float16
+    k = STAGE_A_FEATURES.index("bonded")
+    assert np.array_equal(back.pair_z[valid][:, k], s.pair_z[valid][:, k])  # bits, exact

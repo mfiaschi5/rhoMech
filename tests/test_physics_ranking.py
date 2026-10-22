@@ -129,10 +129,11 @@ def test_components_with_an_ablation_kernel(samples, token_loader, table_kernel,
 
 def test_ks_rank_cli(mini_processed, token_loader, pair_kernels, monkeypatch):  # noqa: F811
     import ksmech.physics.cli as cli
+    from ksmech.arrows.contacts import build_all_contacts
 
-    build_all_samples(
-        "pmechdb", pair_kernels, ["molecule"], mini_processed, missing_iodide(token_loader)
-    )
+    loader = missing_iodide(token_loader)
+    build_all_samples("pmechdb", ["molecule"], mini_processed, loader)
+    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, loader)
     assert samples_path("pmechdb", "molecule_test", mini_processed).exists()
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
     base = ["ks-rank", "--source", "pmechdb", "--processed-dir", str(mini_processed)]

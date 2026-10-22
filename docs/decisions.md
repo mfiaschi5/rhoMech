@@ -3217,3 +3217,41 @@ Each step is counted once, under the first reason that applies, in this order:
 - **Tests.** Artifacts written in tests are stamped clean by an autouse fixture, since the
   commit hook runs on a tree that differs from HEAD. `code_state` itself is tested on a
   scratch repository.
+
+## 2026-10-22 — Sample build split: stage-A samples and a legacy contact sidecar
+
+- **Why.** The legacy oriented contact kernel dominates the sample build: about 40 h for
+  PMechDB with 3 workers, almost all of it in the oriented blocks. Spec v7.2 makes the stage-A
+  pair features geometry-free. Only the physics floor and the GBDT baseline read the legacy
+  contact features, and they read only val, test and part of train (user, 2026-10-22).
+- **Samples (`ksmech-arrows samples`, SAMPLE_VERSION 11).** The pair features are the stage-A
+  set (`physics.stage_a.STAGE_A_FEATURES`):
+  - G and log|G|, the fragment flag;
+  - bonded, bond order and graph distance between the two centre sets on the record's Lewis
+    structure (capped at 6; across fragments 0, 0, 6);
+  - centroid distance and the cross-centre coupling |l_r^T B l_s| within a fragment;
+  - |cos| of the two p vectors;
+  - the dihedral cosine of adjacent bonds.
+
+  They are computed at K = eps = 1 like the old features. `to_params` scales the coupling by K;
+  the rest are parameter-free. `MechanismSample.pair_features` names the columns. The store
+  keeps `inter`, `clash` and `bonded` as bits, and `pair_feature_stats_<strategy>.json` is
+  fitted on the stage-A features.
+- **Sidecar (`ksmech-arrows contacts --split <strategy>`, `arrows.contacts`).**
+  - The 11 legacy features (`PAIR_FEATURES`, oriented kernel at 2.0 / 2.3 / 3.0 Å) and contact
+    sites.
+  - It covers every val and test step of the strategy and a training subsample of 3,000
+    steps: seed 0, drawn without replacement from the sorted ids of the training part,
+    recorded in `samples/contacts_<strategy>/train_subsample.json` with its provenance.
+  - Storage is the store's: valid cells, float16, bit-packed `defined`.
+  - Every shard is stamped with the token files and contact blocks it used, and loading refuses
+    dirty or stale shards.
+- **Readers.** `ksmech-physics ks-rank` and `baseline` join each sample with its sidecar entry
+  (`with_legacy`), print how many samples of each part have none, and so rank and train on the
+  subsample. `physical_pair_z` refuses a stage-A sample. `textbook` builds its cases with the
+  legacy kernels directly (`reactant_sample(..., kernels)`). The GBDT records the sidecar index
+  and the subsample file as inputs.
+- **Build order.** The sample build started on 2026-10-22 from an uncommitted tree runs to the
+  end as a cache warm-up for `data/cache/oriented/`; its blocks are not deleted. Its outputs
+  are dirty and are not used. The stage-A samples are rebuilt from a clean committed tree,
+  then the sidecar.

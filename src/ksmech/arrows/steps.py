@@ -4,17 +4,21 @@
 (atoms first, then orbitals; `ksmech.arrows.reactants`), the fragment of every token, the
 candidate masks, the token-to-centre incidence (orbital, atom, weight), the `ArrowLabel`s with
 their sites, and the products' resonance key. It also stores the pair-track features z_rs of
-every (occupied r, virtual s) pair (`physics.pairs.PAIR_FEATURES`), computed at K = eps = 1
-(`physics.params.REDUCED`; `params.to_params` applies other values), their `defined` mask, the
-sign of G (bookkeeping: the logs drop it), the validity filter, the contact amplitude's argmax
-site pairs, and the symmetric atom-atom Coulomb matrix (also at eps = 1). The full
+every (occupied r, virtual s) pair, computed at K = eps = 1 (`physics.params.REDUCED`;
+`params.to_params` applies other values), their `defined` mask, the sign of G (bookkeeping: the
+logs drop it), the validity filter, and the symmetric atom-atom Coulomb matrix (also at eps =
+1). `pair_features` names the columns: the geometry-free stage-A features
+(`physics.stage_a.STAGE_A_FEATURES`) in the sample store, or the legacy contact features
+(`physics.pairs.PAIR_FEATURES`, with the contact amplitude's argmax sites) when a sample is
+built with contact kernels (textbook cases, tests) or joined with the legacy contact sidecar
+(`arrows.contacts`, for the physics floor and the GBDT). The full
 `MoleculeTokens` (coefficients, S, F) are not copied into every sample: `fragment_keys` names
 the token files, and `MechanismSample.tokens(loader)` reloads them.
 
 A step becomes a sample only when every reactant fragment has tokens and every arrow is
 aligned or absorbed; every other step is skipped with a reason code and counted.
 
-`build_all_samples(source, kernels)` writes the sample store (`arrows.store`) and one
+`build_all_samples(source)` writes the sample store (`arrows.store`) and one
 `data/processed/<source>/samples_<split>.json` view per split, with
 `split = "<strategy>_<part>"`: strategy `molecule` (the default), `scaffold`, `loco-<class>`
 (leave one mechanism class out) or, only when named, `random_leaky` (per step), part `train`,
@@ -64,10 +68,11 @@ from ksmech.physics.pairs import (
     valid_pairs,
 )
 from ksmech.physics.params import REDUCED, KSParams, to_params
+from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 10
+SAMPLE_VERSION = 11
 PARTS = ("train", "val", "test")
 STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
@@ -101,12 +106,13 @@ class MechanismSample:
     acceptor_mask: np.ndarray  # (O,) bool: acceptor candidates (before the partner rule)
     orbital_centroids: np.ndarray  # (O, 3) float32
     incidence: np.ndarray  # (E, 3) float32 rows (orbital j, atom g, weight w_g of token j)
-    pair_z: np.ndarray  # (n_occ, n_virt, 11) float32 z_rs at K = eps = 1, PAIR_FEATURES order
-    pair_defined: np.ndarray  # (n_occ, n_virt, 11) bool
+    pair_z: np.ndarray  # (n_occ, n_virt, F) float32 z_rs at K = eps = 1, `pair_features` order
+    pair_defined: np.ndarray  # (n_occ, n_virt, F) bool
     pair_gap_sign: np.ndarray  # (n_occ, n_virt) int8 sign of G (bookkeeping, not a feature)
     pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair
     pair_contact_sites: np.ndarray  # (n_occ, n_virt, 2) int64 global atoms of the contact
     #   amplitude's argmax (donor site, acceptor site), oriented kernel; -1 for other kernels
+    #   and for stage-A samples
     atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric
     labels: list[ArrowLabel] = field(default_factory=list)
     product_key: str = ""
@@ -116,6 +122,7 @@ class MechanismSample:
     #   cells that pair_valid rejects, by group (`_filter_group`); never dropped silently
     inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file and
     #   contact block this sample was built from (`file:<path>` -> content sha256)
+    pair_features: tuple[str, ...] = STAGE_A_FEATURES  # the columns of pair_z / pair_defined
 
     @property
     def n_atoms(self) -> int:
@@ -160,7 +167,10 @@ def _atom_maps(rt: ReactantTokens) -> np.ndarray:
 
 
 def make_sample(
-    step: ElementaryStep, rt: ReactantTokens, labels: list[ArrowLabel], kernels: PairKernels
+    step: ElementaryStep,
+    rt: ReactantTokens,
+    labels: list[ArrowLabel],
+    kernels: PairKernels | None = None,
 ) -> MechanismSample:
     """The sample of an aligned step (the product key and pair features are computed here)."""
     key = canonical_resonance_key(chem.parse_mapped(step.products_smiles))
@@ -170,12 +180,16 @@ def make_sample(
 
 
 def reactant_sample(
-    step_id: str, source: str, rt: ReactantTokens, kernels: PairKernels
+    step_id: str, source: str, rt: ReactantTokens, kernels: PairKernels | None = None
 ) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
-    hand-built reactant sets, e.g. the textbook selectivity checks)."""
+    hand-built reactant sets, e.g. the textbook selectivity checks). Pair features: stage A,
+    or the legacy contact features with `kernels`."""
     tok = [f.tokens for f in rt.fragments]
-    block = pair_block(tok, kernels, REDUCED)
+    if kernels is None:
+        block, names = stage_a_block(tok, REDUCED), STAGE_A_FEATURES
+    else:
+        block, names = pair_block(tok, kernels, REDUCED), PAIR_FEATURES
     return MechanismSample(
         step_id=step_id,
         source=source,
@@ -201,6 +215,7 @@ def reactant_sample(
         pair_contact_sites=block.sites,
         atom_coulomb=atom_coulomb_matrix(tok, REDUCED).astype(np.float32),
         fermi_smeared=any(t.fermi_smeared for t in tok),
+        pair_features=names,
     )
 
 
@@ -265,7 +280,7 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
 
 
 def sample_for_step(
-    step: ElementaryStep, loader: TokenLoader, kernels: PairKernels
+    step: ElementaryStep, loader: TokenLoader, kernels: PairKernels | None = None
 ) -> MechanismSample | SkipReason:
     with prov.collecting() as used:
         try:
@@ -288,7 +303,7 @@ def sample_for_step(
 
 
 def build_step_samples(
-    steps: Iterable[ElementaryStep], loader: TokenLoader, kernels: PairKernels
+    steps: Iterable[ElementaryStep], loader: TokenLoader, kernels: PairKernels | None = None
 ) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
     """Samples of every step that has one, and the skip reason of every other step."""
     samples, skipped = {}, {}
@@ -375,13 +390,17 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
     }
 
 
-def _config(split: str, kernels: PairKernels, seed: int) -> dict:
-    return {"split": split, "seed": seed, "sample_version": SAMPLE_VERSION, **kernels.describe()}
+def _config(split: str, seed: int) -> dict:
+    return {
+        "split": split,
+        "seed": seed,
+        "sample_version": SAMPLE_VERSION,
+        "pair_features": list(STAGE_A_FEATURES),
+    }
 
 
 def build_all_samples(
     source: str,
-    kernels: PairKernels,
     strategies: Iterable[str] = DEFAULT_STRATEGIES,
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
     loader: TokenLoader | None = None,
@@ -389,11 +408,12 @@ def build_all_samples(
     console: Console | None = None,
 ) -> dict:
     """Build every step's sample once into the store, then one split file per strategy and one
-    view per split. A strategy that cannot run on the source is reported, not raised."""
+    view per split. A strategy that cannot run on the source is reported, not raised. Pair
+    features: stage A (the legacy contact features go to `arrows.contacts`)."""
     console = console or Console()
     parquet = steps_path(source, processed_dir)
     steps = read_training_steps(parquet)
-    samples, skipped = build_step_samples(steps, loader or TokenCache(), kernels)
+    samples, skipped = build_step_samples(steps, loader or TokenCache())
     out_dir = source_dir(source, processed_dir)
     index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION)
     report = {
@@ -416,7 +436,7 @@ def build_all_samples(
         for split, members in ids.items():
             counts = split_report(split, members, samples, skipped)
             view = samples_path(source, split, processed_dir)
-            config = _config(split, kernels, seed)
+            config = _config(split, seed)
             store.write_view(view, members, counts, index, split_file, config)
             report["splits"][split] = counts
             if split.endswith("_train"):
@@ -435,9 +455,11 @@ def pair_stats_path(source: str, name: str, processed_dir: Path = DEFAULT_PROCES
 def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -> PairStats:
     """Statistics of the defined pair features of `samples` at the physical K and eps."""
     params = params or KSParams()
-    return fit_pair_stats(
-        (to_params(s.pair_z, params, PAIR_FEATURES), s.pair_defined) for s in samples
-    )
+    names = samples[0].pair_features if samples else STAGE_A_FEATURES
+    if any(s.pair_features != names for s in samples):
+        raise ValueError("pair statistics over samples with different pair features")
+    blocks = ((to_params(s.pair_z, params, names), s.pair_defined) for s in samples)
+    return fit_pair_stats(blocks, names)
 
 
 def load_samples(path: Path, allow_stale: bool = False) -> list[MechanismSample]:

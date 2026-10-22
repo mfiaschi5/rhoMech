@@ -320,16 +320,18 @@ class PairStats:
         )
 
     @classmethod
-    def from_json(cls, text: str) -> PairStats:
+    def from_json(cls, text: str, names: tuple[str, ...] = PAIR_FEATURES) -> PairStats:
         d = json.loads(text)
-        if tuple(d) != PAIR_FEATURES:
-            raise ValueError(f"pair statistics for {tuple(d)}, expected {PAIR_FEATURES}")
-        return cls(*(np.array([d[n][k] for n in PAIR_FEATURES]) for k in ("mean", "std", "count")))
+        if tuple(d) != tuple(names):
+            raise ValueError(f"pair statistics for {tuple(d)}, expected {tuple(names)}")
+        values = (np.array([d[n][k] for n in names]) for k in ("mean", "std", "count"))
+        return cls(*values, names=tuple(names))
 
 
-def fit_pair_stats(blocks) -> PairStats:
-    """Streaming mean / std over the defined entries of many (z, defined) pairs."""
-    k = len(PAIR_FEATURES)
+def fit_pair_stats(blocks, names: tuple[str, ...] = PAIR_FEATURES) -> PairStats:
+    """Streaming mean / std over the defined entries of many (z, defined) pairs whose last
+    axis holds the features `names`."""
+    k = len(names)
     n, s1, s2 = np.zeros(k), np.zeros(k), np.zeros(k)
     for z, defined in blocks:
         for j in range(k):
@@ -337,7 +339,7 @@ def fit_pair_stats(blocks) -> PairStats:
             n[j], s1[j], s2[j] = n[j] + v.size, s1[j] + v.sum(), s2[j] + (v * v).sum()
     mean = np.divide(s1, n, out=np.zeros(k), where=n > 0)
     var = np.divide(s2, n, out=np.zeros(k), where=n > 0) - mean**2
-    return PairStats(mean, np.sqrt(np.clip(var, 0.0, None)), n)
+    return PairStats(mean, np.sqrt(np.clip(var, 0.0, None)), n, tuple(names))
 
 
 def standardize(z: np.ndarray, defined: np.ndarray, stats: PairStats) -> np.ndarray:

@@ -102,11 +102,12 @@ def test_baseline_cli(mini_processed, token_loader, pair_kernels, monkeypatch): 
     import json
 
     import ksmech.physics.cli as cli
+    from ksmech.arrows.contacts import build_all_contacts
     from ksmech.arrows.steps import build_all_samples
 
-    build_all_samples(
-        "pmechdb", pair_kernels, ["molecule"], mini_processed, missing_iodide(token_loader)
-    )
+    loader = missing_iodide(token_loader)
+    build_all_samples("pmechdb", ["molecule"], mini_processed, loader)
+    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, loader)
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
     quick = bl.TreeConfig(max_rounds=20, check_every=5)
     monkeypatch.setattr(bl, "TreeConfig", lambda: quick)

@@ -51,6 +51,13 @@ SCALING = {
     "centroid_distance": ("K", "mul", 0),
     "cross_coupling": ("K", "mul", 1),
     "clash": ("K", "mul", 0),
+    # stage-A features (`physics.stage_a`): parameter-free except the cross-centre coupling
+    "g": ("K", "mul", 0),
+    "bonded": ("K", "mul", 0),
+    "bond_order": ("K", "mul", 0),
+    "graph_distance": ("K", "mul", 0),
+    "align_cos": ("K", "mul", 0),
+    "dihedral_cos": ("K", "mul", 0),
 }
 
 

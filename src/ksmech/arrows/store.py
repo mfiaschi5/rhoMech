@@ -9,9 +9,10 @@ A split is `samples_<split>.json` next to the store: its ids and counts, with th
 split file as inputs. Nothing is copied per split.
 
 On disk a sample keeps its pair arrays for the valid cells only (`pair_valid`, ~89% of the
-cells): `pair_z` and `atom_coulomb` as float16, the 0/1 features `inter` and `clash` and
-`pair_defined` bit-packed, contact sites as int16, the symmetric `atom_coulomb` as its upper
-triangle. In memory every array is dense float32 again, invalid cells zero / undefined / -1.
+cells): `pair_z` and `atom_coulomb` as float16, the 0/1 features (`BINARY_FEATURES` among the
+sample's `pair_features`) and `pair_defined` bit-packed, contact sites as int16, the
+symmetric `atom_coulomb` as its upper triangle. In memory every array is dense float32 again,
+invalid cells zero / undefined / -1.
 float16 keeps 3 significant digits: the largest error measured on the pair features was 5e-3
 on log-features spanning ~30 units, below 1e-7 absolute on the tiny ones
 (docs/decisions.md, fix item 8).
@@ -35,13 +36,11 @@ if TYPE_CHECKING:
 SHARD_SIZE = 256
 VALID_ONLY = ("pair_z", "pair_defined", "pair_gap_sign", "pair_contact_sites")
 _HALF = ("pair_z", "atom_coulomb")
-BINARY_FEATURES = ("inter", "clash")  # exact 0/1 pair features: stored as bits, not float16
+BINARY_FEATURES = ("inter", "clash", "bonded")  # exact 0/1 pair features: bits, not float16
 
 
-def _binary_columns() -> list[int]:
-    from ksmech.physics.pairs import PAIR_FEATURES
-
-    return [PAIR_FEATURES.index(f) for f in BINARY_FEATURES]
+def _binary_columns(names) -> list[int]:
+    return [k for k, f in enumerate(names) if f in BINARY_FEATURES]
 
 
 def store_dir(view_dir: Path) -> Path:
@@ -60,7 +59,7 @@ def pack(sample: MechanismSample) -> tuple[dict[str, np.ndarray], dict[str, Any]
     valid = sample.pair_valid
     for name in VALID_ONLY:
         arrays[name] = arrays[name][valid]
-    binary = _binary_columns()
+    binary = _binary_columns(sample.pair_features)
     flags = arrays["pair_z"][:, binary]
     if not np.isin(flags, (0.0, 1.0)).all():
         raise ValueError(f"{sample.step_id}: a binary pair feature is not 0/1")
@@ -85,6 +84,7 @@ def unpack(
 
     meta = dict(meta)
     n_feat = meta.pop("n_pair_features")
+    meta["pair_features"] = tuple(meta["pair_features"])
     valid = arrays["pair_valid"].astype(bool)
     shape = valid.shape
     dense = {
@@ -93,7 +93,7 @@ def unpack(
         "pair_gap_sign": np.zeros(shape, dtype=np.int8),
         "pair_contact_sites": np.full((*shape, 2), -1, dtype=np.int64),
     }
-    binary = _binary_columns()
+    binary = _binary_columns(meta["pair_features"])
     rest = [k for k in range(n_feat) if k not in binary]
     z = np.zeros((int(valid.sum()), n_feat), dtype=np.float32)
     z[:, rest] = _from_byte_planes(arrays["pair_z"]).astype(np.float32)
