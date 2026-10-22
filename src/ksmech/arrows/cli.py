@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="random_leaky (the per-step split) only when named",
     )
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--workers", type=int, default=1, help="processes (keep the host total <= 4)")
     return parser
 
 
@@ -147,6 +148,7 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
         args.processed_dir,
         TokenCache(args.tokens_dir),
         args.seed,
+        n_workers=args.workers,
     )
     console.print(
         f"{report['n_samples']} samples from {report['n_training_steps']} training steps; "

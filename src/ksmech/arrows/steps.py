@@ -316,6 +316,40 @@ def build_step_samples(
     return samples, skipped
 
 
+CHUNK = 32  # steps per task of the parallel build
+
+
+def _chunk_worker(task: tuple) -> tuple[dict, dict]:
+    steps, loader, kernels = task
+    return build_step_samples(steps, loader, kernels)
+
+
+def build_step_samples_parallel(
+    steps: list[ElementaryStep],
+    loader: TokenLoader,
+    kernels: PairKernels | None = None,
+    n_workers: int = 1,
+) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
+    """`build_step_samples` over `n_workers` spawned processes (one BLAS thread each), in
+    chunks of consecutive steps. Each process keeps its own token and block memory; block files
+    are written atomically, so two processes computing one block cannot corrupt it."""
+    if n_workers <= 1:
+        return build_step_samples(steps, loader, kernels)
+    from multiprocessing import get_context
+
+    from ksmech.orbitals.build import single_threaded_children
+
+    tasks = [(steps[k : k + CHUNK], loader, kernels) for k in range(0, len(steps), CHUNK)]
+    samples, skipped = {}, {}
+    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
+        for done, (s, k) in enumerate(pool.imap_unordered(_chunk_worker, tasks), 1):
+            samples.update(s)
+            skipped.update(k)
+            if done % 20 == 0 or done == len(tasks):
+                log.info("samples: %d / %d chunks, %d samples", done, len(tasks), len(samples))
+    return samples, skipped
+
+
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9.-]+", "-", name).strip("-")
 
@@ -406,6 +440,7 @@ def build_all_samples(
     loader: TokenLoader | None = None,
     seed: int = 0,
     console: Console | None = None,
+    n_workers: int = 1,
 ) -> dict:
     """Build every step's sample once into the store, then one split file per strategy and one
     view per split. A strategy that cannot run on the source is reported, not raised. Pair
@@ -413,7 +448,7 @@ def build_all_samples(
     console = console or Console()
     parquet = steps_path(source, processed_dir)
     steps = read_training_steps(parquet)
-    samples, skipped = build_step_samples(steps, loader or TokenCache())
+    samples, skipped = build_step_samples_parallel(steps, loader or TokenCache(), None, n_workers)
     out_dir = source_dir(source, processed_dir)
     index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION)
     report = {

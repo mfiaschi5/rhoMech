@@ -361,3 +361,28 @@ def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, 
     assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-3)  # float16
     k = STAGE_A_FEATURES.index("bonded")
     assert np.array_equal(back.pair_z[valid][:, k], s.pair_z[valid][:, k])  # bits, exact
+
+
+def test_the_parallel_build_matches_the_sequential_one(mini_steps, token_loader, tmp_path):
+    """Two spawned workers give the same samples as one process (tokens read from files, so
+    the loader can be sent to the workers)."""
+    from ksmech.arrows.reactants import TokenCache, _fragment_keys
+    from ksmech.arrows.steps import build_step_samples, build_step_samples_parallel
+    from ksmech.data import chem
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.orbitals.tokens import save_tokens
+
+    steps = list(mini_steps.values())
+    cache = TokenCache(tmp_path / "tokens")
+    for step in steps:
+        for _, _, key in _fragment_keys(chem.parse_mapped(step.reactants_smiles)):
+            if key and key != "CI":
+                t = token_loader(key)
+                save_tokens(t, tokens_path(cache.tokens_dir, key, 0, cache.method))
+    one = build_step_samples(steps, cache)
+    two = build_step_samples_parallel(steps, TokenCache(cache.tokens_dir), n_workers=2)
+    assert one[1] == two[1] and sorted(one[0]) == sorted(two[0])
+    for sid, s in one[0].items():
+        other = two[0][sid]
+        assert other.labels == s.labels and np.array_equal(other.pair_valid, s.pair_valid)
+        assert np.allclose(other.pair_z, s.pair_z, rtol=1e-12, atol=1e-12)
