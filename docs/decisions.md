@@ -3031,3 +3031,51 @@ Each step is counted once, under the first reason that applies, in this order:
   - The rise comes from the new provenance, store, IBO and frame code (bare `dict` / `Callable`
     type parameters, untyped numpy returns). The prompt limited annotation work to the public
     functions of data/ and arrows/.
+
+## 2026-10-22 — Jacobi sweeps: closed-form exponent-4 coefficients, reduceat atom sums (fix item 10)
+
+- **Profile.** Before this change, 90% of an IBO localization was `_ibo_gain`: the
+  exponent-4 gain evaluated over every atom at 32 grid angles plus 4 Newton angles, every
+  round.
+- **Closed form.** The gain of one pair is exactly a trigonometric polynomial,
+  a4 (cos4γ − 1) + b4 sin4γ + a8 (cos8γ − 1) + b8 sin8γ.
+  - With x² = A0 + A1 cos4γ + B1 sin4γ (A0 = (d² + q²)/2, A1 = (d² − q²)/2, B1 = d q), the
+    expansion 12 m² x² + 2 x⁴ gives a4 = Σ_A (12 m² + 4 A0) A1, b4 = Σ_A (12 m² + 4 A0) B1,
+    a8 = Σ_A (A1² − B1²) and b8 = Σ_A 2 A1 B1.
+  - A round therefore sums over atoms once (`ibo_coefficients`). The same grid and Newton steps
+    then run on four numbers per pair.
+  - A test checks that the polynomial equals the direct gain to 1e-12. The angle test against
+    a 20,001-point scan still passes.
+- **Atom sums.** `np.add.reduceat` over the atom boundaries replaces the dense (n_atoms × nao)
+  indicator product, in IBO and in PM. Tblite's AO map runs atom by atom; an unsorted map falls
+  back to the indicator, and a test covers both. S^1/2 is computed once per block and shared by
+  the Cholesky start and the sweeps.
+- **Measured** on the same 200 PMechDB molecules, one thread:
+
+  | seconds per molecule | median | p75 | p95 | mean |
+  |---|---|---|---|---|
+  | token build, IBO, now | **0.20** | 0.39 | 0.80 | 0.34 |
+  | token build, IBO, before | 0.56 | 1.76 | 5.86 | 2.67 |
+  | token build, PM (2026-10-20 code) | 0.15 | 0.56 | 3.03 | 0.85 |
+  | localization alone, IBO, now | 0.17 | 0.34 | 0.71 | 0.30 |
+
+  - Sweep counts are unchanged (5 / 5, 12 / 8 on the profiled molecules), and no molecule is at
+    the cap.
+  - Token arrays are still byte-identical across two builds
+    (`test_token_files_are_byte_identical_across_two_builds`). They differ from the previous
+    commit's at the last bits (summation order). That needs no schema change: no tokens were
+    built with that commit.
+  - The full PMechDB token build is projected at about 1.3 CPU-h, against about 4.5 before.
+- **The legacy-kernel pin now holds the kernel's inputs fixed.** The first version of
+  `test_outputs_are_pinned` rebuilt its tokens on every run, so it also pinned the
+  localization. IBO stops when the functional changes by less than 1e-8 per sweep, which fixes
+  the LMOs only to about 1e-4 in rotation angle. The new summation order therefore moved S by
+  about 1e-6, against the pin's rtol of 1e-9.
+  - The five fixture molecules' tokens are now stored with the pin
+    (`tests/fixtures/legacy_fixed23_tokens/`, 120 KB, read with `verify=False`). The pin is
+    regenerated from them.
+  - The kernel code is unchanged (version 6). The rotation tests still build fresh tokens: they
+    compare a record with its own rotated copy.
+- `test_site_lobe_rules` computed an angle with `arccos` and no clip. An H site's lobe points
+  exactly away from its single neighbour, so the cosine came out as −1 − 1 ulp → NaN. The
+  helper now clips.

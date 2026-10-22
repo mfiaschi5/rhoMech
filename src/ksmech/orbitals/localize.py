@@ -156,14 +156,14 @@ def _schedule(n: int) -> list[tuple[np.ndarray, np.ndarray]]:
     return rounds
 
 
-def _round(C, SC, U, D, P, left, right) -> None:
+def _round(C, SC, U, D, atom_sum, left, right) -> None:
     """Rotate every (left[k], right[k]) pair by its optimal PM angle, in place.
 
     C and SC = S C are AO coefficient blocks, U the accumulated rotation, D the per-atom
-    diagonal populations Q_A^ii (n_atoms, n) and P the (n_atoms, nao) AO-to-atom indicator.
+    diagonal populations Q_A^ii (n_atoms, n) and atom_sum the AO-to-atom sum (`_atom_sum`).
     """
     X = C[:, left] * SC[:, right] + C[:, right] * SC[:, left]
-    qij = 0.5 * (P @ X)
+    qij = 0.5 * atom_sum(X)
     qii, qjj = D[:, left], D[:, right]
     diff = qii - qjj
     a = np.sum(qij * qij - 0.25 * diff * diff, axis=0)
@@ -193,18 +193,16 @@ def pipek_mezey_stats(
     U = np.eye(n)
     if n < 2:
         return C, U, PMStats(n, 0, True, 0.0, 0.0)
-    n_atoms = int(ao_to_atom.max()) + 1
-    P = np.zeros((n_atoms, nao))
-    P[ao_to_atom, np.arange(nao)] = 1.0
+    atom_sum = _atom_sum(ao_to_atom)
     SC = S @ C
-    D = P @ (C * SC)
+    D = atom_sum(C * SC)
     start = value = float(np.sum(D * D))
     rounds = _schedule(n)
     sweeps, converged = 0, False
     while sweeps < config.max_sweeps and not converged:
         sweeps += 1
         for left, right in rounds:
-            _round(C, SC, U, D, P, left, right)
+            _round(C, SC, U, D, atom_sum, left, right)
         new = float(np.sum(D * D))
         converged = abs(new - value) < config.tol
         value = new
@@ -258,32 +256,60 @@ def _ibo_gain(m: np.ndarray, d: np.ndarray, q: np.ndarray, gamma: np.ndarray) ->
     return np.sum(12 * m * m * (x * x - d * d) + 2 * (x**4 - d**4), axis=-2)
 
 
+def ibo_coefficients(m: np.ndarray, d: np.ndarray, q: np.ndarray) -> tuple[np.ndarray, ...]:
+    """(a4, b4, a8, b8) per pair: the exponent-4 gain is exactly the trigonometric polynomial
+    a4 (cos 4g - 1) + b4 sin 4g + a8 (cos 8g - 1) + b8 sin 8g. With x^2 = A0 + A1 cos 4g +
+    B1 sin 4g (A0 = (d^2 + q^2)/2, A1 = (d^2 - q^2)/2, B1 = d q), 12 m^2 x^2 + 2 x^4 expands
+    into these four atom sums, so a round sums over atoms once instead of once per angle."""
+    a0, a1, b1 = 0.5 * (d * d + q * q), 0.5 * (d * d - q * q), d * q
+    w = 12 * m * m + 4 * a0
+    return (w * a1).sum(0), (w * b1).sum(0), (a1 * a1 - b1 * b1).sum(0), (2 * a1 * b1).sum(0)
+
+
+def _poly_gain(c: tuple[np.ndarray, ...], g: np.ndarray) -> np.ndarray:
+    a4, b4, a8, b8 = c
+    c4, c8 = np.cos(4 * g) - 1, np.cos(8 * g) - 1
+    return a4 * c4 + b4 * np.sin(4 * g) + a8 * c8 + b8 * np.sin(8 * g)
+
+
 def ibo_angles(m: np.ndarray, d: np.ndarray, q: np.ndarray) -> np.ndarray:
     """Per-pair rotation angle that maximizes the exponent-4 gain: the best of a 32-point grid
     over the period (it contains 0, so no pair loses), refined by Newton steps that are kept
     only where they improve the gain. (m, d, q): (n_atoms, n_pairs)."""
-    grid = _ibo_gain(m, d, q, np.repeat(_IBO_GRID[:, None], m.shape[1], axis=1))
+    c = ibo_coefficients(m, d, q)
+    grid = _poly_gain(c, _IBO_GRID[:, None])
     gamma = _IBO_GRID[np.argmax(grid, axis=0)]
     best = grid.max(axis=0)
     step_max = _IBO_GRID[1] - _IBO_GRID[0]
+    a4, b4, a8, b8 = c
     for _ in range(_NEWTON_STEPS):
-        c, s = np.cos(2 * gamma), np.sin(2 * gamma)
-        x, x1 = d * c + q * s, 2 * (q * c - d * s)
-        f1 = np.sum((24 * m * m * x + 8 * x**3) * x1, axis=0)
-        f2 = np.sum(24 * m * m * (x1 * x1 - 4 * x * x) + 24 * x * x * x1 * x1 - 32 * x**4, axis=0)
-        trial = gamma - np.clip(
-            np.where(f2 < 0, f1 / np.where(f2 < 0, f2, -1.0), 0.0), -step_max, step_max
-        )
-        gain = _ibo_gain(m, d, q, trial[None, :])[0]
+        s4, c4, s8, c8 = np.sin(4 * gamma), np.cos(4 * gamma), np.sin(8 * gamma), np.cos(8 * gamma)
+        f1 = 4 * (b4 * c4 - a4 * s4) + 8 * (b8 * c8 - a8 * s8)
+        f2 = -16 * (a4 * c4 + b4 * s4) - 64 * (a8 * c8 + b8 * s8)
+        newton = np.where(f2 < 0, f1 / np.where(f2 < 0, f2, -1.0), 0.0)
+        trial = gamma - np.clip(newton, -step_max, step_max)
+        gain = _poly_gain(c, trial)
         better = gain > best
         gamma, best = np.where(better, trial, gamma), np.where(better, gain, best)
     return np.where(best > _MIN_GAIN, gamma, 0.0)
 
 
-def _ibo_round(X, U, D, P, left, right) -> None:
+def _atom_sum(ao_to_atom: np.ndarray):
+    """f(M) = per-atom sums of the AO rows of M: `np.add.reduceat` over the atom boundaries
+    when the AO map is sorted (tblite records run atom by atom), else the dense indicator."""
+    ao_to_atom = np.asarray(ao_to_atom)
+    if np.all(np.diff(ao_to_atom) >= 0) and ao_to_atom[0] == 0 and np.all(np.diff(ao_to_atom) <= 1):
+        starts = np.flatnonzero(np.r_[True, np.diff(ao_to_atom) > 0])
+        return lambda M: np.add.reduceat(M, starts, axis=0)
+    P = np.zeros((int(ao_to_atom.max()) + 1, len(ao_to_atom)))
+    P[ao_to_atom, np.arange(len(ao_to_atom))] = 1.0
+    return lambda M: P @ M
+
+
+def _ibo_round(X, U, D, atom_sum, left, right) -> None:
     """Rotate every (left[k], right[k]) pair by its exponent-4 angle, in place. X: Lowdin
-    coefficients, U: accumulated rotation, D: (n_atoms, n) populations, P: AO-to-atom map."""
-    q = P @ (X[:, left] * X[:, right])
+    coefficients, U: accumulated rotation, D: (n_atoms, n) populations, atom_sum: AO -> atom."""
+    q = atom_sum(X[:, left] * X[:, right])
     m = 0.5 * (D[:, left] + D[:, right])
     d = 0.5 * (D[:, left] - D[:, right])
     gamma = ibo_angles(m, d, q)
@@ -297,7 +323,11 @@ def _ibo_round(X, U, D, P, left, right) -> None:
 
 
 def ibo_stats(
-    C_sub: np.ndarray, S: np.ndarray, ao_to_atom: np.ndarray, config: PMConfig | None = None
+    C_sub: np.ndarray,
+    S: np.ndarray,
+    ao_to_atom: np.ndarray,
+    config: PMConfig | None = None,
+    S12: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, PMStats]:
     """IBO localization of the columns of `C_sub` from where they are (the caller picks the
     start): (C_loc, U, stats), C_loc = C_sub @ U, functional sum (Lowdin population)^4."""
@@ -306,18 +336,17 @@ def ibo_stats(
     n = C_sub.shape[1]
     if n < 2:
         return np.array(C_sub, dtype=float), np.eye(n), PMStats(n, 0, True, 0.0, 0.0)
-    X = _sqrt_psd(S) @ C_sub
+    X = (S12 if S12 is not None else _sqrt_psd(S)) @ C_sub
     U = np.eye(n)
-    P = np.zeros((int(ao_to_atom.max()) + 1, len(ao_to_atom)))
-    P[ao_to_atom, np.arange(len(ao_to_atom))] = 1.0
-    D = P @ (X * X)
+    atom_sum = _atom_sum(ao_to_atom)
+    D = atom_sum(X * X)
     start = value = float(np.sum(D**4))
     rounds = _schedule(n)
     sweeps, converged = 0, False
     while sweeps < config.max_sweeps and not converged:
         sweeps += 1
         for left, right in rounds:
-            _ibo_round(X, U, D, P, left, right)
+            _ibo_round(X, U, D, atom_sum, left, right)
         new = float(np.sum(D**4))
         converged = abs(new - value) < config.tol
         value = new
@@ -334,10 +363,13 @@ def localize_block(
     if C_sub.ndim != 2 or C_sub.shape[0] != len(ao_to_atom) or S.shape != (len(ao_to_atom),) * 2:
         raise LocalizationError(f"shape mismatch: C {C_sub.shape}, S {S.shape}")
     U0 = np.eye(C_sub.shape[1])
+    S12 = _sqrt_psd(S) if (config.start == "cholesky" or config.method == "ibo") else None
     if config.start == "cholesky" and C_sub.shape[1] > 1:
-        U0 = cholesky_start(_sqrt_psd(S) @ C_sub)
-    run = ibo_stats if config.method == "ibo" else pipek_mezey_stats
-    _, U1, stats = run(C_sub @ U0, S, ao_to_atom, config)
+        U0 = cholesky_start(S12 @ C_sub)
+    if config.method == "ibo":
+        _, U1, stats = ibo_stats(C_sub @ U0, S, ao_to_atom, config, S12)
+    else:
+        _, U1, stats = pipek_mezey_stats(C_sub @ U0, S, ao_to_atom, config)
     U = U0 @ U1
     return C_sub @ U, U, stats
 

@@ -228,3 +228,24 @@ def test_molecules_that_hit_the_pm_cap_converge_under_ibo():
         if not lo.converged:
             capped.append((s, lo.stats_occ.n_sweeps, lo.stats_virt.n_sweeps))
     assert not capped, capped
+
+
+def test_the_exponent_4_gain_is_the_four_coefficient_polynomial():
+    rng = np.random.default_rng(1)
+    m, d, q = rng.random((7, 30)), rng.normal(size=(7, 30)), rng.normal(size=(7, 30))
+    gamma = rng.uniform(-np.pi / 4, np.pi / 4, size=(5, 30))
+    exact = L._ibo_gain(m, d, q, gamma)
+    poly = L._poly_gain(L.ibo_coefficients(m, d, q), gamma)
+    assert np.allclose(poly, exact, rtol=1e-12, atol=1e-12)
+
+
+def test_atom_sums_match_the_indicator_matrix():
+    ao_to_atom = np.array([0, 0, 0, 0, 1, 2, 2, 2, 2, 3])
+    M = np.random.default_rng(2).normal(size=(10, 4))
+    P = np.zeros((4, 10))
+    P[ao_to_atom, np.arange(10)] = 1.0
+    assert np.allclose(L._atom_sum(ao_to_atom)(M), P @ M)
+    shuffled = np.array([1, 0, 0, 0, 0, 2, 2, 2, 2, 3])  # not sorted: the dense fallback
+    P2 = np.zeros((4, 10))
+    P2[shuffled, np.arange(10)] = 1.0
+    assert np.allclose(L._atom_sum(shuffled)(M), P2 @ M)

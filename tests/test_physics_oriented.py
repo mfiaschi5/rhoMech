@@ -54,7 +54,7 @@ def test_rotation_to():
 def _angle(t, site, lobe, atom) -> float:
     pos = np.array([a.position for a in t.atoms])
     v = pos[atom] - pos[site]
-    return float(np.degrees(np.arccos(lobe @ v / np.linalg.norm(v))))
+    return float(np.degrees(np.arccos(np.clip(lobe @ v / np.linalg.norm(v), -1.0, 1.0))))
 
 
 def _at(seq, x) -> int:

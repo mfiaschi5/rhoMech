@@ -12,6 +12,7 @@ from ksmech.physics.contact import legacy_fixed23 as K
 from ksmech.physics.gto import element_shells
 
 PINNED = Path(__file__).parent / "fixtures" / "legacy_fixed23_pinned.npz"
+TOKENS = Path(__file__).parent / "fixtures" / "legacy_fixed23_tokens"  # frozen kernel inputs
 PAIRS = {  # name -> (donor SMILES, acceptor SMILES, intra)
     "methoxide_chloromethane": ("C[O-]", "CCl", False),
     "ethene_formaldehyde": ("C=C", "C=O", False),
@@ -79,13 +80,24 @@ def test_rotating_one_molecule_changes_nothing_intramolecular(sp_record):
     assert np.array_equal(got.sites, ref.sites) and np.array_equal(got.clash, ref.clash)
 
 
-def test_outputs_are_pinned(sp_record):
+def frozen_tokens(name: str):
+    """The pinned pair's tokens as stored with the fixture: the kernel is pinned on fixed
+    inputs, so a change in localization (convergence, summation order) cannot move it."""
+    from ksmech.orbitals.tokens import load_tokens
+
+    donor, acceptor, intra = PAIRS[name]
+    t_F = load_tokens(TOKENS / f"{name}_donor.npz", verify=False)
+    t_G = t_F if intra else load_tokens(TOKENS / f"{name}_acceptor.npz", verify=False)
+    return t_F, t_G, intra
+
+
+def test_outputs_are_pinned():
     """The frozen baseline: any change to these numbers needs a new ORIENTED_VERSION and a new
-    pinned file (regenerate with `python tests/test_legacy_fixed23.py`)."""
+    pinned file (regenerated from the fixture tokens)."""
     pinned = np.load(PINNED)
     assert int(pinned["version"]) == K.ORIENTED_VERSION
     for name in PAIRS:
-        c = _block(*_tokens(sp_record, name))
+        c = _block(*frozen_tokens(name))
         assert np.allclose(c.S, pinned[f"{name}/S"], rtol=1e-9, atol=1e-12), name
         assert np.allclose(c.beta, pinned[f"{name}/beta"], rtol=1e-9, atol=1e-11), name
         assert np.array_equal(c.sites, pinned[f"{name}/sites"]), name
