@@ -24,3 +24,6 @@ checkpoints/
 graphify-out/
 .claude/settings.local.json
 .claude/worktrees/
+
+# editor swap files
+*.swp
