@@ -3455,3 +3455,56 @@ is now v7.5, sha256 6c6a023f66dd).
   sidecar index and subsample). Report: `gbdt_lgbm_report_<split>_<features>.json`, with
   read/stored counts, training rows, trees, load and fit seconds and peak RSS.
   `textbook --fast` uses the contact models.
+
+## 2026-10-23 — Spec v8: the prediction target is the reaction matrix, not the arrows
+
+- **Decision (user, 2026-10-23).** Curved arrows are no longer the model's output. Each step is
+  predicted as its reaction matrix R = ΔB (Dugundji–Ugi): bond-order changes on atom pairs and
+  non-bonding-electron changes on atoms, applied as B + R. Arrows and the orbitals that interact
+  are a reading of R, reconstructed afterwards.
+
+  The orbital-level target had choices the wavefunction cannot make:
+  - an ionic bond's pair and its atom's lone pair are one localized orbital (Mitsunobu N–P,
+    O–Li, O–Na, O–Mg; 39 round-trip failures at 99.67%);
+  - relays have several readings;
+  - which ligand leaves a hypervalent centre.
+
+  Sub-decisions, user:
+  - labels come from the dataset arrows, applied as one edit;
+  - the target is taken modulo resonance;
+  - the arrow code (alignment, tuples, λ, predicted round trip) stays as a diagnostic;
+  - I draft the spec and the user approves it.
+- **Measured on PMechDB (12,830 training steps).**
+  - **Coverage.** 12,623 have a label (98.4%), against 11,862 samples with arrow labels. The
+    207 left lack a QM record (168) or a fragment correspondence (39). The dataset edit
+    reproduces the annotated product in 100% of them.
+  - **Entries.** Bond-order changes are always ±1 (14,866 / 14,762), 1–8 per step, mostly 2.
+    Non-bonding changes are always ±2, on 0–2 atoms.
+  - **New bonds.** 8,904 form between molecules and 1,028 within one, at graph distance 2–9.
+    So every atom pair is a candidate, with no radius. Pools have a median of 33 atoms with
+    hydrogens, at most 411.
+  - **Resonance.**
+    - "Modulo resonance" taken literally is unusable: the product's resonance structures give
+      more than 16 equivalent R in 2,727 steps, differing by Kekulé swaps of distant rings and
+      charge-separated forms.
+    - The label is the parsimonious class: the R that change the fewest entries. It has one
+      member in 89.4% of steps and two in 9.3%.
+    - The drawn R is parsimonious in 91.6% of steps.
+    - Minimal variants touch no atom outside the drawn reaction centre in 90% of steps.
+    - 3 steps have an empty minimal class (resonance interconversions) and are removed.
+- **Spec changes (v8, sha256 1ad935491b71).**
+  - The task, the BE section and the learning background are rewritten around R.
+  - "Pointer decoder" becomes "Edit decoder":
+    - an anchor pointer over atom pairs (a forming bond, or a breaking one in a heterolysis);
+    - given the anchor, every other entry is classified (−1 / 0 / +1 per pair, −2 / 0 / +2 per
+      atom);
+    - a beam constrained by charge conservation and valence;
+    - the atom-pair prior F^atom, a Boltzmann sum of the orbital-pair F_rs weighted by the centre
+      weights.
+  - The training objective marginalizes over the parsimonious class and the admissible anchors;
+    END_STEP is gone, END_MECH stays.
+  - "Label alignment" becomes "Labels, interpretation and step application"; alignment is a
+    diagnostic.
+  - Evaluation and the physics floor are on anchors.
+- **Not changed.** QM, tokens, Wiberg indices, stage-A features, the contact sidecar, and the
+  dataset-arrow round-trip gate.

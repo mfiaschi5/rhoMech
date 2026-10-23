@@ -3,20 +3,23 @@
 ## Project goal
 
 ksmech is a deep-learning tool that predicts organic reaction mechanisms as sequences of
-elementary steps. Each step is a set of arrows, and each arrow runs from a donor localized
-orbital to an acceptor localized orbital. A transformer scores candidate arrows, and its
-attention is biased by the Klopman-Salem equation, so the model starts from a physical
-picture of orbital interactions instead of learning it from scratch.
+elementary steps. Each step is predicted as the change it makes to the Lewis structure: the
+reaction matrix R = Delta(bond-electron matrix), which bonds form and break and where electron
+pairs end up. Molecules are encoded as atom and localized-orbital tokens, and the transformer's
+attention is biased by the Klopman-Salem equation, so the model starts from a physical picture
+of orbital interactions instead of learning it from scratch. Curved arrows are not predicted:
+they are a reading of R, reconstructed afterwards with the orbital pairs that drive it.
 
-The prediction target is an autoregressive sequence of elementary steps. A step is a list of
-(donor orbital token, acceptor orbital token) arrows. After each step the arrows are applied
-as an edit to the bond-electron matrix, giving an intermediate. The intermediate is
-re-featurized (3D embedding, xTB, localization, new tokens) and fed back in to predict the
-next step, until the model emits a stop token.
+The prediction target is an autoregressive sequence of elementary steps. A step is one reaction
+matrix (bond-order changes of +-1 on atom pairs, lone-pair changes of +-2 on atoms), decoded
+around an anchor bond that forms. The product is B + R; the intermediate is re-featurized (3D
+embedding, xTB, localization, new tokens) and fed back in to predict the next step, until the
+model emits a stop token. Labels come from the dataset arrows applied as one edit, taken
+modulo resonance as the parsimonious class (spec, "Edit labels").
 
 ## Representation
 
-`docs/ksmech_architecture.tex` (spec v7.5) is the source of truth for the representation and
+`docs/ksmech_architecture.tex` (spec v8) is the source of truth for the representation and
 the model; this section summarizes it.
 
 Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are

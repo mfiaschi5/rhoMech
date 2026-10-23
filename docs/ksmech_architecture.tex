@@ -46,13 +46,13 @@
 
 \title{\textbf{ksmech}: a Klopman--Salem-biased transformer\\for elementary-step reaction mechanism prediction\\[4pt]\large Theoretical framework and architecture specification}
 \author{Project design document}
-\date{20 October 2026}
+\date{23 October 2026 (v8 draft)}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-We specify a deep-learning model that predicts organic reaction mechanisms as sequences of elementary steps. Each step is a set of curved arrows, and each arrow is a pointer from an occupied localized molecular orbital (the donor) to a virtual localized molecular orbital (the acceptor), together with the atom on each orbital where the new bond forms. Molecules are featurized with the GFN2-xTB tight-binding Hamiltonian and represented as two token families, atoms and localized orbitals; an orbital token carries only continuous physical descriptors and its spectral decomposition over the canonical orbitals, never a chemist's label such as $\sigma$ or $\pi$. A two-track transformer (a token track and a pair track) scores donor--acceptor pairs; its attention logits are biased by the three terms of the Klopman--Salem perturbation equation, computed from the xTB overlap and Fock matrices. One attention head is frozen to the pure Klopman--Salem kernel, so every prediction carries a physical decomposition and the contribution of the physics can be ablated. A pointer decoder emits arrows autoregressively; the arrows are applied as bond--electron matrix edits, the intermediate is re-featurized, and the loop continues until a stop token.
+We specify a deep-learning model that predicts organic reaction mechanisms as sequences of elementary steps. Each step is predicted as the change it makes to the Lewis structure, the reaction matrix of Dugundji and Ugi: which bonds form and break and where electron pairs end up. Curved arrows are not predicted; they are one reading of that change, reconstructed afterwards together with the localized orbitals whose interaction drives it. Molecules are featurized with the GFN2-xTB tight-binding Hamiltonian and represented as two token families, atoms and localized orbitals; an orbital token carries only continuous physical descriptors and its spectral decomposition over the canonical orbitals, never a chemist's label such as $\sigma$ or $\pi$. A two-track transformer (a token track and a pair track) encodes the system; its attention logits are biased by the three terms of the Klopman--Salem perturbation equation, computed from the xTB overlap and Fock matrices. One attention head is frozen to the pure Klopman--Salem kernel, so every prediction carries a physical decomposition and the contribution of the physics can be ablated. An edit decoder predicts the reaction matrix, anchored on a bond that forms, with the orbital interaction energies projected onto atom pairs as its physical prior; the matrix is added to the bond--electron matrix, the intermediate is re-featurized, and the loop continues until a stop token.
 
 The document is in three parts. Part~I sets out the physical theory the model is built on: the tight-binding electronic-structure problem, orbital localization, second-order perturbation theory of intermolecular interaction, conceptual density-functional descriptors, and the bond--electron matrix formalism of curved arrows. Part~II gives the minimum of deep-learning theory needed to read the architecture. Part~III is the specification proper. Appendices fix the derivations and numerical techniques.
 \end{abstract}
@@ -66,7 +66,7 @@ The document is in three parts. Part~I sets out the physical theory the model is
 
 \section{Scope of the physical model}
 \label{sec:scope}
-The quantity the model must rank is \emph{which pair of electrons moves where} in an elementary step. The physical theory that speaks about exactly this object is molecular-orbital perturbation theory: two closed-shell fragments approach, their orbitals begin to overlap, and the energy change to second order is a sum over pairs of a filled orbital on one fragment and an empty orbital on the other. Everything in Part~I serves that one equation. We need (i) orbitals and their energies for a molecule of any size and charge, cheaply (Section~\ref{sec:es}); (ii) a way to make those orbitals local, so that a pair of them can be pointed at like a curved arrow (Section~\ref{sec:loc}); (iii) the perturbation expression itself and the approximations that make it evaluable from the quantities we have (Section~\ref{sec:pt}); (iv) atom-resolved reactivity descriptors that complement it (Section~\ref{sec:cdft}); and (v) a bookkeeping formalism that turns a chosen pair of orbitals into a product molecule (Section~\ref{sec:be}).
+The quantity the model must predict is \emph{how the Lewis structure changes} in an elementary step: which bonds form and break, and where electron pairs end up. What drives that change is the interaction between the filled levels of one site and the empty levels of another, and the physical theory that speaks about exactly this is molecular-orbital perturbation theory: two closed-shell fragments approach, their orbitals begin to overlap, and the energy change to second order is a sum over pairs of a filled orbital on one fragment and an empty orbital on the other. Everything in Part~I serves that one equation. We need (i) orbitals and their energies for a molecule of any size and charge, cheaply (Section~\ref{sec:es}); (ii) a way to make those orbitals local, so that the interaction of two of them can be attributed to the atoms that carry them (Section~\ref{sec:loc}); (iii) the perturbation expression itself and the approximations that make it evaluable from the quantities we have (Section~\ref{sec:pt}); (iv) atom-resolved reactivity descriptors that complement it (Section~\ref{sec:cdft}); and (v) the bookkeeping formalism in which an elementary step is written (Section~\ref{sec:be}).
 
 \section{Electronic structure in a finite basis}
 \label{sec:es}
@@ -245,7 +245,11 @@ Dugundji and Ugi \cite{ugi} represent a Lewis structure of $n$ atoms by the symm
 \item bond $(i,k)$ $\to$ atom $j$ with the new bond at $i$: $R_{ik}=R_{ki}=-1$, $R_{ij}=R_{ji}=+1$;
 \item bond $(i,k)$ $\to$ lone pair on $k$ (a leaving group): $R_{ik}=R_{ki}=-1$, $R_{kk}=+2$.
 \end{itemize}
-An elementary step is the sum of its arrows' matrices applied at once; formal charges follow from the definition and need no separate rule. Two consequences shape the model. First, the product of a step is a \emph{function} of the chosen arrows, so a model that outputs arrows never has to generate a molecule, and mass and charge conservation hold by construction. Second, resonance structures are distinct $\vb{B}$ matrices of the same molecule; the quantum-mechanical state is their superposition, which is what the wavefunction of Section~\ref{sec:es} already represents. The model therefore works on the wavefunction and treats resonance only as an equivalence relation on $\vb{B}$ matrices when comparing products (Section~\ref{sec:resonance}). Appendix~\ref{app:be} gives a worked example.
+An elementary step is the sum of its arrows' matrices applied at once; formal charges follow from the definition and need no separate rule.
+
+The model predicts $\vb{R}$ itself, not the arrows, for three reasons. First, the decomposition of $\vb{R}$ into arrows is not unique, and the ambiguity is physical, not notational. When a bond is ionic in the wavefunction (an alkoxide's O--Li, the N--P bond of a Mitsunobu betaine, the C--Cl bond of a tetrahedral intermediate), the pair of that bond and a lone pair of its atom are the same localized orbital, so no orbital-level label can say whether ``the lone pair'' or ``the bond'' moved; $\vb{R}$ is the same either way. Relays (E2, enolate alkylation) and the choice of which ligand leaves a hypervalent centre are further readings of one $\vb{R}$. Second, $\vb{R}$ is what the step does: the product is $\vb{B}_{\mathrm{reac}}+\vb{R}$, mass is conserved by construction, and charge conservation is the single linear constraint $\sum_i R_{ii}+2\sum_{i<j}R_{ij}=0$. Third, $\vb{R}$ is sparse and small: on PMechDB an elementary step changes one to eight bond orders, always by $\pm1$, and the non-bonding electrons of at most two atoms, by $\pm2$. Arrows remain the reader's language. They are reconstructed from $\vb{R}$ after prediction, together with the orbital pairs whose Klopman--Salem interaction drives the bonds that form (Section~\ref{sec:interpret}).
+
+Resonance structures are distinct $\vb{B}$ matrices of the same molecule; the quantum-mechanical state is their superposition, which is what the wavefunction of Section~\ref{sec:es} already represents. Two reaction matrices that lead to the same resonance hybrid describe the same step. Among them the physically meaningful ones are the \emph{parsimonious} ones, which change the fewest entries (Section~\ref{sec:labels}). Appendix~\ref{app:be} gives a worked example.
 
 \section{Steric descriptors}
 The repulsive Term~(1) of \eqref{eq:ks-theory} needs the overlap of filled orbitals at the reactive geometry, which no fragment calculation provides. The percent buried volume $V^{\mathrm{bur}}_A$ \cite{vbur}, the fraction of a sphere of radius $3.5$~\AA\ centred on atom $A$ that is occupied by the van der Waals volume of the rest of the molecule, is used as a geometric proxy for how much filled electron density surrounds a site. It is an input descriptor, not a prior on reactivity.
@@ -256,7 +260,7 @@ The repulsive Term~(1) of \eqref{eq:ks-theory} needs the overlap of filled orbit
 
 \section{What is being learned}
 \label{sec:learn}
-The model is a conditional probability distribution $P_\theta(A_t\mid\mathcal{M}_{t-1})$ over elementary steps given the current molecules, with parameters $\theta$ fitted by maximizing the log-likelihood of annotated steps. An elementary step is a short sequence of arrows, and each arrow is a choice from a finite candidate set (the occupied orbitals, then the virtual ones), so the problem is a sequence of \emph{classifications over sets whose size varies with the molecule}. The per-choice loss is the cross-entropy $-\log P_\theta(\text{label})$. When several candidates are physically equivalent (two lone pairs on the same oxygen) the label is a set $\mathcal{D}$ and the loss is the negative log of the total probability mass on the set, $-\log\sum_{r\in\mathcal{D}}P_\theta(r)$: the model is rewarded for putting probability on any equivalent choice and never forced to prefer one.
+The model is a conditional probability distribution $P_\theta(\vb{R}_t\mid\mathcal{M}_{t-1})$ over elementary steps given the current molecules, with parameters $\theta$ fitted by maximizing the log-likelihood of annotated steps. An elementary step is a sparse integer matrix over the atoms present, so the problem is a \emph{structured classification over sets whose size varies with the molecule}: one choice from the candidate atom pairs (a bond that forms), then a value for every other entry given that choice. The per-choice loss is the cross-entropy $-\log P_\theta(\text{label})$. When several labels are physically equivalent (two resonance-equivalent ways of writing the same step, two bonds that form in the same step) the label is a set $\mathcal{D}$ and the loss is the negative log of the total probability mass on the set, $-\log\sum_{x\in\mathcal{D}}P_\theta(x)$: the model is rewarded for putting probability on any equivalent choice and never forced to prefer one.
 
 \section{Attention and the transformer}
 \label{sec:attn}
@@ -282,11 +286,11 @@ A variable-length, unordered collection of items (the spectral entries of an orb
 
 \section{Decoding a step}
 \label{sec:decode}
-\paragraph{Pointer networks.} When the output is an element of the input set, the natural output layer is a \emph{pointer} \cite{pointer}: a query vector is compared with every candidate's encoded vector and the softmax over candidates is the distribution. The candidate set can have any size, no vocabulary is needed, and a mask can remove invalid candidates by setting their logits to $-\infty$.
+\paragraph{Pointer networks.} When the output is an element of the input set, the natural output layer is a \emph{pointer} \cite{pointer}: a query vector is compared with every candidate's encoded vector and the softmax over candidates is the distribution. The candidate set can have any size, no vocabulary is needed, and a mask can remove invalid candidates by setting their logits to $-\infty$. Here the candidates are atom pairs, scored from the pair track.
 
-\paragraph{Autoregressive decoding and teacher forcing.} A step with several arrows is emitted one arrow at a time, each conditioned on those already emitted. During training the conditioning uses the \emph{annotated} previous arrows (teacher forcing), so every arrow is a separate classification with the correct context; at inference the model's own previous choices are used.
+\paragraph{Structured output by anchoring.} A step changes several entries at once, and they are not independent: the leaving group goes with the nucleophile that displaces it. The output is therefore factorized around one \emph{anchor} entry. A pointer chooses the anchor, and every other entry is classified given it. The anchor carries the choice that is genuinely multimodal (which site reacts); given it, the remaining entries are close to determined, so the conditional factorization is accurate where an unconditional one would mix incompatible sites.
 
-\paragraph{Beam search.} Instead of taking the single most probable arrow at each point, the $B$ most probable partial sequences are kept and extended; this recovers high-probability steps that start with a locally less probable arrow and yields a ranked list of alternatives.
+\paragraph{Constrained beam search.} The $B$ most probable anchors are kept. For each, the most probable completions that satisfy the conservation constraint and every atom's valence are enumerated, ranked by total log-probability and merged when they give the same product. This yields a ranked list of distinct steps.
 
 \section{Ablation as method}
 Every design choice that is claimed to matter is paired with a configuration flag that removes it, and the model is retrained with and without. The quantity of interest is the difference in held-out accuracy, with several random seeds so the difference can be compared to its own noise. In particular the physical prior is tested three ways: by removing the bias from all heads, by removing each of its three terms, and by comparing the trained model with the ranking that the untrained physical kernel alone produces (the ``physics floor'').
@@ -298,15 +302,11 @@ Every design choice that is claimed to matter is paired with a configuration fla
 \section{Problem statement}
 
 \subsection{Task}
-The state of a reacting system is the \emph{pool} $\mathcal{M}$: the multiset of all molecular species present, reactants, intermediates, by-products and spectators, each with its multiplicity. An \emph{elementary step} $A$ is an ordered list of arrows $A=(a_1,\dots,a_n)$ that together pass through a single transition state and map one pool to the next, $\mathcal{M}\xrightarrow{A}\mathcal{M}'$. Each arrow is a 4-tuple
-\[
-a=(r,\,a,\,s,\,b),\qquad r\in\mathcal{O}^{\occ}(\mathcal{M}),\quad s\in\mathcal{O}^{\virt}(\mathcal{M}),\quad a\in\mathcal{A}_r,\ b\in\mathcal{A}_s,
-\]
-i.e.\ an electron pair flows from occupied localized orbital $r$ into virtual localized orbital $s$, and the new bond forms between atom $a$ (a centre of $r$) and atom $b$ (a centre of $s$). Applying $A$ with the bond--electron matrix rules of Section~\ref{sec:apply} yields $\mathcal{M}'$ deterministically.
+The state of a reacting system is the \emph{pool} $\mathcal{M}$: the multiset of all molecular species present, reactants, intermediates, by-products and spectators, each with its multiplicity, written as one bond--electron matrix $\vb{B}$ over all its atoms. An \emph{elementary step} is a reaction matrix $\vb{R}$ (Section~\ref{sec:be}) that passes through a single transition state and maps one pool to the next, $\vb{B}'=\vb{B}+\vb{R}$. Its entries are the change of each bond order, $R_{ij}\in\set{-1,0,+1}$ for $i\ne j$, and of each atom's non-bonding electrons, $R_{ii}\in\set{-2,0,+2}$; formal charges follow. Curved arrows and the localized orbitals that interact are not part of the target: they are a reading of $\vb{R}$, reconstructed after prediction (Section~\ref{sec:interpret}).
 
 A \emph{mechanism} is a reaction network: a directed graph whose nodes are pool states and whose edges are elementary steps. It is not a chain. Two steps that touch disjoint atoms are independent and may occur in either order; a species formed late in one turnover (a regenerated catalyst, a by-product acid) can enter an early step of the next; competing steps from the same pool branch. A \emph{pathway} is one path through the network, and an annotated mechanism in the datasets is one such path in one arbitrary order of its independent steps.
 
-The model is therefore a \emph{policy}: a conditional distribution $P_\theta(A\mid\mathcal{M})$ over elementary steps given the current pool. Because every species present is in the pool, a step can involve anything formed earlier; because the policy is defined on any pool, it defines the whole network, not one trajectory. The model has to learn only \emph{which} orbitals interact and where, never how to write the product.
+The model is therefore a \emph{policy}: a conditional distribution $P_\theta(\vb{R}\mid\mathcal{M})$ over elementary steps given the current pool. Because every species present is in the pool, a step can involve anything formed earlier; because the policy is defined on any pool, it defines the whole network, not one trajectory. The model predicts only the change; it never writes a molecule from scratch, because the product is $\vb{B}+\vb{R}$.
 
 Three consequences follow for data, inference and evaluation. (i)~Training: from an annotated pathway the dependency DAG of its steps is derived (step $j$ depends on $i$ if it consumes a product of $i$ or touches an atom $i$ changed); every topological order is a valid trajectory and all are used as training sequences, so the model does not learn an arbitrary order as if it were chemistry. (ii)~Inference: the search is over pool states keyed by the multiset of resonance keys, beams reaching the same pool are merged, and a pool that recurs up to the stoichiometric products closes a cycle (catalyst turnover); the output is the network with step probabilities on its edges. (iii)~Evaluation at pathway level compares the \emph{set} of steps and the final pool, never the sequence.
 
@@ -327,9 +327,9 @@ Three consequences follow for data, inference and evaluation. (i)~Training: from
 \draw[bond] (C2)--(H2a); \draw[bond] (C2)--(H2b); \draw[bond] (C2)--(H2c); \draw[bond] (C2)--(Cl2);
 \draw[arrow] (1.45,0.1) .. controls (2.0,0.9) and (2.8,0.9) .. (3.1,0.25);
 \draw[arrow] (3.95,0.12) .. controls (4.1,0.6) and (4.5,0.6) .. (4.65,0.3);
-\node[tag, anchor=south east] at (1.3,0.95) {donor $r$ (O lone pair), site $a=\mathrm{O}$};
-\node[tag, anchor=north] at (3.9,-0.8) {acceptor $s=\sigma^*$(C--Cl), site $b=\mathrm{C}$};
-\draw[rxn] (5.4,0) -- node[above,font=\scriptsize]{$(r,a,s,b)$} node[below,font=\scriptsize]{apply $\vb{R}$} (7.2,0);
+\node[tag, anchor=south east] at (1.3,0.95) {occupied $r$ on O};
+\node[tag, anchor=north] at (3.9,-0.8) {virtual $s$ on C, Cl};
+\draw[rxn] (5.4,0) -- node[above,font=\scriptsize]{$\vb{R}$} node[below,font=\scriptsize]{$\vb{B}+\vb{R}$} (7.2,0);
 \node[atom] (C3) at (8.0,0) {H$_3$C};
 \node[atom] (O3) at (9.1,0) {O};
 \node[atom] (C4) at (10.2,0) {CH$_3$};
@@ -347,12 +347,12 @@ Three consequences follow for data, inference and evaluation. (i)~Training: from
 \node[draw,rounded corners,fill=orange!10,align=left,text width=5.2cm] (ac) at (8.6,0) {$s$: virtual, $n_s=0$, two centres (C $0.65$, Cl $0.35$)\\$\chi_{\mathrm C}>0.7$ ($\sigma$-like), $\Pi_{\mathrm{CCl}}<0$ (antibonding)\\spectral set: mostly LUMO ($\epsilon\approx-2.1$~eV)};
 \draw[-{Latex[length=2mm]},thick] (d) -- node[above,align=center]{$\KS_3=\beta_{rs}^2\,G(r,s)$\\$\KS_2(\mathrm{O},\mathrm{C})$} (ac);
 \end{tikzpicture}
-\caption{An S$_\mathrm{N}$2 step as the model represents it. The two curved arrows of the textbook drawing are one tuple $(r,a,s,b)$: a donor orbital, the atom on it where the bond forms, an acceptor orbital, and the atom on it that is attacked. The bond--electron matrix edit $\vb{R}$ (Section~\ref{sec:be}) then produces the product with no further learning. The boxes list the descriptors the model actually sees for the two orbitals (values from the GFN2-xTB run on the fixture molecules); the words ``lone pair'' and ``$\sigma^*$'' appear only in this caption, never in the input.}
+\caption{An S$_\mathrm{N}$2 step as the model represents it. The step is the reaction matrix $\vb{R}$: the bond O--C forms (the anchor), C--Cl breaks, O gives up a lone pair and Cl gains one. The two curved arrows of the textbook drawing are its reading. The boxes list the descriptors of the two orbitals whose Klopman--Salem interaction, projected onto the atom pair O--C, is the physical prior on the anchor (values from the GFN2-xTB run on the fixture molecules); the words ``lone pair'' and ``$\sigma^*$'' appear only in this caption, never in the input.}
 \label{fig:sn2}
 \end{figure}
 
 \subsection{Why orbitals}
-In curved-arrow notation every arrow already starts at a filled orbital and ends at an empty one. Term~(3) of the Klopman--Salem equation scores exactly such filled--empty pairs. Choosing localized orbitals as the unit of prediction therefore makes the physics and the labels speak the same language: the quantity the model ranks is the quantity the perturbation theory evaluates.
+In curved-arrow notation every arrow already starts at a filled orbital and ends at an empty one, and Term~(3) of the Klopman--Salem equation scores exactly such filled--empty pairs. Localized orbitals are therefore the representation in which the physics is evaluated: the model encodes them as tokens, their pair interactions bias attention, and the interaction energy of the orbitals two atoms carry is the prior on the bond that forms between them (Eq.~\eqref{eq:Fatom}). The prediction itself is made on atoms, because the change of a Lewis structure is defined on atoms and is the same whichever localized orbitals one attributes it to.
 
 \subsection{Scope}
 Polar (two-electron) mechanisms are the primary target. Radical steps (one-electron arrows) are supported by singly occupied orbital tokens that may act as donor or acceptor; they are a later extension and do not change the architecture.
@@ -626,7 +626,7 @@ $\KS_2$ & O$^{\delta-}$ / C$^{\delta+}$: attractive & O$^{\delta-}$ / H$^{\delta
 $\KS_1$ & crowded C$_\alpha$ & exposed H\\
 \bottomrule
 \end{tabular}
-\caption{Two of the $\sim$60 candidate tuples for methoxide + ethyl bromide, and how the three Klopman--Salem terms see them. Orbital control (large $|G|$) favours A, charge control ($\KS_2$ on a polarized C--H) and sterics favour B. The untrained ranking by $\KS_3$ alone puts A first; which one wins experimentally depends on base strength, hindrance and temperature, and that residual is what the learned heads must supply. The classifier labels in the table are for the reader; the model works from the descriptors.}
+\caption{Two of the $\sim$60 candidate orbital pairs for methoxide + ethyl bromide (the O--C and O--H anchors of S$_\mathrm{N}$2 and E2), and how the three Klopman--Salem terms see them. Orbital control (large $|G|$) favours A, charge control ($\KS_2$ on a polarized C--H) and sterics favour B. The untrained ranking by $\KS_3$ alone puts A first; which one wins experimentally depends on base strength, hindrance and temperature, and that residual is what the learned heads must supply. The classifier labels in the table are for the reader; the model works from the descriptors.}
 \label{fig:sn2e2}
 \end{figure}
 
@@ -650,8 +650,8 @@ All entries are standardized with training-set statistics for the learned heads;
 \node[box, fill=blue!6] (tok) {Token track $\vb{h}_i$\\ \scriptsize atom + orbital embeddings};
 \node[box, fill=green!8, right=of tok] (pair) {Pair track $\vb{p}_{ij}$\\ \scriptsize RBF(dist), $\vb{z}_{ij}$, graph flags};
 \node[box, fill=gray!10, below=of $(tok)!0.5!(pair)$, minimum width=72mm] (enc) {$L=8$ encoder layers\\ \scriptsize logit$_{ij}^{(h)}=\vb{q}_i^{\!\top}\vb{k}_j/\sqrt{d_h}+\vb{w}_h^{\!\top}\vb{p}_{ij}+b^{\KS}_h(i,j)$;\ head 0 frozen to $b^{\KS}$};
-\node[box, fill=blue!6, below=of enc, minimum width=50mm] (dec) {Pointer decoder\\ \scriptsize donor $\to$ site $\to$ acceptor $\to$ site $\to$ stop};
-\node[box, fill=orange!10, right=of dec, minimum width=30mm] (app) {Apply arrows\\ \scriptsize BE-matrix edit};
+\node[box, fill=blue!6, below=of enc, minimum width=50mm] (dec) {Edit decoder\\ \scriptsize anchor bond $\to$ rest of $\vb{R}$ $\to$ stop};
+\node[box, fill=orange!10, right=of dec, minimum width=30mm] (app) {Apply $\vb{R}$\\ \scriptsize $\vb{B}+\vb{R}$};
 \draw[arr] (tok) -- (enc);
 \draw[arr] (pair) -- (enc);
 \draw[arr] (enc) -- (dec);
@@ -710,80 +710,76 @@ Head $h=0$ has no projections and no pair weight; its logits are the physical en
 \ell^{(0)}_{ij}=-\frac{F_{ij}}{\tau}+m_{ij},\qquad
 \vb{a}^{(0)}_i=\sum_j\softmax_j\big(\ell^{(0)}_{ij}\big)\,\vb{W}^{(0)}_V\LN(\vb{h}_j),
 \end{equation}
-with $F_{ij}$ the configurational free energy of Eq.~\eqref{eq:Frs} and $\tau>0$ the same learnable scalar (initialized at $1$~eV) that defines it; the head is active in stage B only. Only $\tau$ and the value projection are trained, and the head's ranking of candidates coincides by construction with the untrained physics floor. Standardization is a convenience for the learned heads; applied here it would reweight the three terms by their sample variances and destroy the Boltzmann reading. Its attention matrix is therefore exactly the Boltzmann-like weighting that the perturbation energy prescribes, in every layer and at every stage of training. This gives (i) an ablation axis with no confound, because the physics can be removed from the other heads while head 0 is left intact or removed altogether, and (ii) an interpretation signal, because $\softmax_j(\ell^{(0)}_{ij})$ at the chosen donor $i=r$, acceptor $j=s$ states how strongly the physics alone favoured the predicted arrow. Configuration flags allow disabling all $b^{\KS}$ terms, dropping any one term, or unfreezing head 0.
+with $F_{ij}$ the configurational free energy of Eq.~\eqref{eq:Frs} and $\tau>0$ the same learnable scalar (initialized at $1$~eV) that defines it; the head is active in stage B only. Only $\tau$ and the value projection are trained, and the head's ranking of candidates coincides by construction with the untrained physics floor. Standardization is a convenience for the learned heads; applied here it would reweight the three terms by their sample variances and destroy the Boltzmann reading. Its attention matrix is therefore exactly the Boltzmann-like weighting that the perturbation energy prescribes, in every layer and at every stage of training. This gives (i) an ablation axis with no confound, because the physics can be removed from the other heads while head 0 is left intact or removed altogether, and (ii) an interpretation signal, because $\softmax_j(\ell^{(0)}_{ij})$ at the orbital pair $(r,s)$ that the reading attributes to the predicted anchor states how strongly the physics alone favoured that bond. Configuration flags allow disabling all $b^{\KS}$ terms, dropping any one term, or unfreezing head 0.
 
-\section{Pointer decoder}
+\section{Edit decoder}
 \label{sec:decoder}
-A step is decoded as a sequence of arrows with teacher forcing (Section~\ref{sec:decode}). Let $\vb{h}_i^{(L)}$ be the final token vectors and $\vb{p}^{(L)}_{ij}$ the final pair vectors.
+Let $\vb{h}_i^{(L)}$ be the final token vectors, $\vb{p}^{(L)}_{ij}$ the final pair vectors (the pair track covers atom tokens as well as orbital tokens), and $\vb{s}=\MLP_S([\vb{h}^{(L)}_{\mathrm{MECH}},\vb{E}_{\mathrm{step}}[t]])$ the step query. The decoder predicts $\vb{R}$ on the atoms of the pool, hydrogens included.
 
-\paragraph{Step query.}
+\paragraph{Atom-pair physics.} The Klopman--Salem terms are defined on orbital pairs; the decoder works on atom pairs. The physical prior of the atom pair $(i,j)$ is the interaction of the orbitals the two atoms carry, combined as a Boltzmann sum over orbital channels in both directions of donation:
 \begin{equation}
-\vb{s}_t=\MLP_S\big([\vb{h}^{(L)}_{\mathrm{MECH}},\ \vb{E}_{\mathrm{step}}[t],\ \vb{g}_{t}]\big),
+F^{\mathrm{atom}}_{ij}=-\tau\log\sum_{r\in\mathcal{O}^{\occ},\ s\in\mathcal{O}^{\virt}}\big(w^{(r)}_i w^{(s)}_j+w^{(r)}_j w^{(s)}_i\big)\,e^{-F_{rs}/\tau},
+\label{eq:Fatom}
 \end{equation}
-where $\vb{g}_t$ is the mean of the token vectors of arrows already emitted in this step (zero for the first arrow), so that concerted multi-arrow steps are decoded coherently.
+with $w$ the centre weights and $F_{rs}$ the configurational free energy of Eq.~\eqref{eq:Frs} (stage B). In stage A the geometry-free features of the orbital pairs take its place, pooled with the same weights, together with the Wiberg bond index of $(i,j)$ in the reactant. The channel $(r,s)$ that dominates the sum is the orbital reading of the bond (Section~\ref{sec:interpret}).
 
-\paragraph{Donor selection.} Over occupied orbital tokens with validity mask $\mathcal{V}^{\occ}$ (occupation within $0.2$ of $2$, not already used in this step):
+\paragraph{Anchor.} Every step forms at least one bond or, in a heterolysis, breaks one. The anchor is a bond that forms ($R_{ij}=+1$ on a pair not bonded in $\vb{B}$), or, in a step that forms none, a bond that breaks. A pointer over candidate pairs $\mathcal{C}$ with a sign $\sigma\in\set{\text{form},\text{break}}$:
 \begin{equation}
-P(r\mid\cdot)=\softmax_{r\in\mathcal{V}^{\occ}}\big(\vb{s}_t^{\!\top}\vb{W}_D\,\vb{h}^{(L)}_r\big).
+P(e\mid\cdot)=\softmax_{e=(i,j,\sigma)\in\mathcal{C}}\Big(\vb{s}^{\!\top}\vb{W}_{\sigma}\big[\vb{h}^{(L)}_i+\vb{h}^{(L)}_j\big]+\vb{u}_{\sigma}^{\!\top}\vb{p}^{(L)}_{ij}-\kappa\,\widehat{F}^{\mathrm{atom}}_{ij}\Big),
 \end{equation}
+with $\kappa$ learnable (initialized at $1$). A forming anchor may be any pair of atoms whose bond order stays at most $3$; no distance cut-off is imposed, because new bonds form between molecules (8,904 on PMechDB) and within one at graph distances from 2 to 9 (1,028). A breaking anchor is a bonded pair.
 
-\paragraph{Donor site.} An orbital with several centres must say on which atom the new bond forms (the terminal carbon of propene for Markovnikov addition; one of the four carbons of a ring $\pi$ orbital). Over the centres of the chosen donor, using the token-to-centre incidence weights $w^{(r)}_a$:
-\begin{equation}
-P(a\mid r,\cdot)=\softmax_{a\in\mathcal{A}_r}\Big(\big(\vb{s}_t+\vb{h}^{(L)}_r\big)^{\!\top}\vb{W}_S\,\vb{h}^{(L)}_a+v_S\,w^{(r)}_a\Big),
-\end{equation}
-which is a one-entry softmax for a one-centre orbital.
+\paragraph{Remaining entries.} Given the anchor $e^\star$ on atoms $(a,b)$, every other pair entry and every atom entry is classified:
+\begin{align}
+P(R_{ij}\mid e^\star,\cdot)&=\softmax_{v\in\{-1,0,+1\}}\MLP_R\big([\vb{p}^{(L)}_{ij},\ \vb{h}^{(L)}_i+\vb{h}^{(L)}_j,\ \vb{c}_{ij}]\big)_v,\\
+P(R_{ii}\mid e^\star,\cdot)&=\softmax_{v\in\{-2,0,+2\}}\MLP_N\big([\vb{h}^{(L)}_i,\ \vb{c}_{ii}]\big)_v,
+\end{align}
+where $\vb{c}$ carries the anchor: $\vb{h}^{(L)}_a+\vb{h}^{(L)}_b$, the pair vectors that join the entry's atoms to $a$ and $b$, and their graph distances to $a$ and $b$. Masks remove $-1$ on a pair without a bond, $+1$ on a triple bond, and $-2$ on an atom without a lone pair.
 
-\paragraph{Acceptor selection.} Conditioned on the donor $r$ and its site $a$, over virtual tokens with mask $\mathcal{V}^{\virt}(r)$ (occupation within $0.2$ of $0$; no $d$-dominated polarization orbitals unless configured; and not a pair whose sites $a,b$ are bonded or identical while the donor site carries $\ge0.25$ of the acceptor's population or the acceptor site $\ge0.25$ of the donor's, which removes an orbital's own antibond and same-atom $n\to\sigma^*$ pairs but keeps the collapse of a tetrahedral intermediate, whose acceptor $\sigma^*$ carries the donor oxygen only as a minor centre):
-\begin{equation}
-P(s\mid r,a,\cdot)=\softmax_{s\in\mathcal{V}^{\virt}(r)}\Big(\big(\vb{s}_t+\vb{h}^{(L)}_r+\vb{h}^{(L)}_a\big)^{\!\top}\vb{W}_A\,\vb{h}^{(L)}_s+\vb{u}^{\!\top}\vb{p}^{(L)}_{rs}\Big).
-\end{equation}
-The explicit pair term $\vb{u}^{\!\top}\vb{p}^{(L)}_{rs}$ is where the Klopman--Salem features of the specific candidate pair enter the arrow score directly, independently of attention.
+\paragraph{Joint probability.} $P(\vb{R}\mid\cdot)=P(e^\star\mid\cdot)\prod_{x\ne e^\star}P(R_x\mid e^\star,\cdot)$. Decoding is the constrained beam search of Section~\ref{sec:decode}. For each of the $B$ best anchors, completions are built from the most probable non-zero entries (at most $8$ bond and $2$ atom changes, the PMechDB maximum); those that violate charge conservation or an atom's valence are discarded; the rest are ranked by $\log P(\vb{R})$ and merged by the resonance key of their product.
 
-\paragraph{Acceptor site.} Same form as the donor site, over $\mathcal{A}_s$.
-
-\paragraph{Leaving bond.} An arrow that forms a bond at $b$ may also break one of $b$'s existing bonds: the partner of an antibonding acceptor in a substitution, a $\pi$ bond in an addition to a carbonyl, an ionic contact that the wavefunction already treats as a lone pair on the leaving atom (a tetrahedral intermediate's chloride, a bromonium's bromide), or, at a hypervalent centre, whichever ligand is the better leaving group. The dataset encodes it as a second arrow, bond $b$--$x\to x$, or its absence. A pointer head chooses among $\set{\textsc{none}}\cup\mathcal{B}_b$, the Lewis bonds of $b$ other than the one being formed,
-\begin{equation}
-P(\lambda\mid r,a,s,b,\cdot)=\softmax_{\lambda}\Big(\vb{w}_\lambda^{\!\top}\big[\vb{s}_t,\vb{h}_r,\vb{h}_s,\vb{h}_b,\vb{h}_{x(\lambda)},\vb{e}_\lambda\big]\Big),
-\end{equation}
-where $\vb{e}_\lambda$ describes the candidate bond: whether it is the partner bond of the chosen acceptor, its Wiberg index in the reactant, its bond order, and the element and charge of the departing atom ($\textsc{none}$ has a learned embedding). The candidate set is masked by physics: an open-shell site keeps all its bonds ($\textsc{none}$ only); a full-shell first- or second-period site cannot expand its octet ($\textsc{none}$ excluded); otherwise the choice is learned. A static index cannot make it in general: at sulfur and phosphorus the bond that leaves is the best leaving group, not the least covalent bond (the lowest Wiberg index at the sink matches the annotated leaving bond in 12--24\% of P and S sinks). An arrow is therefore the tuple $(r,a,s,b,\lambda)$: two orbitals, the two atoms on which they meet, and the bond at the sink that gives way.
-
-\paragraph{Stop heads.} After each arrow a Bernoulli head on $[\vb{s}_t,\vb{h}_r,\vb{h}_s]$ decides \texttt{END\_STEP}; after each step a Bernoulli head on $\vb{h}^{(L)}_{\mathrm{MECH}}$ of the re-featurized intermediate decides \texttt{END\_MECH}.
+\paragraph{Stop head.} A step is one matrix, so there is no per-step stop. After each step a Bernoulli head on $\vb{h}^{(L)}_{\mathrm{MECH}}$ of the re-featurized pool decides \texttt{END\_MECH}.
 
 \section{Training objective}
 \label{sec:loss}
-Dataset arrows are aligned to orbital tokens (Section~\ref{sec:align}); because several LMOs can be chemically equivalent, each arrow carries label \emph{sets} $\mathcal{D}$ (donors) and $\mathcal{A}$ (acceptors). The per-arrow loss marginalizes over the sets (Section~\ref{sec:learn}):
+Each annotated step gives a label set $\mathcal{R}$ of equivalent reaction matrices (Section~\ref{sec:labels}). Each $\vb{R}\in\mathcal{R}$ has a set of admissible anchors $\mathcal{E}(\vb{R})$: its forming bonds, or its breaking bonds when none forms. The loss marginalizes over both (Section~\ref{sec:learn}):
 \begin{equation}
-\begin{split}
-\mathcal{L}_{\mathrm{arrow}}={}&-\log\sum_{r\in\mathcal{D}}P(r\mid\cdot)\;-\;\log P(a^{\star}\mid r^{\star},\cdot)\\
-&-\log\sum_{s\in\mathcal{A}}P(s\mid r^{\star},a^{\star},\cdot)\;-\;\log P(b^{\star}\mid s^{\star},\cdot)\;-\;\mathbb{1}[\lambda\ \text{learned}]\log P(\lambda^{\star}\mid\cdot),
-\end{split}
+\mathcal{L}_{\mathrm{step}}=-\log\sum_{\vb{R}\in\mathcal{R}}\ \sum_{e\in\mathcal{E}(\vb{R})}P(e\mid\cdot)\prod_{x\ne e}P(R_x\mid e,\cdot),
 \end{equation}
-with $r^\star,s^\star$ teacher representatives of the label sets, $a^\star,b^\star$ the labeled site atoms, which are always unique because they come straight from the dataset arrow, and $\lambda^\star$ the labeled leaving bond where the choice is not forced. The total loss is
+where $x$ runs over every candidate pair and atom entry. The total loss is
 \begin{equation}
-\mathcal{L}=\sum_{\text{arrows}}\mathcal{L}_{\mathrm{arrow}}+\lambda_{\mathrm{stop}}\big(\mathrm{BCE}_{\texttt{END\_STEP}}+\mathrm{BCE}_{\texttt{END\_MECH}}\big),\qquad \lambda_{\mathrm{stop}}=0.5 .
+\mathcal{L}=\mathcal{L}_{\mathrm{step}}+\lambda_{\mathrm{stop}}\,\mathrm{BCE}_{\texttt{END\_MECH}},\qquad \lambda_{\mathrm{stop}}=0.5 .
 \end{equation}
-Each elementary step is an independent training sample, one per (step, topological order) of its pathway's dependency DAG; pools are featurized offline, so no gradient flows across steps.
+Most entries are zero in every label. Their terms stay in the likelihood: the model is trained to predict that most of the molecule does not change. Each elementary step is an independent training sample, one per (step, topological order) of its pathway's dependency DAG; pools are featurized offline, so no gradient flows across steps.
 
-\section{Label alignment and step application}
+\section{Labels, interpretation and step application}
 
-\subsection{Arrow-to-orbital alignment}
-\label{sec:align}
-Datasets give arrows as atom-map indices; alignment is by \emph{atom}, never by orbital label. For an arrow whose electrons leave atom $a$ (a lone pair on $a$, or a bond $(a,c)$ whose pair forms the new bond at $a$) and arrive at atom $b$ (an atom, or a bond $(b,d)$ that breaks):
+\subsection{Edit labels}
+\label{sec:labels}
+Datasets give arrows as atom-map indices. They are applied once, jointly, as one bond--electron edit of the drawn reactants (Appendix~\ref{app:be}), and the result is checked against the annotated products modulo resonance; this gives $\vb{R}_{\mathrm{data}}$. The label set $\mathcal{R}$ is the parsimonious class of $\vb{R}_{\mathrm{data}}$: every $\vb{R}$ such that $\vb{B}_{\mathrm{reac}}+\vb{R}$ is a resonance structure of the annotated product (enumerated with the resonance key's settings, capped at $256$ structures, $\vb{R}_{\mathrm{data}}$ always included) and that changes the fewest entries among them. Variants that differ only by resonance shifts far from the reaction centre (Kekul\'e swaps of a distant ring, charge-separated forms) are not parsimonious and never enter the label.
+
+On PMechDB the parsimonious class has one member in $89.4\%$ of steps and two in $9.3\%$; the drawn $\vb{R}_{\mathrm{data}}$ is itself parsimonious in $91.6\%$ of steps, and in the others, drawn with an extra resonance shift, it is replaced by its parsimonious equivalents. A step whose class contains the empty matrix is a resonance interconversion and is removed (Section~\ref{sec:resonance}). The arrows are used for nothing else. No orbital alignment is needed to build a label, so a step whose arrows cannot be aligned to orbitals (a lone heterolysis) is still a training sample: $98.4\%$ of the PMechDB training steps have a label, the rest lacking a QM record or a fragment correspondence.
+
+\subsection{Orbital interpretation}
+\label{sec:interpret}
+A predicted or labeled $\vb{R}$ is read back as curved arrows and orbitals for the chemist and for the interpretability metrics. The arrows are the decomposition of $\vb{R}$ into electron-pair moves: each forming bond takes its pair from a lone pair of one of its atoms or from a breaking bond at that atom, and each breaking bond ends as a lone pair or in a forming bond; where several decompositions exist, the one whose forming bonds have the lowest $F^{\mathrm{atom}}$ channels is shown. The orbital pair of a forming bond $(i,j)$ is the channel $(r,s)$ that dominates Eq.~\eqref{eq:Fatom}, and head 0 states how strongly the physics alone favoured it.
+
+For dataset arrows the same attribution is made by atom, never by orbital label, and kept as a diagnostic of the token set. For an arrow whose electrons leave atom $a$ (a lone pair on $a$, or a bond $(a,c)$ whose pair forms the new bond at $a$) and arrive at atom $b$ (an atom, or a bond $(b,d)$ that breaks):
 \begin{itemize}[nosep]
-\item donor site $a^\star=a$; $\mathcal{D}=\set{r\in\mathcal{O}^{\occ}:\ w^{(r)}_a\ge\tau_{\mathrm{atom}}}$, restricted to tokens that also have weight on $c$ for a bond source (if that empties the set the restriction is dropped and the arrow flagged);
-\item acceptor site $b^\star=b$; $\mathcal{A}=\set{s\in\mathcal{O}^{\virt}:\ w^{(s)}_b\ge\tau_{\mathrm{atom}}}$, restricted to tokens with weight on $d$ for a bond sink, excluding the antibonding partner of the donor's own bond and $d$-dominated polarization orbitals; when the annotated step also contains the leaving arrow (bond $b$--$x\to x$), the set is restricted to the antibonding tokens on $(b,x)$, the $\sigma^*$ of the bond that actually breaks, which is the orbital a nucleophile attacks in a substitution (if no such token exists the arrow is flagged and counted);
+\item donor site $a$; donor set $\set{r\in\mathcal{O}^{\occ}:\ w^{(r)}_a\ge\tau_{\mathrm{atom}}}$, restricted to tokens that also have weight on $c$ for a bond source (if that empties the set the restriction is dropped and the arrow flagged);
+\item acceptor site $b$; acceptor set $\set{s\in\mathcal{O}^{\virt}:\ w^{(s)}_b\ge\tau_{\mathrm{atom}}}$, restricted to tokens with weight on $d$ for a bond sink, excluding the antibonding partner of the donor's own bond and $d$-dominated polarization orbitals; when the step breaks a bond $(b,x)$, restricted to the antibonding tokens on $(b,x)$ where one exists;
 \item a carbanion drawn as a lone pair on an atom that carries no one-centre occupied token (an enolate in its carbanion resonance form) aligns to the multi-centre tokens on that atom;
 \item an empty set falls back to the tokens nearest to the atom by centroid distance and is flagged.
 \end{itemize}
-Sets are multi-label and the loss marginalizes over them. Because sites and sets are defined by atoms and populations, two resonance forms of the same reactant yield the same labels.
+These sets, and the round trip of the attributed tuples, are diagnostics; they are neither labels nor a gate of the data pipeline. They expose exactly where an orbital-level target would have been ambiguous: on PMechDB the attributed tuples reproduce $99.67\%$ of the aligned steps, and the failures are ionic bonds whose pair is a lone pair of their atom and hyperconjugated $\sigma$ donors.
 
 \subsection{Resonance}
 \label{sec:resonance}
-Products and labels are compared modulo resonance. The \emph{resonance key} of a molecule is the lexicographically smallest canonical SMILES over the RDKit resonance enumeration (capped at $1000$ structures, falling back to the plain canonical SMILES). It is used for the round-trip test, for step-level exact match, and for de-duplication. Dataset steps whose reactants and products share a key are resonance interconversions; they are removed from the training target and step indices are renumbered. Resonance structures are never enumerated as model input: the wavefunction already averages over them (Section~\ref{sec:be}), and the tokens are built from it.
+Products and labels are compared modulo resonance. The \emph{resonance key} of a molecule is the lexicographically smallest canonical SMILES over the RDKit resonance enumeration (capped at $1000$ structures, falling back to the plain canonical SMILES). It is used for the label check, the parsimonious label class, step-level exact match and de-duplication. Dataset steps whose reactants and products share a key are resonance interconversions; they are removed from the training target and step indices are renumbered. Resonance structures are never enumerated as model input: the wavefunction already averages over them (Section~\ref{sec:be}), and the tokens are built from it.
 
 \subsection{Applying a step}
 \label{sec:apply}
-Dataset arrows are applied jointly as one bond--electron matrix edit (Section~\ref{sec:be}, Appendix~\ref{app:be}). Predicted arrows $(r,a,s,b,\lambda)$ are applied with the arrows of a step read in order against the edit so far (relays such as E2 and enolization depend on it), sanitizing once at the end: form the bond $a$--$b$; on the donor side, if $r$ is a multiple-bond or $\sigma$-like orbital with a centre $c$ bonded to $a$, the bond $a$--$c$ is consumed (largest-weight such centre), otherwise the source is a lone pair, and a bond that no occupied token spans (an ionic bond) gives its pair; on the acceptor side, the chosen leaving bond $\lambda$ is broken, with its other atom receiving the leaving charge, and $\textsc{none}$ breaks nothing. The forced masks of $\lambda$ and every candidate mask are evaluated on the molecule as edited so far within the step, in the same reading order. Kekulization is a last-resort fallback for a donor site with no usable centre. The result is sanitized and reduced to its resonance key. Round-trip agreement, for dataset arrows and for the labeled $(r,a,s,b)$ tuples alike, is a hard requirement of the data pipeline ($\ge95\%$ on PMechDB).
+A reaction matrix, labeled or predicted, is applied by adding it to $\vb{B}$ on an RDKit molecule with explicit valence checks; the result is sanitized and reduced to its resonance key. Nothing is read in order and nothing is inferred: the leaving bond, the source of a pair and the relay are all entries of $\vb{R}$. Round-trip agreement of the dataset arrows, applied as one edit, with the annotated products is the hard requirement of the data pipeline ($\ge95\%$; $100\%$ on PMechDB).
 
 \section{Inference}
 \label{sec:inference}
@@ -852,21 +848,21 @@ Dataset arrows are applied jointly as one bond--electron matrix edit (Section~\r
 \begin{scope}[yshift=-4.0cm]
 \node[loopbox] (f) at (0.5,0) {featurize $\mathcal{M}_t$\\ \tiny xTB $\to$ PM $\to$ tokens};
 \node[loopbox] (e) at (3.6,0) {encode\\ \tiny two-track transformer};
-\node[loopbox] (dc) at (6.7,0) {decode arrows\\ \tiny pointer: $(r,a,s,b)^{\ast}$};
-\node[loopbox] (ap) at (9.8,0) {apply $\vb R$\\ \tiny BE-matrix edit};
+\node[loopbox] (dc) at (6.7,0) {decode $\vb R$\\ \tiny anchor $\to$ entries};
+\node[loopbox] (ap) at (9.8,0) {apply $\vb R$\\ \tiny $\vb B+\vb R$};
 \node[loopbox] (st) at (12.4,0) {\texttt{END\_MECH}?};
 \draw[looparr] (f)--(e);\draw[looparr] (e)--(dc);\draw[looparr] (dc)--(ap);\draw[looparr] (ap)--(st);
 \draw[looparr] (st.south) |- ++(-0.3,-0.55) -| node[pos=0.25,below,font=\tiny]{no: $\mathcal{M}_{t+1}$, $t\leftarrow t+1$} (f.south);
 \end{scope}
 \end{tikzpicture}}
-\caption{A three-step mechanism (amide formation from methylamine and acetyl chloride) as a sequence of tuples, and the loop that produces it. At each step the current molecules are featurized from scratch (geometry, GFN2-xTB, localization, tokens), encoded, and the decoder emits the arrows of one elementary step; the bond--electron edit yields the next set of molecules, which is featurized again. Every step is also an independent training sample. The orbital names under the structures are the reader's shorthand for tuples of untyped tokens.}
+\caption{A three-step mechanism (amide formation from methylamine and acetyl chloride) as a sequence of reaction matrices, and the loop that produces it. At each step the current molecules are featurized from scratch (geometry, GFN2-xTB, localization, tokens), encoded, and the decoder emits the reaction matrix of one elementary step; added to the bond--electron matrix, it yields the next set of molecules, which is featurized again. Every step is also an independent training sample. The orbital names under the structures are the reading of each matrix (Section~\ref{sec:interpret}), not the model's output.}
 \label{fig:loop}
 \end{figure}
-Given reactant SMILES and their stoichiometry: featurize (cached; stage-1 contact for every candidate pair and stage-2 refinement for the best $K_{\mathrm{ref}}$), encode, and run a beam search of width $B=5$ over $(r,a,s,b)$ tuples within a step, scoring by the sum of the four log-probabilities. Each completed step is applied from its sites, the new pool is keyed by the sorted multiset of its resonance keys, beams reaching the same pool key are merged, a pool key that recurs up to the stoichiometric products closes a cycle, the pool is re-featurized, and decoding continues up to $T_{\max}=8$ steps or \texttt{END\_MECH}. The result is a reaction network (nodes: pool states; edges: steps with probabilities); pathways are reported as ranked paths through it. Every returned pathway lists, per arrow, the intermediate SMILES, the step probability, the three $\KS$ values of the chosen pair, the dominant canonical MO pair $(k,m)$ in $G$ with its energies, and the frozen head's attention weight $\softmax_j(\ell^{(0)}_{rj})\big|_{j=s}$. A surrogate graph network can replace the xTB call at inference once trained on the cached records; it falls back to xTB for elements outside its training set.
+Given reactant SMILES and their stoichiometry: featurize (cached; stage-1 contact for every candidate pair and stage-2 refinement for the best $K_{\mathrm{ref}}$), encode, and run the constrained beam search of Section~\ref{sec:decoder} with width $B=5$, scoring each step by its joint log-probability. Each step is applied as $\vb{B}+\vb{R}$, the new pool is keyed by the sorted multiset of its resonance keys, beams reaching the same pool key are merged, a pool key that recurs up to the stoichiometric products closes a cycle, the pool is re-featurized, and decoding continues up to $T_{\max}=8$ steps or \texttt{END\_MECH}. The result is a reaction network (nodes: pool states; edges: steps with probabilities); pathways are reported as ranked paths through it. Every returned pathway lists, per arrow, the intermediate SMILES, the step probability, the three $\KS$ values of the chosen pair, the dominant canonical MO pair $(k,m)$ in $G$ with its energies, and the frozen head's attention weight $\softmax_j(\ell^{(0)}_{rj})\big|_{j=s}$. A surrogate graph network can replace the xTB call at inference once trained on the cached records; it falls back to xTB for elements outside its training set.
 
 \section{Complexity, invariances, and defaults}
 
-\paragraph{Complexity.} A molecule set with $N_A$ atoms has roughly $N_O\approx 1.6\,N_A$ valence LMOs (one per bond and lone pair, plus their virtual counterparts), so $N\approx2.6\,N_A$. The pair track costs $O(N^2 d_p)$ memory per layer; for $N_A\le80$ this is below $50$~MB per sample at $d_p=64$ in mixed precision. Candidate arrows number $|\mathcal{O}^{\occ}|\cdot|\mathcal{O}^{\virt}|\le(1.3N_A)^2$.
+\paragraph{Complexity.} A molecule set with $N_A$ atoms has roughly $N_O\approx 1.6\,N_A$ valence LMOs (one per bond and lone pair, plus their virtual counterparts), so $N\approx2.6\,N_A$. The pair track costs $O(N^2 d_p)$ memory per layer; for $N_A\le80$ this is below $50$~MB per sample at $d_p=64$ in mixed precision. Candidate anchors number $N_A(N_A-1)/2$ per sign (on PMechDB a median of 33 and at most 411 atoms per pool, hydrogens included), and the conditional entries are as many plus $N_A$.
 
 \paragraph{Invariances.} Rotation and translation invariance hold exactly (distances only). Permutation equivariance over tokens holds by construction of attention. Mirror invariance is deliberately broken by the signed-volume chirality feature.
 
@@ -889,7 +885,9 @@ $\tau$ & configurational temperature, frozen-head scale & swept, then learnable\
 $\lambda_{\KS}$ & global scale of $b^{\KS}$ (learned heads) & 1.0\\
 $\tau_{\mathrm{atom}}$ & population threshold for $\mathcal{A}_r$ & 0.15\\
 $p_{\min}$ & spectral entry cutoff for the input set (max 8) & 0.01\\
-$\lambda_{\mathrm{stop}}$ & stop-loss weight & 0.5\\
+$\lambda_{\mathrm{stop}}$ & stop-loss weight (\texttt{END\_MECH}) & 0.5\\
+$\kappa$ & weight of $\widehat F^{\mathrm{atom}}$ on the anchor (learnable) & init 1.0\\
+$C_{\max}$ & changes per completion & 8 bonds, 2 atoms\\
 $B$ & beam width & 5\\
 $T_{\max}$ & max steps per mechanism & 8\\
 optimizer & AdamW, lr $3\times10^{-4}$, warm-up 2k, cosine & \\
@@ -900,26 +898,26 @@ batch & 32 steps, mixed precision, grad clip 1.0 & \\
 
 \section{Evaluation protocol}
 \begin{itemize}[nosep]
-\item \textbf{Arrow level}: top-$k$ accuracy of $(r,s)$ with set marginalization ($k=1,3,5$), and of the full tuple with sites.
+\item \textbf{Edit level}: top-$k$ accuracy of the anchor with set marginalization ($k=1,3,5$), and of the whole reaction matrix up to its parsimonious class; the arrows and orbital pairs of the reading are reported, not scored.
 \item \textbf{Step level}: exact match of the intermediate's resonance key at top-$k$.
 \item \textbf{Pathway level}: the annotated set of steps (as pool-key pairs) contained in the predicted network at beam 5, order ignored; final pool recovered at any depth $\le8$; for pathways with independent steps, recovery of at least one valid topological order.
 \item \textbf{Validity}: sanitizable steps; conservation of heavy atoms and charge.
 \item \textbf{Splits}: by reactant molecule (default, leak-proof), leave-one-mechanism-class-out, scaffold.
 \item \textbf{Domain coverage}: steps whose species fall outside the closed-shell domain (open-shell metal adducts the SMILES does not mark, bare-metal catalyst placeholders, vanishing-gap species with smeared occupations, resonance interconversions, molecules whose QM calculation failed) are excluded from the training target and from every metric denominator, and counted by reason code; the covered fraction of each dataset is reported as one number next to every accuracy. Charge errors in the source data are repaired at ingest only under explicit rules (a $-1$ on a four-bonded group-14 atom; an onium-to-metal bond read as dative when the metal is $d^0$ or $d^{10}$) and only when the repair yields an even electron count; every repair is logged.
 \item \textbf{Ablations}: no $b^{\KS}$; each term removed; head 0 unfrozen; atom-only tokens; categorical orbital labels added back as input; hybridization, aromaticity and functional-group ids added back as input (both measure what the physical descriptors already carry); $K,\varepsilon$ fixed vs.\ learned; $d$-type acceptors allowed; stage A vs.\ stage B (from scratch and from the stage-A checkpoint); fixed-distance vs.\ configurational contact; the statistical contact kernels; $\tau$ fixed vs.\ learned; three seeds each.
-\item \textbf{Physics floor}: ranking by $-F_{rs}$ (Eq.~\eqref{eq:Frs}) with no learned parameters, and for reference $G$ alone and the fixed-distance kernel; stage-B models are reported relative to it.
-\item \textbf{Interpretability}: Spearman correlation between head-0 attention at the chosen pair and the model's arrow probability, per mechanism class; selectivity suite (S$_\mathrm{N}$2 vs.\ E2, 1,2- vs.\ 1,4-addition, hard/soft alkylation, Markovnikov, EAS regiochemistry, Baldwin rules).
+\item \textbf{Physics floor}: ranking of anchor pairs by $-F^{\mathrm{atom}}_{ij}$ (Eq.~\eqref{eq:Fatom}) with no learned parameters, and for reference the same pooling of $G$ alone and of the fixed-distance kernel; stage-B models are reported relative to it.
+\item \textbf{Interpretability}: Spearman correlation between head-0 attention at the orbital pair attributed to the anchor and the model's anchor probability, per mechanism class; selectivity suite (S$_\mathrm{N}$2 vs.\ E2, 1,2- vs.\ 1,4-addition, hard/soft alkylation, Markovnikov, EAS regiochemistry, Baldwin rules).
 \end{itemize}
 
 \section{Design rationale in brief}
 \begin{enumerate}[nosep]
-\item \emph{Orbitals as tokens} align the prediction unit with both the arrow formalism and the perturbation theory; \emph{untyped} tokens let orbital character generalize across elements instead of being fixed by a label.
+\item \emph{Orbitals as tokens} put the representation in the language of the perturbation theory, \emph{untyped} tokens let orbital character generalize across elements, and \emph{the prediction on atoms} keeps the target free of choices the wavefunction cannot make (a lone pair or an ionic bond's pair, one reading of a relay or another).
 \item \emph{Pair track with physics initialization} lets the Klopman--Salem terms act as a prior on attention rather than as an auxiliary loss, so the network learns corrections to a physically shaped starting point.
 \item \emph{A frozen head} makes the contribution of the physics measurable and every prediction explainable.
 \item \emph{Spectral energies} make Term~(3) exact for localized orbitals and invariant to the arbitrary mixture a localization returns inside a flat subspace, which is what makes aromatic and conjugated systems unproblematic.
 \item \emph{The approach geometry is integrated out, not chosen.} A configurational free energy over sampled poses (intermolecular) or conformers (intramolecular), weighted by the Klopman--Salem terms plus the cost of the pose, replaces every geometric rule with one temperature; orientational entropy and ring strain emerge from the numbers. All of this lives in the physics layer, and the model is trained first without it (stage A) and then with it (stage B), so its contribution is measured rather than assumed.
-\item \emph{Sites} resolve where a multi-centre orbital reacts, which is also the regiochemistry of additions to simple alkenes.
-\item \emph{Deterministic step application} removes product generation from the learning problem and guarantees mass and charge conservation.
+\item \emph{The anchor} resolves where the step happens, which is also the regiochemistry of additions; given it, the rest of the matrix is nearly determined.
+\item \emph{The product is $\vb{B}+\vb{R}$}: no molecule is generated, mass is conserved by construction and charge by one linear constraint in decoding.
 \item \emph{No chemist's taxonomy as input.} Neither orbital tokens nor atom tokens carry categorical labels ($\sigma/\pi$, hybridization, aromaticity, functional group); everything the model sees is a physical quantity or a Lewis-bookkeeping integer. The one deliberate prior is the frozen Klopman--Salem head, which is declared, measurable and removable.
 \end{enumerate}
 
@@ -996,7 +994,7 @@ Methoxide attacking chloromethane, atoms ordered $(\mathrm{O},\mathrm{C},\mathrm
 \vb{B}_{\mathrm{prod}}=\begin{pmatrix}4&1&0\\1&0&0\\0&0&8\end{pmatrix},\qquad
 \vb{R}=\begin{pmatrix}-2&+1&0\\+1&0&-1\\0&-1&+2\end{pmatrix}.
 \]
-Here O carries three lone pairs (6 electrons) in the reactant and two in the product; Cl gains a lone pair. $\sum_{ij}R_{ij}=0$. The two arrows of the S$_\mathrm{N}$2 step are the two elementary matrices ``lone pair O $\to$ C'' ($R_{\mathrm{OO}}=-2$, $R_{\mathrm{OC}}=R_{\mathrm{CO}}=+1$) and ``bond C--Cl $\to$ Cl'' ($R_{\mathrm{CCl}}=R_{\mathrm{ClC}}=-1$, $R_{\mathrm{ClCl}}=+2$); their sum is $\vb{R}$. Formal charges follow: O goes from $6-6-1=-1$ (with its C--O bond included in the full matrix) to $0$; Cl from $0$ to $-1$. In the implementation the edit is performed on an RDKit molecule with explicit valence checks, which is equivalent to applying $\vb{R}$ and verifying that every row satisfies the octet constraints of its element.
+Here O carries three lone pairs (6 electrons) in the reactant and two in the product; Cl gains a lone pair. $\sum_{ij}R_{ij}=0$. The two arrows of the S$_\mathrm{N}$2 step are the two elementary matrices ``lone pair O $\to$ C'' ($R_{\mathrm{OO}}=-2$, $R_{\mathrm{OC}}=R_{\mathrm{CO}}=+1$) and ``bond C--Cl $\to$ Cl'' ($R_{\mathrm{CCl}}=R_{\mathrm{ClC}}=-1$, $R_{\mathrm{ClCl}}=+2$); their sum is $\vb{R}$. The model predicts $\vb{R}$ directly; this decomposition into two arrows is the reading shown to a chemist (Section~\ref{sec:interpret}). Formal charges follow: O goes from $6-6-1=-1$ (with its C--O bond included in the full matrix) to $0$; Cl from $0$ to $-1$. In the implementation the edit is performed on an RDKit molecule with explicit valence checks, which is equivalent to applying $\vb{R}$ and verifying that every row satisfies the octet constraints of its element.
 
 \section{Data sources}
 \label{app:data}
