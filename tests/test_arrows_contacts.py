@@ -50,6 +50,26 @@ def test_sidecar_matches_the_legacy_features(
         assert np.allclose(joined.pair_z[valid], direct.pair_z[valid], rtol=1e-3, atol=1e-3)
         sites = joined.pair_contact_sites[valid]
         assert np.array_equal(sites, direct.pair_contact_sites[valid])
+    _check_selective_loading(view_dir, mini_processed, test, legacy, sub["ids"])
+
+
+def _check_selective_loading(view_dir, processed, test, legacy, sub_ids):
+    """`ids` filters: only those contact entries and samples are read, in view order, and
+    the shard iterator yields the same samples as the list loader."""
+    from ksmech.arrows.steps import iter_samples, sample_ids
+
+    one = test[-1].step_id
+    assert list(contacts.load_contacts(view_dir, "molecule", ids=[one])) == [one]
+    train_path = samples_path("pmechdb", "molecule_train", processed)
+    train_ids = sample_ids(train_path)
+    assert len(train_ids) > 1 and set(sub_ids) <= set(train_ids)
+    picked = load_samples(train_path, ids=reversed(train_ids[:2]))
+    assert [s.step_id for s in picked] == train_ids[:2]  # view order, not the ids' order
+    streamed = {s.step_id for s in iter_samples(train_path)}
+    assert streamed == set(train_ids)
+    side = contacts.load_contacts(view_dir, "molecule", ids=train_ids)
+    assert set(side) == set(sub_ids)  # the training part: only the subsample has contacts
+    assert set(legacy) >= set(side)
 
 
 def test_ranking_refuses_stage_a_samples(mini_steps, token_loader):

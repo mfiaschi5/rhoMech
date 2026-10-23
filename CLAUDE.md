@@ -159,7 +159,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   --source pmechdb [--split molecule|scaffold]` (logistic regression + GBDT ranker,
   `baseline_report_<split>.json`, the models and a GBDT with the textbook pools held out), `uv
   run ksmech-physics textbook` (five textbook selectivity cases, expected vs top-3, cases seen in
-  a model's training marked; builds missing QM records and tokens). The oriented kernel is the
+  a model's training marked; builds missing QM records and tokens; `--fast` for the LightGBM
+  models), `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--features
+  contact|geomfree] [--n-jobs 2]` (the fast LightGBM lambdarank reference: all positives + 20
+  hard + 30 random negatives per step, early stopping on val top-5; `contact` on the sidecar
+  subsample, `geomfree` on stage-A pair features over all training;
+  `gbdt_lgbm_report_<split>_<features>.json` with times and peak RSS). The oriented kernel is the
   frozen baseline `physics/contact/legacy_fixed23.py`. `ks-rank` and `baseline` read the samples
   joined with the contact sidecar (train = its subsample). After a token rebuild: `ksmech-arrows
   samples` (stage-A features and `pair_feature_stats_<strategy>.json` from each training part),

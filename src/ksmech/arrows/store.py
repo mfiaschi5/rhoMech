@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Iterable, Iterator
 from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -222,11 +223,11 @@ def _verify(path: Path, kind: str, version: int, allow_stale: bool) -> prov.Prov
         return prov.read_header(path)
 
 
-def load_view(
-    path: Path, cls: type[MechanismSample], version: int, allow_stale: bool = False
-) -> list[MechanismSample]:
-    """The samples of one split view, in its id order (skipped steps have none). Verifies the
-    view, the index and every shard read: StaleArtifact names what changed."""
+def _view_members(
+    path: Path, version: int, allow_stale: bool, ids: Iterable[str] | None
+) -> tuple[list[str], dict[str, list[int]]]:
+    """(the view's stored ids, kept to `ids` when given, in view order; shard -> members).
+    Verifies the view, its split file and the index."""
     header = _verify(path, "samples", version, allow_stale)
     for name in header.inputs if header else ():
         if name.startswith("file:") and prov.input_path(name).name.startswith("splits_"):
@@ -235,17 +236,52 @@ def load_view(
     index_path = store_dir(Path(path).parent) / "index.json"
     _verify(index_path, "sample_index", version, allow_stale)
     shards = json.loads(index_path.read_text())["shards"]
-    where = {sid: (name, k) for name, ids in shards.items() for k, sid in enumerate(ids)}
-    wanted = [sid for sid in view["ids"] if sid in where]
+    where = {sid: (name, k) for name, ids_ in shards.items() for k, sid in enumerate(ids_)}
+    keep = None if ids is None else set(ids)
+    wanted = [sid for sid in view["ids"] if sid in where and (keep is None or sid in keep)]
     by_shard: dict[str, list[int]] = {}
     for sid in wanted:
         name, k = where[sid]
         by_shard.setdefault(name, []).append(k)
-    loaded = {}
+    return wanted, by_shard
+
+
+def view_ids(path: Path, version: int, allow_stale: bool = False) -> list[str]:
+    """The ids of one split view that have a stored sample, in view order (verified)."""
+    return _view_members(path, version, allow_stale, None)[0]
+
+
+def iter_view(
+    path: Path,
+    cls: type[MechanismSample],
+    version: int,
+    allow_stale: bool = False,
+    ids: Iterable[str] | None = None,
+) -> Iterator[MechanismSample]:
+    """The samples of one split view (only `ids` when given), one shard at a time in shard
+    order, so a caller that reduces each sample never holds the whole view. Verifies the view,
+    the index and every shard read: StaleArtifact names what changed."""
+    _, by_shard = _view_members(path, version, allow_stale, ids)
+    yield from _iter_shards(path, by_shard, cls, version, allow_stale)
+
+
+def _iter_shards(path: Path, by_shard: dict[str, list[int]], cls, version: int, allow_stale):
+    root = store_dir(Path(path).parent)
     for name, members in sorted(by_shard.items()):
-        root = store_dir(Path(path).parent)
-        for s in _load_shard(root / name, members, cls, version, allow_stale):
-            loaded[s.step_id] = s
+        yield from _load_shard(root / name, members, cls, version, allow_stale)
+
+
+def load_view(
+    path: Path,
+    cls: type[MechanismSample],
+    version: int,
+    allow_stale: bool = False,
+    ids: Iterable[str] | None = None,
+) -> list[MechanismSample]:
+    """The samples of one split view (only `ids` when given), in its id order (skipped steps
+    have none). Verifies as `iter_view`."""
+    wanted, by_shard = _view_members(path, version, allow_stale, ids)
+    loaded = {s.step_id: s for s in _iter_shards(path, by_shard, cls, version, allow_stale)}
     return [loaded[sid] for sid in wanted]
 
 

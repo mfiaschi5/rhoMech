@@ -16,6 +16,7 @@ dependencies = [
     "hydra-core",
     "tqdm",
     "rich",
+    "lightgbm>=4.7.0",
 ]
 
 [project.scripts]

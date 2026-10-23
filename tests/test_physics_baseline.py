@@ -126,3 +126,35 @@ def test_baseline_cli(mini_processed, token_loader, pair_kernels, monkeypatch): 
     assert "GBDT ranker (textbook-held-out)" in report["results"]
     seen = read_header(out / "baseline_gbdt_molecule.npz").extra["textbook_pools_in_training"]
     assert seen == sorted(report["textbook_seen"])
+
+
+def test_stage_a_candidate_set(mini_steps, token_loader, sets):
+    """The geometry-free columns: stage-A pair features with NaN where undefined, then the
+    token columns of the legacy set; -G is the same from either pair set."""
+    from ksmech.arrows.steps import sample_for_step as build
+    from ksmech.physics.stage_a import STAGE_A_FEATURES
+
+    names = ("sn2", "proton_transfer", "carbonyl_addition", "e2")
+    assert bl.GEOMFREE_FEATURE_NAMES[: len(STAGE_A_FEATURES)] == list(STAGE_A_FEATURES)
+    assert bl.GEOMFREE_FEATURE_NAMES[11:] == bl.FEATURE_NAMES[11:]
+    for name, legacy in zip(names, sets[1], strict=True):
+        s = build(mini_steps[name], token_loader)
+        cs = bl.candidate_set(s, token_loader, "stage_a")
+        assert cs.X.shape == (int(s.pair_valid.sum()), len(bl.GEOMFREE_FEATURE_NAMES))
+        undefined = ~s.pair_defined[cs.rows, cs.cols]
+        assert np.array_equal(np.isnan(cs.X[:, :11]), undefined)
+        assert np.isfinite(cs.X[:, 11:]).all()
+        assert np.array_equal(cs.positive, label_pairs(s, first_label(s))[cs.rows, cs.cols])
+        assert np.allclose(bl.gap_score(cs, "stage_a"), -s.pair_z[cs.rows, cs.cols, 0])
+        both = {(r, c): k for k, (r, c) in enumerate(zip(cs.rows, cs.cols, strict=True))}
+        common = [
+            (both[(r, c)], k)
+            for k, (r, c) in enumerate(zip(legacy.rows, legacy.cols, strict=True))
+            if (r, c) in both
+        ]
+        a, b = np.array(common).T
+        g_legacy = bl.untrained_scores(legacy)["gap_kernel"][b]
+        assert np.allclose(bl.gap_score(legacy), bl.untrained_scores(legacy)["gap_kernel"])
+        assert np.allclose(bl.gap_score(cs, "stage_a")[a], g_legacy, rtol=1e-3, atol=1e-6)
+    with pytest.raises(ValueError):
+        bl.candidate_set(s, token_loader, "legacy")

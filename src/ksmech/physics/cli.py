@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import resource
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +16,7 @@ from rich.table import Table
 
 from ksmech.arrows import contacts
 from ksmech.arrows.reactants import TokenCache
-from ksmech.arrows.steps import PARTS, load_samples, samples_path
+from ksmech.arrows.steps import PARTS, load_samples, sample_ids, samples_path
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir
 from ksmech.data.provenance import StaleArtifact
@@ -27,6 +29,9 @@ from ksmech.physics.contact_table import DEFAULT_TABLE_PATH
 
 # the untrained physics floor: KS3 + KS2 at d = 2.3 (user decision, docs/decisions.md)
 UNTRAINED_SCORE = "ks3+ks2"
+# `ksmech-physics gbdt --features`: the candidate pair set and the scorer of the hard negatives
+GBDT_PAIRS = {"contact": "legacy", "geomfree": "stage_a"}
+HARD_NEGATIVES = {"contact": "ks3+ks2", "geomfree": "gap_kernel"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("ks-rank", help="rank first arrows by the untrained KS terms")
     b = sub.add_parser("baseline", help="train the logistic-regression and GBDT rankers")
     b.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    g = sub.add_parser("gbdt", help="the fast LightGBM lambdarank ranker")
+    g.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    g.add_argument(
+        "--features",
+        choices=sorted(GBDT_PAIRS),
+        default="contact",
+        help="contact: legacy contact features on the sidecar subsample; geomfree: stage-A "
+        "pair features on the whole training part",
+    )
+    g.add_argument("--hard", type=int, default=20, help="negatives per step: best untrained")
+    g.add_argument("--random", type=int, default=30, help="negatives per step: uniform draw")
+    g.add_argument("--n-jobs", type=int, default=2, help="LightGBM threads")
     t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
     t.add_argument("--source", default="pmechdb", help="where the trained GBDT model lives")
     t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -42,9 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--untrained", default=UNTRAINED_SCORE, help="untrained scorer name")
     t.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
     t.add_argument("--gbdt", type=Path, default=None, help="GBDT model (default: molecule split)")
+    t.add_argument("--fast", action="store_true", help="the LightGBM models of `gbdt` (contact)")
     for p in (r, t):  # diagnostic commands only: read stale artifacts with a warning
         p.add_argument("--allow-stale", action="store_true", help="read stale artifacts (warns)")
-    for p in (r, b):
+    for p in (r, b, g):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
@@ -69,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = {
         "ks-rank": cmd_ks_rank,
         "baseline": cmd_baseline,
+        "gbdt": cmd_gbdt,
         "textbook": cmd_textbook,
     }
     return commands[args.command](args, console)
@@ -85,39 +104,39 @@ def make_kernel(args: argparse.Namespace, distance: float | None = None):
     return ContactKernel(tables, ContactConfig(kernel=args.kernel, oriented=oriented))
 
 
-def _load_parts(args: argparse.Namespace, console: Console) -> dict[str, list] | None:
-    """The samples of every part of `args.split`, joined with the legacy contact sidecar; the
-    training part is the sidecar's subsample. Steps without an entry are counted."""
+def _load_parts(
+    args: argparse.Namespace, console: Console, parts: tuple[str, ...] = PARTS
+) -> dict[str, list] | None:
+    """The samples of `parts` of `args.split` that have a legacy contact entry, joined with it
+    (the training part is the sidecar's subsample). Only those samples and the sidecar shards
+    holding them are read; the steps without an entry are counted."""
     allow_stale = getattr(args, "allow_stale", False)
-    parts = {}
-    try:
-        legacy = contacts.load_contacts(
-            source_dir(args.source, args.processed_dir), args.split, allow_stale
-        )
-    except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]; run `ksmech-arrows contacts --split {args.split}`")
-        return None
-    except StaleArtifact as exc:
-        console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows contacts`")
-        return None
-    for part in PARTS:
+    view_dir = source_dir(args.source, args.processed_dir)
+    out = {}
+    for part in parts:
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         if not path.exists():
             console.print(f"[red]{path} missing[/red]; run `ksmech-arrows samples`")
             return None
         try:
-            samples = load_samples(path, allow_stale=allow_stale)
-        except (StaleArtifact, ValueError) as exc:  # stale or old: rebuild, never reinterpret
+            ids = sample_ids(path, allow_stale)
+            legacy = contacts.load_contacts(view_dir, args.split, allow_stale, ids)
+            samples = load_samples(path, allow_stale, ids=legacy)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]; run `ksmech-arrows contacts --split {args.split}`")
+            return None
+        except StaleArtifact as exc:
+            console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows samples` / `contacts`")
+            return None
+        except ValueError as exc:  # an old sample store: rebuild, never reinterpret
             console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows samples`")
             return None
-        parts[part] = [
-            contacts.with_legacy(s, legacy[s.step_id]) for s in samples if s.step_id in legacy
-        ]
-        missing = len(samples) - len(parts[part])
+        out[part] = [contacts.with_legacy(s, legacy.pop(s.step_id)) for s in samples]
         console.print(
-            f"{args.split}_{part}: {len(parts[part])} samples with contacts, {missing} without"
+            f"{args.split}_{part}: {len(out[part])} samples with contacts, "
+            f"{len(ids) - len(out[part])} without"
         )
-    return parts
+    return out
 
 
 def print_rank_table(report: dict, console: Console, title: str) -> None:
@@ -386,6 +405,218 @@ def cmd_baseline(args: argparse.Namespace, console: Console) -> int:
     return 0 if results["GBDT ranker"]["test"]["top5"] > best_untrained else 1
 
 
+def _untrained(cs, features: str) -> dict[str, np.ndarray]:
+    from ksmech.physics import baseline as bl
+
+    if features == "contact":
+        scores = bl.untrained_scores(cs)
+        return {n: scores[n] for n in UNTRAINED_ROWS}
+    return {"gap_kernel": bl.gap_score(cs, "stage_a")}
+
+
+def _read_part(args, features: str, part: str, loader, visit) -> tuple[int, int]:
+    """`visit(sample, candidate_set)` for every sample of one part, one shard at a time (with
+    `contact`, only the samples that have a legacy contact entry, joined with it). Returns
+    (stored samples of the view, samples visited)."""
+    from ksmech.arrows.steps import iter_samples
+    from ksmech.physics import baseline as bl
+
+    path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+    ids = sample_ids(path)
+    legacy = None
+    if features == "contact":
+        view_dir = source_dir(args.source, args.processed_dir)
+        legacy = contacts.load_contacts(view_dir, args.split, ids=ids)
+    n = 0
+    for s in iter_samples(path, ids=ids if legacy is None else legacy):
+        if legacy is not None:
+            s = contacts.with_legacy(s, legacy.pop(s.step_id))
+        visit(s, bl.candidate_set(s, loader, GBDT_PAIRS[features]))
+        n += 1
+    return len(ids), n
+
+
+def _train_rows(args, features: str, loader, cfg) -> dict:
+    """The sampled training rows of every step and of the steps without a textbook pool."""
+    from ksmech.physics.lgbm import TrainRows
+    from ksmech.physics.textbook import pools_in
+
+    out = {"all": TrainRows(), "held": TrainRows(), "seen": {}}
+
+    def visit(s, cs):
+        hard = _untrained(cs, features)[HARD_NEGATIVES[features]]
+        out["all"].add(cs, hard, cfg)
+        pools = pools_in(s.fragment_keys)
+        for name in pools:
+            out["seen"][name] = out["seen"].get(name, 0) + 1
+        if not pools:
+            out["held"].add(cs, hard, cfg)
+
+    out["n_view"], out["n"] = _read_part(args, features, "train", loader, visit)
+    return out
+
+
+def _eval_part(args, features: str, part: str, loader) -> dict:
+    """Every candidate set of a val / test part (X kept as float32), its untrained scores
+    (computed at full precision first) and which samples hold a textbook pool."""
+    from ksmech.physics.textbook import pools_in
+
+    out = {"sets": [], "untrained": {}, "textbook": []}
+
+    def visit(s, cs):
+        for name, score in _untrained(cs, features).items():
+            out["untrained"].setdefault(name, []).append(score)
+        cs.X = cs.X.astype(np.float32)
+        out["sets"].append(cs)
+        out["textbook"].append(bool(pools_in(s.fragment_keys)))
+
+    out["n_view"], out["n"] = _read_part(args, features, part, loader, visit)
+    return out
+
+
+def _lgbm_results(parts: dict, models: dict) -> dict:
+    from ksmech.physics import baseline as bl
+
+    def summary(sets, scores):
+        return {k: v for k, v in bl.evaluate_scores(sets, scores).items() if k != "ranks"}
+
+    results = {}
+    names = {n for p in ("val", "test") for n in parts[p]["untrained"]}
+    for name in sorted(names):
+        results[f"untrained {name}"] = {
+            p: summary(parts[p]["sets"], parts[p]["untrained"].get(name, []))
+            for p in ("val", "test")
+        }
+    for name, model in models.items():
+        results[name] = {
+            p: summary(parts[p]["sets"], [model.score(cs.X) for cs in parts[p]["sets"]])
+            for p in ("val", "test")
+        }
+    return results
+
+
+def _fit_two(train: dict, val: dict, features: str, cfg, console: Console) -> dict:
+    """The ranker on every training step and the one without the textbook pools (validated
+    without them too), with fit times."""
+    from ksmech.physics import baseline as bl
+    from ksmech.physics.lgbm import EvalRows, fit_lgbm
+
+    names = bl.PAIR_SETS[GBDT_PAIRS[features]]
+    val_held = [cs for cs, t in zip(val["sets"], val["textbook"], strict=True) if not t]
+    models, seconds = {}, {}
+    for tag, rows, vsets in (("all", train["all"], val["sets"]), ("held", train["held"], val_held)):
+        start = time.perf_counter()
+        models[tag] = fit_lgbm(rows, EvalRows.of(vsets), names, cfg)
+        seconds[tag] = round(time.perf_counter() - start, 1)
+        console.print(
+            f"{tag}: {rows.n_rows} rows in {len(rows.groups)} queries, "
+            f"{models[tag].n_trees} trees, {seconds[tag]} s"
+        )
+    return {"models": models, "fit_seconds": seconds}
+
+
+def _lgbm_inputs(args, features: str) -> dict[str, str]:
+    inputs = {}
+    for part in ("train", "val"):
+        inputs |= prov.file_input(
+            samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+        )
+    if features == "contact":
+        side = contacts.contacts_dir(source_dir(args.source, args.processed_dir), args.split)
+        inputs |= prov.file_input(side / "index.json")
+        inputs |= prov.file_input(side / "train_subsample.json")
+    return inputs
+
+
+def _save_two(args, fit: dict, cfg, seen: list[str]) -> None:
+    from ksmech.physics import lgbm
+
+    out_dir = source_dir(args.source, args.processed_dir)
+    tag, inputs = f"{args.split}_{args.features}", _lgbm_inputs(args, args.features)
+    notes = {
+        "all": ("", {"textbook_pools_in_training": seen}),
+        "held": (f"_{HELD_OUT}", {"textbook_pools_in_training": [], "held_out": seen}),
+    }
+    for key, (suffix, extra) in notes.items():
+        path = out_dir / f"gbdt_lgbm_{tag}{suffix}.npz"
+        lgbm.save_lgbm(fit["models"][key], path, cfg, inputs, extra)
+
+
+def _lgbm_report(args, train: dict, parts: dict, fit: dict, results: dict, cfg) -> dict:
+    from ksmech.physics import lgbm
+
+    models = fit["models"]
+    return {
+        "split": args.split,
+        "features": args.features,
+        "results": results,
+        "counts": {
+            p: {"read": d["n"], "stored": d["n_view"]}
+            for p, d in (("train", train), *parts.items())
+        },
+        "train_rows": {"all": train["all"].n_rows, "held": train["held"].n_rows},
+        "n_untrainable": train["all"].n_untrainable,
+        "n_trees": {k: m.n_trees for k, m in models.items()},
+        "history": {k: m.history for k, m in models.items()},
+        "config": lgbm.model_config(models["all"].features, cfg),
+        "load_seconds": fit["load_seconds"],
+        "fit_seconds": fit["fit_seconds"],
+        "peak_rss_mb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024),
+        "textbook_seen": train["seen"],
+    }
+
+
+def _read_all(args, loader, cfg, console: Console) -> tuple[dict, dict] | None:
+    try:
+        train = _train_rows(args, args.features, loader, cfg)
+        parts = {p: _eval_part(args, args.features, p, loader) for p in ("val", "test")}
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]; run `ksmech-arrows samples` / `contacts`")
+        return None
+    except (StaleArtifact, ValueError) as exc:  # stale or old: rebuild, never reinterpret
+        console.print(f"[red]{exc}[/red]; rebuild it (`ksmech-arrows samples` / `contacts`)")
+        return None
+    for p, d in (("train", train), *parts.items()):
+        console.print(f"{args.split}_{args.features} {p}: {d['n']} samples read of {d['n_view']}")
+    console.print(f"textbook pools in {args.split}_train: {train['seen'] or 'none'}")
+    return train, parts
+
+
+def cmd_gbdt(args: argparse.Namespace, console: Console) -> int:
+    """The fast LightGBM ranker (`physics.lgbm`) on the contact or geometry-free features."""
+    from ksmech.physics.lgbm import LGBMConfig
+
+    cfg = LGBMConfig(n_hard=args.hard, n_random=args.random, n_jobs=args.n_jobs)
+    loader = TokenCache(args.tokens_dir, maxsize=128)  # tokens only for the LMO energies
+    start = time.perf_counter()
+    read = _read_all(args, loader, cfg, console)
+    if read is None:
+        return 2
+    train, parts = read
+    load_seconds = round(time.perf_counter() - start, 1)
+    fit = _fit_two(train, parts["val"], args.features, cfg, console) | {
+        "load_seconds": load_seconds
+    }
+    models = {"LightGBM ranker": fit["models"]["all"]}
+    models[f"LightGBM ranker ({HELD_OUT})"] = fit["models"]["held"]
+    results = _lgbm_results(parts, models)
+    n_test = len(parts["test"]["sets"])
+    _baseline_table(results, console, f"first-arrow ranking on {args.split}_test (n {n_test})")
+    _save_two(args, fit, cfg, sorted(train["seen"]))
+    report = _lgbm_report(args, train, parts, fit, results, cfg)
+    out = (
+        source_dir(args.source, args.processed_dir)
+        / f"gbdt_lgbm_report_{args.split}_{args.features}.json"
+    )
+    out.write_text(json.dumps(report, indent=1, default=str) + "\n")
+    console.print(
+        f"load {load_seconds} s, fit {fit['fit_seconds']} s, peak RSS {report['peak_rss_mb']} MB"
+    )
+    console.print(f"wrote {out}")
+    best = max(r["test"]["top5"] for n, r in results.items() if n.startswith("untrained"))
+    return 0 if results["LightGBM ranker"]["test"]["top5"] > best else 1
+
+
 def print_textbook(results, console: Console, title: str, seen: frozenset = frozenset()) -> int:
     """The suite's table; a case whose reactant pool was in the model's training data is
     marked `seen in training`. Returns the number of held-out cases in the top 3."""
@@ -418,11 +649,16 @@ def print_textbook(results, console: Console, title: str, seen: frozenset = froz
 
 
 def _gbdt_scorer(path: Path, allow_stale: bool):
-    """(scorer, the textbook cases whose pools the model was trained on) of a saved GBDT."""
+    """(scorer, the textbook cases whose pools the model was trained on) of a saved GBDT: the
+    numpy ranker of `baseline` or the LightGBM one of `gbdt --features contact`."""
     from ksmech.physics import baseline as bl
+    from ksmech.physics import lgbm
 
-    gbdt = bl.load_gbdt(path, allow_stale=allow_stale)
     header = prov.read_header(path)
+    if header is not None and header.kind == "baseline_lgbm":
+        gbdt = lgbm.load_lgbm(path, bl.FEATURE_NAMES, allow_stale=allow_stale)
+    else:
+        gbdt = bl.load_gbdt(path, allow_stale=allow_stale)
     seen = frozenset(header.extra.get("textbook_pools_in_training", [])) if header else frozenset()
 
     def trained(sample, loader):
@@ -454,8 +690,9 @@ def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
 
     runs = {f"untrained {args.untrained}": (untrained, frozenset())}
     out_dir = source_dir(args.source, args.processed_dir)
-    gbdts = {"GBDT ranker": args.gbdt or out_dir / "baseline_gbdt_molecule.npz"}
-    gbdts[f"GBDT ranker ({HELD_OUT})"] = out_dir / f"baseline_gbdt_molecule_{HELD_OUT}.npz"
+    stem = "gbdt_lgbm_molecule_contact" if args.fast else "baseline_gbdt_molecule"
+    gbdts = {"GBDT ranker": args.gbdt or out_dir / f"{stem}.npz"}
+    gbdts[f"GBDT ranker ({HELD_OUT})"] = out_dir / f"{stem}_{HELD_OUT}.npz"
     for name, path in gbdts.items():
         if not path.exists():
             console.print(f"[yellow]{path} missing: run `ksmech-physics baseline`[/yellow]")

@@ -32,7 +32,7 @@ import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
@@ -498,12 +498,27 @@ def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -
     return fit_pair_stats(blocks, names)
 
 
-def load_samples(path: Path, allow_stale: bool = False) -> list[MechanismSample]:
-    """The samples of one split view (`samples_<split>.json`). The view, the store index and
-    every shard read are verified first (parquet, split file, token files, contact blocks);
-    StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs only: the mismatch
-    is logged and the store is read anyway."""
-    return store.load_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale)
+def load_samples(
+    path: Path, allow_stale: bool = False, ids: Iterable[str] | None = None
+) -> list[MechanismSample]:
+    """The samples of one split view (`samples_<split>.json`), only `ids` when given. The view,
+    the store index and every shard read are verified first (parquet, split file, token files,
+    contact blocks); StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs
+    only: the mismatch is logged and the store is read anyway."""
+    return store.load_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids)
+
+
+def sample_ids(path: Path, allow_stale: bool = False) -> list[str]:
+    """The step ids of one split view that have a stored sample (the view is verified)."""
+    return store.view_ids(Path(path), SAMPLE_VERSION, allow_stale)
+
+
+def iter_samples(
+    path: Path, allow_stale: bool = False, ids: Iterable[str] | None = None
+) -> Iterator[MechanismSample]:
+    """As `load_samples`, one shard at a time (shard order), for callers that reduce each
+    sample and drop it."""
+    return store.iter_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids)
 
 
 class SampleDataset(torch.utils.data.Dataset):

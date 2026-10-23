@@ -47,15 +47,19 @@ from ksmech.physics.ranking import (
     physical_pair_z,
     summarize_ranks,
 )
+from ksmech.physics.stage_a import STAGE_A_FEATURES
 
 log = logging.getLogger(__name__)
 
-FEATURE_NAMES = (
-    list(PAIR_FEATURES)
-    + [f"donor_{n}" for n in feature_names()]
+TOKEN_FEATURES = (
+    [f"donor_{n}" for n in feature_names()]
     + [f"acceptor_{n}" for n in feature_names()]
     + ["donor_site_f_minus", "acceptor_site_f_plus", "donor_energy_ev", "acceptor_energy_ev"]
 )
+FEATURE_NAMES = list(PAIR_FEATURES) + TOKEN_FEATURES
+# the geometry-free ranker (`physics.lgbm`): the stage-A pair features, NaN where undefined
+GEOMFREE_FEATURE_NAMES = list(STAGE_A_FEATURES) + TOKEN_FEATURES
+PAIR_SETS = {"legacy": FEATURE_NAMES, "stage_a": GEOMFREE_FEATURE_NAMES}
 _COL = {name: k for k, name in enumerate(FEATURE_NAMES)}
 
 
@@ -90,7 +94,20 @@ def main_centres(sample: MechanismSample) -> np.ndarray:
     return out
 
 
-def candidate_set(sample: MechanismSample, loader: TokenLoader) -> CandidateSet:
+def _pair_columns(sample: MechanismSample, pairs: str) -> np.ndarray:
+    """(n_occ, n_virt, F) pair block of the ranker: the legacy contact features at the
+    physical K and eps, or the stage-A features as stored with NaN where undefined."""
+    if pairs == "legacy":
+        return physical_pair_z(sample)
+    if pairs != "stage_a" or tuple(sample.pair_features) != STAGE_A_FEATURES:
+        raise ValueError(f"{sample.step_id}: pair set {pairs!r} over {sample.pair_features[:2]}")
+    return np.where(sample.pair_defined, sample.pair_z.astype(np.float64), np.nan)
+
+
+def candidate_set(
+    sample: MechanismSample, loader: TokenLoader, pairs: str = "legacy"
+) -> CandidateSet:
+    """The valid pairs of `sample` with the columns of `PAIR_SETS[pairs]`."""
     tokens = sample.tokens(loader)
     e_occ = np.array([o.energy_ev for t in tokens for o in t.occupied()])
     e_virt = np.array([o.energy_ev for t in tokens for o in t.virtual()])
@@ -104,7 +121,7 @@ def candidate_set(sample: MechanismSample, loader: TokenLoader) -> CandidateSet:
     desc = sample.orbital_features.astype(np.float64)
     X = np.column_stack(
         [
-            physical_pair_z(sample)[rows, cols],
+            _pair_columns(sample, pairs)[rows, cols],
             desc[occ_idx[rows]],
             desc[virt_idx[cols]],
             f_minus[main[occ_idx[rows]]],
@@ -148,6 +165,14 @@ def untrained_scores(cs: CandidateSet) -> dict[str, np.ndarray]:
         "frozen_head": frozen_head(X[:, : len(PAIR_FEATURES)], cs.gap_sign, cs.defined),
     }
     return out
+
+
+def gap_score(cs: CandidateSet, pairs: str = "legacy") -> np.ndarray:
+    """-G, the untrained "G alone" floor, from either pair set (the legacy logs drop the sign
+    of G, restored from `gap_sign`; stage A stores G itself)."""
+    if pairs == "stage_a":
+        return -cs.X[:, GEOMFREE_FEATURE_NAMES.index("g")]
+    return -cs.gap_sign * np.exp(cs.X[:, _COL["log_abs_g"]])
 
 
 def evaluate_scores(sets: list[CandidateSet], scores: list[np.ndarray]) -> dict:

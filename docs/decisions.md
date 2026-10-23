@@ -3405,3 +3405,53 @@ is now v7.5, sha256 6c6a023f66dd).
   - Open: before the Kekulé fallback, take the largest-weight centre of r bonded to a whatever
     its χ. This is reached only where every other rule has failed, so it cannot change a step
     that passes now.
+
+## 2026-10-23 — Fast GBDT reference: LightGBM lambdarank, and lean sample loading
+
+- **Why.** The numpy listwise GBDT of `ksmech-physics baseline` does not fit on the corrected
+  splits. The molecule run was OOM-killed (exit 137), and the scaffold run took more than 4 h
+  at about 9 GB RSS.
+  - `_load_parts` held all 9.5k training samples, although only the 3,000 with a contact
+    entry are used, and it densified every sidecar shard.
+  - The trees saw every valid pair of every training step.
+- **The slow baseline stays** as the reference that the fast one is checked against. A new
+  command, `ksmech-physics gbdt --features contact|geomfree`, holds the fast one
+  (`physics/lgbm.py`).
+- **LightGBM** is a new dependency. The user asked for it explicitly; the "prefer numpy" rule
+  gives way here because a numpy lambdarank would only re-implement it more slowly.
+- **Objective.** `lambdarank`, one query per step, relevance 1 for a labeled pair of the first
+  arrow and 0 otherwise. The labeled pairs of the step's other arrows are left out, as in the
+  numpy GBDT.
+  - Configuration: truncation level 10, learning rate 0.05, 31 leaves, at least 50 rows per
+    leaf, feature and bagging fraction 0.8, `deterministic`, seed 0, 2 threads (the host rule:
+    at most 3 heavy processes).
+- **Negative sampling on training only.**
+  - Each step keeps every positive, the 20 negatives the untrained scorer ranks highest, and
+    30 drawn uniformly from the rest.
+  - The draw uses a generator seeded by (0, crc32(step id)), so it does not depend on the
+    order shards are read in.
+  - Hard negatives come from the floor −(KS3 + KS2) for `contact`. For `geomfree` they come
+    from **−G** (`gap_kernel`), because the KS floor needs the contact features that 6.7k
+    training steps do not have.
+  - Validation and test keep every valid pair.
+- **Early stopping** uses the validation top-5, with top-1 × 1e-3 breaking ties (the numpy
+  GBDT's key). Ranks follow the `label_rank` convention: non-labeled pairs scoring at least as
+  well as the best labeled one. Patience is 100 rounds, at most 2,000.
+- **Feature sets.**
+  - `contact`: the 61 legacy columns (`FEATURE_NAMES`), training on the sidecar subsample. It
+    is the like-for-like check against the slow model.
+  - `geomfree`: the 11 stage-A pair features (`GEOMFREE_FEATURE_NAMES`), with **NaN where
+    undefined** (LightGBM routes missing values itself; `align_cos` and `dihedral_cos` are
+    often undefined), followed by the same 50 token columns, training on the whole training
+    part. It is the like-for-like reference for stage A.
+- **Loading.**
+  - `load_samples` / `load_contacts` take `ids`. A shard holding none of them is not opened.
+  - `iter_samples` yields one shard at a time.
+  - `_load_parts` reads only the samples that have a contact entry. `gbdt` reduces each sample
+    to its sampled rows (train) or float32 candidate set (val, test) before reading the next.
+    Its token cache holds 128 molecules, because tokens are only read for the LMO energies.
+- **Models.** `gbdt_lgbm_<split>_<features>[_textbook-held-out].npz`: LightGBM's text model
+  with a provenance header (kind `baseline_lgbm`; the sample views, and for `contact` the
+  sidecar index and subsample). Report: `gbdt_lgbm_report_<split>_<features>.json`, with
+  read/stored counts, training rows, trees, load and fit seconds and peak RSS.
+  `textbook --fast` uses the contact models.

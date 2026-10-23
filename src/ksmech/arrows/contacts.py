@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
@@ -159,21 +160,28 @@ def _check(path: Path, kind: str, allow_stale: bool) -> None:
         log.warning("stale %s (--allow-stale): %s", kind, exc)
 
 
-def load_contacts(view_dir: Path, strategy: str, allow_stale: bool = False) -> dict[str, dict]:
+def load_contacts(
+    view_dir: Path, strategy: str, allow_stale: bool = False, ids: Iterable[str] | None = None
+) -> dict[str, dict]:
     """step id -> dense legacy arrays (z float32, defined bool, sites int64) over the
-    sample's (n_occ, n_virt) pair block. Verifies the index and every shard; refuses dirty
-    builds unless `allow_stale` (diagnostics). FileNotFoundError when it was never built."""
+    sample's (n_occ, n_virt) pair block, only for `ids` when given (a shard holding none of
+    them is not opened). Verifies the index and every shard read; refuses dirty builds unless
+    `allow_stale` (diagnostics). FileNotFoundError when it was never built."""
     root = contacts_dir(view_dir, strategy)
     if not (root / "index.json").exists():
         raise FileNotFoundError(f"{root / 'index.json'}: no contact sidecar for {strategy!r}")
     _check(root / "index.json", "contact_index", allow_stale)
     shards = json.loads((root / "index.json").read_text())["shards"]
+    keep = None if ids is None else set(ids)
     out = {}
     n_feat = len(PAIR_FEATURES)
-    for name, ids in sorted(shards.items()):
+    for name, members in sorted(shards.items()):
+        wanted = [sid for sid in members if keep is None or sid in keep]
+        if not wanted:
+            continue
         _check(root / name, "contact_shard", allow_stale)
         with np.load(root / name, allow_pickle=False) as z:
-            for sid in ids:
+            for sid in wanted:
                 valid = z[f"{sid}/valid"].astype(bool)
                 dense_z = np.zeros((*valid.shape, n_feat), dtype=np.float32)
                 dense_d = np.zeros((*valid.shape, n_feat), dtype=bool)
