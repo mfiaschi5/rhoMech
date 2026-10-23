@@ -55,6 +55,32 @@ class AlignFlag(StrEnum):
     ALIGN_FALLBACK = "ALIGN_FALLBACK"  # an empty set filled by centroid distance
     SINK_ONLY_D = "SINK_ONLY_D"  # every virtual token on the sink atom is d-type
     LABEL_FILTERED = "LABEL_FILTERED"  # set members with no valid partner (pair_valid) removed
+    LEAVING_OUTSIDE_MASK = "LEAVING_OUTSIDE_MASK"  # the annotated leaving bond is not a choice
+    #   the physical mask allows in the edited state (a bond at an open shell, NONE at a full
+    #   octet, or a leaving bond that is not a bond at b when the arrow is read)
+
+
+NONE_LEAVING = -1  # leaving-bond label: no bond at the sink breaks
+
+
+@dataclass(frozen=True)
+class LeavingCandidate:
+    """One Lewis bond b-x at the sink, as the edited state has it when the arrow is read
+    (spec v7.5, Leaving bond): the features of the pointer head's candidate."""
+
+    atom: int  # x, global atom index
+    is_partner: bool  # b-x is the partner bond of the teacher acceptor s*
+    wbi: float  # Wiberg index of b-x in the reactant record; 0 for a bond formed in this step
+    order: int  # bond order in the edited state
+    element: int  # atomic number of x
+    charge: int  # formal charge of x in the edited state
+
+    def to_list(self) -> list:
+        return [self.atom, int(self.is_partner), self.wbi, self.order, self.element, self.charge]
+
+    @classmethod
+    def from_list(cls, v: list) -> LeavingCandidate:
+        return cls(int(v[0]), bool(v[1]), float(v[2]), int(v[3]), int(v[4]), int(v[5]))
 
 
 class UnalignedReason(StrEnum):
@@ -80,8 +106,17 @@ class ArrowLabel:
     absorbed: tuple[int, ...] = ()  # heterolysis arrows folded into this acceptor set
     teacher_donor: int = -1  # r*: set by the sample builder, a valid pair with teacher_acceptor
     teacher_acceptor: int = -1  # s*
-    breaks_bd: int | None = None  # 1 / 0: the bond b-d to s*'s partner d breaks in this step
-    breaks_bd_forced: bool = False  # True: fixed by physics (`apply_predicted.break_labels`)
+    leaving_bond: int | None = None  # x of the bond b-x that breaks (global), NONE_LEAVING, or
+    #   None before the sample builder labels it (`apply_predicted.leaving_labels`)
+    leaving_candidates: tuple[LeavingCandidate, ...] = ()  # the Lewis bonds the mask allows
+    leaving_none_allowed: bool = True  # NONE is a choice (not at a full-shell period-1/2 sink)
+    breaks_bd: int | None = None  # diagnostic: 1 when the leaving bond is s*'s partner bond,
+    #   0 when another bond or none breaks, None when s* has no partner bond at b
+
+    @property
+    def leaving_learned(self) -> bool:
+        """More than one choice survives the mask: the pointer head is trained on it."""
+        return len(self.leaving_candidates) + int(self.leaving_none_allowed) > 1
 
     def to_dict(self) -> dict:
         return {
@@ -97,8 +132,10 @@ class ArrowLabel:
             "absorbed": list(self.absorbed),
             "teacher_donor": self.teacher_donor,
             "teacher_acceptor": self.teacher_acceptor,
+            "leaving_bond": self.leaving_bond,
+            "leaving_candidates": [c.to_list() for c in self.leaving_candidates],
+            "leaving_none_allowed": self.leaving_none_allowed,
             "breaks_bd": self.breaks_bd,
-            "breaks_bd_forced": self.breaks_bd_forced,
         }
 
     @classmethod
@@ -116,8 +153,10 @@ class ArrowLabel:
             tuple(d["absorbed"]),
             d.get("teacher_donor", -1),
             d.get("teacher_acceptor", -1),
+            d.get("leaving_bond"),
+            tuple(LeavingCandidate.from_list(v) for v in d.get("leaving_candidates", [])),
+            d.get("leaving_none_allowed", True),
             d.get("breaks_bd"),
-            d.get("breaks_bd_forced", False),
         )
 
 

@@ -633,7 +633,7 @@ $\KS_1$ & crowded C$_\alpha$ & exposed H\\
 \subsection{Pair feature vector}
 For an ordered pair of tokens $(i,j)$ the pair features are
 \begin{itemize}[nosep]
-\item geometry-free (stage A): $G$ and $\log|G|$; $\mathbb{1}[\phi(i)\ne\phi(j)]$; bonded flag, bond order, graph distance; centroid distance and its RBF expansion (intramolecular); cross-centre coupling and stereoelectronic alignment cosines in the reactant pose;
+\item geometry-free (stage A): $G$ and $\log|G|$; $\mathbb{1}[\phi(i)\ne\phi(j)]$; bonded flag, bond order, Wiberg bond index of bonded pairs (from the reactant density in the L\"owdin basis), graph distance; centroid distance and its RBF expansion (intramolecular); cross-centre coupling and stereoelectronic alignment cosines in the reactant pose;
 \item configurational (stage B, zero and masked in stage A): $F_{rs}$; $\langle\KS_3\rangle,\langle\KS_2\rangle,\langle\KS_1\rangle,\langle E_{\mathrm{link}}\rangle$ and their variances; $F$ per distance shell; effective distance; accessible fraction; flags.
 \end{itemize}
 All entries are standardized with training-set statistics for the learned heads; the frozen head uses $-F_{rs}/\tau$ in eV.
@@ -739,7 +739,13 @@ P(s\mid r,a,\cdot)=\softmax_{s\in\mathcal{V}^{\virt}(r)}\Big(\big(\vb{s}_t+\vb{h
 \end{equation}
 The explicit pair term $\vb{u}^{\!\top}\vb{p}^{(L)}_{rs}$ is where the Klopman--Salem features of the specific candidate pair enter the arrow score directly, independently of attention.
 
-\paragraph{Acceptor site.} Same form as the donor site, over $\mathcal{A}_s$. An arrow is therefore the 4-tuple $(r,a,s,b)$: two orbitals and the two atoms on which they meet.
+\paragraph{Acceptor site.} Same form as the donor site, over $\mathcal{A}_s$.
+
+\paragraph{Leaving bond.} An arrow that forms a bond at $b$ may also break one of $b$'s existing bonds: the partner of an antibonding acceptor in a substitution, a $\pi$ bond in an addition to a carbonyl, an ionic contact that the wavefunction already treats as a lone pair on the leaving atom (a tetrahedral intermediate's chloride, a bromonium's bromide), or, at a hypervalent centre, whichever ligand is the better leaving group. The dataset encodes it as a second arrow, bond $b$--$x\to x$, or its absence. A pointer head chooses among $\set{\textsc{none}}\cup\mathcal{B}_b$, the Lewis bonds of $b$ other than the one being formed,
+\begin{equation}
+P(\lambda\mid r,a,s,b,\cdot)=\softmax_{\lambda}\Big(\vb{w}_\lambda^{\!\top}\big[\vb{s}_t,\vb{h}_r,\vb{h}_s,\vb{h}_b,\vb{h}_{x(\lambda)},\vb{e}_\lambda\big]\Big),
+\end{equation}
+where $\vb{e}_\lambda$ describes the candidate bond: whether it is the partner bond of the chosen acceptor, its Wiberg index in the reactant, its bond order, and the element and charge of the departing atom ($\textsc{none}$ has a learned embedding). The candidate set is masked by physics: an open-shell site keeps all its bonds ($\textsc{none}$ only); a full-shell first- or second-period site cannot expand its octet ($\textsc{none}$ excluded); otherwise the choice is learned. A static index cannot make it in general: at sulfur and phosphorus the bond that leaves is the best leaving group, not the least covalent bond (the lowest Wiberg index at the sink matches the annotated leaving bond in 12--24\% of P and S sinks). An arrow is therefore the tuple $(r,a,s,b,\lambda)$: two orbitals, the two atoms on which they meet, and the bond at the sink that gives way.
 
 \paragraph{Stop heads.} After each arrow a Bernoulli head on $[\vb{s}_t,\vb{h}_r,\vb{h}_s]$ decides \texttt{END\_STEP}; after each step a Bernoulli head on $\vb{h}^{(L)}_{\mathrm{MECH}}$ of the re-featurized intermediate decides \texttt{END\_MECH}.
 
@@ -749,10 +755,10 @@ Dataset arrows are aligned to orbital tokens (Section~\ref{sec:align}); because 
 \begin{equation}
 \begin{split}
 \mathcal{L}_{\mathrm{arrow}}={}&-\log\sum_{r\in\mathcal{D}}P(r\mid\cdot)\;-\;\log P(a^{\star}\mid r^{\star},\cdot)\\
-&-\log\sum_{s\in\mathcal{A}}P(s\mid r^{\star},a^{\star},\cdot)\;-\;\log P(b^{\star}\mid s^{\star},\cdot),
+&-\log\sum_{s\in\mathcal{A}}P(s\mid r^{\star},a^{\star},\cdot)\;-\;\log P(b^{\star}\mid s^{\star},\cdot)\;-\;\mathbb{1}[\lambda\ \text{learned}]\log P(\lambda^{\star}\mid\cdot),
 \end{split}
 \end{equation}
-with $r^\star,s^\star$ teacher representatives of the label sets and $a^\star,b^\star$ the labeled site atoms, which are always unique because they come straight from the dataset arrow. The total loss is
+with $r^\star,s^\star$ teacher representatives of the label sets, $a^\star,b^\star$ the labeled site atoms, which are always unique because they come straight from the dataset arrow, and $\lambda^\star$ the labeled leaving bond where the choice is not forced. The total loss is
 \begin{equation}
 \mathcal{L}=\sum_{\text{arrows}}\mathcal{L}_{\mathrm{arrow}}+\lambda_{\mathrm{stop}}\big(\mathrm{BCE}_{\texttt{END\_STEP}}+\mathrm{BCE}_{\texttt{END\_MECH}}\big),\qquad \lambda_{\mathrm{stop}}=0.5 .
 \end{equation}
@@ -765,7 +771,7 @@ Each elementary step is an independent training sample, one per (step, topologic
 Datasets give arrows as atom-map indices; alignment is by \emph{atom}, never by orbital label. For an arrow whose electrons leave atom $a$ (a lone pair on $a$, or a bond $(a,c)$ whose pair forms the new bond at $a$) and arrive at atom $b$ (an atom, or a bond $(b,d)$ that breaks):
 \begin{itemize}[nosep]
 \item donor site $a^\star=a$; $\mathcal{D}=\set{r\in\mathcal{O}^{\occ}:\ w^{(r)}_a\ge\tau_{\mathrm{atom}}}$, restricted to tokens that also have weight on $c$ for a bond source (if that empties the set the restriction is dropped and the arrow flagged);
-\item acceptor site $b^\star=b$; $\mathcal{A}=\set{s\in\mathcal{O}^{\virt}:\ w^{(s)}_b\ge\tau_{\mathrm{atom}}}$, restricted to tokens with weight on $d$ for a bond sink, excluding the antibonding partner of the donor's own bond and $d$-dominated polarization orbitals;
+\item acceptor site $b^\star=b$; $\mathcal{A}=\set{s\in\mathcal{O}^{\virt}:\ w^{(s)}_b\ge\tau_{\mathrm{atom}}}$, restricted to tokens with weight on $d$ for a bond sink, excluding the antibonding partner of the donor's own bond and $d$-dominated polarization orbitals; when the annotated step also contains the leaving arrow (bond $b$--$x\to x$), the set is restricted to the antibonding tokens on $(b,x)$, the $\sigma^*$ of the bond that actually breaks, which is the orbital a nucleophile attacks in a substitution (if no such token exists the arrow is flagged and counted);
 \item a carbanion drawn as a lone pair on an atom that carries no one-centre occupied token (an enolate in its carbanion resonance form) aligns to the multi-centre tokens on that atom;
 \item an empty set falls back to the tokens nearest to the atom by centroid distance and is flagged.
 \end{itemize}
@@ -777,7 +783,7 @@ Products and labels are compared modulo resonance. The \emph{resonance key} of a
 
 \subsection{Applying a step}
 \label{sec:apply}
-Dataset arrows are applied jointly as one bond--electron matrix edit (Section~\ref{sec:be}, Appendix~\ref{app:be}). Predicted arrows $(r,a,s,b)$ are applied from their sites alone: form the bond $a$--$b$; if $a$ carries a negative charge or a one-centre occupied token the source is treated as a lone pair, otherwise the Lewis structure is kekulized so that $a$ has a multiple bond to some $c$, that bond is decremented and the charge moved to $c$; if $s$ is an antibonding two-centre token on $(b,d)$ the bond $b$--$d$ is decremented and $d$ receives the leaving charge. The result is sanitized and reduced to its resonance key. Round-trip agreement, for dataset arrows and for the labeled $(r,a,s,b)$ tuples alike, is a hard requirement of the data pipeline ($\ge95\%$ on PMechDB).
+Dataset arrows are applied jointly as one bond--electron matrix edit (Section~\ref{sec:be}, Appendix~\ref{app:be}). Predicted arrows $(r,a,s,b,\lambda)$ are applied with the arrows of a step read in order against the edit so far (relays such as E2 and enolization depend on it), sanitizing once at the end: form the bond $a$--$b$; on the donor side, if $r$ is a multiple-bond or $\sigma$-like orbital with a centre $c$ bonded to $a$, the bond $a$--$c$ is consumed (largest-weight such centre), otherwise the source is a lone pair, and a bond that no occupied token spans (an ionic bond) gives its pair; on the acceptor side, the chosen leaving bond $\lambda$ is broken, with its other atom receiving the leaving charge, and $\textsc{none}$ breaks nothing. The forced masks of $\lambda$ and every candidate mask are evaluated on the molecule as edited so far within the step, in the same reading order. Kekulization is a last-resort fallback for a donor site with no usable centre. The result is sanitized and reduced to its resonance key. Round-trip agreement, for dataset arrows and for the labeled $(r,a,s,b)$ tuples alike, is a hard requirement of the data pipeline ($\ge95\%$ on PMechDB).
 
 \section{Inference}
 \label{sec:inference}

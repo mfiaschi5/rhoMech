@@ -16,7 +16,7 @@ next step, until the model emits a stop token.
 
 ## Representation
 
-`docs/ksmech_architecture.tex` (spec v7.2) is the source of truth for the representation and
+`docs/ksmech_architecture.tex` (spec v7.5) is the source of truth for the representation and
 the model; this section summarizes it.
 
 Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are

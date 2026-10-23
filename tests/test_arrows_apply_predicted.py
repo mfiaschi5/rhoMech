@@ -3,6 +3,7 @@
 from collections import Counter
 
 import numpy as np
+import pytest
 
 from ksmech.arrows.align import align_step
 from ksmech.arrows.apply import ApplyReason
@@ -54,7 +55,7 @@ def test_sn2_from_sites_breaks_the_antibonding_partner(token_loader):
     o, c, cl = (rt.site_of_map(m) for m in (10, 20, 21))
     lone_pair = _token(rt, True, {o}, n_centres=1)
     sigma_star = _token(rt, False, {c, cl}, antibonding=True)
-    out = apply_predicted_arrows(rt.mol, [PredictedArrow(lone_pair, o, sigma_star, c)], rt)
+    out = apply_predicted_arrows(rt.mol, [PredictedArrow(lone_pair, o, sigma_star, c, cl)], rt)
     assert out.ok and out.smiles == chem.canonicalize_mapped("[OH:10][CH3:20].[Cl-:21]")
 
 
@@ -71,11 +72,13 @@ def test_open_shell_sink_keeps_its_bonds(token_loader):
 
 
 def test_e2_relay_works_in_either_arrow_order(mini_steps, token_loader):
+    """The leaving bonds are labeled in the order the arrows are read: base -> H first breaks
+    C-H at H; read the other way, H has already lost C-H and takes the base with NONE."""
     step = mini_steps["e2"]
     rt = _rt(step.reactants_smiles, token_loader)
-    arrows = labeled_arrows(rt, align_step(step, rt).labels)
-    for order in (arrows, arrows[::-1]):
-        out = apply_predicted_arrows(rt.mol, order, rt)
+    labels = align_step(step, rt).labels
+    for order in (labels, labels[::-1]):
+        out = apply_predicted_arrows(rt.mol, labeled_arrows(rt, order), rt)
         assert out.smiles == step.products_smiles
 
 
@@ -146,6 +149,8 @@ def test_set_members_agree_on_the_mini_fixture(mini_steps, token_loader):
 
 
 def test_property_heavy_atoms_and_charge_are_conserved(token_loader):
+    from ksmech.arrows.align import NONE_LEAVING
+
     rng = np.random.default_rng(1)
     sides = [
         "[OH-:1].[CH3:2][Cl:3]",
@@ -163,7 +168,10 @@ def test_property_heavy_atoms_and_charge_are_conserved(token_loader):
             r, s = int(rng.choice(donors)), int(rng.choice(acceptors))
             a = int(rng.choice(list(rt.centres(r))))
             b = int(rng.choice(list(rt.centres(s))))
-            arrows.append(PredictedArrow(r, a, s, b))
+            m = rt.mol_atom.get(b)
+            bonds = [] if m is None else rt.mol.GetAtomWithIdx(m).GetNeighbors()
+            choices = [NONE_LEAVING] + [rt.global_atom[n.GetIdx()] for n in bonds]
+            arrows.append(PredictedArrow(r, a, s, b, int(rng.choice(choices))))
         out = apply_predicted_arrows(rt.mol, arrows, rt)
         if not out.ok:
             continue
@@ -201,81 +209,124 @@ def test_a_hydride_gives_the_pair_of_its_ionic_bond(token_loader):
     occupied_on_h = [t for t in rt.tokens_on_atom[h] if rt.occupied[t - rt.n_atoms]]
     hydride = max(occupied_on_h, key=lambda t: rt.centres(t)[h])
     sigma_star = _token(rt, False, {hp, o}, antibonding=True)
-    out = apply_predicted_arrows(rt.mol, [PredictedArrow(hydride, h, sigma_star, hp)], rt)
+    out = apply_predicted_arrows(rt.mol, [PredictedArrow(hydride, h, sigma_star, hp, o)], rt)
     want = chem.canonicalize_mapped("CC[O-:21].[H:10][H:20].[Na+:11]")
     assert out.ok and out.smiles == want
 
 
-def _one_arrow_flag(rt, label, s):
-    from ksmech.arrows.apply_predicted import break_labels
+def _one_arrow(rt, label, s):
+    from ksmech.arrows.apply_predicted import leaving_labels
 
     (r,) = label.donor_ids
     arrow = PredictedArrow(r, label.donor_site, s, label.acceptor_site)
-    (out,) = break_labels(rt, [arrow], [label])
+    (out,) = leaving_labels(rt, [arrow], [label])
     return out
 
 
-def test_bond_break_labels_are_learned_only_where_the_tuple_cannot_decide(token_loader):
-    from ksmech.arrows.align import ArrowLabel
+def _lone_pair(rt, atom):
+    occupied = [t for t in rt.tokens_on_atom[atom] if rt.occupied[t - rt.n_atoms]]
+    return next(t for t in occupied if len(rt.centres(t)) == 1)
+
+
+def test_the_leaving_bond_mask_follows_the_sink(token_loader):
+    from ksmech.arrows.align import NONE_LEAVING, ArrowLabel
 
     rt = _rt("C[O-:10].C[Si:20](C)(C)[Cl:21].[CH3:30][Cl:31]", token_loader)
     o, si, cl = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
     c, cl2 = rt.site_of_map(30), rt.site_of_map(31)
-    donor = next(
-        t for t in rt.tokens_on_atom[o] if rt.occupied[t - rt.n_atoms] and len(rt.centres(t)) == 1
-    )
+    donor = _lone_pair(rt, o)
     si_star = _token(rt, False, {si, cl}, antibonding=True)
     c_star = _token(rt, False, {c, cl2}, antibonding=True)
 
     def label(site, s, partners=()):
         return ArrowLabel(frozenset({donor}), o, frozenset({s}), site, sink_partners=partners)
 
-    # Si can expand its octet: the dataset decides, learned
-    assert _one_arrow_flag(rt, label(si, si_star), si_star) == (0, False)  # pentacoordinate
-    assert _one_arrow_flag(rt, label(si, si_star, (cl,)), si_star) == (1, False)  # SN2 at Si
-    # a full-shell carbon must lose a bond: forced, whatever the label says
-    assert _one_arrow_flag(rt, label(c, c_star), c_star) == (1, True)
+    # Si can expand its octet: NONE and every Si bond are choices, the dataset decides
+    kept = _one_arrow(rt, label(si, si_star), si_star)
+    assert kept.leaving == NONE_LEAVING and kept.none_allowed and kept.in_mask
+    si_mol = rt.mol_atom[si]
+    neighbours = {rt.global_atom[n.GetIdx()] for n in rt.mol.GetAtomWithIdx(si_mol).GetNeighbors()}
+    assert {x.atom for x in kept.candidates} == neighbours
+    assert {x.element for x in kept.candidates} == {6, 17}
+    (partner,) = [x for x in kept.candidates if x.is_partner]
+    assert partner.atom == cl and kept.breaks_bd == 0
+    assert partner.wbi == pytest.approx(rt.bond_index(si, cl)) and partner.order == 1
+    sn2 = _one_arrow(rt, label(si, si_star, (cl,)), si_star)
+    assert sn2.leaving == cl and sn2.in_mask and sn2.breaks_bd == 1
+    # a full-shell carbon must lose a bond: NONE is not a choice
+    full = _one_arrow(rt, label(c, c_star, (cl2,)), c_star)
+    assert not full.none_allowed and full.leaving == cl2 and full.in_mask
+    assert not _one_arrow(rt, label(c, c_star), c_star).in_mask  # NONE at a full octet
 
 
-def test_without_a_partner_in_s_the_lowest_wiberg_bond_at_b_leaves(token_loader):
-    from dataclasses import replace
+def test_an_open_shell_sink_keeps_every_bond(token_loader):
+    from ksmech.arrows.align import NONE_LEAVING, ArrowLabel
 
-    from ksmech.arrows.align import ArrowLabel
-    from ksmech.arrows.apply_predicted import LEAVING_AMBIGUOUS
-
-    rt = _rt("C[O:10][Si:20](C)(C)[Cl:21]", token_loader)
-    o, si, cl = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
-    donor = next(
-        t for t in rt.tokens_on_atom[o] if rt.occupied[t - rt.n_atoms] and len(rt.centres(t)) == 1
+    rt = _rt("C[CH+:20]C.[OH-:10]", token_loader)
+    o, c = rt.site_of_map(10), rt.site_of_map(20)
+    empty = max(
+        (t for t in rt.tokens_on_atom[c] if not rt.occupied[t - rt.n_atoms]),
+        key=lambda t: rt.centres(t)[c],
     )
-    si_o_star = _token(rt, False, {si, o}, antibonding=True)  # its partner is the donor atom
-    tokens = rt.fragments[0].tokens
-    wbi = dict(tokens.bond_index)
-    tokens.bond_index = {k: (0.40 if set(k) == {si, cl} else max(v, 0.9)) for k, v in wbi.items()}
-
-    def label(partners=()):
-        return ArrowLabel(frozenset({donor}), o, frozenset({si_o_star}), si, sink_partners=partners)
-
-    # the flag is about the bond the rule names: Si-Cl, the lowest Wiberg index at Si
-    assert _one_arrow_flag(rt, label(), si_o_star) == (0, False)
-    assert _one_arrow_flag(rt, label((cl,)), si_o_star) == (1, False)
-    arrow = PredictedArrow(donor, o, si_o_star, si, breaks_bd=1)
-    out = apply_predicted_arrows(rt.mol, [arrow], rt)
-    assert out.ok and "[Cl-:21]" in out.smiles and LEAVING_AMBIGUOUS not in out.flags
-    tied = {k: (0.40 if si in k and o not in k else v) for k, v in tokens.bond_index.items()}
-    tokens.bond_index = tied  # Si-C and Si-Cl both at 0.40: the choice is flagged
-    out = apply_predicted_arrows(rt.mol, [replace(arrow)], rt)
-    assert LEAVING_AMBIGUOUS in out.flags
-    tokens.bond_index = wbi
+    lab = ArrowLabel(frozenset({_lone_pair(rt, o)}), o, frozenset({empty}), c)
+    out = _one_arrow(rt, lab, empty)
+    assert out.leaving == NONE_LEAVING and out.candidates == () and out.in_mask
+    bad = ArrowLabel(lab.donor_ids, o, lab.acceptor_ids, c, sink_partners=(c - 1,))
+    assert not _one_arrow(rt, bad, empty).in_mask
 
 
-def test_forced_flags_read_on_the_edited_state_agree_with_apply(mini_steps, token_loader):
+def test_apply_breaks_exactly_the_chosen_leaving_bond(token_loader):
+    rt = _rt("C[O-:10].C[Si:20](C)(C)[Cl:21]", token_loader)
+    o, si, cl = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
+    donor, si_star = _lone_pair(rt, o), _token(rt, False, {si, cl}, antibonding=True)
+    out = apply_predicted_arrows(rt.mol, [PredictedArrow(donor, o, si_star, si, cl)], rt)
+    assert out.ok and "[Cl-:21]" in out.smiles
+    methyl = next(g for g in rt.global_atom.values() if g not in (o, si, cl) and g != o - 1)
+    out = apply_predicted_arrows(rt.mol, [PredictedArrow(donor, o, si_star, si, methyl)], rt)
+    assert out.ok and "[CH3-]" in out.smiles and "[Cl:21]" in out.smiles  # the chosen bond
+    out = apply_predicted_arrows(rt.mol, [PredictedArrow(donor, o, si_star, si, o - 1)], rt)
+    assert out.reason == ApplyReason.UNKNOWN_ARROW  # not a bond at the sink
+
+
+def test_labeled_leaving_bonds_reproduce_the_fixture_steps(mini_steps, token_loader):
+    from ksmech.arrows.apply_predicted import leaving_labels
+
     for step in mini_steps.values():
         rt = ReactantTokens.from_smiles(step.reactants_smiles, token_loader)
         labels = align_step(step, rt).labels
-        learned = labeled_arrows(rt, labels)
-        both = labeled_arrows(rt, labels, with_forced=True)
-        assert any(a.breaks_bd is not None for a in both) or not labels
-        one = apply_predicted_arrows(rt.mol, learned, rt)
-        two = apply_predicted_arrows(rt.mol, both, rt)
-        assert (one.ok, one.smiles) == (two.ok, two.smiles), step.step_id
+        bare = labeled_arrows(rt, labels, with_leaving=False)
+        assert all(lab is not None and lab.in_mask for lab in leaving_labels(rt, bare, labels))
+        out = apply_predicted_arrows(rt.mol, labeled_arrows(rt, labels), rt)
+        key = canonical_resonance_key(chem.parse_mapped(step.products_smiles)).key
+        assert out.ok and out.key.key == key, step.step_id
+
+
+def test_a_relayed_pi_bond_is_not_the_leaving_bond_of_the_later_arrow(token_loader):
+    """Enolate alkylation: the C10=C11 pair moves to C10-C20 first, so when O- adds to C11
+    the bond the dataset lists as leaving at C11 is already gone: C11 has an open shell and
+    its leaving bond is NONE, inside the mask."""
+    from ksmech.arrows.align import NONE_LEAVING
+    from ksmech.arrows.apply_predicted import leaving_labels
+    from ksmech.data.schema import Arrow, ElementaryStep
+
+    step = ElementaryStep(
+        "enolate",
+        "pmechdb",
+        None,
+        None,
+        "C[CH:10]=[C:11](C)[O-:12].C[CH:20](C)[Br:21]",
+        "C[CH:10]([C:11](C)=[O:12])[CH:20](C)C.[Br-:21]",
+        [
+            Arrow("bond", (10, 11), "bond", (10, 20)),
+            Arrow("bond", (20, 21), "atom", (21,)),
+            Arrow("lone_pair", (12,), "atom", (11,)),
+        ],
+    )
+    rt = _rt(step.reactants_smiles, token_loader)
+    labels = align_step(step, rt).labels
+    labs = leaving_labels(rt, labeled_arrows(rt, labels, with_leaving=False), labels)
+    assert all(lab is not None and lab.in_mask for lab in labs)
+    assert labs[0].leaving == rt.site_of_map(21) and labs[1].leaving == NONE_LEAVING
+    out = apply_predicted_arrows(rt.mol, labeled_arrows(rt, labels), rt)
+    key = canonical_resonance_key(chem.parse_mapped(step.products_smiles)).key
+    assert out.ok and out.key.key == key

@@ -19,6 +19,7 @@ from ksmech.arrows.apply_predicted import (
     PredictedArrow,
     apply_predicted_arrows,
     labeled_arrows,
+    leaving_labels,
     valid_pair_test,
 )
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
@@ -94,19 +95,24 @@ def run_round_trip(
 
 
 def predicted_round_trip_step(
-    step: ElementaryStep, tokens: ReactantTokens, alignment: StepAlignment, with_forced=False
+    step: ElementaryStep, tokens: ReactantTokens, alignment: StepAlignment
 ) -> RoundTrip:
-    """Apply the labeled (token, site) tuples of a completely aligned step from the sites
-    alone (`apply_predicted_arrows`) and compare with the annotated products. The arrows carry
-    their learned bond-break flags, and with `with_forced` the forced ones too."""
-    valid = valid_pair_test(tokens)
-    arrows = labeled_arrows(tokens, alignment.labels, valid, with_forced=with_forced)
+    """Apply the labeled (token, site, leaving bond) tuples of a completely aligned step
+    (`apply_predicted_arrows`) and compare with the annotated products."""
+    arrows = labeled_arrows(tokens, alignment.labels, valid_pair_test(tokens))
     result = apply_predicted_arrows(tokens.mol, arrows, tokens)
     status, pattern = compare_products(result, step)
     if status in MATCH_STATUSES:
         return RoundTrip(step.step_id, status)
     flags = ",".join(sorted({str(f) for lab in alignment.labels for f in lab.flags})) or "-"
     return RoundTrip(step.step_id, status, f"{pattern} | flags {flags}", result.detail)
+
+
+def leaving_outside_mask(tokens: ReactantTokens, alignment: StepAlignment) -> bool:
+    """Some annotated leaving bond of the step is not a choice the physical mask allows."""
+    arrows = labeled_arrows(tokens, alignment.labels, valid_pair_test(tokens), False)
+    labs = leaving_labels(tokens, arrows, alignment.labels)
+    return any(lab is not None and not lab.in_mask for lab in labs)
 
 
 def member_agreement(
@@ -128,6 +134,7 @@ def member_agreement(
                     b.donor_site,
                     m if side == "acceptor" else b.acceptor,
                     b.acceptor_site,
+                    b.leaving,
                 )
                 arrows = base[:k] + [swapped] + base[k + 1 :]
                 result = apply_predicted_arrows(tokens.mol, arrows, tokens)
@@ -142,7 +149,7 @@ def evaluate_alignment(
     labeled tuples of every completely aligned step from their sites, and (optionally) swap
     in every other set member. Returns the alignment report with a `predicted` section."""
     alignments, predicted, skipped, members = [], [], Counter(), Counter()
-    forced_disagree = []
+    outside_mask = []
     for step in steps:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
@@ -156,14 +163,14 @@ def evaluate_alignment(
         alignments.append(al)
         if al.complete:
             predicted.append(predicted_round_trip_step(step, rt, al))
-            if predicted_round_trip_step(step, rt, al, with_forced=True).ok != predicted[-1].ok:
-                forced_disagree.append(step.step_id)
+            if leaving_outside_mask(rt, al):
+                outside_mask.append(step.step_id)
             if member_check and predicted[-1].ok:
                 members.update(member_agreement(step, rt, al))
     out = alignment_report(alignments, skipped)
     out["predicted"] = summarize(predicted)
-    # the forced flags labeled on the edited state must be the ones apply reads itself
-    out["predicted"]["forced_flag_disagreements"] = forced_disagree
+    # annotated leaving bonds the physical mask excludes in the edited state
+    out["predicted"]["leaving_outside_mask"] = outside_mask
     out["predicted"]["member_agreement"] = {
         side: {
             "agree": members[(side, True)],

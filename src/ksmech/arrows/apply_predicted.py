@@ -14,21 +14,18 @@ Source, for donor r at site a:
 4. else a lone pair of a; else, last, a Kekule structure in which a has a multiple bond
    (flagged APPLY_KEKULE_FALLBACK).
 
-The bond a-b forms (or gains one order). Sink, for acceptor s at site b: the only bond that can
-break is b-d, and d takes the pair (`sink_decision`). d is the partner of s, the largest-weight
-centre of an antibonding s bonded to b (multiple bonds first, never the donor site); when s names
-none (one-centre, not antibonding, or its partner is the donor atom), d is the other end of the
-Lewis bond at b with the lowest Wiberg index in the QM record (`qm.bond_index`; the bond to the
-donor atom excluded; a tie within `WBI_TIE` is flagged LEAVING_AMBIGUOUS). Whether b-d breaks
-is the arrow's bond-break flag `breaks_bd`, which physics fixes where it can, read in the state
-the earlier arrows of the step leave:
-5. b had an open shell before the new bond (a carbocation, H+, a borane): 0;
-6. b is a full-shell atom of period 1-2 (H, C, N, O): 1, whatever s is (a bromonium carbon
-   whose acceptor is a one-centre virtual still loses a bond);
-7. b is in period 3+ and s is one-centre (an empty orbital of b's own: TiCl4, SnR3+): 0;
-8. else (b in period 3+ with a multi-centre s: Si, P, S, I) the flag is learned.
-A flag given with the arrow wins (the label, or the decoder's output where it is learned).
-`break_labels` labels the flags of a dataset step with the same reading.
+The bond a-b forms (or gains one order). Sink, for acceptor s at site b: the arrow's leaving
+bond lambda (spec v7.5, Leaving bond) breaks, and its other atom x takes the pair; NONE breaks
+nothing. lambda is chosen among NONE and the Lewis bonds of b other than the one being formed,
+as the edited state has them when the arrow is read, under the physical mask
+(`leaving_choices`):
+5. b had an open shell before the new bond (a carbocation, H+, a borane, an empty d / p
+   shell of Ti, Sn): NONE only;
+6. b is a full-shell atom of period 1-2 (H, C, N, O): NONE excluded, a bond must give way;
+7. otherwise (b in period 3+, which can expand its octet: Si, P, S, I) the choice is learned.
+`leaving_labels` labels lambda for a dataset step with the same reading: the bond b-x whose
+leaving arrow the step has, else NONE. Each candidate carries the pointer head's features:
+whether it is the partner bond of s, its Wiberg index, its order, the element and charge of x.
 """
 
 from __future__ import annotations
@@ -39,7 +36,13 @@ import numpy as np
 from rdkit import Chem, rdBase
 from rdkit.Chem import rdchem
 
-from ksmech.arrows.align import ArrowLabel, representatives
+from ksmech.arrows.align import (
+    NONE_LEAVING,
+    AlignFlag,
+    ArrowLabel,
+    LeavingCandidate,
+    representatives,
+)
 from ksmech.arrows.apply import (
     TYPE_TO_ORDER,
     ApplyReason,
@@ -63,7 +66,7 @@ class PredictedArrow:
     donor_site: int
     acceptor: int
     acceptor_site: int
-    breaks_bd: int | None = None  # bond-break flag of b-d; None: the forced value, if any
+    leaving: int = NONE_LEAVING  # x of the bond b-x that breaks (global atom), or NONE_LEAVING
 
 
 def _pair(i: int, j: int) -> tuple[int, int]:
@@ -105,8 +108,6 @@ class EditState:
 
 
 KEKULE_FALLBACK = "APPLY_KEKULE_FALLBACK"
-LEAVING_AMBIGUOUS = "LEAVING_AMBIGUOUS"  # two Lewis bonds at b within WBI_TIE of the lowest WBI
-WBI_TIE = 0.02
 SIGMA_CHI = 0.5  # chi at or above: a sigma bond pair (chi 1 sigma, 0 pi)
 
 
@@ -218,59 +219,57 @@ def open_shell(state: EditState, i: int) -> bool:
     return state.nonbonding(i) + 2 * bonds < capacity
 
 
-def leaving_partner(
-    state: EditState, tokens: ReactantTokens, b: int, a: int
-) -> tuple[int | None, bool]:
-    """(the neighbour d of b, mol indices, whose Lewis bond to b has the lowest Wiberg index,
-    ambiguous): bonds the record has and this step has not consumed, the bond to the donor
-    atom a excluded; ambiguous when the next one is within WBI_TIE."""
-    glob = tokens.global_atom
-    scored = sorted(
-        (w, x)
-        for x in state.neighbours(b)
-        if x != a and (w := tokens.bond_index(glob[b], glob[x])) is not None
-    )
-    if not scored:
-        return None, False
-    return scored[0][1], len(scored) > 1 and scored[1][0] - scored[0][0] < WBI_TIE
+def acceptor_partner(state: EditState, tokens: ReactantTokens, arrow: PredictedArrow):
+    """The partner d of s at b (mol index): the largest-weight centre of an antibonding,
+    multi-centre s bonded to b in the current state (multiple bonds first, never the donor
+    site); None when s names none."""
+    s = arrow.acceptor
+    if len(tokens.centres(s)) < 2 or tokens.orbital(s).descriptors.overlap_population >= 0:
+        return None
+    site, skip = arrow.acceptor_site, arrow.donor_site
+    return _bonded_centre(tokens, state, s, site, skip, True, multiple_first=True)
 
 
-def sink_decision(
+def leaving_choices(
     state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, room: bool
-) -> tuple[int | None, int | None, bool]:
-    """(forced flag, partner d, ambiguous) of one arrow's sink in the current state (rules
-    5-8): the forced flag is 0 / 1 where physics fixes it, None where it is learned; d is a mol
-    index (the partner of s, else the lowest-WBI Lewis bond at b), None when b has no bond to
-    break; ambiguous: d came from a WBI tie. `room`: b had an open shell before the new bond."""
-    b, s = _mol_index(tokens, arrow.acceptor_site), arrow.acceptor
-    d, ambiguous = None, False
-    if len(tokens.centres(s)) > 1 and tokens.orbital(s).descriptors.overlap_population < 0:
-        site, skip = arrow.acceptor_site, arrow.donor_site
-        d = _bonded_centre(tokens, state, s, site, skip, True, multiple_first=True)
-    if d is None:
-        d, ambiguous = leaving_partner(state, tokens, b, _mol_index(tokens, arrow.donor_site))
+) -> tuple[list[LeavingCandidate], bool]:
+    """(the Lewis bonds at b the mask allows, NONE allowed) in the current state (rules 5-7).
+    `room`: b had an open shell before the new bond."""
     if room:
-        return 0, d, ambiguous
-    if state.base.GetAtomWithIdx(b).GetAtomicNum() <= 10:
-        return 1, d, ambiguous  # a full octet must lose a bond, whatever s is
-    if len(tokens.centres(s)) == 1:
-        return 0, d, ambiguous  # period 3+: an empty orbital of b's own, the octet expands
-    return None, d, ambiguous
+        return [], True
+    b, a = _mol_index(tokens, arrow.acceptor_site), _mol_index(tokens, arrow.donor_site)
+    partner, glob = acceptor_partner(state, tokens, arrow), tokens.global_atom
+    out = []
+    for x in state.neighbours(b):
+        if x == a:
+            continue
+        wbi = tokens.bond_index(glob[b], glob[x])
+        element = state.base.GetAtomWithIdx(x).GetAtomicNum()
+        order, charge = state.order(b, x), state.charge(x)
+        out.append(LeavingCandidate(glob[x], x == partner, wbi or 0.0, order, element, charge))
+    return out, state.base.GetAtomWithIdx(b).GetAtomicNum() > 10
 
 
-def _break(state: EditState, b: int, d: int | None, flag: int | None) -> None:
-    if flag and d is not None:
-        state.decrement(b, d)
-        state.edit.add((d,), +1)
+def _leave(state: EditState, tokens: ReactantTokens, b: int, leaving: int) -> None:
+    """Break the leaving bond b-x (x takes the pair); NONE_LEAVING breaks nothing."""
+    if leaving == NONE_LEAVING:
+        return
+    x = tokens.mol_atom.get(leaving)
+    if x is None or x not in state.neighbours(b):
+        raise ArrowApplyError(
+            ApplyReason.UNKNOWN_ARROW, f"leaving bond {b}-{leaving} is not a bond at the sink"
+        )
+    state.decrement(b, x)
+    state.edit.add((x,), +1)
 
 
 def _step(state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, flags: set):
-    """Source and new bond of one arrow; returns (b, the sink decision)."""
+    """Source and new bond of one arrow; returns (b, whether b had an open shell before)."""
     b = _mol_index(tokens, arrow.acceptor_site)
     room = open_shell(state, b)
     _source(state, tokens, arrow, flags)
     state.edit.add((_mol_index(tokens, arrow.donor_site), b), +1)
-    return b, sink_decision(state, tokens, arrow, room)
+    return b, room
 
 
 def apply_predicted_arrows(
@@ -284,64 +283,95 @@ def apply_predicted_arrows(
     flags: set[str] = set()
     try:
         for arrow in arrows:
-            b, (forced, d, ambiguous) = _step(state, tokens, arrow, flags)
-            flag = forced if arrow.breaks_bd is None else arrow.breaks_bd
-            if flag and ambiguous:
-                flags.add(LEAVING_AMBIGUOUS)
-            _break(state, b, d, flag)
+            b, _ = _step(state, tokens, arrow, flags)
+            _leave(state, tokens, b, arrow.leaving)
         product = sanitize_product(apply_edit(state.base, state.edit))
         return ApplyResult(product, flags=frozenset(flags))
     except ArrowApplyError as exc:
         return ApplyResult(None, exc.reason, exc.detail, flags=frozenset(flags))
 
 
-def break_labels(
+def _consumed(state: EditState, tokens: ReactantTokens, b: int, x: int) -> bool:
+    j = tokens.mol_atom.get(x)
+    return j is not None and _pair(b, j) in state.consumed
+
+
+@dataclass(frozen=True)
+class LeavingLabel:
+    leaving: int  # x of the annotated leaving bond, or NONE_LEAVING
+    candidates: tuple[LeavingCandidate, ...]
+    none_allowed: bool
+    in_mask: bool  # the annotated choice is one the mask allows
+    breaks_bd: int | None  # diagnostic: the leaving bond is s's partner bond
+
+
+def _leaving_label(cands, none_ok: bool, wanted: list[int]) -> LeavingLabel:
+    atoms = [c.atom for c in cands]
+    hit = [x for x in wanted if x in atoms]
+    leaving = hit[0] if hit else NONE_LEAVING
+    in_mask = (bool(hit) or not wanted) and (leaving != NONE_LEAVING or none_ok)
+    partner = next((c.atom for c in cands if c.is_partner), None)
+    breaks = None if partner is None else int(leaving == partner)
+    return LeavingLabel(leaving, tuple(cands), none_ok, in_mask, breaks)
+
+
+def leaving_labels(
     tokens: ReactantTokens, arrows: list[PredictedArrow], labels: list[ArrowLabel]
-) -> list[tuple[int | None, bool]]:
-    """(breaks_bd, forced) of every arrow of a dataset step (`arrows`: its teacher tuples, in
-    the order of `labels`), read as `apply_predicted_arrows` reads them: the forced value where
-    physics fixes it, else 1 when the annotated step breaks b-d (`label.sink_partners`; d the
-    partner `sink_decision` names), 0 when not, None when b has no bond to break. The state
-    advances with these flags. An arrow the edit cannot read (and every later one) gets
-    (None, False)."""
+) -> list[LeavingLabel | None]:
+    """The leaving bond of every arrow of a dataset step (`arrows`: its teacher tuples, in the
+    order of `labels`), read as `apply_predicted_arrows` reads them: the bond b-x whose leaving
+    arrow the step has (`label.sink_partners`), else NONE, with the candidates and the mask of
+    the edited state. A partner bond that an earlier arrow of the step has already consumed
+    (a relay: the C=C pair of an enolate that alkylates has moved before O- adds to C=O) is
+    not this arrow's leaving bond. The state advances with these labels. An arrow the edit
+    cannot read (and every later one) gets None."""
     state = EditState(Chem.Mol(tokens.mol))
-    out: list[tuple[int | None, bool]] = []
+    out: list[LeavingLabel | None] = []
     try:
         for arrow, label in zip(arrows, labels, strict=True):
-            b, (forced, d, _) = _step(state, tokens, arrow, set())
-            if forced is not None:
-                flag = forced
-            else:
-                flag = None if d is None else int(tokens.global_atom[d] in label.sink_partners)
-            out.append((flag, forced is not None))
-            _break(state, b, d, flag)
+            b, room = _step(state, tokens, arrow, set())
+            cands, none_ok = leaving_choices(state, tokens, arrow, room)
+            gone = {x for x in label.sink_partners if _consumed(state, tokens, b, x)}
+            wanted = [x for x in label.sink_partners if x not in gone]
+            out.append(_leaving_label(cands, none_ok, wanted))
+            _leave(state, tokens, b, out[-1].leaving)
     except ArrowApplyError:
         pass
-    return out + [(None, False)] * (len(labels) - len(out))
+    return out + [None] * (len(labels) - len(out))
+
+
+def with_leaving(label: ArrowLabel, lab: LeavingLabel | None) -> ArrowLabel:
+    """The label with its leaving bond (LEAVING_OUTSIDE_MASK when the mask excludes it)."""
+    if lab is None:
+        return label
+    flags = label.flags | ({AlignFlag.LEAVING_OUTSIDE_MASK} if not lab.in_mask else set())
+    return replace(
+        label,
+        leaving_bond=lab.leaving,
+        leaving_candidates=lab.candidates,
+        leaving_none_allowed=lab.none_allowed,
+        breaks_bd=lab.breaks_bd,
+        flags=frozenset(flags),
+    )
 
 
 def labeled_arrows(
-    tokens: ReactantTokens,
-    labels: list[ArrowLabel],
-    valid=None,
-    with_breaks: bool = True,
-    with_forced: bool = False,
+    tokens: ReactantTokens, labels: list[ArrowLabel], valid=None, with_leaving: bool = True
 ) -> list[PredictedArrow]:
     """The teacher representatives (r*, a*, s*, b*) of aligned labels, as predicted arrows;
     with `valid(r, s)` the teacher pair is chosen among valid pairs, as the samples do. With
-    `with_breaks` each arrow carries its learned bond-break flag (`break_labels`), with
-    `with_forced` its forced flag too (the same edit either way)."""
+    `with_leaving` each arrow carries its labeled leaving bond (`leaving_labels`)."""
     arrows = [
         PredictedArrow(r, lab.donor_site, s, lab.acceptor_site)
         for lab in labels
         for r, s in [representatives(tokens, lab, valid)]
     ]
-    if not with_breaks:
+    if not with_leaving:
         return arrows
-    flags = break_labels(tokens, arrows, labels)
+    leaving = leaving_labels(tokens, arrows, labels)
     return [
-        replace(a, breaks_bd=flag if with_forced or not forced else None)
-        for a, (flag, forced) in zip(arrows, flags, strict=True)
+        a if lab is None else replace(a, leaving=lab.leaving)
+        for a, lab in zip(arrows, leaving, strict=True)
     ]
 
 

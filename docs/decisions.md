@@ -3338,3 +3338,70 @@ Two user decisions (2026-10-22 and 2026-10-23) replace the weakest-bond rule and
   - 10 C–Cl and 9 C–Br (the teacher σ* names a C–C partner);
   - 8 S–Cl, 6 P–Cl, 5 S–O;
   - the rest scattered.
+
+## 2026-10-23 — Leaving bond: a categorical choice per arrow (spec v7.5)
+
+User decision, 2026-10-23: the binary bond-break flag and the lowest-WBI rule are replaced by
+a leaving-bond choice λ per arrow (spec v7.5, "Leaving bond"; `docs/ksmech_architecture.tex`
+is now v7.5, sha256 6c6a023f66dd).
+
+- **Choices.** λ ∈ {NONE} ∪ the Lewis bonds of the sink b other than the one being formed, as
+  the molecule edited by the earlier arrows of the step has them when the arrow is read.
+- **Mask (`apply_predicted.leaving_choices`).**
+  - b had an open shell before the new bond: NONE only;
+  - b is full-shell in period 1–2: NONE excluded;
+  - otherwise learned.
+
+  A one-centre acceptor at S, P, Si, Ti is no longer forced to NONE. That case is now learned:
+  the dataset breaks a bond there in 11 steps.
+- **Candidate features** (`LeavingCandidate`): whether it is the partner bond of s*, the
+  reactant WBI, the bond order, the element and charge of the departing atom. WBI stays a
+  feature (candidates, stage A); apply no longer reads it.
+- **Labels (`leaving_labels`).** The bond b–x whose leaving arrow the step has, else NONE.
+  - A partner bond that an earlier arrow of the step already consumed is not this arrow's
+    leaving bond. In an enolate alkylation the C=C pair moves to the new C–C bond before O⁻
+    adds to C=O; that carbon then has an open shell, and its λ is NONE.
+  - Before that rule, 1,085 steps had a label outside the mask. After it, 7 do: the 7 steps the
+    edit cannot read at all (below).
+  - `breaks_bd` survives only as a diagnostic (λ is the partner bond of s*).
+- **Apply.** λ breaks exactly that bond, and its other atom takes the pair; NONE breaks nothing.
+  SAMPLE_VERSION 13.
+- **Label statistics** (11,865 complete steps, 14,753 arrows): 11,324 partner bond, 3,275 NONE,
+  154 another bond. 6,153 arrows have more than one choice (λ learned); 8,600 are forced by
+  the mask.
+
+  | sink | partner bond | NONE | another bond |
+  |---|---|---|---|
+  | C | 5,544 | 2,176 | 96 |
+  | H | 5,117 | 0 | 4 |
+  | S | 140 | 141 | 40 |
+  | P | 46 | 234 | 13 |
+  | Si | 0 | 243 | 0 |
+  | B | 1 | 144 | 0 |
+  | Br | 145 | 0 | 0 |
+  | Li | 0 | 103 | 0 |
+  | Al | 0 | 88 | 0 |
+- **Round trip with labeled λ: 99.67%** (11,826 / 11,865), against 99.04% for the WBI rule:
+  75 fixed, none newly failing.
+- **The 39 left:**
+  - 12 Mitsunobu N–P;
+  - 7 donor side "no bond and no lone pair";
+  - 5 C–Si, 4 C–Sn, 3 Li–O, then single cases (Li–N, C–Li, I–O, Na–O, ...).
+- **Diagnosis of the Mitsunobu group (12).**
+  - The source is the N–P bond of a betaine: its pair forms N=C and P leaves as P⁺.
+  - In all 12 records no occupied token spans N–P (WBI 0.45–0.60), and N carries one
+    one-centre lone pair, which is the teacher donor.
+  - Rule 1 (one-centre donor → lone pair) runs before rule 3 (a tokenless bond gives its pair),
+    so N keeps P and becomes N⁺. (r, a) cannot tell the lone pair from the N–P pair: it is the
+    same token.
+  - Open: a donor-side counterpart of λ, or rule 3 before rule 1 (measured on all steps first).
+- **Diagnosis of the donor-side group (7).**
+  - The donor is a hyperconjugated σ bond already leaning into the neighbouring cation:
+    β-silyl and β-boryl carbocations, an allylborane, a cyclopropylcarbinyl cation.
+  - The teacher r is a 3-centre token (C 0.43, C⁺ 0.36, Si 0.16) with χ 0.05–0.28, below the
+    σ threshold of 0.5.
+  - Rule 2 rejects it, the bond is not tokenless, and a has no lone pair, so the edit cannot
+    read the arrow.
+  - Open: before the Kekulé fallback, take the largest-weight centre of r bonded to a whatever
+    its χ. This is reached only where every other rule has failed, so it cannot change a step
+    that passes now.
