@@ -10,8 +10,12 @@ is the 4-tuple of the spec, with sets in place of single orbitals:
   SOURCE_RELAXED.
 - acceptor site b; acceptor set = every acceptor-candidate token on b (d-type polarization
   functions excluded unless configured). When another arrow of the step moves the pair of a
-  bond (b, d) away from b, that bond breaks at the sink and only the tokens also on d are kept
-  (SINK_RELAXED if none is). For a bond source (a, c), an antibonding orbital of that bond
+  bond (b, x) away from b (a leaving arrow: bond b-x -> x, or the pair of b-x relayed on from
+  x), that bond breaks at the sink and only the antibonding tokens (negative overlap
+  population) also on x are kept. With none (the record often holds such a bond as nearly
+  ionic: no token spans it), the tokens also on x are kept, and with none of those either,
+  every token on b (SINK_RELAXED); `apply_predicted` then finds the leaving bond by its
+  Wiberg index. For a bond source (a, c), an antibonding orbital of that bond
   (leading centres a and c, negative overlap population) is never an acceptor; a lone pair
   has no bond of its own, so nothing is excluded for it.
 - a lone pair drawn on an atom that carries no one-centre occupied token (an enolate drawn as
@@ -77,7 +81,7 @@ class ArrowLabel:
     teacher_donor: int = -1  # r*: set by the sample builder, a valid pair with teacher_acceptor
     teacher_acceptor: int = -1  # s*
     breaks_bd: int | None = None  # 1 / 0: the bond b-d to s*'s partner d breaks in this step
-    breaks_bd_forced: bool = False  # True: fixed by physics (`bond_break_label`), not learned
+    breaks_bd_forced: bool = False  # True: fixed by physics (`apply_predicted.break_labels`)
 
     def to_dict(self) -> dict:
         return {
@@ -238,8 +242,12 @@ def acceptor_set(
     if not on_b and _on(rt, b, ~rt.occupied):
         flags.add(AlignFlag.SINK_ONLY_D)
     if partners:
-        both = [t for t in on_b if any(d in rt.centres(t) for d in partners)]
-        if both:
+        both = [t for t in on_b if any(x in rt.centres(t) for x in partners)]
+        anti = [t for t in both if rt.orbital(t).descriptors.overlap_population < 0]
+        anti = [t for t in anti if not antibonding_on(rt, t, own)]
+        if anti:
+            on_b = anti
+        elif both:
             on_b = both
         else:
             flags.add(AlignFlag.SINK_RELAXED)
@@ -362,6 +370,7 @@ def report(alignments: list[StepAlignment], skipped: Counter) -> dict:
         "mean_donor_set": float(np.mean([len(x.donor_ids) for x in labels])) if labels else 0,
         "mean_acceptor_set": float(np.mean([len(x.acceptor_ids) for x in labels])) if labels else 0,
         "flag_fraction": {str(f): flags[f] / len(labels) if labels else 0.0 for f in AlignFlag},
+        "flag_count": {str(f): flags[f] for f in AlignFlag},
         "n_sinks_on_only_d_atoms": only_d,  # aligned by fallback or unaligned
         "unaligned_groups": [
             {"reason": r, "group": g, "count": n} for (r, g), n in groups.most_common()

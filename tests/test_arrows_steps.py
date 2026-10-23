@@ -363,7 +363,9 @@ def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, 
     assert np.array_equal(back.pair_z[valid][:, k], s.pair_z[valid][:, k])  # bits, exact
 
 
-def test_the_parallel_build_matches_the_sequential_one(mini_steps, token_loader, tmp_path):
+def test_the_parallel_build_matches_the_sequential_one(
+    mini_steps, token_loader, sp_record, tmp_path
+):
     """Two spawned workers give the same samples as one process (tokens read from files, so
     the loader can be sent to the workers)."""
     from ksmech.arrows.reactants import TokenCache, _fragment_keys
@@ -371,16 +373,22 @@ def test_the_parallel_build_matches_the_sequential_one(mini_steps, token_loader,
     from ksmech.data import chem
     from ksmech.orbitals.build import tokens_path
     from ksmech.orbitals.tokens import save_tokens
+    from ksmech.qm.bond_index import save_bond_indices
+    from ksmech.qm.records import save_record
 
     steps = list(mini_steps.values())
-    cache = TokenCache(tmp_path / "tokens")
+    cache = TokenCache(tmp_path / "tokens", bond_index_dir=tmp_path / "wbi")
     for step in steps:
         for _, _, key in _fragment_keys(chem.parse_mapped(step.reactants_smiles)):
             if key and key != "CI":
                 t = token_loader(key)
                 save_tokens(t, tokens_path(cache.tokens_dir, key, 0, cache.method))
+                rec = sp_record(key)
+                save_bond_indices(rec, save_record(rec, tmp_path / "rec.npz"), tmp_path / "wbi")
     one = build_step_samples(steps, cache)
-    two = build_step_samples_parallel(steps, TokenCache(cache.tokens_dir), n_workers=2)
+    other = TokenCache(cache.tokens_dir, bond_index_dir=tmp_path / "wbi")
+    two = build_step_samples_parallel(steps, other, n_workers=2)
+    assert one[0], one[1]  # samples were built, not every step skipped
     assert one[1] == two[1] and sorted(one[0]) == sorted(two[0])
     for sid, s in one[0].items():
         other = two[0][sid]

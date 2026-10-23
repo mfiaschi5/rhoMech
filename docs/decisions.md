@@ -3255,3 +3255,86 @@ Each step is counted once, under the first reason that applies, in this order:
   end as a cache warm-up for `data/cache/oriented/`; its blocks are not deleted. Its outputs
   are dirty and are not used. The stage-A samples are rebuilt from a clean committed tree,
   then the sidecar.
+
+## 2026-10-23 — Labels: leaving-arrow refinement, WBI leaving rule, sequential masks
+
+Two user decisions (2026-10-22 and 2026-10-23) replace the weakest-bond rule and the
+"sink loses any bond" extension of the bond-break flag.
+
+- **Acceptor labels (`align.acceptor_set`).** When another arrow of the step moves the pair of
+  a bond b–x away from the sink b, the acceptor set is restricted to the antibonding tokens
+  (negative overlap population) on b and x. The restriction applies only when such a token
+  exists; otherwise the previous set is kept (tokens on b and x, else every token on b,
+  SINK_RELAXED).
+  - Such a token rarely exists where it matters. Of 143 labels with a leaving bond and no
+    antibonding token on it, 140 have no virtual token on b and x at all, and 125 have no
+    occupied one either.
+  - The pairs are C–Cl 57, S–Cl 23, C–Br 21, S–O 13, P–Cl 5 and P–O 4: tetrahedral
+    intermediates (`CN[C](C)([O-])Cl`), bromonium ions, sulfonyl and phosphoryl chlorides with
+    an O⁻.
+  - In those records the leaving bond is already nearly ionic: the leaving atom carries only
+    one-centre lone pairs, at about 1.2 times the covalent-radius sum.
+- **Wiberg bond indices (`qm.bond_index`, `ksmech-qm bond-index`).**
+  WBI_ab = Σ_{μ∈a, ν∈b} (S^½ P S^½)²_μν, with P the record's total density and the Lewis bonds
+  of `prepare_mol(atom_order_smiles)`. Sanity values: H2 1.00, ethane C–C 1.03, C=O 2.00,
+  C≡N 2.83, benzene 1.44.
+  - They are kept in a per-record sidecar (`data/cache/bond_index/<cache key>.npz`, stamped
+    with the QM record) and attached to the tokens at load time (`MoleculeTokens.bond_index`).
+  - They are not stored in the token file: its content hash keys the contact-block cache,
+    which the warm-up build is filling.
+  - `TokenCache` treats a molecule without its sidecar as missing. 14,343 records, 0 failures.
+  - Stage-A pair feature `wbi`: the largest WBI over the Lewis bonds joining the two centre
+    sets, 0 when they are not bonded.
+- **Sink rule (`apply_predicted.sink_decision`).** The only bond that can break is b–d.
+  - d is the partner of s (an antibonding s's largest-weight centre bonded to b, multiple bonds
+    first, never the donor atom).
+  - When s names none (one-centre, not antibonding, or its partner is the donor atom), d is the
+    Lewis bond at b with the lowest WBI, excluding the bond to the donor atom. A tie within
+    0.02 is flagged LEAVING_AMBIGUOUS; it never occurred on PMechDB.
+  - The flag decides whether b–d breaks:
+    - open shell: 0;
+    - full-shell period 1–2: 1, whatever s is;
+    - period 3+ with a one-centre s: 0;
+    - otherwise learned: 1 iff the annotated step breaks b–d.
+  - The full-shell rule now runs before the one-centre rule. A bromonium carbon whose teacher
+    acceptor is a one-centre virtual must still lose a bond; this was 22 VALENCE failures.
+- **Sequential masks (`break_labels`).** Forced and learned flags are labeled on the molecule
+  as edited by the earlier arrows of the step, in the order `apply_predicted_arrows` reads
+  them. Applying forced and learned flags together gives the same product as learned flags
+  alone on all 11,865 steps (0 disagreements; the gate test asserts it). SAMPLE_VERSION 12.
+- **Diagnostic: lowest-WBI bond at the sink vs the annotated leaving bond.** This covers all
+  12,590 sinks with a leaving arrow, including those where s names the partner and WBI is
+  never consulted. Overall 70.0%.
+
+  | sink | agree | of | ties within 0.02 |
+  |---|---|---|---|
+  | H | 100% | 5,121 | 0 |
+  | C | 47.1% | 6,729 | 813 |
+  | N | 90.6% | 244 | 90 |
+  | S | 23.8% | 181 | 21 |
+  | Br | 100% | 145 | 0 |
+  | P | 11.9% | 59 | 27 |
+  | O | 81.6% | 49 | 7 |
+  | Cl, F | 100% | 36 | 0 |
+  | I | 96.0% | 25 | 0 |
+
+  - Most C disagreements are π pairs leaving (C=O⁺ → O 1,728, C=N⁺ → N 365): a multiple bond
+    has the higher WBI by construction, and there s is a π* that names its partner.
+  - At S and P the lowest WBI is often S–C or P–Cl, not the leaving S–Cl or P=O. The WBI rule
+    is a fallback for C-type sinks, not a general leaving-group oracle.
+- **Round trip (IBO, 11,865 complete steps).**
+
+  | rule | round trip |
+  |---|---|
+  | refinement + b–d only, no fallback | 98.47% |
+  | + WBI fallback | 98.90% |
+  | **+ full shell before one-centre** | **99.04%** (11,751) |
+
+  The 99.03% of the 2026-10-22 extension is the baseline: 1 of its 115 failures passes now and
+  none is new.
+- **What still fails (114).**
+  - 25 S VALENCE (sulfonyl S with an O⁻: the teacher σ* names a kept S–O, flag 0);
+  - 12 Mitsunobu N–P and 7 donor-side "no bond and no lone pair" (separate diagnosis);
+  - 10 C–Cl and 9 C–Br (the teacher σ* names a C–C partner);
+  - 8 S–Cl, 6 P–Cl, 5 S–O;
+  - the rest scattered.

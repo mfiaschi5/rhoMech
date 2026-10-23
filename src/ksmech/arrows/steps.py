@@ -44,7 +44,7 @@ from rich.console import Console
 
 from ksmech.arrows import store
 from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
-from ksmech.arrows.apply_predicted import bond_break_label
+from ksmech.arrows.apply_predicted import PredictedArrow, break_labels
 from ksmech.arrows.reactants import (
     CorrespondenceError,
     MissingTokens,
@@ -72,7 +72,7 @@ from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 11
+SAMPLE_VERSION = 12
 PARTS = ("train", "val", "test")
 STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
@@ -246,7 +246,8 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
     """The labels restricted to the pairs `pair_valid` allows (the bonded-site filter and the
     antibonding-partner rule). A donor (acceptor) with no valid partner in the other set leaves
     its set and the label is flagged LABEL_FILTERED; every rejected cell is counted by group in
-    `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells. None when a
+    `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells, and the
+    bond-break flags are read on the teacher arrows in step order (`break_labels`). None when a
     label has no valid cell left (the step is skipped as LABEL_FILTERED)."""
     row, col = _pair_index(sample)
 
@@ -270,13 +271,16 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
         if trimmed:
             lab = replace(lab, flags=lab.flags | {AlignFlag.LABEL_FILTERED})
         r, s = representatives(rt, lab, valid)
-        breaks, forced = bond_break_label(rt, lab, s)
-        out.append(
-            replace(
-                lab, teacher_donor=r, teacher_acceptor=s, breaks_bd=breaks, breaks_bd_forced=forced
-            )
-        )
-    return out
+        out.append(replace(lab, teacher_donor=r, teacher_acceptor=s))
+    arrows = [
+        PredictedArrow(x.teacher_donor, x.donor_site, x.teacher_acceptor, x.acceptor_site)
+        for x in out
+    ]
+    flags = break_labels(rt, arrows, out)
+    return [
+        replace(x, breaks_bd=flag, breaks_bd_forced=forced)
+        for x, (flag, forced) in zip(out, flags, strict=True)
+    ]
 
 
 def sample_for_step(

@@ -154,7 +154,7 @@ def test_property_heavy_atoms_and_charge_are_conserved(token_loader):
         "[H:1][Br:2].[CH2:3]=[CH2:4]",
     ]
     n_ok = 0
-    for _ in range(300):
+    for _ in range(600):  # random arrows: few give a valid product
         rt = _rt(sides[rng.integers(len(sides))], token_loader)
         donors = np.flatnonzero(rt.donor_ok) + rt.n_atoms
         acceptors = np.flatnonzero(rt.acceptor_ok) + rt.n_atoms
@@ -206,9 +206,17 @@ def test_a_hydride_gives_the_pair_of_its_ionic_bond(token_loader):
     assert out.ok and out.smiles == want
 
 
+def _one_arrow_flag(rt, label, s):
+    from ksmech.arrows.apply_predicted import break_labels
+
+    (r,) = label.donor_ids
+    arrow = PredictedArrow(r, label.donor_site, s, label.acceptor_site)
+    (out,) = break_labels(rt, [arrow], [label])
+    return out
+
+
 def test_bond_break_labels_are_learned_only_where_the_tuple_cannot_decide(token_loader):
     from ksmech.arrows.align import ArrowLabel
-    from ksmech.arrows.apply_predicted import bond_break_label
 
     rt = _rt("C[O-:10].C[Si:20](C)(C)[Cl:21].[CH3:30][Cl:31]", token_loader)
     o, si, cl = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
@@ -223,26 +231,51 @@ def test_bond_break_labels_are_learned_only_where_the_tuple_cannot_decide(token_
         return ArrowLabel(frozenset({donor}), o, frozenset({s}), site, sink_partners=partners)
 
     # Si can expand its octet: the dataset decides, learned
-    assert bond_break_label(rt, label(si, si_star), si_star) == (0, False)  # pentacoordinate
-    assert bond_break_label(rt, label(si, si_star, (cl,)), si_star) == (1, False)  # SN2 at Si
+    assert _one_arrow_flag(rt, label(si, si_star), si_star) == (0, False)  # pentacoordinate
+    assert _one_arrow_flag(rt, label(si, si_star, (cl,)), si_star) == (1, False)  # SN2 at Si
     # a full-shell carbon must lose a bond: forced, whatever the label says
-    assert bond_break_label(rt, label(c, c_star), c_star) == (1, True)
+    assert _one_arrow_flag(rt, label(c, c_star), c_star) == (1, True)
 
 
-def test_a_sigma_star_toward_the_donor_atom_learns_whether_b_loses_any_bond(token_loader):
+def test_without_a_partner_in_s_the_lowest_wiberg_bond_at_b_leaves(token_loader):
+    from dataclasses import replace
+
     from ksmech.arrows.align import ArrowLabel
-    from ksmech.arrows.apply_predicted import bond_break_label
+    from ksmech.arrows.apply_predicted import LEAVING_AMBIGUOUS
 
     rt = _rt("C[O:10][Si:20](C)(C)[Cl:21]", token_loader)
     o, si, cl = rt.site_of_map(10), rt.site_of_map(20), rt.site_of_map(21)
     donor = next(
         t for t in rt.tokens_on_atom[o] if rt.occupied[t - rt.n_atoms] and len(rt.centres(t)) == 1
     )
-    si_o_star = _token(rt, False, {si, o}, antibonding=True)
+    si_o_star = _token(rt, False, {si, o}, antibonding=True)  # its partner is the donor atom
+    tokens = rt.fragments[0].tokens
+    wbi = dict(tokens.bond_index)
+    tokens.bond_index = {k: (0.40 if set(k) == {si, cl} else max(v, 0.9)) for k, v in wbi.items()}
 
     def label(partners=()):
         return ArrowLabel(frozenset({donor}), o, frozenset({si_o_star}), si, sink_partners=partners)
 
-    # the arrow makes Si-O multiple; whether Si also loses a bond (Cl here) is the dataset's call
-    assert bond_break_label(rt, label(), si_o_star) == (0, False)
-    assert bond_break_label(rt, label((cl,)), si_o_star) == (1, False)
+    # the flag is about the bond the rule names: Si-Cl, the lowest Wiberg index at Si
+    assert _one_arrow_flag(rt, label(), si_o_star) == (0, False)
+    assert _one_arrow_flag(rt, label((cl,)), si_o_star) == (1, False)
+    arrow = PredictedArrow(donor, o, si_o_star, si, breaks_bd=1)
+    out = apply_predicted_arrows(rt.mol, [arrow], rt)
+    assert out.ok and "[Cl-:21]" in out.smiles and LEAVING_AMBIGUOUS not in out.flags
+    tied = {k: (0.40 if si in k and o not in k else v) for k, v in tokens.bond_index.items()}
+    tokens.bond_index = tied  # Si-C and Si-Cl both at 0.40: the choice is flagged
+    out = apply_predicted_arrows(rt.mol, [replace(arrow)], rt)
+    assert LEAVING_AMBIGUOUS in out.flags
+    tokens.bond_index = wbi
+
+
+def test_forced_flags_read_on_the_edited_state_agree_with_apply(mini_steps, token_loader):
+    for step in mini_steps.values():
+        rt = ReactantTokens.from_smiles(step.reactants_smiles, token_loader)
+        labels = align_step(step, rt).labels
+        learned = labeled_arrows(rt, labels)
+        both = labeled_arrows(rt, labels, with_forced=True)
+        assert any(a.breaks_bd is not None for a in both) or not labels
+        one = apply_predicted_arrows(rt.mol, learned, rt)
+        two = apply_predicted_arrows(rt.mol, both, rt)
+        assert (one.ok, one.smiles) == (two.ok, two.smiles), step.step_id

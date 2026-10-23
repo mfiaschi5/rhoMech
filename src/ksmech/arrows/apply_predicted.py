@@ -14,23 +14,26 @@ Source, for donor r at site a:
 4. else a lone pair of a; else, last, a Kekule structure in which a has a multiple bond
    (flagged APPLY_KEKULE_FALLBACK).
 
-The bond a-b forms (or gains one order). Sink, for acceptor s at site b:
-5. b had an open shell before the new bond (a carbocation, H+, a borane): nothing breaks;
-6. b is in period 3 or beyond and s is one-centre (an empty d / p of its own, TiCl4, SnR3+):
-   nothing breaks (the octet may expand);
-7. else, if s is antibonding (negative overlap population), the bond to its centre d bonded to
-   b breaks (multiple bonds first, then weight) and d takes the pair; with no such centre, the
-   bond whose pair sits mostly off b (smallest weight on b over the occupied tokens spanning
-   it) breaks.
-
-Rule 7 is not decided by the tuple when b can expand its octet and s is a sigma*: PMechDB adds
-to Si without a leaving group (pentacoordinate silicates) but substitutes at Br and Cl, and P,
-S and I go both ways. Those steps stay below the round-trip gate (docs/decisions.md).
+The bond a-b forms (or gains one order). Sink, for acceptor s at site b: the only bond that can
+break is b-d, and d takes the pair (`sink_decision`). d is the partner of s, the largest-weight
+centre of an antibonding s bonded to b (multiple bonds first, never the donor site); when s names
+none (one-centre, not antibonding, or its partner is the donor atom), d is the other end of the
+Lewis bond at b with the lowest Wiberg index in the QM record (`qm.bond_index`; the bond to the
+donor atom excluded; a tie within `WBI_TIE` is flagged LEAVING_AMBIGUOUS). Whether b-d breaks
+is the arrow's bond-break flag `breaks_bd`, which physics fixes where it can, read in the state
+the earlier arrows of the step leave:
+5. b had an open shell before the new bond (a carbocation, H+, a borane): 0;
+6. b is a full-shell atom of period 1-2 (H, C, N, O): 1, whatever s is (a bromonium carbon
+   whose acceptor is a one-centre virtual still loses a bond);
+7. b is in period 3+ and s is one-centre (an empty orbital of b's own: TiCl4, SnR3+): 0;
+8. else (b in period 3+ with a multi-centre s: Si, P, S, I) the flag is learned.
+A flag given with the arrow wins (the label, or the decoder's output where it is learned).
+`break_labels` labels the flags of a dataset step with the same reading.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from rdkit import Chem, rdBase
@@ -60,7 +63,7 @@ class PredictedArrow:
     donor_site: int
     acceptor: int
     acceptor_site: int
-    breaks_bd: int | None = None  # the decoder's bond-break flag; None: the physical rules decide
+    breaks_bd: int | None = None  # bond-break flag of b-d; None: the forced value, if any
 
 
 def _pair(i: int, j: int) -> tuple[int, int]:
@@ -102,6 +105,8 @@ class EditState:
 
 
 KEKULE_FALLBACK = "APPLY_KEKULE_FALLBACK"
+LEAVING_AMBIGUOUS = "LEAVING_AMBIGUOUS"  # two Lewis bonds at b within WBI_TIE of the lowest WBI
+WBI_TIE = 0.02
 SIGMA_CHI = 0.5  # chi at or above: a sigma bond pair (chi 1 sigma, 0 pi)
 
 
@@ -213,31 +218,59 @@ def open_shell(state: EditState, i: int) -> bool:
     return state.nonbonding(i) + 2 * bonds < capacity
 
 
-def _sink(state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, room: bool) -> None:
-    """Rules 5-7 of the module docstring for the acceptor side of one arrow; `room`: the
-    acceptor site had an open shell before the new bond. A set `arrow.breaks_bd` decides
-    whether a bond at b breaks; rule 7 still says which one."""
-    b = _mol_index(tokens, arrow.acceptor_site)
-    if arrow.breaks_bd == 0:
-        return
-    if arrow.breaks_bd is None:
-        if room:
-            return
-        expands = state.base.GetAtomWithIdx(b).GetAtomicNum() > 10  # period 3+: can exceed 8
-        if expands and len(tokens.centres(arrow.acceptor)) == 1:
-            return  # an empty orbital of its own (Ti, Sn d / p): the bond only forms
-    site, skip = arrow.acceptor_site, arrow.donor_site
-    d = None
-    if tokens.orbital(arrow.acceptor).descriptors.overlap_population < 0:
-        d = _bonded_centre(tokens, state, arrow.acceptor, site, skip, True, multiple_first=True)
-    if d is None:  # a full shell with no partner named: the bond whose pair sits mostly off b
-        a = _mol_index(tokens, arrow.donor_site)
-        glob = tokens.global_atom
-        nbrs = [x for x in state.neighbours(b) if x != a]
-        d = min(nbrs, key=lambda x: bond_weight_on(tokens, glob[b], glob[x]), default=None)
-    if d is not None:
+def leaving_partner(
+    state: EditState, tokens: ReactantTokens, b: int, a: int
+) -> tuple[int | None, bool]:
+    """(the neighbour d of b, mol indices, whose Lewis bond to b has the lowest Wiberg index,
+    ambiguous): bonds the record has and this step has not consumed, the bond to the donor
+    atom a excluded; ambiguous when the next one is within WBI_TIE."""
+    glob = tokens.global_atom
+    scored = sorted(
+        (w, x)
+        for x in state.neighbours(b)
+        if x != a and (w := tokens.bond_index(glob[b], glob[x])) is not None
+    )
+    if not scored:
+        return None, False
+    return scored[0][1], len(scored) > 1 and scored[1][0] - scored[0][0] < WBI_TIE
+
+
+def sink_decision(
+    state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, room: bool
+) -> tuple[int | None, int | None, bool]:
+    """(forced flag, partner d, ambiguous) of one arrow's sink in the current state (rules
+    5-8): the forced flag is 0 / 1 where physics fixes it, None where it is learned; d is a mol
+    index (the partner of s, else the lowest-WBI Lewis bond at b), None when b has no bond to
+    break; ambiguous: d came from a WBI tie. `room`: b had an open shell before the new bond."""
+    b, s = _mol_index(tokens, arrow.acceptor_site), arrow.acceptor
+    d, ambiguous = None, False
+    if len(tokens.centres(s)) > 1 and tokens.orbital(s).descriptors.overlap_population < 0:
+        site, skip = arrow.acceptor_site, arrow.donor_site
+        d = _bonded_centre(tokens, state, s, site, skip, True, multiple_first=True)
+    if d is None:
+        d, ambiguous = leaving_partner(state, tokens, b, _mol_index(tokens, arrow.donor_site))
+    if room:
+        return 0, d, ambiguous
+    if state.base.GetAtomWithIdx(b).GetAtomicNum() <= 10:
+        return 1, d, ambiguous  # a full octet must lose a bond, whatever s is
+    if len(tokens.centres(s)) == 1:
+        return 0, d, ambiguous  # period 3+: an empty orbital of b's own, the octet expands
+    return None, d, ambiguous
+
+
+def _break(state: EditState, b: int, d: int | None, flag: int | None) -> None:
+    if flag and d is not None:
         state.decrement(b, d)
         state.edit.add((d,), +1)
+
+
+def _step(state: EditState, tokens: ReactantTokens, arrow: PredictedArrow, flags: set):
+    """Source and new bond of one arrow; returns (b, the sink decision)."""
+    b = _mol_index(tokens, arrow.acceptor_site)
+    room = open_shell(state, b)
+    _source(state, tokens, arrow, flags)
+    state.edit.add((_mol_index(tokens, arrow.donor_site), b), +1)
+    return b, sink_decision(state, tokens, arrow, room)
 
 
 def apply_predicted_arrows(
@@ -251,64 +284,65 @@ def apply_predicted_arrows(
     flags: set[str] = set()
     try:
         for arrow in arrows:
-            b = _mol_index(tokens, arrow.acceptor_site)
-            room = open_shell(state, b)
-            _source(state, tokens, arrow, flags)
-            state.edit.add((_mol_index(tokens, arrow.donor_site), b), +1)
-            _sink(state, tokens, arrow, room)
+            b, (forced, d, ambiguous) = _step(state, tokens, arrow, flags)
+            flag = forced if arrow.breaks_bd is None else arrow.breaks_bd
+            if flag and ambiguous:
+                flags.add(LEAVING_AMBIGUOUS)
+            _break(state, b, d, flag)
         product = sanitize_product(apply_edit(state.base, state.edit))
         return ApplyResult(product, flags=frozenset(flags))
     except ArrowApplyError as exc:
         return ApplyResult(None, exc.reason, exc.detail, flags=frozenset(flags))
 
 
-def bond_break_label(tokens: ReactantTokens, label: ArrowLabel, s: int) -> tuple[int | None, bool]:
-    """(breaks_bd, forced) of an aligned arrow with acceptor s: does the bond from b to s's
-    partner d break in this step? Physics fixes it where it can:
-    - s is one-centre (an empty orbital of b's own) or b has an open shell: 0, forced;
-    - b is a full-shell atom of period 1-2 (H, C, N, O, ...): 1, forced;
-    - b is in period 3+ and s is antibonding with a centre d bonded to b: learned, 1 when the
-      annotated step breaks b-d (`label.sink_partners`), else 0;
-    - b is in period 3+ and s is antibonding but its partner is the donor's own atom (the
-      arrow turns that bond multiple): learned, 1 when the annotated step breaks any bond at b
-      (rule 7's weakest bond then says which), else 0;
-    - otherwise None (s not antibonding, or b bonded to nothing but the donor's atom)."""
-    b = tokens.mol_atom.get(label.acceptor_site)
-    if b is None:
-        return None, False
+def break_labels(
+    tokens: ReactantTokens, arrows: list[PredictedArrow], labels: list[ArrowLabel]
+) -> list[tuple[int | None, bool]]:
+    """(breaks_bd, forced) of every arrow of a dataset step (`arrows`: its teacher tuples, in
+    the order of `labels`), read as `apply_predicted_arrows` reads them: the forced value where
+    physics fixes it, else 1 when the annotated step breaks b-d (`label.sink_partners`; d the
+    partner `sink_decision` names), 0 when not, None when b has no bond to break. The state
+    advances with these flags. An arrow the edit cannot read (and every later one) gets
+    (None, False)."""
     state = EditState(Chem.Mol(tokens.mol))
-    if len(tokens.centres(s)) == 1 or open_shell(state, b):
-        return 0, True
-    if state.base.GetAtomWithIdx(b).GetAtomicNum() <= 10:
-        return 1, True
-    if tokens.orbital(s).descriptors.overlap_population >= 0:
-        return None, False
-    site, skip = label.acceptor_site, label.donor_site
-    d = _bonded_centre(tokens, state, s, site, skip, True, multiple_first=True)
-    if d is None:
-        a = tokens.mol_atom.get(skip)
-        if not any(x != a for x in state.neighbours(b)):
-            return None, False
-        return int(bool(label.sink_partners)), False
-    d_global = next(g for g, i in tokens.mol_atom.items() if i == d)
-    return int(d_global in label.sink_partners), False
+    out: list[tuple[int | None, bool]] = []
+    try:
+        for arrow, label in zip(arrows, labels, strict=True):
+            b, (forced, d, _) = _step(state, tokens, arrow, set())
+            if forced is not None:
+                flag = forced
+            else:
+                flag = None if d is None else int(tokens.global_atom[d] in label.sink_partners)
+            out.append((flag, forced is not None))
+            _break(state, b, d, flag)
+    except ArrowApplyError:
+        pass
+    return out + [(None, False)] * (len(labels) - len(out))
 
 
 def labeled_arrows(
-    tokens: ReactantTokens, labels: list[ArrowLabel], valid=None, with_breaks: bool = True
+    tokens: ReactantTokens,
+    labels: list[ArrowLabel],
+    valid=None,
+    with_breaks: bool = True,
+    with_forced: bool = False,
 ) -> list[PredictedArrow]:
     """The teacher representatives (r*, a*, s*, b*) of aligned labels, as predicted arrows;
-    with `valid(r, s)` the teacher pair is chosen among valid pairs, as the samples do; with
-    `with_breaks` each arrow carries its labeled bond-break flag where it is learned; a forced
-    flag is left to the physical rules, which apply it in the state the earlier arrows of the
-    step leave (`bond_break_label`)."""
-    out = []
-    for label in labels:
-        r, s = representatives(tokens, label, valid)
-        flag, forced = bond_break_label(tokens, label, s) if with_breaks else (None, True)
-        flag = None if forced else flag
-        out.append(PredictedArrow(r, label.donor_site, s, label.acceptor_site, flag))
-    return out
+    with `valid(r, s)` the teacher pair is chosen among valid pairs, as the samples do. With
+    `with_breaks` each arrow carries its learned bond-break flag (`break_labels`), with
+    `with_forced` its forced flag too (the same edit either way)."""
+    arrows = [
+        PredictedArrow(r, lab.donor_site, s, lab.acceptor_site)
+        for lab in labels
+        for r, s in [representatives(tokens, lab, valid)]
+    ]
+    if not with_breaks:
+        return arrows
+    flags = break_labels(tokens, arrows, labels)
+    return [
+        replace(a, breaks_bd=flag if with_forced or not forced else None)
+        for a, (flag, forced) in zip(arrows, flags, strict=True)
+    ]
 
 
 def valid_pair_test(tokens: ReactantTokens):

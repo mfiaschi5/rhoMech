@@ -83,3 +83,17 @@ def test_antiperiplanar_bonds_have_a_dihedral_cosine_near_minus_one(sp_record):
     ]
     assert cos and min(cos) < -0.95  # staggered: each C-H has an anti C-H on the other carbon
     assert all(-1.0 - 1e-9 <= c <= 1.0 + 1e-9 for c in cos)
+
+
+def test_wiberg_index_of_the_bond_joining_the_two_tokens(pair):
+    methanol, chloromethane, block = pair
+    lp_cl = highest_lone_pair(chloromethane, "Cl")
+    cs = sigma_star(chloromethane, {"C", "Cl"})
+    i, j = _cell(methanol, chloromethane, lp_cl, cs)
+    c, cl = sorted(leading(cs))
+    assert block.z[i, j, A["wbi"]] == pytest.approx(chloromethane.bond_index[(c, cl)])
+    assert 0.5 < block.z[i, j, A["wbi"]] < 1.5
+    n_o, n_v = len(methanol.occupied()), len(methanol.virtual())
+    assert (block.z[:n_o, n_v:, A["wbi"]] == 0).all()  # across fragments: not bonded
+    unbonded = block.z[..., A["bonded"]] == 0
+    assert (block.z[..., A["wbi"]][unbonded] == 0).all()

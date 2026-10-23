@@ -52,6 +52,7 @@ from ksmech.orbitals.localize import (
     is_fermi_smeared,
     localize_record,
 )
+from ksmech.qm.bond_index import as_dict, lewis_bond_indices
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
@@ -289,6 +290,10 @@ class MoleculeTokens:
     fermi_smeared: bool = False  # an MO is > 0.05 from its aufbau occupation (`is_fermi_smeared`)
     digest: str = field(default="", repr=False, compare=False)  # content sha256 (provenance)
     source_path: str = field(default="", repr=False, compare=False)  # file it was loaded from
+    # Lewis bond (i < j) -> Wiberg bond index, from the QM record (`qm.bond_index`): attached at
+    # build or load time, not part of the token file (its hash keys the contact-block cache)
+    bond_index: dict[tuple[int, int], float] | None = field(default=None, repr=False, compare=False)
+    bond_index_input: tuple[str, str] = field(default=("", ""), repr=False, compare=False)
 
     @property
     def C_loc(self) -> np.ndarray:
@@ -548,6 +553,7 @@ def build_molecule_tokens(
         qm_warnings=rec.warnings,
         fg_vocab_size=len(vocab),
         fermi_smeared=is_fermi_smeared(rec),
+        bond_index=as_dict(*lewis_bond_indices(rec)),
     )
 
 

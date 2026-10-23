@@ -38,6 +38,7 @@ from ksmech.orbitals.tokens import (
     OrbitalToken,
     load_tokens,
 )
+from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, bond_index_path, load_bond_indices
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.xtb_calc import QMConfig
 
@@ -167,7 +168,9 @@ class TokenCache:
 
     A file whose provenance header no longer matches (schema, config or its QM record) is
     treated as absent and its reason kept in `stale` (STALE_ARTIFACT), unless `allow_stale`
-    (diagnostics only). Every token file served is reported to `provenance.note_input`."""
+    (diagnostics only). So is a molecule without its Wiberg bond-index sidecar
+    (`ksmech-qm bond-index`), which is attached to the tokens. Every token file and sidecar
+    served is reported to `provenance.note_input`."""
 
     def __init__(
         self,
@@ -176,8 +179,10 @@ class TokenCache:
         conformer_id: int = 0,
         maxsize: int = 1024,
         allow_stale: bool = False,
+        bond_index_dir: Path = DEFAULT_BOND_INDEX_DIR,
     ):
         self.tokens_dir = Path(tokens_dir)
+        self.bond_index_dir = Path(bond_index_dir)
         self.method = method or QMConfig().method
         self.conformer_id = conformer_id
         self.maxsize = maxsize
@@ -190,7 +195,15 @@ class TokenCache:
         if not path.exists():
             return None
         try:
-            return load_tokens(path, verify=not self.allow_stale)
+            tokens = load_tokens(path, verify=not self.allow_stale)
+            side = bond_index_path(self.bond_index_dir, key, self.conformer_id, self.method)
+            if not side.exists():
+                self.stale[key] = f"{side}: no bond indices (run `ksmech-qm bond-index`)"
+                return None
+            tokens.bond_index = load_bond_indices(side, verify=not self.allow_stale)
+            header = prov.read_header(side)
+            tokens.bond_index_input = (prov.file_input_name(side), header.content_sha256)
+            return tokens
         except StaleArtifact as exc:
             self.stale[key] = str(exc)
             return None
@@ -206,6 +219,8 @@ class TokenCache:
                 self._memo.popitem(last=False)
         if value is not None and value.source_path:
             prov.note_input(prov.file_input_name(value.source_path), value.digest)
+        if value is not None and value.bond_index_input[0]:
+            prov.note_input(*value.bond_index_input)
         return value
 
 
@@ -318,6 +333,18 @@ class ReactantTokens:
             off + int(a): float(w)
             for a, w in zip(d.all_center_atoms, d.all_center_weights, strict=True)
         }
+
+    def bond_index(self, a: int, b: int) -> float | None:
+        """Wiberg index of the Lewis bond between global atoms a and b of the record (None when
+        they are not bonded there, or sit on different fragments)."""
+        f = int(self.atom_fragment[a])
+        if f != int(self.atom_fragment[b]):
+            return None
+        wbi = self.fragments[f].tokens.bond_index
+        if wbi is None:
+            raise ValueError(f"{self.fragments[f].key}: tokens without bond indices")
+        off = int(self.atom_offsets[f])
+        return wbi.get((min(a, b) - off, max(a, b) - off))
 
     @cached_property
     def tokens_on_atom(self) -> dict[int, list[int]]:

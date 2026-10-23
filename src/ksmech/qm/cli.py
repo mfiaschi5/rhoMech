@@ -12,6 +12,7 @@ from rich.console import Console
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.data.schema import Source
 from ksmech.qm.batch import featurize_dataset, summarize
+from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, build_bond_indices
 from ksmech.qm.records import DEFAULT_CACHE_DIR
 from ksmech.qm.xtb_calc import QMConfig
 
@@ -31,13 +32,24 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-retry-failed", action="store_true", help="skip known failures")
     run.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     run.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    wbi = sub.add_parser("bond-index", help="Wiberg bond indices of every cached QM record")
+    wbi.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    wbi.add_argument("--out-dir", type=Path, default=DEFAULT_BOND_INDEX_DIR)
     return parser
+
+
+def cmd_bond_index(args: argparse.Namespace, console: Console) -> int:
+    counts = build_bond_indices(args.cache_dir, args.out_dir)
+    console.print(f"bond indices under {args.out_dir}: {dict(counts.most_common())}")
+    return 0 if not any(k.startswith("failed") for k in counts) else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     console = Console()
+    if args.command == "bond-index":
+        return cmd_bond_index(args, console)
     config = QMConfig(
         optimizer=args.optimizer,
         timeout_s=args.timeout,

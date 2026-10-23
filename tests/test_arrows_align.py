@@ -196,3 +196,4 @@ def test_pmechdb_alignment_and_predicted_round_trip():
     assert report["arrows_aligned_fraction"] >= 0.90
     assert report["flag_fraction"]["ALIGN_FALLBACK"] <= 0.10
     assert report["predicted"]["match_rate"] >= 0.95
+    assert report["predicted"]["forced_flag_disagreements"] == []

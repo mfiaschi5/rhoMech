@@ -94,11 +94,13 @@ def run_round_trip(
 
 
 def predicted_round_trip_step(
-    step: ElementaryStep, tokens: ReactantTokens, alignment: StepAlignment
+    step: ElementaryStep, tokens: ReactantTokens, alignment: StepAlignment, with_forced=False
 ) -> RoundTrip:
     """Apply the labeled (token, site) tuples of a completely aligned step from the sites
-    alone (`apply_predicted_arrows`) and compare with the annotated products."""
-    arrows = labeled_arrows(tokens, alignment.labels, valid_pair_test(tokens))
+    alone (`apply_predicted_arrows`) and compare with the annotated products. The arrows carry
+    their learned bond-break flags, and with `with_forced` the forced ones too."""
+    valid = valid_pair_test(tokens)
+    arrows = labeled_arrows(tokens, alignment.labels, valid, with_forced=with_forced)
     result = apply_predicted_arrows(tokens.mol, arrows, tokens)
     status, pattern = compare_products(result, step)
     if status in MATCH_STATUSES:
@@ -140,6 +142,7 @@ def evaluate_alignment(
     labeled tuples of every completely aligned step from their sites, and (optionally) swap
     in every other set member. Returns the alignment report with a `predicted` section."""
     alignments, predicted, skipped, members = [], [], Counter(), Counter()
+    forced_disagree = []
     for step in steps:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
@@ -153,10 +156,14 @@ def evaluate_alignment(
         alignments.append(al)
         if al.complete:
             predicted.append(predicted_round_trip_step(step, rt, al))
+            if predicted_round_trip_step(step, rt, al, with_forced=True).ok != predicted[-1].ok:
+                forced_disagree.append(step.step_id)
             if member_check and predicted[-1].ok:
                 members.update(member_agreement(step, rt, al))
     out = alignment_report(alignments, skipped)
     out["predicted"] = summarize(predicted)
+    # the forced flags labeled on the edited state must be the ones apply reads itself
+    out["predicted"]["forced_flag_disagreements"] = forced_disagree
     out["predicted"]["member_agreement"] = {
         side: {
             "agree": members[(side, True)],

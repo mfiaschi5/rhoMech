@@ -56,6 +56,7 @@ SCALING = {
     "bonded": ("K", "mul", 0),
     "bond_order": ("K", "mul", 0),
     "graph_distance": ("K", "mul", 0),
+    "wbi": ("K", "mul", 0),
     "align_cos": ("K", "mul", 0),
     "dihedral_cos": ("K", "mul", 0),
 }

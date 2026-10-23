@@ -8,6 +8,8 @@ For an ordered (occupied r, virtual s) pair of the reactant set:
   record's Lewis structure (`prepare_mol`): bonded when some centre of r is bonded to some
   centre of s, the largest such bond order, and the shortest graph distance between the two
   sets (0 when they share an atom), capped at 6; across fragments 0, 0 and 6;
+- `wbi`: the largest Wiberg bond index (`qm.bond_index`, from the record's density) over the
+  Lewis bonds joining the two centre sets; 0 when they are not bonded;
 - `centroid_distance`, `cross_coupling`: the distance between the two centroids and |l_r^T B
   l_s| over the AO blocks between their centres, in the reactant pose (within a fragment);
 - `align_cos`: |cos| of the angle between the p vectors of r and s on their main centres (the
@@ -38,6 +40,7 @@ STAGE_A_FEATURES = (
     "bonded",
     "bond_order",
     "graph_distance",
+    "wbi",
     "centroid_distance",
     "cross_coupling",
     "align_cos",
@@ -59,6 +62,13 @@ def _graph(t: MoleculeTokens) -> tuple[np.ndarray, np.ndarray]:
         i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
         order[i, j] = order[j, i] = b.GetBondTypeAsDouble()
     return np.minimum(dist, GRAPH_CAP), order
+
+
+def _wbi_between(t: MoleculeTokens, cr: list[int], cs: list[int], order: np.ndarray) -> float:
+    if t.bond_index is None:
+        raise ValueError(f"{t.smiles}: tokens without bond indices (`ksmech-qm bond-index`)")
+    pairs = [(min(i, j), max(i, j)) for i in cr for j in cs if i != j and order[i, j] > 0]
+    return max((t.bond_index.get(p, 0.0) for p in pairs), default=0.0)
 
 
 def _centres(o: OrbitalToken) -> list[int]:
@@ -112,13 +122,14 @@ def _intra(t: MoleculeTokens, occ, virt, z: np.ndarray, d: np.ndarray, params) -
             z[i, j, A["graph_distance"]] = sub.min()
             z[i, j, A["bonded"]] = float((bonds > 0).any())
             z[i, j, A["bond_order"]] = bonds.max()
+            z[i, j, A["wbi"]] = _wbi_between(t, cr, cs, order)
             ps = _p_vector(s, t, int(s.descriptors.center_atoms[0]))
             if pr is not None and ps is not None:
                 z[i, j, A["align_cos"]], d[i, j, A["align_cos"]] = abs(pr @ ps), True
             cos = _dihedral_cos(t, cr, cs, order)
             if cos is not None:
                 z[i, j, A["dihedral_cos"]], d[i, j, A["dihedral_cos"]] = cos, True
-    d[..., [A["graph_distance"], A["bonded"], A["bond_order"]]] = True
+    d[..., [A["graph_distance"], A["bonded"], A["bond_order"], A["wbi"]]] = True
 
 
 def stage_a_block(fragments: list[MoleculeTokens], params: KSParams = REDUCED) -> PairBlock:
@@ -151,7 +162,7 @@ def stage_a_block(fragments: list[MoleculeTokens], params: KSParams = REDUCED) -
                 _intra(t_f, occ, virt, z, d, params)
             else:
                 z[..., A["graph_distance"]] = GRAPH_CAP
-                d[..., [A["graph_distance"], A["bonded"], A["bond_order"]]] = True
+                d[..., [A["graph_distance"], A["bonded"], A["bond_order"], A["wbi"]]] = True
     bad = ~np.isfinite(block.z)
     block.n_non_finite = int(bad.sum())
     block.defined[bad] = False
