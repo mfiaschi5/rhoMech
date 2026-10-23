@@ -3508,3 +3508,40 @@ is now v7.5, sha256 6c6a023f66dd).
   - Evaluation and the physics floor are on anchors.
 - **Not changed.** QM, tokens, Wiberg indices, stage-A features, the contact sidecar, and the
   dataset-arrow round-trip gate.
+
+## 2026-10-24 — Edit labels (spec v8, phase 1): `arrows/delta_be.py`, `ksmech-arrows edit-labels`
+
+- **R_data.** The dataset arrows of a step are applied as one edit of the drawn reactants and
+  checked against the annotated products. ReactionMatrix holds the non-zero entries on
+  reactant-mol indices; `to_global` maps them onto the token atoms.
+- **Parsimony, refined: fewest formal charges first, then fewest entries.** Counting entries
+  alone prefers charge-separated product forms, which a drawn reactant often reaches in fewer
+  changes. Measured on the 1,076 steps whose drawn R was not the entry-minimal one:
+  - 441 had a minimal form with more charges than the drawn product (a hydrazone as
+    N⁻–C=OH⁺, a Mg carboxylate as O⁺=C–O⁻, an arene as C⁺…C⁻);
+  - 633 had as many;
+  - 2 had fewer.
+
+  Those labels would also feed the next step formal charges in an unnatural form. The cost is
+  now (Σ|formal charge| of the product structure, entries): the dominant resonance contributor,
+  reached with the fewest changes. This refines the approved v8 wording; the spec text is updated
+  to match.
+- **The key check filters the class.** Members are taken by cost among the matrices whose
+  product passes `match_products`, the resonance-key check that evaluation uses. The key comes
+  from a capped enumeration that is not perfectly form-invariant: from some charge-separated
+  forms (a benzylic cation spread into the ring) it does not find its way back.
+  - A rejected member is dropped and the next cost level is tried; R_data always passes.
+  - 264 steps had a member rejected; without the filter they were 262 skips (VARIANT_MISMATCH).
+- **The anchor is any rising bond order** (+1 entry: a new σ bond or a π bond on a bonded pair),
+  else any falling one. The first definition, a new σ bond or a bond that disappears, left 316
+  steps without an anchor: an amine closing an iminium on a carbocation, P⁺–O⁻ → P=O, C=OH⁺ →
+  C⁺–OH. The spec text is updated to match.
+- **Gate result (12,830 PMechDB training steps): 12,623 labeled (98.39%).** The 207 left lack a
+  QM record (168) or a fragment correspondence (39).
+  - Class size: 1 in 12,044 steps, 2 in 510, 3 in 61, 4 or more in 8.
+  - The drawn R is parsimonious in 12,021 steps.
+  - The resonance enumeration hit the cap of 256 in 942 steps.
+  - Anchors: 11,838 rising, 785 falling (heterolyses).
+  - Bond changes per step: 1 in 1,876, 2 in 7,332, 3 in 1,736, 4 in 1,443, 5–7 in 236.
+  - The 3 steps the measurement had called resonance interconversions are now labeled: by the
+    evaluation key their reactants and products differ.

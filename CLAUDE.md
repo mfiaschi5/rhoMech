@@ -151,7 +151,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   pmechdb` (the sample store `samples/shard_*.npz` + `index.json` with the geometry-free stage-A
   pair features, one `samples_<strategy>_<part>.json` view per split of `molecule`, `scaffold` and
   `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
-  spawned processes, keep the host total <= 4; re-run both after a token rebuild), `uv run ksmech-arrows contacts --source pmechdb [--split molecule]` (the legacy
+  spawned processes, keep the host total <= 4; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
+  labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`), `uv run
+  ksmech-arrows contacts --source pmechdb [--split molecule]` (the legacy
   contact sidecar `samples/contacts_<split>/`: the 11 KS pair features with the oriented kernel at
   2.0, 2.3 and 3.0 Angstrom for val, test and a 3,000-step training subsample; needs `samples`)
 - Physics: `uv run ksmech-physics ks-rank --source pmechdb [--split molecule|scaffold] [--kernel

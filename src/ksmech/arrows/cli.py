@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.arrows.contacts import TRAIN_SUBSAMPLE, build_all_contacts
+from ksmech.arrows.delta_be import label_report, step_label
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.roundtrip import evaluate_alignment, run_round_trip
 from ksmech.arrows.steps import DEFAULT_STRATEGIES, STRATEGIES, build_all_samples
@@ -32,11 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("align", help="align arrows to tokens; predicted-arrow round trip")
     s = sub.add_parser("samples", help="sample store (stage-A pair features) + split views")
     c = sub.add_parser("contacts", help="legacy contact sidecar: val, test, a train subsample")
-    for p in (r, a, s, c):
+    e = sub.add_parser("edit-labels", help="reaction-matrix labels (spec v8) and their coverage")
+    for p in (r, a, s, c, e):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     r.add_argument("--include-resonance", action="store_true", help="also resonance steps")
-    for p in (a, s, c):
+    for p in (a, s, c, e):
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
     c.add_argument("--kernel", choices=KERNELS, default="oriented", help="contact kernel")
     c.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
@@ -70,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         "align": cmd_align,
         "samples": cmd_samples,
         "contacts": cmd_contacts,
+        "edit-labels": cmd_edit_labels,
     }
     return commands[args.command](args, path, console)
 
@@ -188,6 +191,29 @@ def cmd_contacts(args: argparse.Namespace, path: Path, console: Console) -> int:
     )
     _write(report, args, f"contacts_report_{args.split}.json", console)
     return 0 if report["n_entries"] else 1
+
+
+EDIT_LABEL_GATE = 0.95  # labeled fraction of the training steps
+
+
+def cmd_edit_labels(args: argparse.Namespace, path: Path, console: Console) -> int:
+    """Label every training step with its reaction matrix (spec v8) on the token atoms; the
+    data gate is the labeled fraction, and no class member may fail to reproduce its step."""
+    loader = TokenCache(args.tokens_dir)
+    labels = {step.step_id: step_label(step, loader) for step in read_training_steps(path)}
+    report = label_report(labels)
+    console.print(
+        f"{report['n_labeled']} / {report['n_steps']} training steps labeled "
+        f"({report['labeled_fraction']:.2%}); skipped {report['skipped']}"
+    )
+    console.print(
+        f"class size {report['class_size']}, drawn R parsimonious in "
+        f"{report['data_parsimonious']}, resonance enumeration truncated in "
+        f"{report['resonance_truncated']}, anchors {report['anchor_kind']}"
+    )
+    _write(report, args, "edit_labels_report.json", console)
+    ok = report["labeled_fraction"] >= EDIT_LABEL_GATE
+    return 0 if ok and "VARIANT_MISMATCH" not in report["skipped"] else 1
 
 
 if __name__ == "__main__":
