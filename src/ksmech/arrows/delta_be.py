@@ -30,8 +30,7 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
-from rdkit import Chem, rdBase
-from rdkit.Chem import rdchem
+from rdkit import Chem
 
 from ksmech.arrows.apply import (
     TYPE_TO_ORDER,
@@ -46,7 +45,7 @@ from ksmech.arrows.apply import (
 )
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
 from ksmech.data import chem
-from ksmech.data.resonance import _FLAGS
+from ksmech.data.resonance import frozen_hydrogens, resonance_forms
 from ksmech.data.schema import ElementaryStep
 
 RESONANCE_CAP = 256  # product resonance structures enumerated for the label class
@@ -182,16 +181,15 @@ def _charges(mol: Chem.Mol) -> int:
 
 
 def _costs(reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix) -> tuple[dict, int]:
-    """(R -> (formal charges of its product structure, entries), structures enumerated)."""
+    """(R -> (formal charges of its product structure, entries), structures enumerated). The
+    structures are the resonance forms of the product with its H frozen, Kekule structures as
+    drawn (`resonance.resonance_forms`); a product that does not sanitize has only `r_data`."""
     cost = {r_data: (_charges(prod), r_data.size)}
-    with rdBase.BlockLogs():
-        supplier = rdchem.ResonanceMolSupplier(prod, int(_FLAGS), RESONANCE_CAP)
-        n = len(supplier)
-        for k in range(min(n, RESONANCE_CAP)):
-            form = supplier[k]
-            if form is not None:
-                r = matrix_between(reac, form)
-                cost[r] = min(cost.get(r, (_charges(form), r.size)), (_charges(form), r.size))
+    frozen = frozen_hydrogens(prod)
+    forms, n = ([], 0) if frozen is None else resonance_forms(frozen, RESONANCE_CAP)
+    for form in forms:
+        r = matrix_between(reac, form)
+        cost[r] = min(cost.get(r, (_charges(form), r.size)), (_charges(form), r.size))
     return cost, n
 
 

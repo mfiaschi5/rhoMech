@@ -197,3 +197,27 @@ def test_variants_the_key_check_rejects_give_way_to_the_next_cost_level():
     assert r_data not in best and rejected == 0 and all(_conserves_charge(r) for r in best)
     fallback, _, _, rejected = parsimonious_class(mol, prod, r_data, accept=lambda r: False)
     assert r_data in fallback and rejected >= len(best)
+
+
+@pytest.mark.parametrize(
+    ("reactants", "products", "arrows"),
+    [
+        (  # methyl azide formed
+            "[N-:1]=[N+:2]=[N-:3].[CH3:4][Br:5]",
+            "[N-:1]=[N+:2]=[N:3][CH3:4].[Br-:5]",
+            [Arrow("lone_pair", (3,), "atom", (4,)), Arrow("bond", (4, 5), "atom", (5,))],
+        ),
+        (  # an azide ion looking on at an SN2
+            "[N-]=[N+]=[N-].[OH-:1].[CH3:2][Cl:3]",
+            "[N-]=[N+]=[N-].[OH:1][CH3:2].[Cl-:3]",
+            [Arrow("lone_pair", (1,), "atom", (2,)), Arrow("bond", (2, 3), "atom", (3,))],
+        ),
+    ],
+)
+def test_a_radical_azide_never_wins_the_fewest_charges_rule(reactants, products, arrows):
+    """RDKit's enumeration also returns an azide as the diradical N=N[N], with fewer formal
+    charges than N=[N+]=[N-]. It is not a resonance form of the closed-shell product, so the
+    drawn R stays the one parsimonious label."""
+    label = edit_label(_step(reactants, products, arrows))
+    assert isinstance(label, EditLabel) and label.data_parsimonious
+    assert len(label.variants) == 1

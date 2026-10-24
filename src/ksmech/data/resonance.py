@@ -13,6 +13,12 @@ onto carbon (enolate <-> carbanion, allyl cation shifts, C=O <-> C+-O-).
 Resonance structures share the sigma skeleton, so `skeleton_key` (every bond single, charges
 zero, maps and explicit H kept) is a cheap necessary condition: two sides with different
 skeletons cannot share a resonance key and the enumeration is skipped.
+
+Every enumeration runs with the hydrogens frozen (`frozen_hydrogens`) and keeps only the forms
+that have the input's H count on every atom, its total charge and its radical electrons
+(`resonance_forms`). RDKit re-derives the implicit H of an unbracketed atom in each structure
+(a nitro O came out as [OH2+]) and also returns structures with unpaired electrons
+(CCN([O+])[O-]); neither is a resonance form.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ _FLAGS = (
     | rdchem.ResonanceFlags.UNCONSTRAINED_ANIONS
     | rdchem.ResonanceFlags.ALLOW_CHARGE_SEPARATION
 )
+_KEKULE_OPS = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
 
 
 class ResonanceFlag(StrEnum):
@@ -63,6 +70,55 @@ def _map_free(mol: Chem.Mol) -> Chem.Mol:
     return m
 
 
+def frozen_hydrogens(mol: Chem.Mol, aromaticity: bool = False) -> Chem.Mol | None:
+    """A copy in which every atom keeps the H count it has (explicit H = total H, no implicit
+    H), sanitized again, since the enumeration needs the conjugation sanitization perceives;
+    None when it does not sanitize. Aromaticity is perceived only when asked: on a Kekule
+    structure it changes which structures RDKit returns, and the edit labels read bond orders."""
+    m = Chem.Mol(mol)
+    m.UpdatePropertyCache(strict=False)
+    for atom in m.GetAtoms():
+        atom.SetNumExplicitHs(atom.GetTotalNumHs())
+        atom.SetNoImplicit(True)
+    ops = Chem.SanitizeFlags.SANITIZE_ALL if aromaticity else _KEKULE_OPS
+    try:
+        with rdBase.BlockLogs():
+            Chem.SanitizeMol(m, sanitizeOps=ops)
+    except Chem.rdchem.MolSanitizeException:
+        return None
+    return m
+
+
+def _electron_state(mol: Chem.Mol) -> tuple[tuple[int, ...], int, int]:
+    """(H count of every atom, total charge, radical electrons): what a resonance form keeps."""
+    m = Chem.Mol(mol)
+    m.UpdatePropertyCache(strict=False)
+    atoms = list(m.GetAtoms())
+    return (
+        tuple(a.GetTotalNumHs() for a in atoms),
+        sum(a.GetFormalCharge() for a in atoms),
+        sum(a.GetNumRadicalElectrons() for a in atoms),
+    )
+
+
+def resonance_forms(
+    mol: Chem.Mol, max_structures: int, read_truncated: bool = True
+) -> tuple[list[Chem.Mol], int]:
+    """The resonance forms of `mol` (its H frozen by the caller: `frozen_hydrogens`) among the
+    first `max_structures` structures RDKit enumerates, keeping only those with the electron
+    state of `mol`; and the number of structures RDKit counted. When that reaches
+    `max_structures` the enumeration is truncated, and with `read_truncated=False` no form is
+    read."""
+    ref = _electron_state(mol)
+    with rdBase.BlockLogs():
+        supplier = rdchem.ResonanceMolSupplier(mol, int(_FLAGS), max_structures)
+        n = len(supplier)
+        if n >= max_structures and not read_truncated:
+            return [], n
+        raw = [supplier[k] for k in range(min(n, max_structures))]
+    return [f for f in raw if f is not None and _electron_state(f) == ref], n
+
+
 def _canonical_form(mol: Chem.Mol) -> Chem.Mol | None:
     """The sanitized molecule rebuilt from its map-free canonical SMILES: canonical atom order
     and Kekule structure, whatever order and drawing it came in. Every atom keeps the H count
@@ -75,29 +131,22 @@ def _canonical_form(mol: Chem.Mol) -> Chem.Mol | None:
         out = Chem.MolFromSmiles(Chem.MolToSmiles(m))
     if out is None:
         return None
-    for atom in out.GetAtoms():
-        atom.SetNumExplicitHs(atom.GetTotalNumHs())
-        atom.SetNoImplicit(True)
-    return _sanitized_copy(out)
+    return frozen_hydrogens(out, aromaticity=True)
 
 
 def resonance_structures(
     mol: Chem.Mol, max_structures: int = MAX_STRUCTURES
 ) -> tuple[set[str], int, ResonanceFlag]:
-    """Map-free canonical SMILES of every resonance structure of `mol` (enumerated on its
-    canonical form), the enumeration size and the flag. Truncated or failed: the plain SMILES."""
+    """Map-free canonical SMILES of every resonance form of `mol` (enumerated on its
+    canonical form, `resonance_forms`) and of that form itself, the enumeration size and the
+    flag. Truncated or failed: the plain SMILES."""
     m = _canonical_form(mol)
     if m is None:
         return {Chem.MolToSmiles(_map_free(mol))}, 0, ResonanceFlag.RESONANCE_FAILED
-    with rdBase.BlockLogs():
-        supplier = rdchem.ResonanceMolSupplier(m, int(_FLAGS), max_structures)
-        n = len(supplier)
-        if n >= max_structures:
-            return {Chem.MolToSmiles(m)}, n, ResonanceFlag.RESONANCE_TRUNCATED
-        keys = {Chem.MolToSmiles(supplier[i]) for i in range(n) if supplier[i] is not None}
-    if not keys:
-        return {Chem.MolToSmiles(m)}, n, ResonanceFlag.RESONANCE_FAILED
-    return keys, n, ResonanceFlag.OK
+    forms, n = resonance_forms(m, max_structures, read_truncated=False)
+    if n >= max_structures:
+        return {Chem.MolToSmiles(m)}, n, ResonanceFlag.RESONANCE_TRUNCATED
+    return {Chem.MolToSmiles(f) for f in forms} | {Chem.MolToSmiles(m)}, n, ResonanceFlag.OK
 
 
 def canonical_resonance_key(mol: Chem.Mol, max_structures: int = MAX_STRUCTURES) -> ResonanceKey:

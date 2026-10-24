@@ -3723,3 +3723,44 @@ is now v7.5, sha256 6c6a023f66dd).
     radicals), SCF_NOT_CONVERGED 46 and TIMEOUT 3.
   - Six token files and six Wiberg sidecars were added.
   - Edit labels: 12,733 / 12,779 training steps (99.64%). MISSING_TOKENS is down from 48 to 46.
+
+## 2026-10-25 — Resonance forms with frozen hydrogens and no odd forms (resonance item 1)
+
+- **Why.** RDKit's `ResonanceMolSupplier` returns structures that are not resonance forms of
+  its input.
+  - On an unbracketed atom it re-derives the implicit H in each structure: a nitro O comes out
+    as [OH2+].
+  - It returns structures with unpaired electrons: CCN([O+])[O-], an azide as N=N[N], a diazo
+    group as C=[N][N].
+
+  893 of the 12,779 PMechDB training products have at least one such structure. The sigma key,
+  resonance-invariant by construction, differed across RDKit's structures of 84 of 1,393
+  sampled products (6%) for this reason.
+- **Change.**
+  - `resonance.frozen_hydrogens` copies a molecule with every atom's H count frozen (explicit
+    = total, no implicit H) and sanitizes it again.
+  - `resonance.resonance_forms` keeps only the enumerated structures with the input's H count
+    on every atom, its total charge and its radical electrons.
+  - Both the resonance key (`resonance_structures`) and the edit-label class
+    (`delta_be._costs`) enumerate this way.
+- **No aromaticity for the edit labels.** They freeze without perceiving aromaticity.
+  - Re-perceived aromaticity on a Kekule product changes which structures RDKit returns, and
+    the labels read bond orders: 3,085 of 12,779 products gave a different set of reaction
+    matrices.
+  - Without it, the valid structures are exactly those of the raw enumeration for all 12,779,
+    with the same enumeration size.
+  - The key keeps its aromatic canonical form.
+  - A truncated key enumeration still returns before reading any structure: reading 1,000
+    per truncated molecule would slow ingestion down.
+- **Effect.**
+  - Sigma-key invariance over forms: 1,388 of 1,388 sampled products (100%), against 94.0%.
+    The current resonance key, computed from each form, agrees across all of them in only
+    825 of the 1,388 (59%).
+  - Resonance-step flags are unchanged: 157 of 13,090 accepted steps.
+  - Edit labels, computed without tokens over all 12,779 training steps:
+    - The class changes in 53 steps. In each one a radical form had the fewest formal
+      charges: an azide drawn N=N[N] or a diazo group C=[N][N], often in a spectator molecule.
+      The drawn R is parsimonious again in those steps.
+    - Class sizes 1 / 2 / 3 / 4+: 12,204 / 507 / 61 / 7, against 12,195 / 514 / 62 / 8.
+    - Steps with a rejected variant: 260, against 265. The key check that rejects them is
+      not form-invariant; item 2 replaces it with the sigma key.

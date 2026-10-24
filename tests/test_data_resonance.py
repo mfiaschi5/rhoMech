@@ -3,18 +3,25 @@
 from dataclasses import replace
 
 import pytest
-from rdkit import Chem
+from rdkit import Chem, rdBase
+from rdkit.Chem import rdchem
 
 from ksmech.data import chem
 from ksmech.data.resonance import (
+    _FLAGS,
+    MAX_STRUCTURES,
     ResonanceFlag,
     canonical_resonance_key,
+    frozen_hydrogens,
     is_resonance_step,
+    resonance_forms,
+    resonance_structures,
     skeleton_key,
     training_steps,
 )
 from ksmech.data.schema import ElementaryStep, Source
 from ksmech.data.stats import compute_stats
+from tests.fixtures.molecules import MOLECULES
 
 KEKULE_A = "[CH:1]1=[CH:2][CH:3]=[CH:4][CH:5]=[CH:6]1"
 KEKULE_B = "[CH:1]1[CH:2]=[CH:3][CH:4]=[CH:5][CH:6]=1"
@@ -145,3 +152,59 @@ def test_a_charge_separation_rdkit_reaches_from_one_side_only_is_a_resonance_ste
     charged = chem.parse_mapped("C[CH+:10][N-:11]O")
     assert is_resonance_step(neutral, charged) == (True, ResonanceFlag.OK)
     assert is_resonance_step(charged, neutral) == (True, ResonanceFlag.OK)
+
+
+def electron_state(mol: Chem.Mol) -> tuple:
+    m = Chem.Mol(mol)
+    m.UpdatePropertyCache(strict=False)
+    atoms = list(m.GetAtoms())
+    return (
+        [a.GetTotalNumHs() for a in atoms],
+        sum(a.GetFormalCharge() for a in atoms),
+        sum(a.GetNumRadicalElectrons() for a in atoms),
+    )
+
+
+@pytest.mark.parametrize("name", sorted(MOLECULES))
+def test_resonance_forms_keep_every_hydrogen_the_charge_and_the_pairing(name):
+    """With the H frozen, every form keeps the H count of every atom, the total charge and no
+    unpaired electron, and the molecule itself is one of its forms."""
+    mol = frozen_hydrogens(Chem.MolFromSmiles(MOLECULES[name]))
+    forms, n = resonance_forms(mol, MAX_STRUCTURES)
+    assert 1 <= len(forms) <= n < MAX_STRUCTURES
+    assert all(electron_state(f) == electron_state(mol) for f in forms)
+    assert Chem.MolToSmiles(mol) in {Chem.MolToSmiles(f) for f in forms}
+
+
+def test_nitro_forms_never_move_a_hydrogen_or_unpair_electrons():
+    """RDKit's own enumeration of nitroethane re-derives the implicit H of an unbracketed O
+    ([OH2+]) and returns the radical CCN([O+])[O-]. Neither survives: the two equivalent N-O
+    forms are left, and they give one key."""
+    mol = Chem.MolFromSmiles("CC[N+](=O)[O-]")
+    with rdBase.BlockLogs():
+        raw = rdchem.ResonanceMolSupplier(mol, int(_FLAGS), 64)
+        raw_smiles = {Chem.MolToSmiles(raw[k]) for k in range(len(raw))}
+    assert {"CCN([O-])[OH2+]", "CCN([O+])[O-]"} <= raw_smiles  # what the filter is for
+    forms, _ = resonance_forms(frozen_hydrogens(mol), 64)
+    assert len(forms) == 2
+    assert all(electron_state(f) == electron_state(mol) for f in forms)
+    keys, _, flag = resonance_structures(mol)
+    assert flag == ResonanceFlag.OK and len(keys) == 1
+
+
+def test_enolate_forms_are_the_alkoxide_and_the_carbanion():
+    """From either drawing: two forms, one with the charge on O and one on the CH2."""
+    for smiles in (ENOLATE, CARBANION):
+        forms, _ = resonance_forms(frozen_hydrogens(chem.parse_mapped(smiles)), 64)
+        charged = sorted(a.GetSymbol() for f in forms for a in f.GetAtoms() if a.GetFormalCharge())
+        assert charged == ["C", "O"], smiles
+        assert all(electron_state(f) == electron_state(chem.parse_mapped(smiles)) for f in forms)
+
+
+def test_frozen_hydrogens_keep_a_kekule_structure_unless_aromaticity_is_asked():
+    """The edit labels read bond orders, so their enumeration starts from the Kekule structure
+    as drawn; the resonance key works on the aromatic canonical form."""
+    kekule = Chem.MolFromSmiles("C1=CC=CC=C1")
+    Chem.Kekulize(kekule, clearAromaticFlags=True)
+    assert not any(b.GetIsAromatic() for b in frozen_hydrogens(kekule).GetBonds())
+    assert all(b.GetIsAromatic() for b in frozen_hydrogens(kekule, aromaticity=True).GetBonds())
