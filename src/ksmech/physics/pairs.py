@@ -42,7 +42,7 @@ import numpy as np
 from ksmech.orbitals.tokens import (
     CandidateConfig,
     MoleculeTokens,
-    is_antibonding_partner,
+    antibonding_partner_matrix,
     site_excluded_matrix,
 )
 from ksmech.physics.contact.legacy_fixed23 import ORIENTED_VERSION, OrientedConfig
@@ -274,7 +274,7 @@ def valid_pairs(fragments: list[MoleculeTokens], config: CandidateConfig | None 
         o_f, v_f = t.occupied(), t.virtual()
         if not o_f or not v_f:
             continue
-        own = np.array([[is_antibonding_partner(d, a) for a in v_f] for d in o_f])
+        own = antibonding_partner_matrix(o_f, v_f)
         bad = own | site_excluded_matrix(t, o_f, v_f, config.site_weight)
         out[r0[f] : r0[f + 1], c0[f] : c0[f + 1]] &= ~bad
     return out

@@ -199,6 +199,26 @@ def is_antibonding_partner(donor: OrbitalToken, acceptor: OrbitalToken) -> bool:
     return shared and d.overlap_population > 0 and a.overlap_population < 0
 
 
+def antibonding_partner_matrix(donors, acceptors) -> np.ndarray:
+    """(len(donors), len(acceptors)) `is_antibonding_partner` of every pair, vectorized."""
+    key_d, ok_d = _leading_pairs(donors, 1.0)
+    key_a, ok_a = _leading_pairs(acceptors, -1.0)
+    same = (key_d[:, None, :] == key_a[None, :, :]).all(-1)
+    return same & ok_d[:, None] & ok_a[None, :]
+
+
+def _leading_pairs(orbitals, sign: float) -> tuple[np.ndarray, np.ndarray]:
+    """The two leading centres of each orbital (sorted) and whether it has two centres and an
+    overlap population of sign `sign` (+1 bonding, -1 antibonding)."""
+    key = np.full((len(orbitals), 2), -1)
+    ok = np.zeros(len(orbitals), dtype=bool)
+    for k, o in enumerate(orbitals):
+        c = o.descriptors.all_center_atoms
+        if len(c) >= 2 and sign * o.descriptors.overlap_population > 0:
+            key[k], ok[k] = sorted(c[:2]), True
+    return key, ok
+
+
 BONDED = 1.3  # x covalent-radii sum, as in the QM layer and the contact table
 
 
@@ -237,21 +257,33 @@ def _weight_on(o: OrbitalToken, atom: int) -> float:
 
 def site_excluded_matrix(t: MoleculeTokens, donors, acceptors, weight: float) -> np.ndarray:
     """(len(donors), len(acceptors)) True where every site pair of the two tokens (each centre
-    of the donor x each centre of the acceptor) is excluded by `site_pairs_excluded`."""
-    out = np.ones((len(donors), len(acceptors)), dtype=bool)
-    cen_a = [np.asarray(o.descriptors.all_center_atoms, dtype=int) for o in acceptors]
-    j = np.repeat(np.arange(len(acceptors)), [len(c) for c in cen_a])
-    b = np.concatenate(cen_a) if cen_a else np.zeros(0, dtype=int)
-    acc = [acceptors[k] for k in j]
-    bonded = bonded_matrix(t)
-    for i, d in enumerate(donors):
-        for site in np.asarray(d.descriptors.all_center_atoms, dtype=int):
-            a = np.full(len(j), site)
-            hit = site_pairs_excluded(t, [d] * len(j), a, acc, b, weight, bonded)
-            kept = np.zeros(len(acceptors), dtype=bool)
-            np.logical_or.at(kept, j, ~hit)
-            out[i] &= ~kept
-    return out
+    of the donor x each centre of the acceptor) is excluded by `site_pairs_excluded`.
+
+    In closed form: a token pair is kept when one of its centre pairs is neither the same atom
+    nor bonded, or when the acceptor carries < `weight` on one donor centre and the donor <
+    `weight` on one acceptor centre (the two weights of `site_pairs_excluded` are read at the
+    two sites independently, so that existence factorizes). A token without centres is
+    excluded (vacuously, as before)."""
+    n = len(t.atoms)
+    in_d, w_d = _centre_arrays(donors, n)
+    in_a, w_a = _centre_arrays(acceptors, n)
+    far = (~(bonded_matrix(t) | np.eye(n, dtype=bool))).astype(float)
+    low_d = (~(w_d >= weight)).astype(float)  # NaN reads as low, as in `site_pairs_excluded`
+    low_a = (~(w_a >= weight)).astype(float)
+    kept = (in_d @ far @ in_a.T) > 0
+    kept |= ((in_d @ low_a.T) > 0) & ((low_d @ in_a.T) > 0)
+    return ~kept
+
+
+def _centre_arrays(orbitals, n_atoms: int) -> tuple[np.ndarray, np.ndarray]:
+    """(len(orbitals), n_atoms) centre indicator (0/1) and centre weights (0 off the centres)."""
+    inside = np.zeros((len(orbitals), n_atoms))
+    weights = np.zeros((len(orbitals), n_atoms))
+    for k, o in enumerate(orbitals):
+        atoms = np.asarray(o.descriptors.all_center_atoms, dtype=int)
+        inside[k, atoms] = 1.0
+        weights[k, atoms] = o.descriptors.all_center_weights
+    return inside, weights
 
 
 def excluded_pair(

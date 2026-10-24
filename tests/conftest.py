@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -153,6 +154,41 @@ def token_loader(sp_record):
         return memo[key]
 
     return get
+
+
+@pytest.fixture
+def mini_token_cache(mini_steps, token_loader, sp_record, tmp_path):
+    """A `TokenCache` over token and bond-index files written for the mini steps' reactants:
+    unlike `token_loader`, it can be sent to spawned workers. Each record has its own file, so
+    no sidecar's input changes after it is written."""
+    from ksmech.arrows.reactants import TokenCache, _fragment_keys
+    from ksmech.data import chem
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.orbitals.tokens import save_tokens
+    from ksmech.qm.bond_index import save_bond_indices
+    from ksmech.qm.records import save_record
+
+    cache = TokenCache(tmp_path / "tokens", bond_index_dir=tmp_path / "wbi")
+    keys = {
+        key
+        for step in mini_steps.values()
+        for _, _, key in _fragment_keys(chem.parse_mapped(step.reactants_smiles))
+        if key
+    }
+    for n, key in enumerate(sorted(keys)):
+        save_tokens(token_loader(key), tokens_path(cache.tokens_dir, key, 0, cache.method))
+        rec = sp_record(key)
+        save_bond_indices(rec, save_record(rec, tmp_path / f"rec_{n}.npz"), tmp_path / "wbi")
+    return cache
+
+
+@pytest.fixture(scope="session")
+def realdata_workers() -> int:
+    """Spawned processes of one real-data pass: `KSMECH_TEST_WORKERS` (default 14), or 1
+    inside an xdist run, whose workers already fill the host (15 heavy processes at most)."""
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return 1
+    return int(os.environ.get("KSMECH_TEST_WORKERS", "14"))
 
 
 @pytest.fixture(autouse=True)

@@ -55,7 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="random_leaky (the per-step split) only when named",
     )
     s.add_argument("--seed", type=int, default=0)
-    s.add_argument("--workers", type=int, default=1, help="processes (keep the host total <= 4)")
+    for p in (a, s):
+        p.add_argument(
+            "--workers", type=int, default=1, help="spawned processes (host total <= 15)"
+        )
     return parser
 
 
@@ -125,7 +128,10 @@ def print_alignment(report: dict, console: Console) -> None:
 
 def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
     report = evaluate_alignment(
-        read_training_steps(path), TokenCache(args.tokens_dir), not args.no_member_check
+        read_training_steps(path),
+        TokenCache(args.tokens_dir),
+        not args.no_member_check,
+        n_workers=args.workers,
     )
     print_alignment(report, console)
     print_failures(report["predicted"], "predicted-arrow round trip", console)

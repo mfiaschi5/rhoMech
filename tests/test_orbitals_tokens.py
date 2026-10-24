@@ -16,6 +16,7 @@ from ksmech.orbitals.tokens import (
     AtomToken,
     CandidateConfig,
     OrbitalKind,
+    antibonding_partner_matrix,
     atom_feature_names,
     bonded_matrix,
     build_molecule_tokens,
@@ -384,3 +385,32 @@ def test_site_rule_threshold(sp_record):
                 for b in s.descriptors.all_center_atoms
             )
             assert matrix[i, j] == every
+
+
+@pytest.mark.parametrize("name", sorted(MOLECULES))
+def test_candidate_matrices_give_their_pairwise_rules(sp_record, name):
+    """The closed-form site matrix and the vectorized antibonding-partner matrix agree with
+    the rules they summarize (`site_pairs_excluded` over every centre pair,
+    `is_antibonding_partner`), at the default site weight and at weights that cut through the
+    centre populations."""
+    t = build_molecule_tokens(sp_record(MOLECULES[name]))
+    occ, virt = t.occupied(), t.virtual()
+    own = antibonding_partner_matrix(occ, virt)
+    assert own.tolist() == [[is_antibonding_partner(d, s) for s in virt] for d in occ]
+    bonded = bonded_matrix(t)
+    for w in (CandidateConfig().site_weight, 0.35, 0.55):
+        matrix = site_excluded_matrix(t, occ, virt, w)
+        every = [
+            [
+                all(
+                    site_pairs_excluded(t, [d], [int(a)], [s], [int(b)], w, bonded)[0]
+                    for a in d.descriptors.all_center_atoms
+                    for b in s.descriptors.all_center_atoms
+                )
+                for s in virt
+            ]
+            for d in occ
+        ]
+        assert matrix.tolist() == every, (name, w)
+    default = site_excluded_matrix(t, occ, virt, CandidateConfig().site_weight)
+    assert default.any() and not default.all(), name  # a bond with itself, and real arrows

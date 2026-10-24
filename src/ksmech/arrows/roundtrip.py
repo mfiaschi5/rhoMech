@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ksmech.arrows.align import StepAlignment, align_step
 from ksmech.arrows.align import report as alignment_report
@@ -33,6 +33,7 @@ from ksmech.data import chem
 from ksmech.data.schema import ElementaryStep
 
 N_EXAMPLES = 3
+CHUNK = 64  # consecutive steps per task of a parallel alignment pass
 
 
 @dataclass(frozen=True)
@@ -142,35 +143,88 @@ def member_agreement(
     return out
 
 
-def evaluate_alignment(
-    steps: Iterable[ElementaryStep], loader: TokenLoader, member_check: bool = True
-) -> dict:
-    """One pass over `steps`: align every step whose reactants are tokenized, apply the
-    labeled tuples of every completely aligned step from their sites, and (optionally) swap
-    in every other set member. Returns the alignment report with a `predicted` section."""
-    alignments, predicted, skipped, members = [], [], Counter(), Counter()
-    outside_mask = []
+@dataclass
+class _AlignPass:
+    """What the alignment pass collects over some steps; the parts of a parallel pass add up
+    in step order."""
+
+    alignments: list[StepAlignment] = field(default_factory=list)
+    predicted: list[RoundTrip] = field(default_factory=list)
+    outside_mask: list[str] = field(default_factory=list)
+    skipped: Counter = field(default_factory=Counter)
+    members: Counter = field(default_factory=Counter)
+
+    def __iadd__(self, other: _AlignPass) -> _AlignPass:
+        self.alignments += other.alignments
+        self.predicted += other.predicted
+        self.outside_mask += other.outside_mask
+        self.skipped.update(other.skipped)
+        self.members.update(other.members)
+        return self
+
+
+def _align_pass(steps: list[ElementaryStep], loader: TokenLoader, member_check: bool):
+    out = _AlignPass()
     for step in steps:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
         except MissingTokens:
-            skipped["MISSING_TOKENS"] += 1
+            out.skipped["MISSING_TOKENS"] += 1
             continue
         except CorrespondenceError:
-            skipped["CORRESPONDENCE"] += 1
+            out.skipped["CORRESPONDENCE"] += 1
             continue
         al = align_step(step, rt)
-        alignments.append(al)
+        out.alignments.append(al)
         if al.complete:
-            predicted.append(predicted_round_trip_step(step, rt, al))
+            out.predicted.append(predicted_round_trip_step(step, rt, al))
             if leaving_outside_mask(rt, al):
-                outside_mask.append(step.step_id)
-            if member_check and predicted[-1].ok:
-                members.update(member_agreement(step, rt, al))
-    out = alignment_report(alignments, skipped)
-    out["predicted"] = summarize(predicted)
+                out.outside_mask.append(step.step_id)
+            if member_check and out.predicted[-1].ok:
+                out.members.update(member_agreement(step, rt, al))
+    return out
+
+
+def _align_task(task: tuple) -> _AlignPass:
+    return _align_pass(*task)
+
+
+def _parallel_align_pass(steps, loader, member_check: bool, n_workers: int) -> _AlignPass:
+    """`_align_pass` over chunks of `CHUNK` consecutive steps in `n_workers` spawned processes
+    (one BLAS thread each); each task gets its own copy of `loader`, which must pickle (a
+    `TokenCache` does, and its copy starts empty)."""
+    from multiprocessing import get_context
+
+    from ksmech.orbitals.build import single_threaded_children
+
+    tasks = [(steps[k : k + CHUNK], loader, member_check) for k in range(0, len(steps), CHUNK)]
+    out = _AlignPass()
+    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
+        for part in pool.imap(_align_task, tasks):
+            out += part
+    return out
+
+
+def evaluate_alignment(
+    steps: Iterable[ElementaryStep],
+    loader: TokenLoader,
+    member_check: bool = True,
+    n_workers: int = 1,
+) -> dict:
+    """One pass over `steps`: align every step whose reactants are tokenized, apply the
+    labeled tuples of every completely aligned step from their sites, and (optionally) swap
+    in every other set member. Returns the alignment report with a `predicted` section, the
+    same for any `n_workers` (spawned processes; `loader` must then pickle)."""
+    steps = list(steps)
+    if n_workers > 1:
+        acc = _parallel_align_pass(steps, loader, member_check, n_workers)
+    else:
+        acc = _align_pass(steps, loader, member_check)
+    members = acc.members
+    out = alignment_report(acc.alignments, acc.skipped)
+    out["predicted"] = summarize(acc.predicted)
     # annotated leaving bonds the physical mask excludes in the edited state
-    out["predicted"]["leaving_outside_mask"] = outside_mask
+    out["predicted"]["leaving_outside_mask"] = acc.outside_mask
     out["predicted"]["member_agreement"] = {
         side: {
             "agree": members[(side, True)],

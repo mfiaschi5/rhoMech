@@ -3595,3 +3595,44 @@ is now v7.5, sha256 6c6a023f66dd).
     built once per worker. The tests write only to their tmp directories and only read `data/`.
   - The hook now takes about as long as the slowest single test: the real-data alignment and
     round trip over PMechDB.
+
+## 2026-10-24 — The candidate filter in closed form; the real-data tests in their own hook stage
+
+- **Why.** With xdist, the hook still took 34 minutes, because one test dominated it: the
+  real-data alignment pass over the PMechDB training steps. A profile of 300 steps put 89% of
+  the time in `tokens.site_excluded_matrix`, which called `site_pairs_excluded` once per donor
+  centre and looked up each centre weight in a Python loop (11 million `flatnonzero` calls).
+  The antibonding-partner rule took another 20% of what was left: a Python double loop over
+  every token pair.
+- **Closed form.** A token pair is excluded when every centre pair (a, b) is near (same atom
+  or bonded) and the acceptor carries at least w on a or the donor at least w on b. So the
+  pair is kept when:
+  - some centre pair is far, which is the 0/1 product `C_d @ far @ C_a.T`; or
+  - some donor centre is low for the acceptor and some acceptor centre is low for the donor.
+
+  The second condition factorizes because `site_pairs_excluded` reads the two weights at the
+  two sites independently. As in the loop, a NaN weight reads as low and a token without
+  centres is excluded vacuously. `antibonding_partner_matrix` compares the sorted two leading
+  centres and the overlap signs. The pairwise functions stay as the definitions, and the
+  frozen legacy kernel still calls `site_pairs_excluded`.
+- **Check.** Both matrices are identical to the loops on all 14,226 token files: 14,222
+  molecules, and 4 with an empty block. The site matrix went from 1,441 s to 11.7 s in total.
+  The tests compare both matrices with the pairwise rules on the ten fixture molecules, at the
+  default weight and at 0.35 and 0.55. The alignment pass went from 102 s to 21 s on its first
+  300 steps; what remains is mostly reading token files.
+- **Parallel pass.** `evaluate_alignment(..., n_workers)` runs chunks of 64 consecutive steps
+  in spawned processes, each with one BLAS thread, and merges them in step order. The report
+  is identical, and a test checks it. A `TokenCache` sent to a worker starts with nothing in
+  memory (`__getstate__`), so a used cache is not copied into every task. `ksmech-arrows align
+  --workers N` exposes it. The dataset-arrow round trip takes 13 s for all steps and stays
+  sequential.
+- **Hook.** pytest now runs in two stages:
+  - `pytest -x -q -n 14 -m "not realdata"`;
+  - then `pytest -x -q -m realdata`, one test at a time, where a pass uses
+    `KSMECH_TEST_WORKERS` processes (default 14).
+
+  Inside an xdist run a real-data pass uses one process, because the xdist workers already
+  fill the host. Either way the host never runs more than 15 heavy processes.
+- **Measured.** The real-data stage takes 2 minutes: the alignment test 41 s instead of about
+  30 minutes, the PMechDB load 30 s, the molecule-split check 27 s, the IBO check 18 s and the
+  round trip 7 s.

@@ -120,10 +120,11 @@ learned" is a flag away.
 
 ```bash
 uv sync                       # install everything into .venv
-uv run pytest -n 14           # run tests in 14 processes (pytest-xdist; -x stops at the first failure)
+uv run pytest -n 14 -m "not realdata"  # unit tests in 14 processes (pytest-xdist; -x stops at the first failure)
+uv run pytest -m realdata     # real-data tests one at a time, each pass in 14 spawned processes
 uv run ruff check .           # lint
 uv run ruff format .          # format
-uv run pre-commit install     # enable the ruff + pytest -x -n 14 commit hook
+uv run pre-commit install     # enable the commit hook: ruff, then the two pytest runs above with -x
 ```
 
 Main CLI entry points are added phase by phase and listed here as they land:
@@ -149,7 +150,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - Arrows: `uv run ksmech-arrows roundtrip --source pmechdb` (dataset arrows applied as one
   BE-matrix edit per step vs. the annotated products, `arrows_roundtrip.json`), `uv run
   ksmech-arrows align --source pmechdb` (arrow-to-orbital labels by atom, unaligned groups,
-  predicted-arrow round trip, `alignment_report.json`), `uv run ksmech-arrows samples --source
+  predicted-arrow round trip, `alignment_report.json`; `--workers N` spawned processes), `uv run
+  ksmech-arrows samples --source
   pmechdb` (the sample store `samples/shard_*.npz` + `index.json` with the geometry-free stage-A
   pair features, one `samples_<strategy>_<part>.json` view per split of `molecule`, `scaffold` and
   `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`

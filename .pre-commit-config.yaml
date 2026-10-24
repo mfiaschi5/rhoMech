@@ -14,8 +14,16 @@ repos:
         types: [python]
         pass_filenames: false
       - id: pytest
-        name: pytest -x (14 processes)
-        entry: uv run pytest -x -q -n 14
+        name: pytest -x, not realdata (14 processes)
+        entry: uv run pytest -x -q -n 14 -m "not realdata"
+        verbose: true  # print pytest's summary line even when the hook passes
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: pytest-realdata
+        name: pytest -x, realdata (one at a time, 14-process passes)
+        entry: uv run pytest -x -q -m realdata
+        verbose: true
         language: system
         pass_filenames: false
         always_run: true

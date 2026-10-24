@@ -210,6 +210,10 @@ class TokenCache:
         self.stale: dict[str, str] = {}
         self._memo: OrderedDict[str, MoleculeTokens | None] = OrderedDict()
 
+    def __getstate__(self) -> dict:
+        """A copy sent to a worker process starts with nothing in memory."""
+        return {**self.__dict__, "stale": {}, "_memo": OrderedDict()}
+
     def _load(self, key: str) -> MoleculeTokens | None:
         path = tokens_path(self.tokens_dir, key, self.conformer_id, self.method)
         if not path.exists():

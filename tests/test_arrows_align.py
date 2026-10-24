@@ -1,10 +1,12 @@
 """Arrow-to-orbital alignment by atom (`ksmech.arrows.align`, `ksmech.arrows.reactants`)."""
 
 import dataclasses
+import pickle
 from collections import Counter
 
 import pytest
 
+from ksmech.arrows import roundtrip
 from ksmech.arrows.align import (
     AlignFlag,
     UnalignedReason,
@@ -197,8 +199,35 @@ def test_label_dict_round_trip(mini_steps, token_loader):
         assert type(lab).from_dict(lab.to_dict()) == lab
 
 
+def test_a_token_cache_sent_to_a_worker_starts_empty(mini_steps, mini_token_cache):
+    mini_token_cache("[OH-]")
+    mini_token_cache.stale["x"] = "reason"
+    copy = pickle.loads(pickle.dumps(mini_token_cache))
+    assert mini_token_cache._memo and not copy._memo and not copy.stale
+    assert (copy.tokens_dir, copy.bond_index_dir, copy.method, copy.maxsize) == (
+        mini_token_cache.tokens_dir,
+        mini_token_cache.bond_index_dir,
+        mini_token_cache.method,
+        mini_token_cache.maxsize,
+    )
+    assert copy("[OH-]") is not None and not copy.stale
+
+
+def test_the_parallel_alignment_pass_gives_the_same_report(
+    mini_steps, mini_token_cache, monkeypatch
+):
+    """Chunks of two steps over two spawned workers: the report of one process, member swaps
+    and a step without tokens (iodomethane is not in the cache) included."""
+    monkeypatch.setattr(roundtrip, "CHUNK", 2)
+    iodide = make_step("[OH-:10].[CH3:20][I:21]>>[OH:10][CH3:20].[I-:21] 10=20;20,21=21")
+    steps = [*mini_steps.values(), iodide]
+    one = evaluate_alignment(steps, mini_token_cache)
+    assert one["steps_skipped"] == {"MISSING_TOKENS": 1} and one["predicted"]["n_steps"]
+    assert evaluate_alignment(steps, mini_token_cache, n_workers=2) == one
+
+
 @pytest.mark.realdata
-def test_pmechdb_alignment_and_predicted_round_trip():
+def test_pmechdb_alignment_and_predicted_round_trip(realdata_workers):
     path = steps_path("pmechdb")
     cache = TokenCache()
     files = sorted(cache.tokens_dir.glob("*.npz"))
@@ -206,7 +235,8 @@ def test_pmechdb_alignment_and_predicted_round_trip():
         pytest.skip("PMechDB steps or token cache missing")
     if read_header(files[0]) is None:
         pytest.skip("token cache predates provenance headers: backfill qm, rebuild tokens")
-    report = evaluate_alignment(read_training_steps(path), cache, member_check=False)
+    steps = read_training_steps(path)
+    report = evaluate_alignment(steps, cache, member_check=False, n_workers=realdata_workers)
     print({k: v for k, v in report.items() if k != "unaligned_groups"})
     assert report["n_steps_aligned_or_tried"] > 0
     assert report["arrows_aligned_fraction"] >= 0.90
