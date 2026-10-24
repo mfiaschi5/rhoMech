@@ -118,3 +118,23 @@ def test_training_steps_drop_excluded_steps_and_keep_the_gap():
     assert counts["METAL_PLACEHOLDER"] == 0
     back = ElementaryStep.from_dict(steps[2].to_dict())
     assert back.domain_exclusion == "OPEN_SHELL_METAL" and back.charge_repair is None
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        "C[O+](B(Br)Br)[C:20]",  # a methyl drawn without its hydrogens
+        "[Sn-][O+:21]=[CH2:20]",  # a tin Lewis acid drawn without ligands
+        "CC(C)(C)[O-].[K]",  # potassium without its charge
+    ],
+)
+def test_atoms_drawn_as_radicals_are_outside_the_closed_shell_domain(smiles):
+    _, codes, repairs = screen_side(frag(smiles), "reactants")
+    assert codes == [DomainCode.RADICAL_DRAWN] and not repairs
+
+
+def test_closed_shell_and_odd_fragments_keep_their_codes():
+    _, codes, _ = screen_side(frag("CC(C)=O.C[O-].[K+]"), "reactants")
+    assert codes == []
+    _, codes, _ = screen_side(frag("[Br][Fe-]([Br])([Br])[Br]"), "reactants")
+    assert codes == [DomainCode.OPEN_SHELL_METAL]  # odd: the earlier rule, not RADICAL_DRAWN

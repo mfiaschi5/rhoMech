@@ -3636,3 +3636,26 @@ is now v7.5, sha256 6c6a023f66dd).
 - **Measured.** The real-data stage takes 2 minutes: the alignment test 41 s instead of about
   30 minutes, the PMechDB load 30 s, the molecule-split check 27 s, the IBO check 18 s and the
   round trip 7 s.
+
+## 2026-10-24 — RADICAL_DRAWN: atoms drawn with unpaired electrons are outside the domain
+
+- **Why.** After the QM retry, one more PMechDB step was completely aligned, and its
+  annotated leaving bond fell outside the physical mask: pmechdb-9346d5b585fc8087, whose
+  reacting methyl is drawn `[C:20]`, without its hydrogens. RDKit reads that carbon as having
+  three unpaired electrons. The odd-electron screen does not catch it because the count adds
+  up, so the QM layer computed the molecule as an open-shell quartet, and the mask allows no
+  bond to break at an open shell.
+- **Extent.** 51 training steps have an atom that RDKit marks with unpaired electrons:
+  - 25 carbons with 1–3 unpaired electrons (methyls and methylenes drawn without H);
+  - 10 oxygens;
+  - 8 Sn drawn without ligands;
+  - 4 K or Na drawn without a charge.
+
+  In a polar dataset these are drawing errors.
+- **Rule (user decision).** RADICAL_DRAWN is domain rule 5 (`data.domain`): a fragment that is
+  not odd but has an atom with radical electrons puts the step outside the closed-shell
+  domain until the radical extension. It is last in the precedence, so existing codes keep
+  their counts; odd fragments keep the earlier rules.
+- **Re-ingest.** 13,090 accepted steps. 12,779 training steps, against 12,830 before. The
+  exclusions are OPEN_SHELL_METAL 78, RADICAL_DRAWN 52, METAL_PLACEHOLDER 24 and
+  CHARGE_UNREPAIRED 1.

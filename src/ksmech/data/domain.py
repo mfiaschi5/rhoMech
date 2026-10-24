@@ -24,6 +24,13 @@ rules, in this order (user decisions of 2026-10-21; docs/decisions.md):
    the step unbalanced). It is a charge error, not an open shell; the step is excluded.
 
 An odd fragment without any metal gets no code here; the QM layer reports it (SPIN_PARITY).
+
+5. **RADICAL_DRAWN** (any fragment, odd or not, that the rules above leave uncoded): an atom
+   RDKit marks with unpaired electrons. In a polar dataset these are drawing errors (a methyl
+   written `[C:20]` without its hydrogens, Sn or K written without ligands or counterion);
+   read literally they are open shells, which the QM layer would compute as such and the
+   leaving-bond mask would treat as such. Outside the closed-shell domain until the radical
+   extension (user decision of 2026-10-24); the step is excluded.
 """
 
 from __future__ import annotations
@@ -41,12 +48,14 @@ class DomainCode(StrEnum):
     METAL_PLACEHOLDER = "METAL_PLACEHOLDER"
     OPEN_SHELL_METAL = "OPEN_SHELL_METAL"
     CHARGE_UNREPAIRED = "CHARGE_UNREPAIRED"
+    RADICAL_DRAWN = "RADICAL_DRAWN"
 
 
 PRECEDENCE = (
     DomainCode.METAL_PLACEHOLDER,
     DomainCode.OPEN_SHELL_METAL,
     DomainCode.CHARGE_UNREPAIRED,
+    DomainCode.RADICAL_DRAWN,
 )
 CHARGE_REPAIRED = "CHARGE_REPAIRED"
 _S_BLOCK = frozenset([3, 4, 11, 12, 19, 20, 37, 38, 55, 56, 87, 88])
@@ -67,6 +76,11 @@ def is_odd(mol: Chem.Mol) -> bool:
     unpaired = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
     n = electron_count(mol)
     return n < unpaired or (n - unpaired) % 2 == 1
+
+
+def has_drawn_radical(mol: Chem.Mol) -> bool:
+    """Some atom carries unpaired electrons as drawn (RDKit's radical electrons)."""
+    return any(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
 
 
 def _is_metal(atom: Chem.Atom) -> bool:
@@ -152,6 +166,8 @@ def screen_side(
     out, codes, repairs = mol, [], []
     for atoms, frag in _fragments(mol):
         if not is_odd(frag):
+            if has_drawn_radical(frag):
+                codes.append(DomainCode.RADICAL_DRAWN)
             continue
         if is_placeholder(frag):
             codes.append(DomainCode.METAL_PLACEHOLDER)
