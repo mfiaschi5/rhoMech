@@ -17,9 +17,11 @@ embedding, xTB, localization, new tokens) and fed back in to predict the next st
 model emits a stop token. Labels come from the dataset arrows applied as one edit, taken
 modulo resonance as the parsimonious class (spec, "Edit labels"). Resonance identity is the
 sigma key (`data.resonance.sigma_key`, spec "Resonance"): the sigma skeleton with every H count
-frozen and the charges zeroed, plus the total charge. Steps whose two sides share it leave the
-training target and are kept as resonance pairs; training draws random valid resonance forms of
-the reactant pool as inputs, with the labels recomputed.
+frozen and the charges zeroed, plus the total charge. Steps whose two sides share it with the
+atom maps kept (no atom changes its sigma bonds or H) leave the training target and are kept as
+resonance pairs; degenerate exchanges (the same molecules, atoms that change partners) are real
+steps and stay. Training draws random valid resonance forms of the reactant pool as inputs, with
+the labels recomputed.
 
 ## Representation
 

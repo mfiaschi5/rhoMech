@@ -73,11 +73,19 @@ def test_the_sigma_key_is_a_property_of_the_molecule_not_of_the_drawing(a, b):
     assert key(a) == key(b) and ":" not in key(a)
 
 
-def test_a_degenerate_exchange_has_one_sigma_key():
-    """A proton passed between two waters leaves the same molecules on both sides: map-free,
-    the sides have one sigma key, and the step leaves the training target with the resonance
-    steps (docs/decisions.md, 2026-10-25)."""
-    assert sides("[OH2:1].[OH3+:2]", "[OH3+:1].[OH2:2]")
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("[OH2:1].[OH3+:2]", "[OH3+:1].[OH2:2]"),  # a proton passed between two waters
+        ("C[S-:10].C[S:21][H:20]", "C[S-:21].C[S:10][H:20]"),  # thiolate / thiol
+        ("C[S-:10].C[S:20][S:21]C", "C[S-:21].C[S:10][S:20]C"),  # thiol-disulfide exchange
+    ],
+)
+def test_a_degenerate_exchange_is_a_real_step(a, b):
+    """The same molecules on both sides, so one map-free sigma key, but atoms change partners:
+    a real elementary step, which stays in the training target (docs/decisions.md,
+    2026-10-25)."""
+    assert key(a) == key(b) and not sides(a, b)
 
 
 def test_a_long_conjugated_anion_needs_no_enumeration():

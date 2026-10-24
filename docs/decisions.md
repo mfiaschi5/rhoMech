@@ -3836,3 +3836,27 @@ is now v7.5, sha256 6c6a023f66dd).
   that enters the loss (a consistency term, or extra augmentation draws) is settled with the
   training stage.
 - **Removed from the spec.** "Resonance structures are never enumerated as model input."
+
+## 2026-10-25 — Degenerate exchanges are real steps and stay in training (user decision)
+
+- **Why.** The map-free sigma key also matched three steps whose two sides are the same
+  molecules: a thiolate/thiol proton swap (pmechdb-c905cbb9489419ee), a thiol-disulfide
+  exchange (pmechdb-1dee1f33e7ecf103) and a degenerate cation shift in a symmetric cage
+  (pmechdb-76cd41c118dfb991). They had left training with the resonance steps. The user: they
+  are actual reactions, and reagents and products are not the same because the two molecules
+  are not interchangeable. The atoms change partners, and a mechanism follows the atoms.
+- **Change.** `is_resonance_step` compares sigma keys with the atom maps kept
+  (`sigma_key(mol, keep_maps=True)`): a resonance step changes no atom's sigma bonds or H.
+  - The map-free key still compares a predicted product with the annotated one, so
+    deprotonating either of two equivalent methyls gives the same product.
+  - At step level, a degenerate exchange's product has its reactants' map-free key, so that
+    metric cannot score these steps. The edit-level metric (R up to its class) does.
+- **Numbers (PMechDB).**
+  - 482 resonance steps, of which 471 inside the domain are written as pairs.
+  - 12,464 training steps.
+  - Edit labels: 12,418 / 12,464 labeled (99.63%); skipped
+    {'MISSING_TOKENS': 46}.
+  - Class size 1 / 2 / 3 / 4+: 11,733 / 619 / 59 / 7.
+  - Drawn R parsimonious in 11,774 steps.
+  - Rejected variants: 0.
+  - Truncated enumerations: 978.

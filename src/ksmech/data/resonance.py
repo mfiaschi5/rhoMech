@@ -6,8 +6,9 @@ every atom's H count frozen and every charge and radical zeroed, followed by `|`
 charge. Two closed-shell Lewis structures with one sigma key have the same atoms, sigma bonds,
 H and total charge, so the same electron count: they differ only in where the pi bonds, lone
 pairs and charges sit, which is what resonance forms are. No enumeration is needed, so the key
-is exact and never truncated. A step whose two sides have one sigma key is a resonance step
-(or a degenerate exchange whose sides are the same molecules) and leaves the training target.
+is exact and never truncated. A step whose two sides have one sigma key with the atom maps
+kept (`is_resonance_step`) is a resonance step and leaves the training target; a degenerate
+exchange, whose sides are the same molecules but whose atoms change partners, is a real step.
 
 `resonance_forms` enumerates the forms themselves, for the edit-label class (`arrows.delta_be`)
 and for input augmentation. It runs RDKit's `ResonanceMolSupplier` on a copy whose H counts are
@@ -34,10 +35,11 @@ _FLAGS = (
 _KEKULE_OPS = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
 
 
-def sigma_key(mol: Chem.Mol) -> str:
+def sigma_key(mol: Chem.Mol, keep_maps: bool = False) -> str:
     """The sigma skeleton of `mol` with its H frozen and its charges and radicals zeroed, as
-    map-free canonical SMILES without stereo, then `|<total charge>`. An H drawn as an atom
-    counts on its neighbour, as an implicit H does, and H2 drawn [H][H] is [HH]."""
+    canonical SMILES without stereo, then `|<total charge>`; map-free unless `keep_maps`. An H
+    drawn as an atom counts on its neighbour, as an implicit H does, and H2 drawn [H][H] is
+    [HH]."""
     m = Chem.RWMol(mol)
     m.UpdatePropertyCache(strict=False)
     charge = sum(a.GetFormalCharge() for a in m.GetAtoms())
@@ -47,7 +49,8 @@ def sigma_key(mol: Chem.Mol) -> str:
         atom.SetFormalCharge(0)
         atom.SetNumRadicalElectrons(0)
         atom.SetIsAromatic(False)
-        atom.SetAtomMapNum(0)
+        if not keep_maps:
+            atom.SetAtomMapNum(0)
     for bond in m.GetBonds():
         bond.SetBondType(Chem.BondType.SINGLE)
         bond.SetIsAromatic(False)
@@ -76,9 +79,11 @@ def _dihydrogen_as_one_atom(m: Chem.RWMol) -> Chem.RWMol:
 
 
 def is_resonance_step(reactants: Chem.Mol, products: Chem.Mol) -> bool:
-    """The two sides have one sigma key: the step moves only pi bonds, lone pairs and charges
-    (or exchanges identical molecules), so it is no elementary step of the target."""
-    return sigma_key(reactants) == sigma_key(products)
+    """The two sides are resonance forms atom by atom: with the atom maps kept they have one
+    sigma key, so no atom changes its sigma bonds or its H and the step moves only pi bonds,
+    lone pairs and charges. A degenerate exchange (the same molecules on both sides, but atoms
+    that change partners: a thiol-disulfide exchange) has one map-free key and is a real step."""
+    return sigma_key(reactants, keep_maps=True) == sigma_key(products, keep_maps=True)
 
 
 def frozen_hydrogens(mol: Chem.Mol) -> Chem.Mol | None:
