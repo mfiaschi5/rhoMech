@@ -15,7 +15,11 @@ matrix (bond-order changes of +-1 on atom pairs, lone-pair changes of +-2 on ato
 around an anchor bond that forms. The product is B + R; the intermediate is re-featurized (3D
 embedding, xTB, localization, new tokens) and fed back in to predict the next step, until the
 model emits a stop token. Labels come from the dataset arrows applied as one edit, taken
-modulo resonance as the parsimonious class (spec, "Edit labels").
+modulo resonance as the parsimonious class (spec, "Edit labels"). Resonance identity is the
+sigma key (`data.resonance.sigma_key`, spec "Resonance"): the sigma skeleton with every H count
+frozen and the charges zeroed, plus the total charge. Steps whose two sides share it leave the
+training target and are kept as resonance pairs; training draws random valid resonance forms of
+the reactant pool as inputs, with the labels recomputed.
 
 ## Representation
 
@@ -129,8 +133,8 @@ uv run pre-commit install     # enable the commit hook: ruff, then the two pytes
 
 Main CLI entry points are added phase by phase and listed here as they land:
 
-- Data: `uv run ksmech-data ingest --source pmechdb` (parquet + rejections + report under
-  `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
+- Data: `uv run ksmech-data ingest --source pmechdb` (steps parquet, `resonance_pairs.parquet`,
+  rejections and report under `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts

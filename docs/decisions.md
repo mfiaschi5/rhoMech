@@ -3817,3 +3817,22 @@ is now v7.5, sha256 6c6a023f66dd).
   - The drawn R is parsimonious in 11,771 steps (94.8%, against 95.2% before).
   - Enumeration truncated at 256 structures in 978 steps.
   - Anchors: 11,691 rising, 724 falling.
+
+## 2026-10-25 — Spec v8.1: the sigma key, resonance pairs and resonance augmentation (item 4)
+
+- **Resonance.** The spec defines resonance identity by the sigma key, and uses it wherever
+  identity is decided: the label check, class acceptance, step-level exact match, beam merging
+  and pool keys. Steps with one sigma key on both sides leave the training target; those inside
+  the domain are kept as resonance pairs. Resonance forms, where they are needed, are RDKit's
+  enumeration with frozen H and the odd structures dropped.
+- **Edit labels.** Class members are accepted by the sigma key, so none is dropped on PMechDB.
+  The class numbers are the new ones: one member in 94.5% of steps, two in 5.0%, drawn R
+  parsimonious in 94.8%, 99.6% labeled.
+- **Training objective (user decision).** Each molecule of a sample's reactant pool is drawn as
+  a random valid resonance form, and the label set is recomputed for that drawing. The atom
+  tokens' formal charges and the matrix B the edit is decoded on belong to a drawing, so
+  without this the model would learn the dataset's choice of drawing. The resonance pairs are
+  extra equivalence examples: two drawings of one pool that must get the same prediction. How
+  that enters the loss (a consistency term, or extra augmentation draws) is settled with the
+  training stage.
+- **Removed from the spec.** "Resonance structures are never enumerated as model input."
