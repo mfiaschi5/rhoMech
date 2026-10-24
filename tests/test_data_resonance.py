@@ -1,5 +1,6 @@
-"""Resonance keys, the ingestion flag and the training-target filter."""
+"""The sigma key, resonance forms, the ingestion flag and the training-target filter."""
 
+import random
 from dataclasses import replace
 
 import pytest
@@ -9,14 +10,10 @@ from rdkit.Chem import rdchem
 from ksmech.data import chem
 from ksmech.data.resonance import (
     _FLAGS,
-    MAX_STRUCTURES,
-    ResonanceFlag,
-    canonical_resonance_key,
     frozen_hydrogens,
     is_resonance_step,
     resonance_forms,
-    resonance_structures,
-    skeleton_key,
+    sigma_key,
     training_steps,
 )
 from ksmech.data.schema import ElementaryStep, Source
@@ -27,49 +24,89 @@ KEKULE_A = "[CH:1]1=[CH:2][CH:3]=[CH:4][CH:5]=[CH:6]1"
 KEKULE_B = "[CH:1]1[CH:2]=[CH:3][CH:4]=[CH:5][CH:6]=1"
 ENOLATE = "[CH2:1]=[C:2]([CH3:4])[O-:3]"
 CARBANION = "[CH2-:1][C:2]([CH3:4])=[O:3]"
+FORMS = 256  # enumeration cap of these tests, as the edit labels'
 
 
-def key(smiles: str, **kw):
-    return canonical_resonance_key(chem.parse_mapped(smiles), **kw)
+def key(smiles: str) -> str:
+    return sigma_key(chem.parse_mapped(smiles))
 
 
-def test_kekule_structures_share_a_key():
-    a, b = key(KEKULE_A), key(KEKULE_B)
-    assert a.key == b.key and a.flag == b.flag == ResonanceFlag.OK and a.n_structures >= 1
+def sides(a: str, b: str) -> bool:
+    return is_resonance_step(chem.parse_mapped(a), chem.parse_mapped(b))
 
 
-def test_enolate_and_carbanion_share_a_key():
-    a, b = key(ENOLATE), key(CARBANION)
-    assert a.key == b.key and a.flag == ResonanceFlag.OK
-    assert skeleton_key(chem.parse_mapped(ENOLATE)) == skeleton_key(chem.parse_mapped(CARBANION))
+def test_kekule_structures_share_a_sigma_key():
+    assert key(KEKULE_A) == key(KEKULE_B) == key("c1ccccc1")
 
 
-def test_atom_maps_distinguish_degenerate_exchange():
-    """A proton that moved to another atom changes the mapped skeleton: not resonance."""
-    water_a, water_b = "[OH2:1].[OH3+:2]", "[OH3+:1].[OH2:2]"
-    assert skeleton_key(chem.parse_mapped(water_a)) != skeleton_key(chem.parse_mapped(water_b))
-    flag, _ = is_resonance_step(chem.parse_mapped(water_a), chem.parse_mapped(water_b))
-    assert flag is False
+def test_enolate_and_carbanion_share_a_sigma_key():
+    assert key(ENOLATE) == key(CARBANION) and sides(ENOLATE, CARBANION)
+    assert not sides(ENOLATE, "[CH3:1][C:2]([CH3:4])=[O:3]")  # an H more: a protonation
 
 
-def test_is_resonance_step_on_sides():
-    assert is_resonance_step(chem.parse_mapped(ENOLATE), chem.parse_mapped(CARBANION))[0]
-    assert not is_resonance_step(
-        chem.parse_mapped(ENOLATE), chem.parse_mapped("[CH3:1][C:2]([CH3:4])=[O:3]")
-    )[0]
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("CC(=O)C", "CC(O)=C"),  # a tautomer moves an H
+        ("[NH4+]", "N"),  # a proton more, a charge more
+        ("C=C[O-]", "C=CO"),  # the charge, not only where it sits
+        ("CC=O", "C1CO1"),  # another sigma skeleton
+        ("CC[O-:1].C[O:2][H:3]", "CC[O:1][H:3].C[O-:2]"),  # a proton between two alcohols
+        ("CC[O-].CO", "CCO.C[O-]"),  # the same with every H implicit
+    ],
+)
+def test_the_sigma_key_separates_what_resonance_cannot_reach(a, b):
+    """An O with no H (a zeroed alkoxide) is not an O-H: every H count is written out."""
+    assert key(a) != key(b)
 
 
-def test_truncation_falls_back_to_the_plain_smiles():
-    mol = chem.parse_mapped("[CH2-:1][CH:2]=[CH:3][CH:4]=[CH:5][CH:6]=[O:7]")
-    full = canonical_resonance_key(mol)
-    assert full.flag == ResonanceFlag.OK and full.n_structures > 2
-    cut = canonical_resonance_key(mol, max_structures=2)
-    assert cut.flag == ResonanceFlag.RESONANCE_TRUNCATED and cut.n_structures == 2
-    assert cut.key == "[CH2-]C=CC=CC=O"  # the input itself, maps stripped
-    assert full.key == "C=CC=CC=C[O-]"  # the smallest over the enumeration
-    sides = (mol, chem.parse_mapped("[CH2:1]=[CH:2][CH:3]=[CH:4][CH:5]=[CH:6][O-:7]"))
-    assert is_resonance_step(*sides)[0] is True
-    assert is_resonance_step(*sides, max_structures=2) == (False, ResonanceFlag.RESONANCE_TRUNCATED)
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("[H:5][O:1][CH3:2]", "CO"),  # an H drawn as an atom counts on its neighbour
+        ("[H][H]", "[HH]"),  # H2 drawn either way
+        ("C/C=C/C", "C/C=C\\C"),  # no stereo
+        ("[CH3:1][C:2](=[O:3])[CH2-:4]", "[CH2-:1][C:2](=[O:3])[CH3:4]"),  # no atom maps
+    ],
+)
+def test_the_sigma_key_is_a_property_of_the_molecule_not_of_the_drawing(a, b):
+    assert key(a) == key(b) and ":" not in key(a)
+
+
+def test_a_degenerate_exchange_has_one_sigma_key():
+    """A proton passed between two waters leaves the same molecules on both sides: map-free,
+    the sides have one sigma key, and the step leaves the training target with the resonance
+    steps (docs/decisions.md, 2026-10-25)."""
+    assert sides("[OH2:1].[OH3+:2]", "[OH3+:1].[OH2:2]")
+
+
+def test_a_long_conjugated_anion_needs_no_enumeration():
+    """The key enumerates nothing, so it is never truncated."""
+    assert sides(
+        "[CH2-:1][CH:2]=[CH:3][CH:4]=[CH:5][CH:6]=[O:7]",
+        "[CH2:1]=[CH:2][CH:3]=[CH:4][CH:5]=[CH:6][O-:7]",
+    )
+
+
+def test_a_charge_separation_reached_from_one_side_only_is_a_resonance_step():
+    """C=N-O <-> C(+)-N(-)-O: RDKit enumerates the neutral form from the charged one, not the
+    reverse; the sigma key needs neither."""
+    assert sides("C[CH:10]=[N:11]O", "C[CH+:10][N-:11]O")
+    assert sides("C[CH+:10][N-:11]O", "C[CH:10]=[N:11]O")
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    ["c1ccccc1[O-]", "CO[C:20]([O-:10])=[CH:21][CH:22]=[CH2:23]", "CC(=O)C=C[O-]", "C=C[CH2+]"],
+)
+def test_the_sigma_key_does_not_depend_on_atom_order(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    keys = set()
+    for seed in range(30):
+        order = list(range(mol.GetNumAtoms()))
+        random.Random(seed).shuffle(order)
+        keys.add(sigma_key(Chem.RenumberAtoms(mol, order)))
+    assert len(keys) == 1, keys
 
 
 def step(i: int, pathway: str | None, index: int | None, resonance: bool = False):
@@ -109,49 +146,28 @@ def test_resonance_step_survives_the_dict_round_trip():
 def test_ingestion_flags_the_mini_fixture_resonance_step(mini_steps, mini_result):
     assert mini_steps["resonance"].resonance_step is True
     assert all(not s.resonance_step for name, s in mini_steps.items() if name != "resonance")
-    assert mini_result.report()["n_resonance_steps"] == 1
+    report = mini_result.report()
+    assert report["n_resonance_steps"] == report["n_resonance_pairs"] == 1
     stats = compute_stats(list(mini_steps.values()))
     assert stats["n_resonance_steps"] == 1 and stats["n_training_steps"] == 4
 
 
-@pytest.mark.parametrize("smiles", ["[Na+].[Cl-]", "[H+]", "C"])
-def test_single_structure_molecules(smiles):
-    k = key(smiles)
-    assert k.flag == ResonanceFlag.OK and k.n_structures == 1
+def test_the_resonance_pairs_file_holds_the_in_domain_resonance_steps(mini_steps, tmp_path):
+    import pyarrow.parquet as pq
 
+    from ksmech.data.io import write_resonance_pairs
 
-@pytest.mark.parametrize(
-    "smiles",
-    ["c1ccccc1[O-]", "CO[C:20]([O-:10])=[CH:21][CH:22]=[CH2:23]", "CC(=O)C=C[O-]", "C=C[CH2+]"],
-)
-def test_key_does_not_depend_on_atom_order(smiles):
-    """RDKit's resonance enumeration depends on atom order (phenoxide gave two keys before the
-    key was taken on the canonical re-read molecule)."""
-    import random
-
-    mol = Chem.MolFromSmiles(smiles)
-    keys = set()
-    for seed in range(30):
-        order = list(range(mol.GetNumAtoms()))
-        random.Random(seed).shuffle(order)
-        keys.add(canonical_resonance_key(Chem.RenumberAtoms(mol, order)).key)
-    assert len(keys) == 1, keys
-
-
-def test_key_strips_atom_maps():
-    """Deprotonating either methyl of acetone gives the same product."""
-    a = canonical_resonance_key(Chem.MolFromSmiles("[CH3:1][C:2](=[O:3])[CH2-:4]"))
-    b = canonical_resonance_key(Chem.MolFromSmiles("[CH2-:1][C:2](=[O:3])[CH3:4]"))
-    assert a.key == b.key and ":" not in a.key
-
-
-def test_a_charge_separation_rdkit_reaches_from_one_side_only_is_a_resonance_step():
-    """C=N-O <-> C(+)-N(-)-O: RDKit enumerates the neutral form from the charged one, not the
-    reverse, so the minima differ; the step is still a resonance step (the sets intersect)."""
-    neutral = chem.parse_mapped("C[CH:10]=[N:11]O")
-    charged = chem.parse_mapped("C[CH+:10][N-:11]O")
-    assert is_resonance_step(neutral, charged) == (True, ResonanceFlag.OK)
-    assert is_resonance_step(charged, neutral) == (True, ResonanceFlag.OK)
+    out_of_domain = replace(mini_steps["resonance"], step_id="x", domain_exclusion="RADICAL_DRAWN")
+    path = write_resonance_pairs([*mini_steps.values(), out_of_domain], tmp_path / "pairs.parquet")
+    rows = pq.read_table(path).to_pylist()
+    s = mini_steps["resonance"]
+    assert rows == [
+        {
+            "step_id": s.step_id,
+            "reactants_smiles": s.reactants_smiles,
+            "products_smiles": s.products_smiles,
+        }
+    ]
 
 
 def electron_state(mol: Chem.Mol) -> tuple:
@@ -168,18 +184,19 @@ def electron_state(mol: Chem.Mol) -> tuple:
 @pytest.mark.parametrize("name", sorted(MOLECULES))
 def test_resonance_forms_keep_every_hydrogen_the_charge_and_the_pairing(name):
     """With the H frozen, every form keeps the H count of every atom, the total charge and no
-    unpaired electron, and the molecule itself is one of its forms."""
+    unpaired electron; the molecule itself is one of its forms, and all share its sigma key."""
     mol = frozen_hydrogens(Chem.MolFromSmiles(MOLECULES[name]))
-    forms, n = resonance_forms(mol, MAX_STRUCTURES)
-    assert 1 <= len(forms) <= n < MAX_STRUCTURES
+    forms, n = resonance_forms(mol, FORMS)
+    assert 1 <= len(forms) <= n < FORMS
     assert all(electron_state(f) == electron_state(mol) for f in forms)
     assert Chem.MolToSmiles(mol) in {Chem.MolToSmiles(f) for f in forms}
+    assert {sigma_key(f) for f in forms} == {sigma_key(mol)}
 
 
 def test_nitro_forms_never_move_a_hydrogen_or_unpair_electrons():
     """RDKit's own enumeration of nitroethane re-derives the implicit H of an unbracketed O
     ([OH2+]) and returns the radical CCN([O+])[O-]. Neither survives: the two equivalent N-O
-    forms are left, and they give one key."""
+    forms are left."""
     mol = Chem.MolFromSmiles("CC[N+](=O)[O-]")
     with rdBase.BlockLogs():
         raw = rdchem.ResonanceMolSupplier(mol, int(_FLAGS), 64)
@@ -188,8 +205,7 @@ def test_nitro_forms_never_move_a_hydrogen_or_unpair_electrons():
     forms, _ = resonance_forms(frozen_hydrogens(mol), 64)
     assert len(forms) == 2
     assert all(electron_state(f) == electron_state(mol) for f in forms)
-    keys, _, flag = resonance_structures(mol)
-    assert flag == ResonanceFlag.OK and len(keys) == 1
+    assert {sigma_key(f) for f in forms} == {sigma_key(mol)}
 
 
 def test_enolate_forms_are_the_alkoxide_and_the_carbanion():
@@ -201,10 +217,9 @@ def test_enolate_forms_are_the_alkoxide_and_the_carbanion():
         assert all(electron_state(f) == electron_state(chem.parse_mapped(smiles)) for f in forms)
 
 
-def test_frozen_hydrogens_keep_a_kekule_structure_unless_aromaticity_is_asked():
+def test_frozen_hydrogens_keep_a_kekule_structure():
     """The edit labels read bond orders, so their enumeration starts from the Kekule structure
-    as drawn; the resonance key works on the aromatic canonical form."""
+    as drawn: re-perceived aromaticity would change which structures RDKit returns."""
     kekule = Chem.MolFromSmiles("C1=CC=CC=C1")
     Chem.Kekulize(kekule, clearAromaticFlags=True)
     assert not any(b.GetIsAromatic() for b in frozen_hydrogens(kekule).GetBonds())
-    assert all(b.GetIsAromatic() for b in frozen_hydrogens(kekule, aromaticity=True).GetBonds())

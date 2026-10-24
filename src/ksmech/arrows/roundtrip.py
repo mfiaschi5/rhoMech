@@ -1,7 +1,7 @@
 """Round-trip checks: arrows applied to the reactants must give the annotated products.
 
 A step matches `exact` when the edited molecule has the annotated canonical Kekulé SMILES, and
-`resonance` when only the resonance keys agree. Everything else is a failure, with a pattern
+`resonance` when only the sigma keys agree. Everything else is a failure, with a pattern
 string that groups failures of the same kind: the reason code (VALENCE, SANITIZE,
 UNKNOWN_ARROW, MISMATCH) and, for a mismatch, which properties of which elements differ.
 """

@@ -3764,3 +3764,56 @@ is now v7.5, sha256 6c6a023f66dd).
     - Class sizes 1 / 2 / 3 / 4+: 12,204 / 507 / 61 / 7, against 12,195 / 514 / 62 / 8.
     - Steps with a rejected variant: 260, against 265. The key check that rejects them is
       not form-invariant; item 2 replaces it with the sigma key.
+
+## 2026-10-25 — The sigma key is the resonance identity; resonance steps leave training (resonance items 2-3)
+
+- **Decision (user, option B).** Resonance identity is the sigma key, `data.resonance.sigma_key`:
+  the map-free canonical SMILES of the sigma skeleton (every bond single, no aromatic flag), with
+  every atom's H count frozen and its charge and radical electrons zeroed, then
+  `|<total charge>`.
+  - Two closed-shell Lewis structures with one sigma key have the same atoms, sigma bonds, H and
+    total charge, so the same electron count: they are resonance forms of each other.
+  - The key enumerates nothing, so it is exact and never truncated.
+  - The enumerated key it replaces (the smallest SMILES over a capped enumeration) agreed across
+    the forms of only 59% of sampled products, and InChI with fixed H only 58%. It is removed,
+    with `ResonanceKey`, `ResonanceFlag`, `resonance_structures` and `skeleton_key`.
+- **Choices inside the key.**
+  - An H drawn as an atom counts on its neighbour, as an implicit H does, and H2 drawn [H][H]
+    is [HH]. `RemoveHs` adds each removed H to its frozen neighbour's count.
+  - Every atom is written with its H count (`allHsExplicit`). RDKit's writer decides brackets
+    by valence, and wrote an O with no H (a zeroed alkoxide) as a plain `O`, like an O-H. A
+    draft without this called 1,814 PMechDB steps resonance, most of them proton transfers.
+  - No stereo: R carries none, and the model predicts none.
+  - Radicals are zeroed with the charges, so the key assumes closed shells. Open-shell species
+    are outside the domain (domain rules 3 to 5).
+- **Where it decides.**
+  - `is_resonance_step` at ingest: one sigma key on both sides.
+  - `compare.match_products`: `resonance` when the edited molecule has the products' sigma key.
+    The ingest arrow check, the round trips and the edit-label check (`delta_be.reproduces`)
+    all go through it.
+  - The sample's `product_key`, which step-level evaluation reads, is the products' sigma key.
+    `product_key_flag` is gone and `SAMPLE_VERSION` is 14, so the existing sample stores are
+    refused and must be rebuilt.
+- **Degenerate exchanges.** The key is map-free, so a step that exchanges identical molecules
+  has one sigma key and leaves the training target with the resonance steps. PMechDB has 3:
+  - a thiolate/thiol proton swap (pmechdb-c905cbb9489419ee);
+  - a thiolate/disulfide exchange (pmechdb-1dee1f33e7ecf103);
+  - a degenerate carbocation shift (pmechdb-76cd41c118dfb991).
+- **Resonance pairs.** Ingest writes `resonance_pairs.parquet` with the step id, the reactant
+  drawing and the product drawing of every resonance step inside the closed-shell domain. They
+  are equivalence examples for training. The ingest report counts them as `n_resonance_pairs`.
+- **Re-ingest (PMechDB).**
+  - 13,090 accepted steps and 14 rejected, both unchanged.
+  - 485 resonance steps, against 157: those 157 still flagged, 328 more, none lost. 482 are
+    resonance interconversions and 3 degenerate exchanges.
+  - 474 of the 485 lie inside the domain and are written as pairs.
+  - 12,461 training steps, against 12,779.
+- **Edit labels** over the 12,461 training steps.
+  - 12,415 labeled (99.63%). The only skip is MISSING_TOKENS, 46 steps.
+  - Rejected variants: 0, against 264. Every class member is a resonance form of the product,
+    so it has the product's sigma key.
+  - Class size 1 / 2 / 3 / 4+: 11,730 / 619 / 59 / 7. Members the old key rejected now enter
+    the class.
+  - The drawn R is parsimonious in 11,771 steps (94.8%, against 95.2% before).
+  - Enumeration truncated at 256 structures in 978 steps.
+  - Anchors: 11,691 rising, 724 falling.

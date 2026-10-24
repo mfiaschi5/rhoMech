@@ -15,7 +15,7 @@ from ksmech.arrows.apply_predicted import (
 from ksmech.arrows.reactants import ReactantTokens
 from ksmech.arrows.roundtrip import member_agreement, predicted_round_trip_step
 from ksmech.data import chem
-from ksmech.data.resonance import canonical_resonance_key
+from ksmech.data.resonance import sigma_key
 
 
 def _rt(smiles: str, loader) -> ReactantTokens:
@@ -126,7 +126,7 @@ def test_kekule_switch_finds_the_multiple_bond(token_loader):
     arenium = chem.parse_mapped(
         "[CH3:20][CH:{}]1[CH+:{}][CH:{}]=[CH:{}][CH:{}]=[CH:{}]1".format(*ring)
     )
-    assert out.ok and out.key.key == canonical_resonance_key(arenium).key
+    assert out.ok and out.key == sigma_key(arenium)
 
 
 def test_sites_must_be_drawn_atoms(token_loader):
@@ -297,8 +297,8 @@ def test_labeled_leaving_bonds_reproduce_the_fixture_steps(mini_steps, token_loa
         bare = labeled_arrows(rt, labels, with_leaving=False)
         assert all(lab is not None and lab.in_mask for lab in leaving_labels(rt, bare, labels))
         out = apply_predicted_arrows(rt.mol, labeled_arrows(rt, labels), rt)
-        key = canonical_resonance_key(chem.parse_mapped(step.products_smiles)).key
-        assert out.ok and out.key.key == key, step.step_id
+        key = sigma_key(chem.parse_mapped(step.products_smiles))
+        assert out.ok and out.key == key, step.step_id
 
 
 def test_a_relayed_pi_bond_is_not_the_leaving_bond_of_the_later_arrow(token_loader):
@@ -328,5 +328,5 @@ def test_a_relayed_pi_bond_is_not_the_leaving_bond_of_the_later_arrow(token_load
     assert all(lab is not None and lab.in_mask for lab in labs)
     assert labs[0].leaving == rt.site_of_map(21) and labs[1].leaving == NONE_LEAVING
     out = apply_predicted_arrows(rt.mol, labeled_arrows(rt, labels), rt)
-    key = canonical_resonance_key(chem.parse_mapped(step.products_smiles)).key
-    assert out.ok and out.key.key == key
+    key = sigma_key(chem.parse_mapped(step.products_smiles))
+    assert out.ok and out.key == key

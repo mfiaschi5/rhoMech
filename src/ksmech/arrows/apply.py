@@ -33,7 +33,7 @@ from functools import cached_property
 from rdkit import Chem, rdBase
 
 from ksmech.data import chem
-from ksmech.data.resonance import ResonanceKey, canonical_resonance_key
+from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import Arrow, SourceKind
 
 ORDER_TO_TYPE = {1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}
@@ -227,8 +227,9 @@ class ApplyResult:
         return None if self.mol is None else chem.canonical_mapped_smiles(self.mol)
 
     @cached_property
-    def key(self) -> ResonanceKey | None:
-        return None if self.mol is None else canonical_resonance_key(self.mol)
+    def key(self) -> str | None:
+        """The sigma key: the identity modulo resonance (`data.resonance.sigma_key`)."""
+        return None if self.mol is None else sigma_key(self.mol)
 
 
 def apply_moves(mol: Chem.Mol, moves: list[Move]) -> ApplyResult:
@@ -242,8 +243,8 @@ def apply_moves(mol: Chem.Mol, moves: list[Move]) -> ApplyResult:
 
 def apply_arrows(reactants: Chem.Mol, arrows: list[Arrow | Displacement]) -> ApplyResult:
     """Products of one step: every arrow summed into one BE-matrix edit of `reactants`
-    (atom-mapped, as from `chem.parse_mapped`), then sanitized. `result.key` is the
-    canonical resonance key. Raises NotImplementedError for radical arrows."""
+    (atom-mapped, as from `chem.parse_mapped`), then sanitized. `result.key` is the sigma
+    key. Raises NotImplementedError for radical arrows."""
     try:
         moves = [m for arrow in arrows for m in arrow_moves(arrow)]
     except ArrowApplyError as exc:

@@ -33,6 +33,30 @@ def write_steps(steps: Iterable[ElementaryStep], path: Path) -> Path:
     return path
 
 
+RESONANCE_PAIR_SCHEMA = pa.schema(
+    [("step_id", pa.string()), ("reactants_smiles", pa.string()), ("products_smiles", pa.string())]
+)
+
+
+def write_resonance_pairs(steps: Iterable[ElementaryStep], path: Path) -> Path:
+    """The resonance steps inside the closed-shell domain (two sides with one sigma key), as
+    (step id, reactant drawing, product drawing): equivalence examples, kept out of the
+    training target."""
+    rows = [
+        {
+            "step_id": s.step_id,
+            "reactants_smiles": s.reactants_smiles,
+            "products_smiles": s.products_smiles,
+        }
+        for s in steps
+        if s.resonance_step and s.domain_exclusion is None
+    ]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=RESONANCE_PAIR_SCHEMA), path)
+    return path
+
+
 def read_steps(path: Path) -> list[ElementaryStep]:
     """Every accepted step, resonance steps included (flagged `resonance_step`)."""
     table = pq.read_table(path, schema=STEP_SCHEMA)

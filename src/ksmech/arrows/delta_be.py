@@ -8,8 +8,9 @@ the annotated product, chosen first by the fewest formal charges in that product
 dominant resonance contributor) and then by the fewest changed entries (`parsimonious_class`).
 Counting entries alone would prefer charge-separated forms, which a drawn reactant often reaches
 in fewer changes (a hydrazone as N(-)-C=OH(+): 441 PMechDB steps; docs/decisions.md 2026-10-24).
-The product's structures are enumerated with the resonance key's settings, capped at
-`RESONANCE_CAP`, and `R_data` is always a candidate. Arrows are used for nothing else.
+The product's structures are its resonance forms (`data.resonance.resonance_forms`, H
+frozen), capped at `RESONANCE_CAP`, and `R_data` is always a candidate. Arrows are used for
+nothing else.
 
 A ReactionMatrix holds the non-zero entries: bond-order changes (i < j, delta +-1) and changes
 of non-bonding electrons (delta +-2), on reactant-mol atom indices; `to_global` moves them to
@@ -17,11 +18,10 @@ the atoms of the reactant tokens. An anchor (spec v8, Edit decoder) is a bond or
 (a +1 entry: a new bond, or a pi bond on a bonded pair), or, in a step without one, a bond order
 that falls.
 
-The class is built in order of cost among the matrices whose product passes the resonance-key
-check that evaluation uses (`reproduces`). The key comes from a capped enumeration that is not
-perfectly form-invariant: from some charge-separated forms it does not find its way back, so a
-resonance form of the product can fail it (262 PMechDB steps). Such members are dropped and
-counted; `R_data` always passes, so the class is never empty.
+The class is built in order of cost among the matrices whose product passes the check that
+evaluation uses (`reproduces`: the same sigma key as the annotated product). Every resonance
+form has the product's sigma key, so a member fails only when its edit cannot be applied; such
+members are dropped and counted, and `R_data` always passes, so the class is never empty.
 """
 
 from __future__ import annotations

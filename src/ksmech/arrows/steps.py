@@ -3,7 +3,7 @@
 `MechanismSample` holds the model inputs of every reactant fragment in one global index space
 (atoms first, then orbitals; `ksmech.arrows.reactants`), the fragment of every token, the
 candidate masks, the token-to-centre incidence (orbital, atom, weight), the `ArrowLabel`s with
-their sites, and the products' resonance key. It also stores the pair-track features z_rs of
+their sites, and the products' sigma key. It also stores the pair-track features z_rs of
 every (occupied r, virtual s) pair, computed at K = eps = 1 (`physics.params.REDUCED`;
 `params.to_params` applies other values), their `defined` mask, the sign of G (bookkeeping: the
 logs drop it), the validity filter, and the symmetric atom-atom Coulomb matrix (also at eps =
@@ -55,7 +55,7 @@ from ksmech.arrows.reactants import (
 from ksmech.data import chem, splits
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
-from ksmech.data.resonance import canonical_resonance_key
+from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import MoleculeTokens
 from ksmech.physics.pairs import (
@@ -72,7 +72,7 @@ from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 13
+SAMPLE_VERSION = 14  # 14: product_key is the sigma key, product_key_flag is gone
 PARTS = ("train", "val", "test")
 STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
@@ -115,8 +115,7 @@ class MechanismSample:
     #   and for stage-A samples
     atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric
     labels: list[ArrowLabel] = field(default_factory=list)
-    product_key: str = ""
-    product_key_flag: str = ""
+    product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
     label_filter: dict[str, int] = field(default_factory=dict)  # labeled (donor, acceptor)
     #   cells that pair_valid rejects, by group (`_filter_group`); never dropped silently
@@ -173,9 +172,9 @@ def make_sample(
     kernels: PairKernels | None = None,
 ) -> MechanismSample:
     """The sample of an aligned step (the product key and pair features are computed here)."""
-    key = canonical_resonance_key(chem.parse_mapped(step.products_smiles))
     sample = reactant_sample(step.step_id, str(step.source), rt, kernels)
-    sample.labels, sample.product_key, sample.product_key_flag = labels, key.key, str(key.flag)
+    sample.labels = labels
+    sample.product_key = sigma_key(chem.parse_mapped(step.products_smiles))
     return sample
 
 

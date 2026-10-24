@@ -22,8 +22,10 @@ from ksmech.arrows.steps import (
     samples_path,
     write_split_file,
 )
+from ksmech.data import chem
 from ksmech.data import provenance as prov
 from ksmech.data.io import steps_path, write_steps
+from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import Arrow, ElementaryStep
 
 
@@ -64,7 +66,7 @@ def test_sample_holds_tokens_labels_and_product_key(mini_steps, token_loader, pa
     assert s.atom_features.shape[0] == s.n_atoms == len(s.atom_map)
     assert s.orbital_spectra.shape == (s.n_orbitals, 8, 2)
     assert (s.atom_map > 0).sum() == 3  # the three mapped atoms
-    assert s.product_key and s.product_key_flag == "OK"
+    assert s.product_key == sigma_key(chem.parse_mapped(step.products_smiles))
     (label,) = s.labels
     assert s.atom_map[label.donor_site] == 10 and s.atom_map[label.acceptor_site] == 20
     j, g, w = s.incidence.T

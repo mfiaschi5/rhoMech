@@ -119,7 +119,7 @@ def check_arrows_reproduce_products(
 ) -> None:
     """The arrows, applied to the reactants as one bond-electron-matrix edit
     (`ksmech.arrows.apply`), must give the products: the same canonical Kekulé SMILES, or the
-    same resonance key. A step without arrows (ReactMech) has nothing to check. Radical arrows
+    same sigma key. A step without arrows (ReactMech) has nothing to check. Radical arrows
     are not implemented yet, so a step with one is logged and not checked."""
     if not arrows:
         return
@@ -169,7 +169,7 @@ def build_step(
         chem.canonical_mapped_smiles(reactants), chem.canonical_mapped_smiles(products)
     )
     reactants, products = screen.reactants, screen.products
-    resonance, _ = is_resonance_step(reactants, products)
+    resonance = is_resonance_step(reactants, products)
     return ElementaryStep(
         step_id=step_id,
         source=source,

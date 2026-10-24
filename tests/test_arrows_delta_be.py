@@ -170,15 +170,18 @@ def test_edit_labels_cli_reports_coverage_and_gates_it(
 
 
 def test_a_pi_bond_that_forms_is_an_anchor():
-    """An amine lone pair closing an iminium on a carbocation forms no new sigma bond: the C-N
-    order rises from 1 to 2, and that entry is the anchor."""
+    """A carbanion expelling chloride from the next carbon forms no new sigma bond: the C-C
+    order rises from 1 to 2, and that entry is the anchor. (An amine closing an iminium on a
+    carbocation, the earlier example, has one sigma key on both sides: a resonance step.)"""
     step = _step(
-        "S[CH+:20][NH2:10]", "S[CH:20]=[NH2+:10]", [Arrow("lone_pair", (10,), "atom", (20,))]
+        "[CH2-:10][CH2:20][Cl:21]",
+        "[CH2:10]=[CH2:20].[Cl-:21]",
+        [Arrow("lone_pair", (10,), "bond", (10, 20)), Arrow("bond", (20, 21), "atom", (21,))],
     )
     label = edit_label(step)
-    assert isinstance(label, EditLabel)
+    assert isinstance(label, EditLabel) and label.data_parsimonious
     (r,) = label.variants
-    assert _by_map(step, r) == ({(10, 20, 1)}, {(10, -2)})
+    assert _by_map(step, r) == ({(10, 20, 1), (20, 21, -1)}, {(10, -2), (21, 2)})
     ((anchor,),) = label.anchors
     assert anchor[2] == "form"
 

@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ksmech.data.io import source_dir, write_steps
+from ksmech.data.io import source_dir, write_resonance_pairs, write_steps
 from ksmech.data.schema import ElementaryStep, Source
 from ksmech.data.validation import Rejection, RejectReason, StepRejected
 
@@ -59,6 +59,9 @@ class IngestResult:
             "n_records": self.n_records,
             "n_accepted": len(self.steps),
             "n_resonance_steps": sum(s.resonance_step for s in self.steps),
+            "n_resonance_pairs": sum(
+                s.resonance_step and s.domain_exclusion is None for s in self.steps
+            ),
             "domain_exclusions": dict(
                 Counter(s.domain_exclusion for s in self.steps if s.domain_exclusion).most_common()
             ),
@@ -71,11 +74,13 @@ class IngestResult:
 
 
 def write_outputs(result: IngestResult, processed_dir: Path) -> dict[str, Path]:
-    """Write steps.parquet, rejections.csv and ingest_report.json under <processed>/<source>/."""
+    """Write steps.parquet, resonance_pairs.parquet, rejections.csv and ingest_report.json under
+    <processed>/<source>/."""
     out = source_dir(result.source, processed_dir)
     out.mkdir(parents=True, exist_ok=True)
     paths = {
         "steps": write_steps(result.steps, out / "steps.parquet"),
+        "resonance_pairs": write_resonance_pairs(result.steps, out / "resonance_pairs.parquet"),
         "rejections": out / "rejections.csv",
         "report": out / "ingest_report.json",
         "repairs": out / "charge_repairs.csv",
