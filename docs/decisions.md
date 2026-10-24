@@ -3583,3 +3583,26 @@ is now v7.5, sha256 6c6a023f66dd).
   enters `QMConfig.method`, so retried records share the cache key and token configuration of
   the rest. Defaults are unchanged (500, 250). Arynes and Fe radicals stay out, counted by their
   reason codes.
+
+## 2026-10-24 — ksmech-eta: progress read from the logs, standard library only
+
+- **What.** `ksmech-eta` lists every running `ksmech-*` command with its progress and estimated
+  time left, so a long build's ETA is one command away instead of a hand-read log tail.
+- **Where the progress comes from.** Nothing new is written by the builds. A process is found
+  under `/proc` (the interpreter running a `ksmech-*` entry point; `uv run` and the
+  multiprocessing workers are not matched) and its log is the file its stderr or stdout is
+  redirected to. Two formats are parsed from the last 256 kB:
+  - tqdm bars (`ksmech-qm run`): done/total from the bar; `recent` is tqdm's own smoothed
+    estimate, `mean` is elapsed / done × left. tqdm writes no clock time, so the log's mtime
+    dates the reading.
+  - timestamped logging lines with `n / total` (`ksmech-arrows samples`): the last series with
+    the same message and total; `mean` over the whole series, `recent` over its last 5 points.
+    Points before the process started are dropped, since a restarted run appends to its log.
+- **Standard library only, run outside the venv.** `src/ksmech/eta.py` imports nothing from
+  ksmech or third parties. The `~/.local/bin` wrapper runs it with the system `python3 -I`, so
+  checking a build never imports the build's code, and the tool can be used from a worktree while
+  the main checkout must stay clean (untracked files in `src/` mark artifacts dirty).
+- **Limits.** Commands that print only a final summary (`ksmech-orbitals build`, `ksmech-qm
+  bond-index`, `ksmech-arrows edit-labels`) show "none found in the log"; a driver script's later
+  steps are named (`via`) but not estimated.
+

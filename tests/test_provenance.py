@@ -149,7 +149,14 @@ def test_dirty_builds_are_flagged_and_refused_for_training(monkeypatch, tmp_path
 
 
 def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_path):
+    import os
     import subprocess
+
+    # A pre-commit hook exports GIT_DIR and GIT_INDEX_FILE; inherited, they point every git call
+    # below at the committing repository (in a linked worktree `git init` rewrote the shared
+    # .git/config with bare = true on 2026-10-24).
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)
 
     def git(*args):
         subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)

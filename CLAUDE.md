@@ -177,5 +177,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   samples` (stage-A features and `pair_feature_stats_<strategy>.json` from each training part),
   then `ksmech-arrows contacts`, then `ksmech-orbitals contact-table` for the table ablation, then
   `ks-rank`, `baseline`, `textbook`.
+- Monitoring: `ksmech-eta` (progress and time left of every running `ksmech-*` command: pid,
+  child processes, driver script or systemd scope, log, done/total and two ETAs, `recent` and
+  `mean`, read from the tqdm bar or the timestamped `n / total` lines of the log its stderr goes
+  to; `ksmech-eta LOG ...` for given logs, `--watch 60`, `--json`). Standard library only: the
+  `~/.local/bin/ksmech-eta` wrapper runs `python3 -I src/ksmech/eta.py`, outside the venv, so it is
+  safe while a build runs; `uv run ksmech-eta` works too.
 - Training: _not yet_
 - Evaluation: _not yet_
