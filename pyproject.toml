@@ -31,6 +31,7 @@ dev = [
     "pytest",
     "ruff",
     "pre-commit",
+    "pytest-xdist>=3.8.0",
 ]
 
 [build-system]

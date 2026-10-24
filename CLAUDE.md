@@ -120,10 +120,10 @@ learned" is a flag away.
 
 ```bash
 uv sync                       # install everything into .venv
-uv run pytest                 # run tests (use -x to stop at first failure)
+uv run pytest -n 14           # run tests in 14 processes (pytest-xdist; -x stops at the first failure)
 uv run ruff check .           # lint
 uv run ruff format .          # format
-uv run pre-commit install     # enable the ruff + pytest -x commit hook
+uv run pre-commit install     # enable the ruff + pytest -x -n 14 commit hook
 ```
 
 Main CLI entry points are added phase by phase and listed here as they land:
@@ -153,7 +153,7 @@ Main CLI entry points are added phase by phase and listed here as they land:
   pmechdb` (the sample store `samples/shard_*.npz` + `index.json` with the geometry-free stage-A
   pair features, one `samples_<strategy>_<part>.json` view per split of `molecule`, `scaffold` and
   `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
-  spawned processes, keep the host total <= 4; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
+  spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`), `uv run
   ksmech-arrows contacts --source pmechdb [--split molecule]` (the legacy
   contact sidecar `samples/contacts_<split>/`: the 11 KS pair features with the oriented kernel at

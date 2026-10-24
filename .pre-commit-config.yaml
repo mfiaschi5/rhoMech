@@ -14,8 +14,8 @@ repos:
         types: [python]
         pass_filenames: false
       - id: pytest
-        name: pytest -x
-        entry: uv run pytest -x -q
+        name: pytest -x (14 processes)
+        entry: uv run pytest -x -q -n 14
         language: system
         pass_filenames: false
         always_run: true

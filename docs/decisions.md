@@ -3583,3 +3583,15 @@ is now v7.5, sha256 6c6a023f66dd).
   enters `QMConfig.method`, so retried records share the cache key and token configuration of
   the rest. Defaults are unchanged (500, 250). Arynes and Fe radicals stay out, counted by their
   reason codes.
+
+## 2026-10-24 — The commit hook runs pytest in 14 processes (pytest-xdist)
+
+- **Why.** The hook ran the whole suite on one core: 37 minutes a commit on a 16-thread machine
+  (user, 2026-10-24: use more processes).
+- **Change.** pytest-xdist 3.8.0 is a development dependency (`uv add --dev`), and the hook runs
+  `uv run pytest -x -q -n 14`.
+  - The "prefer numpy over dependencies" rule is about the code that runs, not test tooling.
+  - Each xdist worker has its own session, so the session fixtures (QM records, tokens) are
+    built once per worker. The tests write only to their tmp directories and only read `data/`.
+  - The hook now takes about as long as the slowest single test: the real-data alignment and
+    round trip over PMechDB.
