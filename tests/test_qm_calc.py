@@ -143,3 +143,41 @@ def test_xtb_backend_without_binary_reports_reason_code(qm_config):
 def test_xtb_backend_agrees_with_tblite_backend(qm_config, qm_record):
     xtb = GFN2Calculator(replace(qm_config, optimizer="xtb")).run(mol_for("CCO"), 0)
     assert abs(xtb.energy_ha - qm_record("CCO").energy_ha) < 1e-3
+
+
+def test_convergence_limits_are_not_part_of_the_method():
+    """--maxiter and --scf-maxiter relax convergence only: records keep their cache key."""
+    base = QMConfig()
+    relaxed = replace(base, maxiter=2000, scf_maxiter=1000, timeout_s=3600)
+    assert relaxed.method == base.method
+
+
+def test_the_scf_cycle_limit_reaches_tblite():
+    from ksmech.qm.records import QMError
+    from ksmech.qm.xtb_calc import _single_point
+
+    z = np.array([8, 1, 1])
+    xyz = np.array([[0.0, 0.0, 0.0], [0.0, 1.43, 1.11], [0.0, -1.43, 1.11]])  # water, Bohr
+    assert _single_point(z, xyz, 0, 0, "water", False).get("energy") < 0
+    with pytest.raises(QMError) as exc:
+        _single_point(z, xyz, 0, 0, "water", False, scf_maxiter=1)
+    assert exc.value.reason == ReasonCode.SCF_NOT_CONVERGED
+
+
+def test_qm_cli_passes_the_convergence_flags(monkeypatch, tmp_path):
+    import ksmech.qm.cli as cli
+
+    seen = {}
+
+    def fake(source, **kw):
+        seen["config"] = kw["config"]
+        import pandas as pd
+
+        return pd.DataFrame({"status": ["ok"]})
+
+    monkeypatch.setattr(cli, "featurize_dataset", fake)
+    monkeypatch.setattr(cli, "summarize", lambda m: {"success_fraction": 1.0})
+    flags = ["--timeout", "3600", "--maxiter", "2000", "--scf-maxiter", "1000"]
+    assert cli.main(["run", "--source", "pmechdb", *flags]) == 0
+    cfg = seen["config"]
+    assert (cfg.timeout_s, cfg.maxiter, cfg.scf_maxiter) == (3600, 2000, 1000)

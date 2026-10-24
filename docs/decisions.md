@@ -3561,3 +3561,25 @@ is now v7.5, sha256 6c6a023f66dd).
     token atom of the reactant side as before.
   - `[H][H]`, `[H+]` and `[H-]` map as they did.
 - The orphan H2 QM record under the old `[HH]` key is kept.
+
+## 2026-10-24 — QM retry of failed molecules: relaxed convergence, same method
+
+- **Why.** 207 PMechDB training steps had no edit label. 39 were the `[HH]` correspondence,
+  fixed in a973e5c. The other 168 come from 159 reactant molecules that the batch computed and
+  that failed with a reason code; they were not skipped. Over all 283 failed molecules, by
+  reason (reactant side of training steps in parentheses):
+  - OPT_NOT_CONVERGED, 500 L-BFGS iterations: 98 (89);
+  - SCF_NOT_CONVERGED, tblite's 250 cycles: 58 (47);
+  - TIMEOUT, more than 900 s: 23 (21);
+  - EMBED_FAILED, arynes: 6 (2);
+  - SPIN_PARITY, Fe radicals in products: 100 (0).
+- **Decision (user).** Retry with relaxed convergence only and the same method string:
+  - `--timeout 3600`;
+  - `--maxiter 2000`, a new CLI flag on `QMConfig.maxiter`;
+  - `--scf-maxiter 1000`, new: `QMConfig.scf_maxiter`, passed to tblite's `max-iter` in every
+    calculator (optimization, single point, Fukui ±1).
+
+  No electronic temperature: smearing changes the result, iteration limits do not. Neither limit
+  enters `QMConfig.method`, so retried records share the cache key and token configuration of
+  the rest. Defaults are unchanged (500, 250). Arynes and Fe radicals stay out, counted by their
+  reason codes.

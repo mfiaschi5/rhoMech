@@ -27,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--optimizer", choices=["tblite", "xtb"], default="tblite")
     run.add_argument("--limit", type=int, default=None, help="random subset, for pilots")
     run.add_argument("--timeout", type=int, default=900, help="seconds per molecule")
+    run.add_argument("--maxiter", type=int, default=500, help="geometry optimizer iterations")
+    run.add_argument("--scf-maxiter", type=int, default=250, help="SCF cycles per energy")
     run.add_argument("--conn-cov-factor", type=float, default=1.3)
     run.add_argument("--min-success", type=float, default=0.97)
     run.add_argument("--no-retry-failed", action="store_true", help="skip known failures")
@@ -53,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     config = QMConfig(
         optimizer=args.optimizer,
         timeout_s=args.timeout,
+        maxiter=args.maxiter,
+        scf_maxiter=args.scf_maxiter,
         conn_cov_factor=args.conn_cov_factor,
         cache_dir=args.cache_dir,
     )

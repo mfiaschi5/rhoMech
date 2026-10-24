@@ -24,6 +24,7 @@ _XTB_TIMEOUT_S = 600
 # Bonds to these ionic/very electropositive elements are not tested: their contacts with the
 # rest of the molecule are electrostatic, and covalent-radius ratios mean little for them.
 SKIP_BOND_ELEMENTS = frozenset({3, 11, 12, 19})  # Li, Na, Mg, K
+SCF_MAXITER = 250  # tblite's own default SCF cycle limit
 
 
 def new_calculator(
@@ -33,9 +34,11 @@ def new_calculator(
     unpaired: int,
     solvent: str | None = None,
     save_integrals: bool = False,
+    scf_maxiter: int = SCF_MAXITER,
 ) -> Calculator:
     calc = Calculator("GFN2-xTB", z, xyz_bohr, charge=float(charge), uhf=int(unpaired))
     calc.set("verbosity", 0)
+    calc.set("max-iter", int(scf_maxiter))  # a convergence limit, not part of the method
     if solvent:
         calc.add("alpb-solvation", solvent)
     if save_integrals:
@@ -88,6 +91,7 @@ def optimize_tblite(
     maxiter: int,
     solvent: str | None = None,
     walls: WallRestraint | None = None,
+    scf_maxiter: int = SCF_MAXITER,
 ) -> np.ndarray:
     """L-BFGS-B on GFN2 energies and gradients (plus optional bond walls).
 
@@ -95,7 +99,7 @@ def optimize_tblite(
     """
     if len(z) == 1:
         return xyz_bohr.copy()
-    calc = new_calculator(z, xyz_bohr, charge, unpaired, solvent)
+    calc = new_calculator(z, xyz_bohr, charge, unpaired, solvent, scf_maxiter=scf_maxiter)
 
     def objective(flat: np.ndarray) -> tuple[float, np.ndarray]:
         calc.update(positions=flat.reshape(-1, 3))

@@ -39,7 +39,8 @@ class QMConfig:
     optimizer: str = "tblite"  # "tblite": scipy L-BFGS on tblite; "xtb": the xtb binary
     solvent: str | None = "water"  # ALPB implicit solvent for every calculation; None = gas phase
     fmax: float = 3e-4  # max |gradient| in Hartree/Bohr
-    maxiter: int = 500
+    maxiter: int = 500  # optimizer iterations
+    scf_maxiter: int = 250  # SCF cycles per energy (tblite's default); not part of `method`
     timeout_s: int = 900  # per molecule, enforced by the batch runner (103 atoms take ~300 s)
     conn_cov_factor: float = 1.3  # an input bond stretched beyond this x r_cov sum = broken
     restrain: bool = True  # retry a dissociating species with bond walls (tblite backend only)
@@ -89,20 +90,23 @@ def _check_atom_order(mol: Chem.Mol, smiles: str) -> None:
         raise ValueError(f"mol atom order differs from prepare_mol({smiles!r}); build it with that")
 
 
-def _single_point(z, xyz_bohr, charge, unpaired, solvent, integrals):
-    calc = new_calculator(z, xyz_bohr, charge, unpaired, solvent, save_integrals=integrals)
+def _single_point(z, xyz_bohr, charge, unpaired, solvent, integrals, scf_maxiter=250):
+    calc = new_calculator(
+        z, xyz_bohr, charge, unpaired, solvent, save_integrals=integrals, scf_maxiter=scf_maxiter
+    )
     try:
         return calc.singlepoint()
     except TBLiteRuntimeError as exc:
         raise QMError(ReasonCode.SCF_NOT_CONVERGED, str(exc)) from exc
 
 
-def _fukui_fd(z, xyz_bohr, charge, unpaired, q_n, solvent) -> fukui.FukuiFD | None:
+def _fukui_fd(z, xyz_bohr, charge, unpaired, q_n, solvent, scf_maxiter=250) -> fukui.FukuiFD | None:
     """Finite-difference Fukui from the N+1 and N-1 systems; None if either SCF fails."""
     u_ion = fukui.unpaired_for_ionized(unpaired)
     try:
-        q_plus = _single_point(z, xyz_bohr, charge - 1, u_ion, solvent, False).get("charges")
-        q_minus = _single_point(z, xyz_bohr, charge + 1, u_ion, solvent, False).get("charges")
+        plus = _single_point(z, xyz_bohr, charge - 1, u_ion, solvent, False, scf_maxiter)
+        minus = _single_point(z, xyz_bohr, charge + 1, u_ion, solvent, False, scf_maxiter)
+        q_plus, q_minus = plus.get("charges"), minus.get("charges")
     except (QMError, TBLiteValueError, TBLiteRuntimeError) as exc:
         log.info("Fukui N+-1 failed (%s)", exc)
         return None
@@ -117,7 +121,16 @@ class GFN2Calculator:
         cfg = self.config
         if cfg.optimizer == "xtb":
             return optimize_xtb(z, xyz_bohr, charge, unpaired, cfg.solvent)
-        return optimize_tblite(z, xyz_bohr, charge, unpaired, cfg.fmax, cfg.maxiter, cfg.solvent)
+        return optimize_tblite(
+            z,
+            xyz_bohr,
+            charge,
+            unpaired,
+            cfg.fmax,
+            cfg.maxiter,
+            cfg.solvent,
+            scf_maxiter=cfg.scf_maxiter,
+        )
 
     def _relax(self, mol, z, start_bohr, charge, unpaired) -> tuple[np.ndarray, bool]:
         """Free optimization; if an input bond breaks, redo it from the start geometry with walls.
@@ -136,7 +149,15 @@ class GFN2Calculator:
             log.info("free optimization broke a bond (%s); retrying with walls", exc.detail)
         walls = bond_walls(mol, cfg.wall_factor, cfg.wall_k)
         xyz_bohr = optimize_tblite(
-            z, start_bohr, charge, unpaired, cfg.fmax, cfg.maxiter, cfg.solvent, walls
+            z,
+            start_bohr,
+            charge,
+            unpaired,
+            cfg.fmax,
+            cfg.maxiter,
+            cfg.solvent,
+            walls,
+            scf_maxiter=cfg.scf_maxiter,
         )
         check_connectivity(mol, xyz_bohr * BOHR_ANG, cfg.conn_cov_factor)
         return xyz_bohr, True
@@ -150,7 +171,9 @@ class GFN2Calculator:
         charge, unpaired = resolve_charge_spin(mol)
         xyz_bohr, restrained = self._relax(mol, z, start, charge, unpaired)
         xyz_ang = xyz_bohr * BOHR_ANG
-        res = _single_point(z, xyz_bohr, charge, unpaired, self.config.solvent, True)
+        res = _single_point(
+            z, xyz_bohr, charge, unpaired, self.config.solvent, True, self.config.scf_maxiter
+        )
         rec = self._assemble(res, z, xyz_ang, smiles, conf_id, charge, unpaired)
         if restrained:
             rec.add_warning(ReasonCode.RESTRAINED_GEOM)
@@ -206,7 +229,10 @@ class GFN2Calculator:
     def _add_fukui_fd(self, rec: QMRecord, z, xyz_bohr) -> None:
         if ReasonCode.NO_FRONTIER in rec.warnings:
             return
-        fd = _fukui_fd(z, xyz_bohr, rec.charge, rec.unpaired, rec.charges, self.config.solvent)
+        cfg = self.config
+        fd = _fukui_fd(
+            z, xyz_bohr, rec.charge, rec.unpaired, rec.charges, cfg.solvent, cfg.scf_maxiter
+        )
         if fd is None:
             rec.add_warning(ReasonCode.FUKUI_SCF_FAIL)
             return

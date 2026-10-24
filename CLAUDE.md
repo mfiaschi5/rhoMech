@@ -134,7 +134,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
   (STALE_ARTIFACT); only `ks-rank` and `textbook` take `--allow-stale`.
-- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`), `uv run ksmech-qm bond-index`
+- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
+  `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
+  change the method string), `uv run ksmech-qm bond-index`
   (Wiberg bond indices of the Lewis bonds of every cached record, `data/cache/bond_index/`; the
   token cache needs them, so re-run after the QM batch)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
