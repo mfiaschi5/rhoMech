@@ -3659,3 +3659,39 @@ is now v7.5, sha256 6c6a023f66dd).
 - **Re-ingest.** 13,090 accepted steps. 12,779 training steps, against 12,830 before. The
   exclusions are OPEN_SHELL_METAL 78, RADICAL_DRAWN 52, METAL_PLACEHOLDER 24 and
   CHARGE_UNREPAIRED 1.
+
+## 2026-10-24 — QM retry and edit-label coverage: 99.62% of PMechDB training steps
+
+- **Retry run** (`ksmech-qm run --workers 15 --timeout 3600 --maxiter 2000 --scf-maxiter 1000`).
+  It recovered 130 of the 283 failed molecules, and 117 of the 159 on the reactant side of
+  training steps. All of them got tokens and Wiberg sidecars: 14,226 token files, 14,473
+  sidecars.
+- **Still failing (153), counted by reason, not retried again.**
+  - SPIN_PARITY: 98 Fe radicals, products only, outside the closed-shell domain.
+  - SCF_NOT_CONVERGED in 1000 cycles: 46, of which 37 on the reactant side. Mostly TiCl4- and
+    SnCl4/SnBr4-bound oxocarbenium adducts, plus bromonium and iodonium ions, `C=[O+][Zn-]`, a
+    K phenoxide and `[O-]BO`.
+  - TIMEOUT at more than 3600 s: 3, all on the reactant side, molecules of 150+ atoms.
+  - EMBED_FAILED: 6, of which 2 on the reactant side (a Ca chelate and a fused polycycle; the
+    others are arynes).
+- **The run was interrupted twice.**
+  - At 10 workers the host reset after 5 minutes. `stress-ng --matrix 16` alone reset it within
+    a second, while `stress-ng --cpu 6` passed. The cause was bad BIOS settings, fixed by the user.
+  - The rest ran at 15 workers without trouble.
+- **A RAM fault remained.** On the evening of the same day the host showed a kernel oops, a
+  flipped bit in a token file's page-cache copy, and a flipped bit in a btrfs checksum it
+  wrote for a system library. Every one of these was bit 6 cleared. It ran three mismatched
+  DIMMs, two on one channel; the user removed the odd one (now 2 x 8 GB, one per channel).
+  - A full read of the project data (215,178 files, 17 GB) found no checksum error.
+  - A record computed wrong in RAM before it was written would still carry a valid checksum.
+    Recomputing a sample of QM records and comparing them is the check for that.
+- **Edit labels after the retry, the `[HH]` fix (a973e5c) and RADICAL_DRAWN (0c62023).**
+  - 12,731 / 12,779 training steps labeled (99.62%). Before RADICAL_DRAWN removed 51 training
+    steps it was 12,782 / 12,830 (99.63%).
+  - The only skip is MISSING_TOKENS: 48 steps that involve the 42 reactant molecules above.
+    CORRESPONDENCE went from 39 to 0.
+  - Class size: 1 in 12,148 steps, 2 in 513, 3 in 62, 4 or more in 8.
+  - The drawn R is parsimonious in 12,115 steps. 264 steps had a resonance variant rejected
+    by the key check.
+  - Resonance enumeration truncated in 984 steps.
+  - Anchors: 11,927 rising, 804 falling.
