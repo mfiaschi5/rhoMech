@@ -181,3 +181,23 @@ def test_qm_cli_passes_the_convergence_flags(monkeypatch, tmp_path):
     assert cli.main(["run", "--source", "pmechdb", *flags]) == 0
     cfg = seen["config"]
     assert (cfg.timeout_s, cfg.maxiter, cfg.scf_maxiter) == (3600, 2000, 1000)
+
+
+def test_qm_cli_passes_the_retry_reasons(monkeypatch):
+    import pandas as pd
+
+    import ksmech.qm.cli as cli
+
+    seen = {}
+
+    def fake(source, **kw):
+        seen.update(kw)
+        return pd.DataFrame({"status": ["ok"]})
+
+    monkeypatch.setattr(cli, "featurize_dataset", fake)
+    monkeypatch.setattr(cli, "summarize", lambda m: {"success_fraction": 1.0})
+    argv = ["run", "--source", "pmechdb", "--retry-reason", "EMBED_FAILED", "TIMEOUT"]
+    assert cli.main(argv) == 0
+    assert seen["retry_reasons"] == ["EMBED_FAILED", "TIMEOUT"]
+    assert cli.main(["run", "--source", "pmechdb"]) == 0
+    assert seen["retry_reasons"] is None

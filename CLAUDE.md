@@ -137,7 +137,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (STALE_ARTIFACT); only `ks-rank` and `textbook` take `--allow-stale`.
 - QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
-  change the method string), `uv run ksmech-qm bond-index`
+  change the method string; `--retry-reason REASON ...` retries only the failures with those
+  codes), `uv run ksmech-qm bond-index`
   (Wiberg bond indices of the Lewis bonds of every cached record, `data/cache/bond_index/`; the
   token cache needs them, so re-run after the QM batch)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital

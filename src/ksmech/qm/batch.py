@@ -13,7 +13,7 @@ import random
 import signal
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
@@ -171,7 +171,14 @@ def collect_molecules(
     return sorted(keys), list(failures.values())
 
 
-def _is_done(task: MolTask, prev: pd.DataFrame | None, retry_failed: bool) -> bool:
+def _is_done(
+    task: MolTask,
+    prev: pd.DataFrame | None,
+    retry_failed: bool,
+    retry_reasons: Collection[str] | None = None,
+) -> bool:
+    """Every conformer is cached, or the molecule failed before and is not to be retried:
+    with `retry_reasons`, a failure is retried only when its reason code is one of them."""
     rows = None
     if prev is not None:
         rows = prev[(prev["smiles"] == task.smiles) & (prev["method"] == task.config.method)]
@@ -184,7 +191,12 @@ def _is_done(task: MolTask, prev: pd.DataFrame | None, retry_failed: bool) -> bo
         for c in range(n_expected)
     ):
         return True
-    return bool(rows is not None and (rows["status"] == "failed").any() and not retry_failed)
+    failed = None if rows is None else rows["status"] == "failed"
+    if failed is None or not failed.any():
+        return False
+    if retry_reasons:
+        return not rows.loc[failed, "reason"].isin(set(retry_reasons)).any()
+    return not retry_failed
 
 
 def _run_isolated(task: MolTask, on_rows: OnRows) -> None:
@@ -338,8 +350,11 @@ def featurize_dataset(
     limit: int | None = None,
     retry_failed: bool = True,
     console: Console | None = None,
+    retry_reasons: Collection[str] | None = None,
 ) -> pd.DataFrame:
-    """Featurize every unique molecule of `source`; resumable. Returns this run's manifest rows."""
+    """Featurize every unique molecule of `source`; resumable. Returns this run's manifest rows.
+    Earlier failures are retried (`retry_failed`), or only those whose reason code is in
+    `retry_reasons`."""
     config = config or QMConfig()
     console = console or Console()
     smiles_list, canon_failures = collect_molecules(source, processed_dir)
@@ -350,7 +365,7 @@ def featurize_dataset(
     if prev is not None and "method" not in prev.columns:
         prev = prev.assign(method="")  # manifests written before the method column existed
     tasks = [MolTask(s, n_conformers, config) for s in smiles_list]
-    todo = [t for t in tasks if not _is_done(t, prev, retry_failed)]
+    todo = [t for t in tasks if not _is_done(t, prev, retry_failed, retry_reasons)]
     console.print(
         f"{len(smiles_list)} unique molecules, {len(smiles_list) - len(todo)} done already, "
         f"{len(todo)} to compute ({n_workers} workers, {config.method})"

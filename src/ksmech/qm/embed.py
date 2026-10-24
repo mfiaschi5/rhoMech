@@ -57,6 +57,13 @@ def _generate(mol: Chem.Mol, n_confs: int, seed: int) -> list[int]:
         cids = list(AllChem.EmbedMultipleConfs(mol, n_confs, params))
         if cids:
             _add_note(mol, ReasonCode.EMBED_RANDOM_COORDS)
+    if not cids:  # inconsistent bounds (a metal chelate ring, an aryne): ignore the smoothing
+        params.ignoreSmoothingFailures = True
+        params.useBasicKnowledge = False
+        params.useExpTorsionAnglePrefs = False
+        cids = list(AllChem.EmbedMultipleConfs(mol, n_confs, params))
+        if cids:
+            _add_note(mol, ReasonCode.EMBED_RELAXED_BOUNDS)
     return cids
 
 

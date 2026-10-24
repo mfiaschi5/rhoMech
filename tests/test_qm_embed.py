@@ -5,8 +5,8 @@ import pytest
 from rdkit import Chem
 
 from ksmech.data import chem
-from ksmech.qm.embed import PRUNE_RMSD, embed, kabsch_rmsd, prepare_mol
-from ksmech.qm.records import QMError
+from ksmech.qm.embed import NOTES_PROP, PRUNE_RMSD, embed, kabsch_rmsd, prepare_mol
+from ksmech.qm.records import QMError, ReasonCode
 from tests.fixtures.molecules import MOLECULES
 
 
@@ -82,3 +82,21 @@ def test_kabsch_rmsd_ignores_rigid_motion():
     q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
     assert kabsch_rmsd(xyz, xyz @ q.T + 5.0) == pytest.approx(0.0, abs=1e-6)
     assert kabsch_rmsd(xyz, xyz + 0.1 * rng.normal(size=xyz.shape)) > 0
+
+
+def notes(mol) -> list[str]:
+    return mol.GetProp(NOTES_PROP).split(",") if mol.HasProp(NOTES_PROP) else []
+
+
+def test_a_calcium_chelate_embeds_with_relaxed_bounds():
+    """ETKDG's triangle smoothing rejects the distance bounds of a Ca chelate ring, from random
+    coordinates too; the last attempt ignores the smoothing failure and the knowledge terms, and
+    records that it did. A molecule that embeds normally never reaches it."""
+    chelate = prepare_mol("O=C([O-])C[NH+]1CC(=O)[O][Ca]1")
+    assert embed(chelate, n_conformers=1, seed=0) == [0]
+    assert str(ReasonCode.EMBED_RELAXED_BOUNDS) in notes(chelate)
+    xyz = chelate.GetConformer(0).GetPositions()
+    assert np.isfinite(xyz).all() and xyz.std() > 0.1
+    ethanol = prepare_mol("CCO")
+    embed(ethanol, n_conformers=1, seed=0)
+    assert str(ReasonCode.EMBED_RELAXED_BOUNDS) not in notes(ethanol)

@@ -13,7 +13,7 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.data.schema import Source
 from ksmech.qm.batch import featurize_dataset, summarize
 from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, build_bond_indices
-from ksmech.qm.records import DEFAULT_CACHE_DIR
+from ksmech.qm.records import DEFAULT_CACHE_DIR, ReasonCode
 from ksmech.qm.xtb_calc import QMConfig
 
 
@@ -32,6 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--conn-cov-factor", type=float, default=1.3)
     run.add_argument("--min-success", type=float, default=0.97)
     run.add_argument("--no-retry-failed", action="store_true", help="skip known failures")
+    run.add_argument(
+        "--retry-reason",
+        nargs="+",
+        default=None,
+        choices=[str(r) for r in ReasonCode],
+        metavar="REASON",
+        help="retry only the failures with these reason codes",
+    )
     run.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     run.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     wbi = sub.add_parser("bond-index", help="Wiberg bond indices of every cached QM record")
@@ -70,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             retry_failed=not args.no_retry_failed,
             console=console,
+            retry_reasons=args.retry_reason,
         )
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]; run `ksmech-data ingest --source {args.source}` first")

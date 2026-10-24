@@ -159,3 +159,15 @@ def test_truncated_cache_files_are_recomputed(tiny):
     view = run(processed, cfg, retry_failed=False)
     assert victim.stat().st_size > 0
     assert view.loc[view["smiles"] == "CO", "status"].tolist() == ["ok"]
+
+
+def test_retry_reasons_pick_the_failures_to_retry(tiny, monkeypatch):
+    processed, cfg = tiny
+    run(processed, cfg)
+    calls = []
+    real = batch.process_molecule
+    monkeypatch.setattr(batch, "process_molecule", lambda t: calls.append(t.smiles) or real(t))
+    run(processed, cfg, retry_reasons=["EMBED_FAILED"])
+    assert calls == []  # BAD failed with SPIN_PARITY
+    run(processed, cfg, retry_reasons=["SPIN_PARITY", "TIMEOUT"])
+    assert calls == [BAD]

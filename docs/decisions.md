@@ -3695,3 +3695,22 @@ is now v7.5, sha256 6c6a023f66dd).
     by the key check.
   - Resonance enumeration truncated in 984 steps.
   - Anchors: 11,927 rising, 804 falling.
+
+## 2026-10-24 — Embedding with relaxed distance bounds; `ksmech-qm run --retry-reason`
+
+- **Why.** After the convergence retry, six molecules still failed with EMBED_FAILED: on the
+  reactant side a Ca chelate (`O=C([O-])C[NH+]1CC(=O)[O][Ca]1`) and a fused polycycle, on the
+  product side four arynes. ETKDG's triangle smoothing finds their distance bounds
+  inconsistent (a metal in a five-membered chelate ring, a strained ring fusion, a triple bond
+  in a six-membered ring), and random starting coordinates do not help.
+- **Fallback.** A third attempt sets `ignoreSmoothingFailures` and switches off the
+  basic-knowledge and torsion-preference terms. It embeds all six, while ethanol and the
+  fixtures never reach it.
+  - It runs only when the first two attempts produced nothing, so no existing record changes.
+  - A record built this way carries the warning EMBED_RELAXED_BOUNDS.
+  - The method string does not change: GFN2 starts its optimization from a rougher guess, and
+    the connectivity check still rejects a geometry that rearranges.
+- **Retry by reason.** `ksmech-qm run --retry-reason R ...` retries only the molecules whose
+  recorded failure has one of those codes. The other failures stay as they are and are
+  counted. The default is unchanged: every failure is retried, and `--no-retry-failed`
+  retries none.
