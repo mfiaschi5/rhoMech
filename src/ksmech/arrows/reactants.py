@@ -142,8 +142,28 @@ def _hydrogens(frag: Chem.Mol, record: Chem.Mol, heavy: dict[int, int]) -> dict[
     return out
 
 
+def _hydrogen_only(frag: Chem.Mol, record: Chem.Mol) -> dict[int, int] | None:
+    """A fragment whose atoms are all hydrogens (H2 drawn as [HH]: one atom carrying an
+    implicit H; or as [H][H]) has no heavy skeleton to match. Its hydrogens are made explicit
+    (the drawn atoms keep their indices) and matched by count onto the record's, which are
+    equivalent; None for any other fragment."""
+    if any(a.GetAtomicNum() != 1 for a in frag.GetAtoms()):
+        return None
+    m = Chem.Mol(frag)
+    m.UpdatePropertyCache(strict=False)
+    explicit = Chem.AddHs(m)
+    if explicit.GetNumAtoms() != record.GetNumAtoms() or any(
+        a.GetAtomicNum() != 1 for a in record.GetAtoms()
+    ):
+        raise CorrespondenceError("hydrogen counts differ")
+    return {a.GetIdx(): a.GetIdx() for a in frag.GetAtoms()}
+
+
 def record_correspondence(frag: Chem.Mol, record: Chem.Mol, key: str) -> dict[int, int]:
     """Fragment atom index -> record atom index for every atom of the drawn fragment."""
+    hydrogens = _hydrogen_only(frag, record)
+    if hydrogens is not None:
+        return hydrogens
     heavy = _heavy_by_canonical_order(frag, key)
     if heavy is None or any(
         frag.GetAtomWithIdx(i).GetAtomicNum() != record.GetAtomWithIdx(j).GetAtomicNum()

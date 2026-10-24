@@ -68,6 +68,22 @@ def test_correspondence_falls_back_to_the_skeleton_for_another_resonance_form():
     assert record.GetAtomWithIdx(symbols["O"]).GetFormalCharge() == -1
 
 
+def test_molecular_hydrogen_drawn_as_one_atom_maps_onto_its_record(token_loader):
+    """[HH] is one drawn atom carrying an implicit H; the record of its key [H][H] has two
+    explicit H atoms. The drawn atom maps onto one of them, the implicit H is the other, and the
+    reactant side keeps both as token atoms; [H][H] drawn maps atom by atom."""
+    rt = ReactantTokens.from_smiles("[OH-:10].[HH].[Na+]", token_loader)
+    (h2,) = [f for f in rt.fragments if f.key == "[H][H]"]
+    assert len(h2.tokens.atoms) == 2 and h2.record.GetNumAtoms() == 2
+    (drawn,) = h2.mol_atoms
+    assert set(h2.record_of) == {drawn} and h2.record_of[drawn] in (0, 1)
+    f = rt.fragments.index(h2)
+    assert int(rt.atom_offsets[f + 1]) - int(rt.atom_offsets[f]) == 2  # both atoms are tokens
+    both = ReactantTokens.from_smiles("[OH-:10].[H:5][H:6].[Na+]", token_loader)
+    (h2,) = [f for f in both.fragments if f.key == "[H][H]"]
+    assert sorted(h2.record_of.values()) == [0, 1]
+
+
 def test_missing_tokens_are_reported_by_key():
     with pytest.raises(MissingTokens) as exc:
         ReactantTokens.from_smiles("[OH-:1].[CH3:2][Cl:3]", lambda key: None)

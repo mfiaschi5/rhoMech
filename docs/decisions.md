@@ -3545,3 +3545,19 @@ is now v7.5, sha256 6c6a023f66dd).
   - Bond changes per step: 1 in 1,876, 2 in 7,332, 3 in 1,736, 4 in 1,443, 5–7 in 236.
   - The 3 steps the measurement had called resonance interconversions are now labeled: by the
     evaluation key their reactants and products differ.
+
+## 2026-10-24 — Molecular hydrogen drawn as [HH]: correspondence with hydrogens made explicit
+
+- **Problem.** 39 PMechDB training steps failed with CorrespondenceError ("heavy-atom counts
+  differ"); their reactants include H2 drawn as `[HH]`.
+  - Since 73e5f7c, `[HH]` and `[H][H]` share the key `[H][H]`, so the tokens are found.
+  - But the drawn `[HH]` is one atom carrying an implicit H, while the record
+    (`prepare_mol("[H][H]")`) has two explicit H atoms, so neither the canonical-order match nor
+    the heavy-skeleton match applies.
+- **Fix (`reactants._hydrogen_only`).** A fragment whose atoms are all hydrogens is matched with
+  its hydrogens made explicit (`AddHs`; the drawn atoms keep their indices) and by count onto the
+  record's hydrogens, which are equivalent. The only condition is "every atom is H".
+  - For `[HH]` the drawn atom maps onto one record H; the implicit H is the other, which stays a
+    token atom of the reactant side as before.
+  - `[H][H]`, `[H+]` and `[H-]` map as they did.
+- The orphan H2 QM record under the old `[HH]` key is kept.
