@@ -3714,3 +3714,12 @@ is now v7.5, sha256 6c6a023f66dd).
   recorded failure has one of those codes. The other failures stay as they are and are
   counted. The default is unchanged: every failure is retried, and `--no-retry-failed`
   retries none.
+- **Result** (`ksmech-qm run --workers 6 --retry-reason EMBED_FAILED`, same relaxed convergence
+  flags as the retry before it).
+  - All six molecules embedded with EMBED_RELAXED_BOUNDS and passed GFN2 with their
+    connectivity: the aryne C-C triple bonds come out at 1.27-1.28 Angstrom and the Ca-O at
+    1.99 Angstrom.
+  - QM now covers 14,232 of 14,379 molecules (98.98%). The other 147 are SPIN_PARITY 98 (Fe
+    radicals), SCF_NOT_CONVERGED 46 and TIMEOUT 3.
+  - Six token files and six Wiberg sidecars were added.
+  - Edit labels: 12,733 / 12,779 training steps (99.64%). MISSING_TOKENS is down from 48 to 46.
