@@ -1348,6 +1348,74 @@ class OrbitalSetOut(_Out):
     provenance: WorkbenchProvenanceOut
 
 
+class Depict2DViewIn(_In):
+    """The 3D viewer's orientation: `quaternion` = 3Dmol getView()[4..7] [x, y, z, w]; the view
+    frame is R(q) p (x right, y up, z towards the viewer), as sketch/projection.ts."""
+
+    quaternion: list[float] = Field(min_length=4, max_length=4)
+    convention: Literal["3dmol-rotationGroup"] = "3dmol-rotationGroup"
+
+
+class Depict2DIn(_In):
+    """POST /depict2d: a 2D drawing of the sketch (V2000 molblock). match3d needs the computed
+    molecule's id and the view."""
+
+    molblock: str
+    mode: Literal["clean", "match3d"] = "clean"
+    style: Literal["textbook", "perspective"] = "textbook"
+    molecule_id: str | None = None
+    view: Depict2DViewIn | None = None
+
+
+class Depict2DWedgeOut(_Out):
+    bond: int  # bond index of the input molblock
+    narrow: int  # atom index at the narrow end (the stereocentre)
+    kind: Literal["wedge", "hash"]
+
+
+class Depict2DDefectsOut(_Out):
+    close_contacts: int
+    coincident: int
+    label_overlaps: int
+    atom_on_bond: int
+    crossings: int
+    small_angles: int
+    inside_ring: int
+    squashed_rings: int
+    bond_length_rms: float
+    score: float
+
+
+class Depict2DCandidateOut(_Out):
+    method: str
+    total: float  # defect score + 20 x view residual (+ 50 when the stereo differs)
+    score: float | None
+    residual: float | None
+    stereo: str
+
+
+class Depict2DOut(_Out):
+    """The drawing in EXACTLY the input atom and bond order: coords[i] of atom i (bond 1.5),
+    depth[i] (+ towards the viewer) when the drawing has one, wedges by bond index."""
+
+    mode: Literal["clean", "match3d"]
+    style: Literal["textbook", "perspective"]
+    method: str  # rdkit-templates | coordgen | perspective:<t> | match3d-<rdkit|projected|...>
+    template: str | None  # the perspective template used
+    molblock: str
+    coords: list[tuple[float, float]]
+    depth: list[float] | None
+    wedges: list[Depict2DWedgeOut]
+    smiles: str  # canonical isomeric SMILES RDKit reads from the molblock
+    stereo: Literal["none", "kept", "mismatch"]
+    view_residual: float | None
+    defects: Depict2DDefectsOut
+    candidates: list[Depict2DCandidateOut]
+    notes: list[str]
+    version: int
+    molecule_id: str | None
+
+
 # ---- the TypeScript mirror
 
 TS_MODELS: list[type[BaseModel]] = [

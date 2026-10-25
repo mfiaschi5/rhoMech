@@ -7,11 +7,14 @@
 // sessionStorage (session.ts). Selections link the tables, the 3D view and the sketch through
 // the POST's sketch mapping, only while the sketch is unchanged since the compute (topology, and
 // wedges unless they draw the record's configuration: session.sketchChanged; coordinates never
-// count). The sketcher's 3D -> 2D projection reads the 3D view through a ProjectionSource
-// (viewer/viewProjection.ts), so the sketch module never sees 3Dmol.
+// count). The sketcher's Clean and 3D -> 2D are server layouts (POST /api/depict2d, the page's
+// Depictor); 3D -> 2D reads the viewer's quaternion through a ProjectionSource
+// (viewer/viewProjection.ts), so the sketch module never sees 3Dmol. On each 3D -> 2D the page
+// also checks the quaternion convention: the plain projection of the record by that quaternion
+// against 3Dmol's own modelToScreen.
 //
 // DOM: <div data-testid="workbench" data-molecule-id data-linked data-projection-residual
-// (screen-fit residual of the last projection, viewProjection.screenResidual)>, wb-compute, wb-status
+// (screen-fit residual of that check, viewProjection.screenResidual)>, wb-compute, wb-status
 // [data-status=idle|posting|running|ready|qm_only|failed|missing|error], wb-stale-note,
 // wb-chemistry-banner[data-chemistry], wb-mapping-note.
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -24,18 +27,19 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
 import { useCapability } from "../../state/store";
 import type { MoleculeGeometryOut, MoleculeOut } from "../../api/types.gen";
+import { depict2d } from "../../api/client";
 import { useGeometry, useOrbitalSet, useProperties } from "./data";
 import { OrbitalPanel } from "./orbitals/OrbitalPanel";
 import type { Window } from "./orbitals/levels";
 import { CANONICAL, DEFAULT_SET, DEFAULT_START, isMoleculeId, isOrbitalKind, parseIndex, parseLayers, parseQuality, parseRep, formatLayers, type LayerSpec } from "./params";
 import { restoreComputed, restoreSketch, saveComputed, saveSketch, sketchChanged, sketchTopology } from "./session";
-import { emptySketch, exportSketch, fromMolblock, importSketch, molblockSmiles, Sketcher, toMolblock, useSketchInfo, type ProjectionSource, type SketchModel } from "./sketch";
+import { emptySketch, exportSketch, fromMolblock, importSketch, molblockSmiles, Sketcher, toMolblock, useSketchInfo, type Depictor, type ProjectionSource, type SketchModel } from "./sketch";
 import { clearSelection, useSelection } from "./store";
 import { PropertyTabs } from "./tables/PropertyTabs";
 import { useMolecule, type ComputeState } from "./useMolecule";
 import { useWorkbenchLayers } from "./useWorkbenchLayers";
 import { ViewerPanel } from "./viewer/ViewerPanel";
-import { screenResidual, viewProjection } from "./viewer/viewProjection";
+import { screenResidual, viewProjection, viewQuaternion } from "./viewer/viewProjection";
 import "./workbench.css";
 
 type Update = Record<string, string | number | null>;
@@ -206,20 +210,25 @@ function projectionBlocker(state: ComputeState, model: SketchModel, geometry: Mo
   return null;
 }
 
-/** The sketcher's projection source: the record geometry seen through the 3D view now. */
+/** The sketcher's projection source: the computed molecule and the 3D view's quaternion now
+ *  (and the convention check against 3Dmol's screen positions as a side effect). */
 function useProjectionSource(state: ComputeState, model: SketchModel, geometry: MoleculeGeometryOut | undefined, viewer: GLViewer | null) {
   const [residual, setResidual] = useState<number | null>(null);
   const source: ProjectionSource = {
     disabledReason: projectionBlocker(state, model, geometry, viewer),
-    project: () => {
-      if (!viewer || !geometry || !state.mapping) return null;
+    view: () => {
+      const mid = state.molecule?.molecule_id;
+      const q = viewer ? viewQuaternion(viewer) : null;
+      if (!viewer || !geometry || !state.mapping || !mid || !q) return null;
       const p = viewProjection(viewer, model, state.mapping, geometry);
       if (p) setResidual(screenResidual(viewer, geometry, model, state.mapping, p));
-      return p;
+      return { moleculeId: mid, quaternion: q };
     },
   };
   return { source, residual };
 }
+
+const depictor: Depictor = (req, signal) => depict2d(req, { signal });
 
 function Workbench({ route }: { route: Route }) {
   const prm = route.params;
@@ -273,7 +282,7 @@ function Workbench({ route }: { route: Route }) {
       <div className="wb-grid">
         <div className="wb-left">
           <section className="panel wb-sketch-panel">
-            <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={340} projection={projection.source} />
+            <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={340} projection={projection.source} depictor={depictor} />
             <ComputeBar state={state} canCompute={info.valid && !info.stale} stale={stale} onCompute={onCompute} />
           </section>
           {mid && (

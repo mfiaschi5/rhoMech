@@ -1,9 +1,10 @@
 // @ts-nocheck -- run by `node --experimental-strip-types --test` (see model.test.ts).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyProjection, medianBond3D, projectPoints, quatFromAxisAngle, rotateByQuat, toViewFrame } from "./projection.ts";
-import { BOND_LENGTH, addAtom, addBond, centroid, emptySketch, sketchExtras, withExtras } from "./model.ts";
+import { projectPoints, quatFromAxisAngle, rotateByQuat, toViewFrame } from "./projection.ts";
+import { addAtom, addBond, emptySketch, sketchExtras, withExtras } from "./model.ts";
 import { fromMolblock, toMolblock } from "./molfile.ts";
+import { applyDepiction } from "./depiction.ts";
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);
 const closeV = (p, q, eps = 1e-9) => p.forEach((x, i) => close(x, q[i], eps));
@@ -61,31 +62,13 @@ function propane() {
   return { m, ids };
 }
 
-test("applyProjection: median 3D bond -> BOND_LENGTH, depth scaled alike, old centroid, breaks on", () => {
-  const { m, ids } = propane();
-  // C-C 1.53 A, 112 deg, the chain bent towards the viewer
-  const xyz = [[0, 0, 0], [1.27, 0, 0.855], [2.54, 0, 0]];
-  const proj = projectPoints(ids, xyz, [0, 0, 0, 1]);
-  close(medianBond3D(m, proj), Math.hypot(1.27, 0.855));
-  const out = applyProjection(m, proj);
-  const k = BOND_LENGTH / Math.hypot(1.27, 0.855);
-  const a = out.atoms;
-  close(a[1].x - a[0].x, 1.27 * k);
-  close(a[1].z - a[0].z, 0.855 * k);
-  closeV(centroid(out), centroid(m));
-  assert.equal(out.breakCrossings, true);
-  assert.deepEqual(out.bonds, m.bonds, "topology untouched");
-  assert.equal(applyProjection(m, { ids: ids.slice(0, 2), xy: proj.xy.slice(0, 2), z: proj.z.slice(0, 2) }), null);
-});
-
 test("depth is kept by the session extras and never written to the molfile", () => {
-  const { m, ids } = propane();
-  const out = applyProjection(m, projectPoints(ids, [[0, 0, 0], [1.27, 0, 0.855], [2.54, 0, 0]], [0, 0, 0, 1]));
+  const { m } = propane();
+  const out = applyDepiction(m, { coords: [[0, 0], [1.27, 0.7], [2.54, 0]], depth: [0, 0.9, 0], wedges: [] });
   const mb = toMolblock(out);
   assert.match(mb, /2D/);
-  for (const line of mb.split("\n").slice(4, 7)) close(Number.parseFloat(line.slice(20, 30)), 0);
+  for (const line of mb.split("\n").slice(4, 7)) assert.equal(Number.parseFloat(line.slice(20, 30)), 0);
   const back = withExtras(fromMolblock(mb), JSON.parse(JSON.stringify(sketchExtras(out))));
   assert.deepEqual(back.atoms.map((a) => a.z), out.atoms.map((a) => a.z));
   assert.equal(back.breakCrossings, true);
-  assert.match(toMolblock(out, "", { depth: true }), /3D/);
 });

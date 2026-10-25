@@ -357,7 +357,17 @@
   color: var(--error);
 }
 
-/* layout actions: the crossing-breaks toggle and the fix report */
+/* layout actions: the clean style, the crossing-breaks toggle and the depiction report */
+.sk-style {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--fg);
+}
+
 .sk-toggle.active {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, var(--panel-2));

@@ -1219,3 +1219,62 @@ export interface OrbitalSetOut {
   notes: string[];
   provenance: WorkbenchProvenanceOut;
 }
+
+export interface Depict2DViewIn {
+  quaternion: number[];
+  convention?: "3dmol-rotationGroup";
+}
+
+export interface Depict2DIn {
+  molblock: string;
+  mode?: "clean" | "match3d";
+  style?: "textbook" | "perspective";
+  molecule_id?: string | null;
+  view?: Depict2DViewIn | null;
+}
+
+export interface Depict2DWedgeOut {
+  bond: number;
+  narrow: number;
+  kind: "wedge" | "hash";
+}
+
+export interface Depict2DDefectsOut {
+  close_contacts: number;
+  coincident: number;
+  label_overlaps: number;
+  atom_on_bond: number;
+  crossings: number;
+  small_angles: number;
+  inside_ring: number;
+  squashed_rings: number;
+  bond_length_rms: number;
+  score: number;
+}
+
+export interface Depict2DCandidateOut {
+  method: string;
+  total: number;
+  score: number | null;
+  residual: number | null;
+  stereo: string;
+}
+
+export interface Depict2DOut {
+  mode: "clean" | "match3d";
+  style: "textbook" | "perspective";
+  method: string;
+  template: string | null;
+  molblock: string;
+  coords: [number, number][];
+  depth: number[] | null;
+  wedges: Depict2DWedgeOut[];
+  smiles: string;
+  stereo: "none" | "kept" | "mismatch";
+  view_residual: number | null;
+  defects: Depict2DDefectsOut;
+  candidates: Depict2DCandidateOut[];
+  notes: string[];
+  version: number;
+  molecule_id: string | null;
+}

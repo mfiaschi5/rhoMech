@@ -6,12 +6,14 @@
 //   HOMO level -> its orbital surface layer is drawn (or, without WebGL, its cube fetched), switch
 //   the set to pm_mulliken -> the orbital rows are Pipek-Mezey LMOs, add a density layer, open
 //   the atoms tab and click the O row -> the 3D view selects it and the sketch highlights O.
-// The projection test imports camphor (a bicycle RDKit's 2D clean-up draws flat) through the
-// sketcher's import panel, computes it, turns the 3D view by a mouse drag and presses 3D->2D:
-// the atoms move, the depth and the crossing breaks are on, the fix report shows no label
-// overlap, the wedges still draw the record's stereo (the page stays linked), and the
-// projection matches 3Dmol's own screen positions (data-projection-residual). With
-// KSMECH_E2E_SHOTS=<dir> it saves before/after screenshots there.
+// The layout test imports camphor through the sketcher's import panel and presses Clean (the
+// server's depiction, POST /api/depict2d): textbook gives RDKit's ring-template drawing, then
+// perspective the norbornane template with depth and crossing breaks, the wedges keeping the
+// stereo. It computes camphor, turns the 3D view by a mouse drag and presses 3D->2D: a match3d
+// layout with the view's depth, crossing breaks, the record's stereo (the page stays linked),
+// and the quaternion convention matching 3Dmol's own screen positions
+// (data-projection-residual). Undo steps back through the three layouts. With
+// KSMECH_E2E_SHOTS=<dir> it saves screenshots there.
 // Skipped, with the server's reason, while the workbench capability is off.
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -116,10 +118,19 @@ async function shot(page: Page, testId: string, name: string): Promise<void> {
   await page.getByTestId(testId).screenshot({ path: join(dir, name) });
 }
 
-test.describe("projection", () => {
+async function expectReport(page: Page, attrs: Record<string, string | RegExp>): Promise<Locator> {
+  const report = page.getByTestId("sketch-depict-report");
+  for (const [k, v] of Object.entries(attrs)) await expect(report).toHaveAttribute(k, v, { timeout: 60_000 });
+  console.log(`[workbench] ${(await report.textContent()) ?? ""}`);
+  return report;
+}
+
+const MARKS = "[data-testid^=sketch-bond-][data-stereo=wedge], [data-testid^=sketch-bond-][data-stereo=hash]";
+
+test.describe("layout", () => {
   test.use({ deviceScaleFactor: 2 }); // sharper screenshots
 
-  test("3D -> 2D projection of camphor: depth, crossing breaks, fix report, stereo kept", async ({ page, request }) => {
+  test("camphor: server Clean (ring template, perspective template), compute, 3D->2D (match3d), stereo and link kept", async ({ page, request }) => {
     test.setTimeout(300_000);
     await skipWithoutWorkbench(request);
     await page.goto("/#/workbench");
@@ -130,10 +141,30 @@ test.describe("projection", () => {
     const sketch = page.getByTestId("sketch");
     await expect(sketch).toHaveAttribute("data-atoms", "11");
     await expect(sketch).toHaveAttribute("data-smiles", /@/);
+    const smiles = (await sketch.getAttribute("data-smiles")) ?? "";
     const project = page.getByTestId("sketch-project");
     await expect(project).toBeDisabled();
     await expect(project).toHaveAttribute("data-reason", "compute the molecule first");
-    await shot(page, "sketch", "camphor-1-clean2d.png");
+
+    // Clean, textbook: RDKit's ring templates (the server's choice over CoordGen for camphor)
+    await expect(page.getByTestId("sketch-clean-style")).toHaveValue("textbook");
+    await page.getByTestId("sketch-clean").click();
+    await expectReport(page, { "data-kind": "clean", "data-method": "rdkit-templates", "data-stereo": "kept", "data-fallback": "false" });
+    await expect(sketch).toHaveAttribute("data-has-depth", "false");
+    await expect(sketch).toHaveAttribute("data-smiles", smiles);
+    await shot(page, "sketch", "camphor-1-textbook.png");
+
+    // Clean, perspective: the norbornane template, its depth, the crossing drawn broken
+    await page.getByTestId("sketch-clean-style").selectOption("perspective");
+    await expect(sketch).toHaveAttribute("data-clean-style", "perspective");
+    await page.getByTestId("sketch-clean").click();
+    await expectReport(page, { "data-kind": "clean", "data-template": "norbornane", "data-stereo": "kept", "data-label-overlaps": "0" });
+    await expect(sketch).toHaveAttribute("data-has-depth", "true");
+    await expect(sketch).toHaveAttribute("data-break-crossings", "true");
+    await expect(sketch).toHaveAttribute("data-smiles", smiles);
+    await expect(page.locator(MARKS)).toHaveCount(2);
+    if (Number(await sketch.getAttribute("data-crossings")) > 0) await expect(page.locator("[data-testid^=sketch-bond-][data-broken]").first()).toBeAttached();
+    await shot(page, "sketch", "camphor-2-perspective.png");
 
     await page.getByTestId("wb-compute").click();
     await expect(page.locator("[data-testid=wb-status][data-status=ready]")).toBeVisible({ timeout: 180_000 });
@@ -143,7 +174,7 @@ test.describe("projection", () => {
     await expect(wb).toHaveAttribute("data-linked", "true");
     if ((await viewer.getAttribute("data-state")) !== "ready") {
       await expect(project).toHaveAttribute("data-reason", /no 3D view/);
-      test.skip(true, "no WebGL in this browser: the projection needs the 3D view");
+      test.skip(true, "no WebGL in this browser: 3D->2D needs the 3D view");
     }
     await expect(project).toBeEnabled({ timeout: 30_000 });
 
@@ -155,36 +186,27 @@ test.describe("projection", () => {
     await page.mouse.down();
     await page.mouse.move(cx + 70, cy + 45, { steps: 8 });
     await page.mouse.up();
-    await shot(page, "wb-viewer", "camphor-2-view3d.png");
+    await shot(page, "wb-viewer", "camphor-3-view3d.png");
 
     const before = await atomPositions(page);
     await project.click();
+    await expectReport(page, { "data-kind": "project", "data-method": /^match3d-/, "data-stereo": "kept" });
     await expect.poll(() => atomPositions(page)).not.toBe(before);
     await expect(sketch).toHaveAttribute("data-has-depth", "true");
     await expect(sketch).toHaveAttribute("data-break-crossings", "true");
     await expect(page.getByTestId("sketch-break-toggle")).toHaveAttribute("data-active", "true");
-    const report = page.getByTestId("sketch-fix-report");
-    await expect(report).toHaveAttribute("data-kind", "project");
-    await expect(report).toHaveAttribute("data-label-overlaps", "0");
-    await expect(report).toHaveAttribute("data-stereo", /^(kept|repaired)$/);
-    console.log(`[workbench] projection: ${(await report.textContent()) ?? ""}`);
     const residual = Number(await wb.getAttribute("data-projection-residual"));
-    console.log(`[workbench] projection vs 3Dmol modelToScreen: residual ${residual}`);
+    console.log(`[workbench] quaternion convention vs 3Dmol modelToScreen: residual ${residual}`);
     expect(residual).toBeLessThan(0.1);
-    const crossings = Number(await sketch.getAttribute("data-crossings"));
-    if (crossings > 0) await expect(page.locator("[data-testid^=sketch-bond-][data-broken]").first()).toBeAttached();
-    await expect(page.locator("[data-testid^=sketch-bond-][data-stereo=wedge], [data-testid^=sketch-bond-][data-stereo=hash]")).toHaveCount(2);
+    await expect(page.locator(MARKS)).toHaveCount(2);
     await expect(wb).toHaveAttribute("data-linked", "true");
     await expect(page.getByTestId("wb-stale-note")).toHaveCount(0);
-    await shot(page, "sketch", "camphor-3-projected.png");
+    await shot(page, "sketch", "camphor-4-match3d.png");
 
-    await page.getByTestId("sketch-fix").click();
-    await expect(report).toHaveAttribute("data-kind", "fix");
-    await expect(report).toHaveAttribute("data-label-overlaps", "0");
-    await expect(wb).toHaveAttribute("data-linked", "true");
-
-    // one undo step per action: back to the imported drawing
+    // one undo step per layout: back to the perspective, then the textbook drawing
     await page.getByTestId("sketch-undo").click();
+    await expect(page.getByTestId("sketch-depict-report")).toHaveCount(0);
+    await expect(sketch).toHaveAttribute("data-has-depth", "true");
     await page.getByTestId("sketch-undo").click();
     await expect(sketch).toHaveAttribute("data-has-depth", "false");
     await expect(sketch).toHaveAttribute("data-break-crossings", "false");

@@ -640,6 +640,13 @@ def molecule_cube(
     return PlainTextResponse(cube.text, headers=headers)
 
 
+@router.post("/depict2d", response_model=S.Depict2DOut, dependencies=_WB)
+def depict2d(svc: Svc, body: S.Depict2DIn) -> S.Depict2DOut:
+    if body.molecule_id is not None:
+        check_id("molecule_id", body.molecule_id)
+    return workbench_service.depict2d_out(svc.ctx, body)
+
+
 # ---- curation (static routes before /curate/{mid})
 
 

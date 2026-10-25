@@ -6,12 +6,15 @@
 //
 // DOM: <div data-testid="sketch-toolbar">, buttons tool-<name>[data-active], element-<El>
 // [data-active], element-more (opens <div data-testid="periodic-picker"> with periodic-<El>),
-// sketch-undo, sketch-redo, sketch-clean, sketch-project (3D -> 2D; only with a projection
-// source, disabled with the reason as its title), sketch-fix, sketch-break-toggle
-// [data-active aria-pressed], sketch-fit, sketch-clear, sketch-import, sketch-export.
+// sketch-undo, sketch-redo, sketch-clean, <select data-testid="sketch-clean-style"> (textbook |
+// perspective), sketch-project (3D -> 2D; only with a projection source, disabled with the
+// reason as its title), sketch-break-toggle [data-active aria-pressed], sketch-fit,
+// sketch-clear, sketch-import, sketch-export. There is no "Fix layout": the server's RDKit
+// depiction replaced the home-made relaxation (docs/decisions.md, 2026-10-25).
 import { useEffect, useState, type ReactNode } from "react";
 import { PALETTE, PERIODIC_ROWS, elementClass } from "./elements";
 import type { ToolName } from "./tools";
+import { CLEAN_STYLES, type CleanStyle } from "./depiction";
 
 export type SketchPanel = "import" | "export" | null;
 
@@ -26,12 +29,14 @@ export interface ToolbarProps {
   canRedo: boolean;
   onClean(): void;
   canClean: boolean;
+  cleanStyle: CleanStyle;
+  onCleanStyle(s: CleanStyle): void;
+  /** A Clean or 3D->2D is waiting for the server. */
+  busy: boolean;
   onFit(): void;
   onClear(): void;
   /** The projection button: null hides it (no 3D source). */
   projection: { enabled: boolean; reason: string | null; onProject(): void } | null;
-  onFix(): void;
-  canFix: boolean;
   breakCrossings: boolean;
   onToggleBreaks(): void;
   panel: SketchPanel;
@@ -140,7 +145,7 @@ function PeriodicPicker({ current, onPick }: { current: string; onPick(el: strin
  *  (a disabled button gets no pointer events, so its own title never shows). */
 function ProjectButton({ enabled, reason, onProject }: NonNullable<ToolbarProps["projection"]>) {
   const title = enabled
-    ? "Project the 3D view, as it is oriented now, onto the drawing: wedges from the depth, crossings broken by depth, then Fix layout (Shift+D)"
+    ? "Redraw the sketch as the 3D view shows the computed structure now (RDKit depiction matched to the view, or a perspective template; wedges keep the structure's stereo; crossings broken by depth) (Shift+D)"
     : `3D→2D unavailable: ${reason ?? "no 3D view"}`;
   return (
     <span className="sk-tip" title={title} data-testid="sketch-project-wrap">
@@ -207,9 +212,21 @@ export function Toolbar(p: ToolbarProps) {
       <div className="sk-group sk-actions">
         {act("sketch-undo", "Undo", p.onUndo, p.canUndo, "Ctrl+Z")}
         {act("sketch-redo", "Redo", p.onRedo, p.canRedo, "Ctrl+Shift+Z / Ctrl+Y")}
-        {act("sketch-clean", "Clean", p.onClean, p.canClean, "RDKit 2D layout")}
+        {act("sketch-clean", p.busy ? "Clean…" : "Clean", p.onClean, p.canClean, "Server 2D layout (RDKit): textbook = ring templates or CoordGen, perspective = chairs, cages and bicycles drawn in perspective")}
+        <select
+          className="sk-style"
+          data-testid="sketch-clean-style"
+          value={p.cleanStyle}
+          title="Clean style"
+          onChange={(e) => p.onCleanStyle(e.target.value as CleanStyle)}
+        >
+          {CLEAN_STYLES.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
         {p.projection && <ProjectButton {...p.projection} />}
-        {act("sketch-fix", "Fix layout", p.onFix, p.canFix, "Resolve overlapping labels and atoms, atoms on bonds, short bonds and tight angles; keeps the wedges' meaning (Shift+G)")}
         <button
           type="button"
           className={`btn btn-small sk-toggle${p.breakCrossings ? " active" : ""}`}

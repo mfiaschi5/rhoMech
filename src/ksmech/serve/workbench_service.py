@@ -8,6 +8,9 @@ heavy work runs in the worker (`wb_orbital_set`, `wb_cube`, `wb_properties`) thr
 worker wrote, after checking that each lies under `data/serve`. Each cache path is computed
 here first, so a cached result never touches the scheduler. The geometry is read with
 `np.load` from the QM record (never `load_record`, which probes tblite).
+
+The 2D depiction (`depict2d_out`, RDKit only, in the API process) reads the record geometry
+the same way for a 3D->2D drawing and never featurizes.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ksmech.serve import densities, geometry, molecule, orbital_sets, properties
+from ksmech.serve import densities, depiction2d, geometry, molecule, orbital_sets, properties
 from ksmech.serve import schemas as S
 from ksmech.serve.context import ApiContext
 from ksmech.serve.errors import Code, ServeError
@@ -223,3 +226,41 @@ def cube_headers(cube: CubeText, download: bool) -> dict[str, str]:
         "Access-Control-Expose-Headers": "X-Cube-Kind, X-Cube-Units, X-Cube-Integral, "
         "X-Cube-Expected, X-Cube-Spacing",
     }
+
+
+# ---- 2D depiction
+
+
+def _record_xyz(ctx: ApiContext, mid: str, drawn) -> np.ndarray:
+    """The QM record coordinates of each drawn atom (sketch order); never computes."""
+    entry = molecule.load_entry(ctx.settings, mid)
+    path = qm_npz_path(ctx.settings, entry["key"], ctx.featurizer.method)
+    if path is None:
+        msg = f"no QM record for {entry['key']}: compute the molecule first"
+        raise ServeError(Code.MOLECULE_NOT_READY, msg, detail={"molecule_id": mid})
+    if drawn.key != entry["key"]:
+        msg = f"the sketch is {drawn.key}, molecule {mid} is {entry['key']}"
+        raise ServeError(Code.MAPPING_FAILED, msg, detail={"molecule_id": mid})
+    mapping = molecule.sketch_mapping(drawn.mol, entry["key"])
+    if mapping is None:
+        msg = f"the sketch does not match the record of {entry['key']}"
+        raise ServeError(Code.MAPPING_FAILED, msg, detail={"molecule_id": mid})
+    with np.load(path, allow_pickle=False) as z:
+        xyz = np.asarray(z["coords_ang"], dtype=float).reshape(-1, 3)
+    return xyz[mapping["sketch_to_record"]]
+
+
+def depict2d_out(ctx: ApiContext, body: S.Depict2DIn) -> S.Depict2DOut:
+    """POST /depict2d: the 2D drawing of a sketch (`depiction2d`). match3d reads the record
+    geometry of `molecule_id` (MOLECULE_NOT_READY without one; never featurizes)."""
+    mol, raw = depiction2d.parse_molblock(body.molblock)
+    if body.mode == "clean":
+        out = depiction2d.clean(mol, raw, body.style)
+        return S.Depict2DOut(**out, molecule_id=body.molecule_id)
+    if body.molecule_id is None or body.view is None:
+        msg = "match3d needs molecule_id and view"
+        raise ServeError(Code.REQUEST_INVALID, msg, detail={"mode": body.mode})
+    drawn = molecule.parse_input(molblock=body.molblock)
+    ref = _record_xyz(ctx, body.molecule_id, drawn)
+    out = depiction2d.match3d(mol, raw, ref, body.view.quaternion, body.style)
+    return S.Depict2DOut(**out, molecule_id=body.molecule_id)

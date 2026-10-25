@@ -1,0 +1,398 @@
+{
+ "about": "Perspective ring templates of the sketcher's 2D depiction (serve/depiction_templates.py). Coordinates (x, y in ring_templates.smi, depth z here, same atom order, drawing units: the median drawn bond is 1.5; x right, y up, z towards the viewer) are an orthographic picture of an MMFF geometry: the parent is embedded (20 RDKit srETKDGv3 structures, the seed given, MMFF94 optimized, the lowest energy kept), its largest ring system kept, turned so that 'up' points up the page and 'right' to the right (atom indices are positions in the ring system, parent atom order), then spun about up, tilted about the page's x axis (positive shows the top face) and rolled about the view axis by the degrees given (depiction_gallery.derive_template; `ksmech-serve gallery --derive-templates` re-derives them). Views were chosen by hand from a search over spin and tilt and checked in the gallery. Atoms and bonds are generic (* and ~): a template is a conformation, used only where it fits the molecule's 3D structure.",
+ "templates": {
+  "cyclohexane-chair": {
+   "title": "cyclohexane chair",
+   "source": "derived: MMFF cyclohexane, orthographic view below",
+   "convention": "textbook chair: C3 axis up the page, so axial bonds are vertical; the three ring-bond directions each appear twice (parallel pairs) and every equatorial bond is parallel to the ring bonds once removed; seen 22 degrees from above, turned 12 degrees so the left tip is the lower one",
+   "examples": [
+    "OC1CCCCC1",
+    "CC(C)[C@@H]1CC[C@@H](C)C[C@H]1O",
+    "OC[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@@H]1O"
+   ],
+   "derivation": {
+    "parent": "C1CCCCC1",
+    "seed": 7,
+    "up": "normal",
+    "right": [
+     [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+     ],
+     [
+      0
+     ]
+    ],
+    "spin": -12,
+    "tilt": 22,
+    "roll": 0
+   },
+   "depth": [
+    -0.283,
+    -1.975,
+    -1.326,
+    0.283,
+    1.975,
+    1.326
+   ]
+  },
+  "norbornane": {
+   "title": "bicyclo[2.2.1]heptane (norbornane, camphor, borneol)",
+   "source": "derived: MMFF norbornane, orthographic view below",
+   "convention": "the one-atom bridge (C7) at the top, the bridgeheads left and right, the two-atom bridges below it, one in front and one behind (one crossing, drawn broken)",
+   "examples": [
+    "CC1(C)[C@@H]2CC[C@@]1(C)C(=O)C2",
+    "CC1(C)[C@@H]2CC[C@@]1(C)[C@@H](O)C2",
+    "C1=C[C@H]2CC[C@@H]1C2"
+   ],
+   "derivation": {
+    "parent": "C1CC2CCC1C2",
+    "seed": 7,
+    "up": [
+     [
+      2,
+      5
+     ],
+     [
+      6
+     ]
+    ],
+    "right": [
+     [
+      2
+     ],
+     [
+      5
+     ]
+    ],
+    "spin": -35,
+    "tilt": 15,
+    "roll": 0
+   },
+   "depth": [
+    -1.838,
+    -0.826,
+    0.832,
+    1.528,
+    0.516,
+    -0.634,
+    0.422
+   ]
+  },
+  "bicyclo222": {
+   "title": "bicyclo[2.2.2]octane (quinuclidine, DABCO)",
+   "source": "derived: MMFF bicyclo[2.2.2]octane, orthographic view below",
+   "convention": "bridgeheads left and right, one bridge across the top, the other two below it, front and back (one crossing)",
+   "examples": [
+    "C1CN2CCC1CC2",
+    "C1CN2CCN1CC2"
+   ],
+   "derivation": {
+    "parent": "C1CC2CCC1CC2",
+    "seed": 7,
+    "up": [
+     [
+      2,
+      5
+     ],
+     [
+      0,
+      1
+     ]
+    ],
+    "right": [
+     [
+      2
+     ],
+     [
+      5
+     ]
+    ],
+    "spin": 39,
+    "tilt": 12,
+    "roll": 0
+   },
+   "depth": [
+    0.958,
+    -0.214,
+    -0.993,
+    -1.949,
+    -0.778,
+    0.993,
+    1.577,
+    0.406
+   ]
+  },
+  "tropane": {
+   "title": "bicyclo[3.2.1]octane (tropane, cocaine)",
+   "source": "derived: MMFF bicyclo[3.2.1]octane, orthographic view below",
+   "convention": "the one-atom bridge (N8 of a tropane) at the top, the three-atom bridge in front as half a chair, the two-atom bridge behind (one crossing)",
+   "examples": [
+    "COC(=O)[C@H]1[C@@H](OC(=O)c2ccccc2)C[C@@H]2CC[C@H]1N2C",
+    "CN1[C@@H]2CC[C@H]1CC(=O)C2"
+   ],
+   "derivation": {
+    "parent": "C1CC2CCC(C1)C2",
+    "seed": 7,
+    "up": [
+     [
+      2,
+      5
+     ],
+     [
+      7
+     ]
+    ],
+    "right": [
+     [
+      2
+     ],
+     [
+      5
+     ]
+    ],
+    "spin": -29,
+    "tilt": 15,
+    "roll": 0
+   },
+   "depth": [
+    -1.728,
+    -0.429,
+    1.064,
+    1.611,
+    0.779,
+    -0.207,
+    -1.81,
+    0.72
+   ]
+  },
+  "adamantane": {
+   "title": "adamantane",
+   "source": "derived: MMFF adamantane, orthographic view below",
+   "convention": "the usual adamantane picture: three chairs seen nearly along a C2 axis, one crossing at the centre",
+   "examples": [
+    "OC12CC3CC(CC(C3)C1)C2",
+    "CC12CC3CC(C)(C1)CC(N)(C3)C2"
+   ],
+   "derivation": {
+    "parent": "C1C2CC3CC1CC(C2)C3",
+    "seed": 7,
+    "up": "normal",
+    "right": [
+     [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ],
+     [
+      0
+     ]
+    ],
+    "spin": -6,
+    "tilt": -8,
+    "roll": 0
+   },
+   "depth": [
+    -0.071,
+    -0.824,
+    0.49,
+    1.317,
+    2.058,
+    0.752,
+    -0.49,
+    -1.246,
+    -2.058,
+    0.071
+   ]
+  },
+  "cubane": {
+   "title": "cubane",
+   "source": "derived: MMFF cubane, orthographic view below",
+   "convention": "a cube seen 25 degrees from a face and 20 degrees from above: the front face nearly square, the back face offset up and to the side (two crossings)",
+   "examples": [
+    "C12C3C4C1C1C2C3C41",
+    "OC(=O)C12C3C4C1C1C2C3C41"
+   ],
+   "derivation": {
+    "parent": "C12C3C4C1C5C2C3C45",
+    "seed": 7,
+    "up": [
+     [
+      0
+     ],
+     [
+      1
+     ]
+    ],
+    "right": [
+     [
+      0
+     ],
+     [
+      3
+     ]
+    ],
+    "spin": 25,
+    "tilt": 20,
+    "roll": 0
+   },
+   "depth": [
+    0.092,
+    0.651,
+    1.3,
+    0.741,
+    -0.651,
+    -1.3,
+    -0.741,
+    -0.092
+   ]
+  },
+  "trans-decalin": {
+   "title": "trans-decalin (two chairs)",
+   "source": "derived: MMFF trans-decalin, orthographic view below",
+   "convention": "two chairs side by side along the page, mean plane seen 30 degrees from above and turned 20 degrees, so no ring bond points at the viewer; axial bonds vertical",
+   "examples": [
+    "[C@@H]12CCCC[C@H]1CCCC2"
+   ],
+   "derivation": {
+    "parent": "[C@@H]12CCCC[C@H]1CCCC2",
+    "seed": 7,
+    "up": "normal",
+    "right": [
+     [
+      1,
+      2,
+      3,
+      4
+     ],
+     [
+      6,
+      7,
+      8,
+      9
+     ]
+    ],
+    "spin": -20,
+    "tilt": 30,
+    "roll": 0
+   },
+   "depth": [
+    -0.81,
+    -0.815,
+    0.044,
+    1.638,
+    1.656,
+    0.81,
+    0.815,
+    -0.044,
+    -1.638,
+    -1.656
+   ]
+  },
+  "cis-decalin": {
+   "title": "cis-decalin (two chairs)",
+   "source": "derived: MMFF cis-decalin, orthographic view below",
+   "convention": "two chairs folded along the shared bond like a tent, the mean plane seen 45 degrees from above",
+   "examples": [
+    "[C@@H]12CCCC[C@@H]1CCCC2"
+   ],
+   "derivation": {
+    "parent": "[C@@H]12CCCC[C@@H]1CCCC2",
+    "seed": 7,
+    "up": "normal",
+    "right": [
+     [
+      1,
+      2,
+      3,
+      4
+     ],
+     [
+      6,
+      7,
+      8,
+      9
+     ]
+    ],
+    "spin": -34,
+    "tilt": 45,
+    "roll": 0
+   },
+   "depth": [
+    1.116,
+    2.164,
+    1.219,
+    0.183,
+    -0.909,
+    0.043,
+    -1.054,
+    -1.997,
+    -0.906,
+    0.141
+   ]
+  },
+  "steroid": {
+   "title": "steroid core, all chairs, trans-anti-trans (5alpha)",
+   "source": "derived: MMFF 5alpha-androstane (methyls dropped from the template), orthographic view below",
+   "convention": "rings A to D from left to right, A, B and C as chairs, the mean plane seen 25 degrees from above and turned 8 degrees; angular methyls go on the vertical axial slots",
+   "examples": [
+    "C[C@@]12CCC[C@H]1[C@@H]1CC[C@H]3CCCC[C@]3(C)[C@H]1CC2"
+   ],
+   "derivation": {
+    "parent": "C[C@@]12CCC[C@H]1[C@@H]1CC[C@H]3CCCC[C@]3(C)[C@H]1CC2",
+    "seed": 7,
+    "up": "normal",
+    "right": [
+     [
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+     ],
+     [
+      0,
+      1,
+      2,
+      3,
+      4
+     ]
+    ],
+    "spin": -8,
+    "tilt": 25,
+    "roll": 0
+   },
+   "depth": [
+    -1.478,
+    -2.026,
+    -0.317,
+    0.99,
+    -0.13,
+    0.756,
+    2.163,
+    2.94,
+    1.505,
+    2.283,
+    0.852,
+    -0.567,
+    -1.298,
+    0.129,
+    -0.679,
+    -2.193,
+    -2.929
+   ]
+  }
+ }
+}

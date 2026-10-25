@@ -1,73 +1,105 @@
-// The sketcher's layout actions: the 3D -> 2D projection (from a ProjectionSource the page
-// provides: the sketch never talks to the 3D viewer itself), "Fix layout" and the crossing
-// breaks toggle, with the report of the last projection or fix (shown in the info bar while it
-// describes the drawing on screen).
+// The sketcher's layout actions: Clean, 3D->2D and the crossing-breaks toggle, with the report
+// of the last one (shown in the info bar while it describes the drawing on screen).
 //
-// Projection: applyProjection (coordinates and depth from the source), RDKit's reading of the
-// 3D stereo (the target), projectedLayout (wedges from the depth, layout fix, tilts), then
-// repairStereo as the safety net; one undoable commit. Fix: fixLayout with the hand anchor (the
-// projection anchor when the drawing has depth), RDKit's reading of the drawing before as the
-// stereo target.
-import { useState } from "react";
+// Both layouts come from the server (POST /api/depict2d through the page's Depictor; the sketch
+// never fetches by itself): Clean sends the molblock with mode "clean" and the chosen style
+// (textbook: RDKit's ring templates or CoordGen, whichever has fewer defects; perspective: the
+// chemist-style template library); 3D->2D sends mode "match3d" with the computed molecule's id
+// and the 3D viewer's quaternion (ProjectionSource.view(), the page reads it from 3Dmol). The
+// answer is applied by atom and bond index (depiction.applyDepiction) as one undoable commit,
+// unless the drawing changed while it was on its way. When the server cannot be reached (or
+// refuses), Clean falls back to RDKit.js's CoordGen layout in the browser and the report says
+// so; 3D->2D has no fallback.
+import { useLayoutEffect, useRef, useState } from "react";
+import type { Depict2DOut } from "../../../api/types.gen";
 import type { RDKitModule } from "../../../chem/rdkit";
-import { hasDepth, setBreakCrossings, type SketchModel } from "./model";
-import { applyProjection, type Projection3D } from "./projection";
-import { projectedLayout } from "./projectLayout";
-import { ANCHOR_HAND, ANCHOR_PROJECTION, fixLayout, type LayoutMetrics } from "./layoutFix";
-import { drawnStereo, repairStereo, stereoFromDepth, type StereoReading } from "./rdkitSketch";
+import { setBreakCrossings, type SketchModel } from "./model";
+import type { Quat } from "./projection";
+import { toMolblock } from "./molfile";
+import { cleanUpSketch } from "./rdkitSketch";
+import { applyDepiction, type CleanStyle, type Depictor } from "./depiction";
 import type { SketchEditor } from "./useSketchEditor";
 
-/** What the page offers the sketcher for the projection. */
+/** What the page offers the sketcher for 3D->2D. */
 export interface ProjectionSource {
-  /** Null when the projection can run; else why not (the button's tooltip). */
+  /** Null when 3D->2D can run; else why not (the button's tooltip). */
   disabledReason: string | null;
-  /** The drawn atoms in the viewer's current frame (Angstrom), or null. */
-  project(): Projection3D | null;
+  /** The computed molecule and the viewer's rotation quaternion [x, y, z, w] now, or null. */
+  view(): { moleculeId: string; quaternion: Quat } | null;
 }
 
-export type StereoOutcome = "none" | "kept" | "repaired" | "mismatch";
-
 export interface LayoutReport {
-  kind: "project" | "fix";
-  before: LayoutMetrics;
-  after: LayoutMetrics;
-  tilt: readonly [number, number] | null;
-  stereo: StereoOutcome;
+  kind: "clean" | "project";
+  /** The server's answer (null for a fallback or an error). */
+  result: Depict2DOut | null;
+  /** Why the browser layout was used instead of the server's. */
+  fallback: string | null;
+  error: string | null;
   forModel: SketchModel;
 }
 
-/** Repair the drawing's stereo towards `target` (RDKit), with the outcome. */
-function checkStereo(rdkit: RDKitModule | null, m: SketchModel, target: StereoReading | null): { model: SketchModel; stereo: StereoOutcome } {
-  if (!rdkit || !target || target.centres.size === 0) return { model: m, stereo: "none" };
-  const r = repairStereo(rdkit, m, target);
-  return { model: r.model, stereo: !r.ok ? "mismatch" : r.model !== m ? "repaired" : "kept" };
-}
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-export function useLayoutActions(ed: SketchEditor, rdkit: RDKitModule | null, source: ProjectionSource | undefined, hCounts: ReadonlyMap<number, number> | null) {
+export function useLayoutActions(ed: SketchEditor, rdkit: RDKitModule | null, source: ProjectionSource | undefined, depictor: Depictor | undefined, style: CleanStyle) {
   const [report, setReport] = useState<LayoutReport | null>(null);
-  const canProject = !!source && source.disabledReason === null && ed.committed.atoms.length > 0;
-  const project = () => {
-    const p = canProject ? source?.project() : null;
-    const m1 = p ? applyProjection(ed.committed, p) : null;
-    if (!m1) return;
-    const target = rdkit ? stereoFromDepth(rdkit, m1) : null;
-    const r = projectedLayout(m1, target ? target.centres.keys() : [], { hCounts });
-    const { model, stereo } = checkStereo(rdkit, r.model, target);
-    ed.commit(model, { external: true });
-    setReport({ kind: "project", before: r.before, after: r.after, tilt: r.tilt, stereo, forModel: model });
+  const [busy, setBusy] = useState(false);
+  const latest = useRef(ed.committed);
+  useLayoutEffect(() => {
+    latest.current = ed.committed;
+  });
+  const n = ed.committed.atoms.length;
+  const canProject = !!source && !!depictor && source.disabledReason === null && n > 0 && !busy;
+  const canClean = n > 1 && !busy && (!!depictor || !!rdkit);
+
+  const browserClean = (m: SketchModel, why: string) => {
+    const next = rdkit ? cleanUpSketch(rdkit, m) : null;
+    if (next) ed.commit(next, { external: true });
+    setReport({ kind: "clean", result: null, fallback: why, error: next ? null : "RDKit.js is not loaded", forModel: next ?? m });
   };
-  const fix = () => {
+
+  /** Send `m` to the server and apply the answer; false when the drawing moved on meanwhile. */
+  const run = async (kind: LayoutReport["kind"], m: SketchModel, req: Parameters<Depictor>[0]) => {
+    const out = await (depictor as Depictor)(req);
+    if (latest.current !== m) return false;
+    const next = applyDepiction(m, out);
+    if (!next) throw new Error("the server's drawing does not fit the sketch");
+    ed.commit(next, { external: true });
+    setReport({ kind, result: out, fallback: null, error: null, forModel: next });
+    return true;
+  };
+
+  const clean = async () => {
     const m = ed.committed;
-    if (m.atoms.length < 2) return;
-    const target = rdkit ? drawnStereo(rdkit, m) : null;
-    const r = fixLayout(m, { anchor: hasDepth(m) ? ANCHOR_PROJECTION : ANCHOR_HAND, hCounts });
-    const { model, stereo } = checkStereo(rdkit, r.model, target);
-    if (model !== m) ed.commit(model);
-    setReport({ kind: "fix", before: r.before, after: r.after, tilt: null, stereo, forModel: model });
+    if (!canClean) return;
+    if (!depictor) return browserClean(m, "no server: browser CoordGen layout");
+    setBusy(true);
+    try {
+      await run("clean", m, { molblock: toMolblock(m), mode: "clean", style });
+    } catch (err) {
+      if (latest.current === m) browserClean(m, `server unavailable (${message(err)}): browser CoordGen layout`);
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const project = async () => {
+    const m = ed.committed;
+    const v = canProject ? source?.view() : null;
+    if (!v) return;
+    setBusy(true);
+    try {
+      const view = { quaternion: [...v.quaternion], convention: "3dmol-rotationGroup" as const };
+      await run("project", m, { molblock: toMolblock(m), mode: "match3d", style, molecule_id: v.moleculeId, view });
+    } catch (err) {
+      setReport({ kind: "project", result: null, fallback: null, error: message(err), forModel: m });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleBreaks = () => ed.commit(setBreakCrossings(ed.committed, !ed.committed.breakCrossings));
   const shown = report && report.forModel === ed.committed ? report : null;
-  return { canProject, project, fix, toggleBreaks, report: shown };
+  return { canProject, canClean, busy, clean, project, toggleBreaks, report: shown };
 }
 
 export type LayoutActions = ReturnType<typeof useLayoutActions>;

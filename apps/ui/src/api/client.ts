@@ -469,6 +469,12 @@ const molecule = (mid: string, rest = "") => `/molecule/${encodeURIComponent(mid
 export const createMolecule = (body: T.MoleculeIn, o?: RequestOptions) =>
   request<T.MoleculeOut>({ method: "POST", path: "/molecule", body }, o);
 
+/** POST /depict2d: the server's 2D drawing of a sketch (RDKit ring templates, the perspective
+ *  template library, or match3d: the computed structure as the 3D view shows it), in the
+ *  molblock's atom and bond order. */
+export const depict2d = (body: T.Depict2DIn, o?: RequestOptions) =>
+  request<T.Depict2DOut>({ method: "POST", path: "/depict2d", body }, o);
+
 /** GET /molecule/{id}: the status (never computes; mapping is always null here). */
 export const getMolecule = (mid: string, o?: RequestOptions) => request<T.MoleculeOut>({ path: molecule(mid) }, o);
 

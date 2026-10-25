@@ -88,12 +88,19 @@ then look at it:
   input), bonds (Wiberg index, length) and the RDKit.js descriptors of the sketch. Clicking an
   atom row selects it in 3D and highlights the drawn atom in the sketch, while the sketch is
   unchanged since the compute.
-- 3D -> 2D: once computed, the sketcher's "3D→2D" button (Shift+D) redraws the sketch as the 3D
-  view is oriented now (wedges from the depth, the bond behind each crossing drawn broken),
-  then "Fix layout" (Shift+G, also on any drawing) resolves overlapping labels and atoms, atoms
-  on bonds, short bonds and tight angles; "Break crossings" (Shift+X) toggles the breaks. The
-  sketch stays linked to the record, since only coordinates and wedges that keep its stereo
-  change.
+- 2D layouts from the server (`POST /api/depict2d`, RDKit): "Clean" with a style next to it,
+  textbook (RDKit's ring templates or CoordGen, whichever has fewer defects) or perspective (a
+  library of chemist-style drawings: chair cyclohexanes and pyranoses, norbornanes such as
+  camphor, bicyclo[2.2.2]octane, tropane, adamantane, cubane, cis- and trans-decalin, the steroid
+  core; used only where it fits the molecule's 3D shape); without the server Clean falls back
+  to RDKit.js's CoordGen with a notice. Once computed, "3D→2D" (Shift+D) redraws the sketch as
+  the 3D view shows the record now (RDKit's depiction matched to the view, the view itself as a
+  ring template, or a perspective template, whichever reads best), wedges keeping the record's
+  stereo and the bond behind each crossing drawn broken; "Break crossings" (Shift+X) toggles
+  the breaks. The info bar reports the method, the defects and the stereo check. The sketch
+  stays linked to the record, since only coordinates and wedges that keep its stereo change.
+  `uv run --no-sync ksmech-serve gallery [--out DIR]` draws a fixed gallery of 22 hard
+  molecules with every method, to judge the layouts by eye.
 
 Defaults and approximations: the density is valence-only on GFN2's minimal basis (an STO-nG
 fit, so its integral is shown next to N_valence), the ESP is an approximate point-charge

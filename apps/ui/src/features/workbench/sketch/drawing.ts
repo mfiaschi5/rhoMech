@@ -86,7 +86,7 @@ export const hLabelWidth = (hCount: number): number => (hCount > 0 ? FONT_PX * 0
 
 /** The box (screen px about the atom, y down) of everything a label draws: the symbol, the H
  *  count on its side and the charge superscript. SketchCanvas places the glyphs by the same
- *  numbers; the layout correction (layoutFix.ts) uses the box in model units. */
+ *  numbers. */
 export function labelBox(label: AtomLabel): { x0: number; x1: number; y0: number; y1: number } {
   const half = labelHalfWidth(label.el);
   const hw = hLabelWidth(label.hCount);

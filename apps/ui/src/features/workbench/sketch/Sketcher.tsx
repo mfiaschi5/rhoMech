@@ -1,6 +1,6 @@
 // Sketcher: a ChemDraw-like 2D molecule editor in SVG (workbench phase 4). Self-contained: its
-// own immutable model (model.ts), undo/redo, tools, hotkeys, RDKit validation, clean-up,
-// import and export.
+// own immutable model (model.ts), undo/redo, tools, hotkeys, RDKit validation, import and
+// export; the 2D layouts (Clean, 3D->2D) come from the server through the page's Depictor.
 //
 // Props:
 //   value          SketchModel   optional; a new value (by reference) replaces the drawing as an
@@ -9,12 +9,17 @@
 //   highlightAtoms number[]      sketch atom ids drawn with the highlight halo
 //   readOnly       boolean       no toolbar, no edits (hover, pan and zoom still work)
 //   height         number        canvas height in px (default 360); the width follows the parent
-//   projection     ProjectionSource  optional; the 3D -> 2D projection (useLayoutActions.ts):
-//                                why it is off, or the drawn atoms in the 3D view's frame
+//   projection     ProjectionSource  optional; 3D -> 2D (useLayoutActions.ts): why it is off,
+//                                or the computed molecule's id and the 3D viewer's quaternion
+//   depictor       Depictor      optional; POST /api/depict2d (depiction.ts). Clean uses it with
+//                                the style picked next to the button (textbook | perspective,
+//                                kept per tab in sessionStorage); without it, or when the server
+//                                fails, Clean is RDKit.js's CoordGen layout with a notice
 //
 // DOM: <div data-testid="sketch" data-smiles (RDKit canonical, "" when invalid/empty)
 //      data-valid data-atoms data-bonds data-tool data-status (useSketchInfo status)
-//      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth>
+//      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth
+//      data-busy (a layout is waiting for the server) data-clean-style>
 //   the toolbar (Toolbar.tsx), <svg data-testid="sketch-canvas"> (SketchCanvas.tsx), the
 //   import/export popovers (ImportExport.tsx) and <div data-testid="sketch-info"> (InfoBar.tsx).
 //
@@ -27,7 +32,7 @@
 //   Ctrl+Z   Ctrl+Shift+Z / Ctrl+Y      undo / redo
 //   Ctrl+A                              select all
 //   Ctrl+V                              import the clipboard (SMILES or molfile)
-//   Shift+D  Shift+G  Shift+X           3D -> 2D projection, fix layout, crossing breaks
+//   Shift+D  Shift+X                    3D -> 2D, crossing breaks
 //   Esc                                 cancel the gesture, clear the selection, close popovers
 //
 // Demo / test harness (not a page; for a scratch mount or a Playwright test):
@@ -40,7 +45,7 @@ import { useRDKit, type RDKitModule } from "../../../chem/rdkit";
 import { setElement, type SketchModel } from "./model";
 import { fitView, type Vec, type View } from "./geometry";
 import { applyKey, NO_SELECTION } from "./tools";
-import { cleanUpSketch, exportSketch, importSketch } from "./rdkitSketch";
+import { exportSketch, importSketch } from "./rdkitSketch";
 import { useSketchEditor, type SketchEditor } from "./useSketchEditor";
 import { useSketchInfo } from "./useSketchInfo";
 import { useSketchPointer, type SketchPointer } from "./useSketchPointer";
@@ -51,6 +56,7 @@ import { InfoBar } from "./InfoBar";
 import { useLayoutActions, type LayoutActions, type ProjectionSource } from "./useLayoutActions";
 import { findCrossings } from "./crossings";
 import { hasDepth } from "./model";
+import { restoreCleanStyle, saveCleanStyle, type CleanStyle, type Depictor } from "./depiction";
 import "./sketch.css";
 
 export interface SketcherProps {
@@ -60,6 +66,7 @@ export interface SketcherProps {
   readOnly?: boolean;
   height?: number;
   projection?: ProjectionSource;
+  depictor?: Depictor;
 }
 
 /** Pixels per model unit at 100 %: a 1.5 bond is 37.5 px. */
@@ -157,14 +164,10 @@ function handleKey(e: KeyboardEvent, { ed, pointer, closePanel, layout }: KeyDep
   return true;
 }
 
-/** Shift+D / Shift+G / Shift+X: projection, fix layout, crossing breaks (not element keys). */
+/** Shift+D / Shift+X: 3D -> 2D, crossing breaks (not element keys). */
 function layoutKey(k: string, layout: LayoutActions): boolean {
   if (k === "d") {
-    if (layout.canProject) layout.project();
-    return true;
-  }
-  if (k === "g") {
-    layout.fix();
+    if (layout.canProject) void layout.project();
     return true;
   }
   if (k === "x") {
@@ -196,7 +199,7 @@ function useView(ed: SketchEditor, width: number, height: number): ViewState {
   return { view, setView, fit };
 }
 
-/** The toolbar and drop actions that need RDKit. */
+/** The toolbar and drop actions that need RDKit (Clean is a layout action). */
 function useSketchActions(ed: SketchEditor, rdkit: RDKitModule | null, readOnly: boolean) {
   const importText = (text: string): string | null => {
     try {
@@ -205,10 +208,6 @@ function useSketchActions(ed: SketchEditor, rdkit: RDKitModule | null, readOnly:
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     }
-  };
-  const clean = () => {
-    const m = rdkit ? cleanUpSketch(rdkit, ed.committed) : null;
-    if (m) ed.commit(m, { external: true });
   };
   const onElement = (el: string) => {
     ed.setElement(el);
@@ -223,7 +222,7 @@ function useSketchActions(ed: SketchEditor, rdkit: RDKitModule | null, readOnly:
     if (err) console.warn("sketch drop:", err);
   };
   const clear = () => ed.commit({ atoms: [], bonds: [], nextId: ed.committed.nextId });
-  return { importText, clean, onElement, onDrop, clear };
+  return { importText, onElement, onDrop, clear };
 }
 
 type SketchActions = ReturnType<typeof useSketchActions>;
@@ -233,7 +232,8 @@ function EditorToolbar(p: {
   act: SketchActions;
   layout: LayoutActions;
   projection: ProjectionSource | undefined;
-  canClean: boolean;
+  cleanStyle: CleanStyle;
+  onCleanStyle(s: CleanStyle): void;
   onFit(): void;
   panel: SketchPanel;
   onPanel(p: SketchPanel): void;
@@ -249,13 +249,14 @@ function EditorToolbar(p: {
       onRedo={ed.redo}
       canUndo={ed.canUndo}
       canRedo={ed.canRedo}
-      onClean={act.clean}
-      canClean={p.canClean}
+      onClean={() => void layout.clean()}
+      canClean={layout.canClean}
+      cleanStyle={p.cleanStyle}
+      onCleanStyle={p.onCleanStyle}
+      busy={layout.busy}
       onFit={p.onFit}
       onClear={act.clear}
-      projection={p.projection ? { enabled: layout.canProject, reason: p.projection.disabledReason, onProject: layout.project } : null}
-      onFix={layout.fix}
-      canFix={ed.committed.atoms.length > 1}
+      projection={p.projection ? { enabled: layout.canProject, reason: p.projection.disabledReason, onProject: () => void layout.project() } : null}
       breakCrossings={ed.committed.breakCrossings ?? false}
       onToggleBreaks={layout.toggleBreaks}
       panel={p.panel}
@@ -276,7 +277,16 @@ function ExportFor({ rdkit, model, onClose }: { rdkit: RDKitModule | null; model
   return <ExportPanel {...out} onClose={onClose} />;
 }
 
-export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection }: SketcherProps) {
+function useCleanStyle(): [CleanStyle, (s: CleanStyle) => void] {
+  const [style, setStyle] = useState<CleanStyle>(restoreCleanStyle);
+  const set = (s: CleanStyle) => {
+    setStyle(s);
+    saveCleanStyle(s);
+  };
+  return [style, set];
+}
+
+export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor }: SketcherProps) {
   const ed = useSketchEditor(value, onChange);
   const info = useSketchInfo(ed.committed);
   const { rdkit } = useRDKit();
@@ -287,8 +297,9 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
   const [panel, setPanel] = useState<SketchPanel>(null);
   const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly);
   const act = useSketchActions(ed, rdkit, readOnly);
+  const [cleanStyle, setCleanStyle] = useCleanStyle();
+  const layout = useLayoutActions(ed, rdkit, projection, depictor, cleanStyle);
   const fresh = !info.stale && ed.model === ed.committed && info.valid;
-  const layout = useLayoutActions(ed, rdkit, projection, fresh ? info.hCounts : null);
   const closePanel = () => setPanel(null);
   useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, importText: act.importText, layout });
   const highlight = useMemo(() => new Set(highlightAtoms ?? []), [highlightAtoms]);
@@ -312,11 +323,23 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
       data-crossings={crossings}
       data-break-crossings={ed.committed.breakCrossings ? "true" : "false"}
       data-has-depth={hasDepth(ed.committed) ? "true" : "false"}
+      data-busy={layout.busy ? "true" : "false"}
+      data-clean-style={cleanStyle}
       onPointerEnter={setInside(true)}
       onPointerLeave={setInside(false)}
     >
       {!readOnly && (
-        <EditorToolbar ed={ed} act={act} layout={layout} projection={projection} canClean={!!rdkit && ed.committed.atoms.length > 1} onFit={fit} panel={panel} onPanel={setPanel} />
+        <EditorToolbar
+          ed={ed}
+          act={act}
+          layout={layout}
+          projection={projection}
+          cleanStyle={cleanStyle}
+          onCleanStyle={setCleanStyle}
+          onFit={fit}
+          panel={panel}
+          onPanel={setPanel}
+        />
       )}
       <div className="sk-stage" ref={stageRef} onDragOver={(e) => e.preventDefault()} onDrop={act.onDrop}>
         <SketchCanvas

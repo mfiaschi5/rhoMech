@@ -1,35 +1,52 @@
 // InfoBar: the RDKit verdict under the canvas: canonical SMILES (or the sanitization error) and
-// formula, MW, logP, TPSA, HBD/HBA.
+// formula, MW, logP, TPSA, HBD/HBA, and the report of the last Clean / 3D->2D.
 //
-// Props: info (useSketchInfo), report (the last projection / fix, useLayoutActions; null hides).
+// Props: info (useSketchInfo), report (the last layout action, useLayoutActions; null hides).
 // DOM: <div data-testid="sketch-info" data-status data-valid> with sketch-info-smiles,
 // sketch-info-error, <span data-testid="sketch-desc-<key>"> per descriptor and
-// <div data-testid="sketch-fix-report" data-kind data-label-overlaps data-close-contacts
-// data-atom-on-bond data-crossings data-bond-rms data-stereo> (values after the fix).
+// <div data-testid="sketch-depict-report" data-kind (clean | project) data-method data-template
+// data-stereo (none | kept | mismatch) data-score data-label-overlaps data-close-contacts
+// data-crossings data-view-residual data-fallback (true when the browser laid it out)
+// data-error>.
 import type { SketchInfo } from "./useSketchInfo";
 import type { LayoutReport } from "./useLayoutActions";
 
-function FixReport({ r }: { r: LayoutReport }) {
-  const { before: b, after: a } = r;
-  const pair = (x: number, y: number) => (x === y ? String(y) : `${x}→${y}`);
-  const tilt = r.tilt && (r.tilt[0] || r.tilt[1]) ? ` (view tilted ${r.tilt[0]}°, ${r.tilt[1]}°)` : "";
-  const stereo = { none: "", kept: " · stereo kept", repaired: " · stereo repaired", mismatch: " · stereo differs!" }[r.stereo];
+function describe(r: LayoutReport): string {
+  const what = r.kind === "project" ? "3D→2D" : "Clean";
+  if (r.error) return `${what} failed: ${r.error}`;
+  if (!r.result) return `${what}: ${r.fallback ?? ""}`;
+  const o = r.result;
+  const d = o.defects;
+  const how = o.template ? `${o.style} template ${o.template}` : o.method;
+  const fit = o.view_residual === null ? "" : ` · view fit ${o.view_residual.toFixed(2)}`;
+  const stereo = { none: "", kept: " · stereo kept", mismatch: " · stereo differs!" }[o.stereo];
+  const notes = o.notes.length ? ` · ${o.notes.join("; ")}` : "";
+  return (
+    `${what} (${how}): score ${d.score.toFixed(1)} · label overlaps ${d.label_overlaps} · close contacts ` +
+    `${d.close_contacts} · atom on bond ${d.atom_on_bond} · crossings ${d.crossings}${fit}${stereo}${notes}`
+  );
+}
+
+function DepictReport({ r }: { r: LayoutReport }) {
+  const o = r.result;
+  const bad = !!r.error || o?.stereo === "mismatch";
   return (
     <div
-      className={`sk-fix-report${r.stereo === "mismatch" ? " sk-error" : ""}`}
-      data-testid="sketch-fix-report"
+      className={`sk-fix-report${bad ? " sk-error" : ""}`}
+      data-testid="sketch-depict-report"
       data-kind={r.kind}
-      data-label-overlaps={a.labelOverlaps}
-      data-close-contacts={a.closeContacts}
-      data-atom-on-bond={a.atomOnBond}
-      data-crossings={a.crossings}
-      data-bond-rms={a.bondLengthRms.toFixed(3)}
-      data-stereo={r.stereo}
+      data-method={o?.method ?? "browser-coordgen"}
+      data-template={o?.template ?? ""}
+      data-stereo={o?.stereo ?? "none"}
+      data-score={o ? o.defects.score.toFixed(3) : ""}
+      data-label-overlaps={o?.defects.label_overlaps ?? ""}
+      data-close-contacts={o?.defects.close_contacts ?? ""}
+      data-crossings={o?.defects.crossings ?? ""}
+      data-view-residual={o?.view_residual ?? ""}
+      data-fallback={r.fallback ? "true" : "false"}
+      data-error={r.error ?? ""}
     >
-      <span className="muted">{r.kind === "project" ? `3D→2D${tilt}:` : "Fix layout:"}</span> label overlaps {pair(b.labelOverlaps, a.labelOverlaps)} · close
-      contacts {pair(b.closeContacts, a.closeContacts)} · atom on bond {pair(b.atomOnBond, a.atomOnBond)} · crossings {pair(b.crossings, a.crossings)} · bond
-      RMS {b.bondLengthRms.toFixed(2)}→{a.bondLengthRms.toFixed(2)}
-      {stereo}
+      {describe(r)}
     </div>
   );
 }
@@ -80,7 +97,7 @@ export function InfoBar({ info, report = null }: { info: SketchInfo; report?: La
           <span className="muted">{label}</span> {value}
         </span>
       ))}
-      {report && <FixReport r={report} />}
+      {report && <DepictReport r={report} />}
     </div>
   );
 }

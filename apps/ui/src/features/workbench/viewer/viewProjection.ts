@@ -1,8 +1,9 @@
-// The 3D view as the sketcher's projection source: the record coordinates of the drawn atoms
-// (through the POST's sketch_to_record), rotated by the viewer's current quaternion
-// (getView()[4..7], 3Dmol's rotationGroup; sketch/projection.ts has the frame), and the check
-// that this orthographic projection matches what 3Dmol draws: modelToScreen of the same atoms,
-// fitted by a scale and a translation only (no rotation, no mirror), leaves a small residual.
+// The 3D view as the sketcher's 3D->2D source: the viewer's current quaternion (getView()[4..7],
+// 3Dmol's rotationGroup; sketch/projection.ts has the frame), which the sketcher sends to POST
+// /api/depict2d (match3d), and the check of that convention: the record coordinates of the drawn
+// atoms (through the POST's sketch_to_record) rotated by the quaternion and projected
+// orthographically must match what 3Dmol draws: modelToScreen of the same atoms, fitted by a
+// scale and a translation only (no rotation, no mirror), leaves a small residual.
 import type { GLViewer } from "3dmol";
 import type { MoleculeGeometryOut, SketchMappingOut } from "../../../api/types.gen";
 import { projectPoints, type Projection3D, type Quat, type Vec3 } from "../sketch/projection";

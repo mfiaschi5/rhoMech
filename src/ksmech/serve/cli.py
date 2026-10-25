@@ -6,6 +6,7 @@
     ksmech-serve export
     ksmech-serve schema-ts [--out apps/ui/src/api/types.gen.ts]
     ksmech-serve probe-cache --smiles S [--smiles S ...]
+    ksmech-serve gallery [--out DIR] [--only NAME ...] [--derive-templates]
 
 There is no authentication. By default the server binds 127.0.0.1 (reach it through
 `ssh -L 8000:localhost:8000 <server>`); `--host 0.0.0.0` (or one of this machine's addresses)
@@ -43,7 +44,7 @@ log = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
-COMMANDS = ("run", "recheck", "export", "schema-ts", "probe-cache")
+COMMANDS = ("run", "recheck", "export", "schema-ts", "probe-cache", "gallery")
 CHEMISTRY_CHOICES = ("real", "cached", "synthetic")
 _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 LOCK_HELD = {
@@ -99,6 +100,16 @@ def build_parser() -> argparse.ArgumentParser:
         "token cache (KSMECH_SHARED_CACHE_ROOT, real method)",
     )
     pc.add_argument("--smiles", action="append", required=True, help="a SMILES (repeatable)")
+    gal = sub.add_parser(
+        "gallery", help="draw the 2D depiction gallery of hard molecules (PNG + SVG per method)"
+    )
+    gal.add_argument("--out", type=Path, default=Path("depiction-gallery"), help="output dir")
+    gal.add_argument("--only", nargs="+", default=None, metavar="NAME", help="gallery names")
+    gal.add_argument(
+        "--derive-templates",
+        action="store_true",
+        help="also write ring_templates.smi/.json re-derived from their derivations into OUT",
+    )
     return parser
 
 
@@ -420,12 +431,29 @@ def cmd_probe_cache(args: argparse.Namespace) -> int:
     return 0 if keys and not missing and not invalid else 1
 
 
+def cmd_gallery(args: argparse.Namespace) -> int:
+    """RDKit only: no settings, no lock, no worker."""
+    from ksmech.serve.depiction_gallery import GALLERY, derive_all, run_gallery
+
+    unknown = sorted(set(args.only or ()) - {name for name, _ in GALLERY})
+    if unknown:
+        print(f"ksmech-serve gallery: unknown names {unknown}", file=sys.stderr)
+        return 2
+    summary = run_gallery(args.out, args.only)
+    if args.derive_templates:
+        derive_all(args.out / "derived-templates")
+    poor = [n for n, ms in summary.items() if any(m["stereo"] == "mismatch" for m in ms.values())]
+    print(f"gallery: {len(summary)} molecules in {args.out}; stereo mismatches: {poor or 'none'}")
+    return 0
+
+
 HANDLERS = {
     "run": cmd_run,
     "recheck": cmd_recheck,
     "export": cmd_export,
     "schema-ts": cmd_schema_ts,
     "probe-cache": cmd_probe_cache,
+    "gallery": cmd_gallery,
 }
 
 

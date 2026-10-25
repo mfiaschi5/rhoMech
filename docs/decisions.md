@@ -4001,6 +4001,10 @@ is now v7.5, sha256 6c6a023f66dd).
 
 ## 2026-10-25 — Workbench sketcher: 3D -> 2D projection, crossing breaks, layout fix
 
+(Superseded the same day for the layout: the client-side projection layout and the "Fix layout"
+relaxation were replaced by server-side RDKit depiction, see "Sketcher 2D layout" below; the
+view convention, the depth storage, the linking rule and the crossing breaks still hold.)
+
 - **Projection convention.** The sketcher's "3D→2D" (Shift+D) draws the record geometry of each
   drawn atom (`sketch_to_record`) as the 3D view shows it now: `v = R(q) p` with `q` the
   rotationGroup quaternion of 3Dmol's `getView()` (indices 4-7, x y z w) and R the matrix of
@@ -4062,3 +4066,97 @@ is now v7.5, sha256 6c6a023f66dd).
   half-width on each side, divided by the sine of the crossing angle (at least 0.35), on every
   stroke; wedges split in two, hashes lose the ticks inside. On by default after a projection,
   a toolbar toggle (Shift+X) otherwise.
+
+## 2026-10-25 — Sketcher 2D layout: server-side RDKit depiction and perspective templates
+
+- **Why the relaxation went.** The 3D->2D projection followed by the home-made "Fix layout"
+  relaxation (bond-length, angle, contact and label terms, tilted views) was judged awful by eye:
+  a projection of a cage lines atoms up behind each other, and a local relaxation only smears
+  the result. It is removed (sketch/layoutFix.ts, projectLayout.ts, stereo.ts and their tests),
+  with its button (Shift+G). Both layouts now come from RDKit on the server:
+  `POST /api/depict2d` (serve/depiction2d.py, API process, RDKit only, no worker). Kept from the
+  old code: the 3Dmol view convention (the quaternion is sent as is; the page still checks it
+  against `modelToScreen`, `data-projection-residual`), the depth-based wedge choice and the
+  render-time crossing breaks, now fed by the server's depth.
+- **Request and answer.** `{molblock, mode: clean | match3d, style: textbook | perspective,
+  molecule_id?, view?: {quaternion [x, y, z, w], convention "3dmol-rotationGroup"}}`. The
+  answer keeps EXACTLY the molblock's atom and bond order: `coords[i]` (bond 1.5), `depth[i]`
+  (+ towards the viewer, or null), wedges by bond index with the narrow-end atom, the molblock
+  (written here: the input's Kekule form and charges, narrow end first), the canonical isomeric
+  SMILES RDKit reads back, `stereo` none / kept / mismatch, the defect report and every
+  candidate's score. Errors: EMPTY_INPUT, INVALID_MOLFILE, LIMIT_EXCEEDED (250 atoms),
+  REQUEST_INVALID (match3d without id or view, a zero quaternion), MOLECULE_NOT_FOUND,
+  MOLECULE_NOT_READY (no QM record; never featurizes), MAPPING_FAILED (the sketch is another
+  molecule or does not map onto the record), DEPICTION_FAILED (new, 500: RDKit could not lay it
+  out). The client applies the answer by index (sketch/depiction.ts); when the server cannot be
+  reached Clean falls back to RDKit.js's CoordGen with a notice in the info bar.
+- **No global RDKit state.** `SetPreferCoordGen` is process-wide and depict.py sets it, so every
+  RDKit depictor call passes `forceRDKit=True` and CoordGen is called by name
+  (`rdCoordGen.AddCoords`). RDKit's ring templates are global too (`SetRingSystemTemplates`
+  replaces them; reloading the defaults costs 0.4 s) and RDKit never applies a template to a
+  monocycle (checked: a deliberately distorted cyclohexane template is ignored, a norbornane one
+  is used, and template atoms/bonds match as SMARTS, so `*` and `~` make them generic). So the
+  textbook style uses RDKit's default templates (`useRingTemplates=True`), and the perspective
+  library is applied by our own matcher; `RDKIT_TEMPLATE_LOCK` guards the one test that loads
+  our file into RDKit to prove its format.
+- **Textbook.** RDKit with its ring templates and CoordGen, the lower defect score wins, but
+  CoordGen must win by 2 (the gallery favoured RDKit's templates: camphor, cubane, morphine,
+  pinene; CoordGen drew camphor's gem-dimethyl bridge as a cross inside the ring).
+- **Defect score** (serve/depiction_metrics.py, drawing units, bond L = 1.5): 10 label overlaps
+  (a labelled atom within 0.8 L of an atom it is not bonded to) + 8 close contacts (< 0.5 L) +
+  15 coincident atoms (< 0.25 L) + 6 atoms on a bond (< 0.2 L) + 10 atoms in no ring drawn
+  inside a ring + w_x crossings + w_s squashed rings (principal-spread ratio < 0.6) + 2 angles
+  under 35 deg + 20 bond-length RMS. By kind: flat layouts w_x 3, w_s 0; perspective templates
+  w_x 1, w_s 0 (their crossings and slanted rings are the point); the view template w_x 1.5,
+  w_s 6 (a slanted aromatic ring is just squashed). Calibrated on the gallery: the inside-ring
+  term was added when the first score preferred CoordGen's camphor, the coincident and squashed
+  terms when degenerate or slanted 3D views won.
+- **Template library** (serve/data/ring_templates.smi in RDKit's format: one generic CXSMILES
+  ring system with 2D coordinates and a name per line; ring_templates.json: title, depth per
+  atom, examples, source, convention, derivation). Ten templates: cyclohexane chair, norbornane
+  (camphor, borneol, norbornene), bicyclo[2.2.2]octane (quinuclidine, DABCO), tropane
+  (bicyclo[3.2.1]), adamantane, cubane, trans- and cis-decalin, the all-chair 5alpha steroid
+  core. Each is an orthographic picture of the lowest-energy MMFF structure of its parent (20
+  srETKDGv3 embeddings, seed 7), turned to a hand-chosen view (up and right axes from atoms,
+  then spin, tilt, roll; picked from a search over spin and tilt and checked in the gallery) and
+  scaled so the median drawn bond is 1.5: parallel bonds stay parallel, axial bonds are vertical.
+  A pinane template was dropped: RDKit's default pinane template already is the chemist's
+  drawing, ours crossed the double bond of alpha-pinene.
+- **Applying a template.** A template is a conformation, not a graph: it is matched (largest
+  first) only on a whole ring system (rings sharing two or more atoms) and its 3D shape (x, y
+  and the stored depth) is fitted to a 3D structure of the molecule, mirror allowed, accepted
+  under 0.12 bond lengths RMSD. So benzene is never a chair, cis- and trans-decalin pick their
+  own drawing and a boat is left alone. The 3D structure is the lowest-energy of 4 srETKDGv3 +
+  MMFF embeddings (plain ETKDGv3 gave only twist-boats for cis-4-tert-butylcyclohexanol), or
+  the record for match3d. Each exocyclic neighbour in no ring goes on the tetrahedral slot its
+  3D bond points to (axial / equatorial, exo / endo), one bond length along the slot's drawn
+  direction snapped onto vertical or a ring-bond direction within 8 deg (textbook chairs);
+  ring neighbours (spiro, ring substituents) are left to RDKit, which lays out the rest around
+  the locked atoms (`Compute2DCoords(coordMap=..., forceRDKit=True)`). The perspective drawing
+  is kept unless it scores more than 15 worse than the textbook one (cocaine's two esters crowd
+  on the tropane template; the spiro ketal squeezes): then the textbook layout, with a note.
+- **match3d.** The record geometry (sketch atom i = record atom sketch_to_record[i], recomputed
+  on the server from the posted molblock) is turned by R(q) (the same rotation as
+  projection.ts rotateByQuat; a test pins it) and scaled so the median 3D bond is 1.5. The
+  stereo target is read from that 3D structure (`AssignStereochemistryFrom3D`), keeping CIP
+  R / S everywhere and r / s only on atoms with at most two ring bonds: a cage's bridgehead
+  pseudo-stereo (adamantane, cubane) would only add wedges. Candidates:
+  `GenerateDepictionMatching3DStructure` (a 3D distance-matrix mimic, so the view only orients
+  it), `Compute2DCoordsMimicDistmat` on the projected distances, the view itself as a template
+  made on the spot (ring atoms where the view shows them, exocyclic atoms along their projected
+  bonds, RDKit for the rest), the textbook layout and, for style perspective, the template
+  layout. Each is turned onto the projection (flat ones may also be mirrored; a perspective
+  picture never, it would show the enantiomer) and ranked by defects + 20 x the fit residual
+  (RMS distance to the projection over its spread) + 50 for a stereo mismatch. The depth is the
+  view's (a template keeps its own).
+- **Wedges.** One mark per stereocentre on the single bond that scores best (acyclic +4,
+  terminal neighbour +2, neighbour not a centre +3; with depth +2 |dz| / L and +3 when a wedge
+  is in front or a hash behind, else -3), its kind from `Chem.WedgeBond(bond, centre, conf)`
+  (whose answer is for the given centre even when it is the bond's end atom; RDKit's own writer
+  then puts the wrong narrow end, hence our writer). RDKit reads the result back; on a
+  difference RDKit's `WedgeMolBonds` is tried, then `stereo: mismatch` is reported (never seen
+  on the gallery or the tests).
+- **Gallery.** `uv run --no-sync ksmech-serve gallery [--out DIR]` draws 22 hard molecules with
+  the old CoordGen clean-up, textbook, perspective and match3d from two fixed views of an
+  RDKit structure (no xTB) into one PNG + SVG grid per method, sheets of molecules x methods and
+  gallery.json. RDKit's drawer renders them, so the sketcher's crossing breaks are not shown.
