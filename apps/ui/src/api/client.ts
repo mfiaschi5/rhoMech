@@ -232,8 +232,10 @@ export const cancelJob = (jobId: string, q: { force?: boolean } = {}, o?: Reques
     o,
   );
 
+/** POST /jobs/{id}/override: a user step R on a state of the job's network (synchronous; 202
+ *  pending while the parent's analysis is computed). */
 export const overrideJob = (jobId: string, body: T.OverrideIn, o?: RequestOptions) =>
-  request<T.JobCreatedOut>(
+  request<T.OverrideResultOut>(
     { method: "POST", path: `/jobs/${encodeURIComponent(jobId)}/override`, body },
     o,
   );
@@ -251,7 +253,7 @@ export const getPathways = (
     o,
   );
 
-// ---- pools, tokens, candidates, physics
+// ---- pools and tokens
 
 const pool = (stateId: string, rest = "") => `/pool/${encodeURIComponent(stateId)}${rest}`;
 
@@ -264,61 +266,6 @@ export const getPool = (stateId: string, o?: RequestOptions) =>
 
 export const getTokens = (stateId: string, o?: RequestOptions) =>
   request<T.TokensOut>({ path: pool(stateId, "/tokens") }, o);
-
-export interface CandidatesQuery {
-  predictor?: string;
-  donor?: number | null;
-  includeExcluded?: boolean;
-  offset?: number;
-  limit?: number;
-  temperature?: number | null;
-  scope?: "all" | "inter";
-}
-
-export const getCandidates = (stateId: string, q: CandidatesQuery = {}, o?: RequestOptions) =>
-  request<T.CandidatesOut>(
-    {
-      path: pool(stateId, "/candidates"),
-      query: {
-        predictor: q.predictor,
-        donor: q.donor,
-        include_excluded: q.includeExcluded,
-        offset: q.offset,
-        limit: q.limit,
-        temperature: q.temperature,
-        scope: q.scope,
-      },
-    },
-    o,
-  );
-
-export interface PhysicsQuery {
-  donor: number;
-  acceptor: number;
-  donorSite?: number | null;
-  acceptorSite?: number | null;
-  predictor?: string;
-  temperature?: number | null;
-}
-
-export const getPhysics = (stateId: string, q: PhysicsQuery, o?: RequestOptions) =>
-  request<T.PhysicsOut>(
-    {
-      path: pool(stateId, "/physics"),
-      query: {
-        donor: q.donor,
-        acceptor: q.acceptor,
-        donor_site: q.donorSite,
-        acceptor_site: q.acceptorSite,
-        predictor: q.predictor,
-        temperature: q.temperature,
-      },
-    },
-    o,
-  );
-
-export const getSitePairs = (stateId: string, q: { donor: number; acceptor: number }, o?: RequestOptions) =>
-  request<T.SitePairsOut>({ path: pool(stateId, "/site_pairs"), query: { ...q } }, o);
 
 // ---- geometry, depiction, 3D
 
@@ -353,34 +300,6 @@ export const getDepiction = (stateId: string, q: DepictionQuery = {}, o?: Reques
     o,
   );
 
-export interface ContactRef {
-  stateId: string;
-  donor: number;
-  donorSite: number;
-  acceptor: number;
-  acceptorSite: number;
-}
-
-export const contactPath = (c: ContactRef, rest = "") =>
-  `/contact/${encodeURIComponent(c.stateId)}/${c.donor}/${c.donorSite}/${c.acceptor}/${c.acceptorSite}${rest}`;
-
-export const getContact = (c: ContactRef, q: { cubes?: "urls" | "inline" } = {}, o?: RequestOptions) =>
-  request<T.ContactOut>({ path: contactPath(c), query: { cubes: q.cubes } }, o);
-
-export const getContactCube = (c: ContactRef, which: "donor" | "acceptor", o?: RequestOptions) =>
-  request<string>({ path: contactPath(c, `/cube/${which}`), as: "text" }, o);
-
-/** A server-given URL ("/api/..." as in ContactOut.cube_urls) fetched as text, pending-aware. */
-export function getTextUrl(url: string, o?: RequestOptions): Promise<string> {
-  const u = new URL(url, window.location.origin);
-  const path = u.pathname.startsWith(API_BASE) ? u.pathname.slice(API_BASE.length) : u.pathname;
-  const query: Query = {};
-  u.searchParams.forEach((v, k) => {
-    query[k] = v;
-  });
-  return request<string>({ path, query, as: "text" }, o);
-}
-
 // ---- curation, export, recheck
 
 export const curate = (body: T.CurateIn, o?: RequestOptions) =>
@@ -397,11 +316,34 @@ export interface MechanismListQuery {
 export const listMechanisms = (q: MechanismListQuery = {}, o?: RequestOptions) =>
   request<T.MechanismSummaryOut[]>({ path: "/curate", query: { ...q } }, o);
 
-export const exportCurated = (body: T.ExportIn = {}, o?: RequestOptions) =>
-  request<T.JobCreatedOut>({ method: "POST", path: "/curate/export", body }, o);
+/** The report of a PMechDB export (the X-Ksmech-Export-Report header). */
+export interface PmechdbExportReport {
+  statuses: string[];
+  n_mechanisms: number;
+  n_steps_considered: number;
+  n_steps_written: number;
+  skipped: Record<string, number>;
+  warnings?: string[];
+}
 
-export const getLatestExport = (o?: RequestOptions) =>
-  request<T.ExportReportOut>({ path: "/curate/export/latest" }, o);
+/** GET /curate/export/pmechdb?status=..: the curated steps as PMechDB raw records (text/csv)
+ *  and the report of its header. A download, never training data. */
+export async function exportPmechdb(
+  statuses: readonly string[],
+  o?: RequestOptions,
+): Promise<{ csv: string; report: PmechdbExportReport | null }> {
+  const res = await request<TextWithHeaders>({ path: "/curate/export/pmechdb", query: { status: statuses }, as: "textWithHeaders" }, o);
+  const raw = res.headers.get("X-Ksmech-Export-Report");
+  let report: PmechdbExportReport | null = null;
+  try {
+    report = raw ? (JSON.parse(raw) as PmechdbExportReport) : null;
+  } catch {
+    report = null;
+  }
+  return { csv: res.text, report };
+}
+
+export const exportPmechdbUrl = (statuses: readonly string[]) => apiUrl("/curate/export/pmechdb", { status: statuses });
 
 export const recheckMechanisms = (body: T.RecheckIn = {}, o?: RequestOptions) =>
   request<T.JobCreatedOut>({ method: "POST", path: "/curate/recheck", body }, o);

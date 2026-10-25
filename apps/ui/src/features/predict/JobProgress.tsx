@@ -6,7 +6,8 @@
 //   pollError  ApiError | null            a failed poll (network down, 404)
 //   title      string                     heading (default "Job")
 //
-// DOM: job-status[data-status], job-progress, job-cancel (while not terminal), job-error.
+// DOM: predict-job-status[data-status], predict-job-progress, predict-job-cancel (while not
+// terminal), predict-job-error.
 import { useState } from "react";
 import { ApiError, cancelJob, toApiError } from "../../api/client";
 import { isTerminal } from "../../api/poll";
@@ -74,13 +75,13 @@ function CancelButtons({ jobId }: { jobId: string }) {
   };
   return (
     <>
-      <button type="button" className="btn btn-small" data-testid="job-cancel" disabled={cancelling} onClick={() => void cancel(false)}>
+      <button type="button" className="btn btn-small" data-testid="predict-job-cancel" disabled={cancelling} onClick={() => void cancel(false)}>
         cancel
       </button>
       <button type="button" className="btn btn-small" disabled={cancelling} title="also kill the worker task" onClick={() => void cancel(true)}>
         force cancel
       </button>
-      <ErrorBanner error={cancelError} title="Cannot cancel" testId="job-cancel-error" />
+      <ErrorBanner error={cancelError} title="Cannot cancel" testId="predict-job-cancel-error" />
     </>
   );
 }
@@ -89,11 +90,11 @@ export function JobProgress({ job, pollError, title = "Job" }: JobProgressProps)
   const status = job?.status ?? "loading";
   const task = job?.progress.current_task ?? null;
   return (
-    <section className="panel job-progress-panel" data-testid="job-progress" data-job-id={job?.job_id ?? ""} data-kind={job?.kind ?? ""}>
+    <section className="panel job-progress-panel" data-testid="predict-job-progress" data-job-id={job?.job_id ?? ""} data-kind={job?.kind ?? ""}>
       <div className="row job-head">
         <strong>{title}</strong>
         {job && <code className="code">{shortId(job.job_id, 17)}</code>}
-        <span className={`badge job-status job-status-${status}`} data-testid="job-status" data-status={status}>
+        <span className={`badge job-status job-status-${status}`} data-testid="predict-job-status" data-status={status}>
           {status}
         </span>
         {job && !isTerminal(job) && <CancelButtons jobId={job.job_id} />}
@@ -113,10 +114,10 @@ export function JobProgress({ job, pollError, title = "Job" }: JobProgressProps)
         <ErrorBanner
           error={bodyError(job.error)}
           title={`${job.kind} job ${job.status}`}
-          testId="job-error"
+          testId="predict-job-error"
         />
       )}
-      <ErrorBanner error={pollError} title="Cannot poll the job" testId="job-poll-error" />
+      <ErrorBanner error={pollError} title="Cannot poll the job" testId="predict-job-poll-error" />
     </section>
   );
 }

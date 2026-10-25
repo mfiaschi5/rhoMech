@@ -17,5 +17,6 @@ export const NO_BROWSER_REASON =
 
 export const browserPath: string | undefined = BROWSER_CANDIDATES.find((p) => existsSync(p));
 
-export const E2E_PORT = 8765;
+/** The server's port: KSMECH_E2E_PORT, default 8765 (a parallel run picks its own). */
+export const E2E_PORT = Number.parseInt(process.env.KSMECH_E2E_PORT ?? "", 10) || 8765;
 export const E2E_BASE_URL = `http://127.0.0.1:${E2E_PORT}`;

@@ -40,13 +40,11 @@ export function ProvenanceBadge({ provenance: p, compact = false }: ProvenanceBa
             <dt>checkpoint</dt>
             <dd><code>{p.checkpoint_hash ?? "none"}</code></dd>
             <dt>KS params</dt>
-            <dd>K {p.ks_params.K}, ε {p.ks_params.eps}, τ {p.ks_params.tau} eV</dd>
+            <dd>K {p.ks_params.K}, ε {p.ks_params.eps} eV</dd>
             <dt>temperature</dt>
             <dd>{p.temperature ?? "default"}</dd>
             <dt>scope</dt>
             <dd>{p.candidate_scope}</dd>
-            <dt>contact distance</dt>
-            <dd>{p.contact_distance_ang.toFixed(2)} Å</dd>
             <dt>artifacts</dt>
             <dd>{Object.entries(p.artifact_versions).map(([k, v]) => `${k} ${v}`).join(", ")}</dd>
             {p.notes.length > 0 && (

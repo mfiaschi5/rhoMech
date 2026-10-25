@@ -5,7 +5,7 @@
 //   atomXY        ReadonlyMap<map number, [x, y]>  atom positions in viewBox units (required)
 //   viewBox       [x, y, w, h]                     the depiction's viewBox (required)
 //   width, height number                           pixel size, equal to the depiction's (required)
-//   arrows        TokenArrowLike[]                 token arrows (ArrowOut, or arrowFromCandidate(c)):
+//   arrows        TokenArrowLike[]                 token arrows:
 //                                                  each gives a "main" arrow, plus an "implied" sink
 //                                                  arrow when sink_partner_map is set
 //   datasetArrows DatasetArrowOut[]                dataset arrows in map mode ("dataset")

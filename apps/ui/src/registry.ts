@@ -1,7 +1,9 @@
 // The feature seam (design §11.1). main.tsx imports every src/features/*/index.{ts,tsx} eagerly;
 // each feature calls registerPage() for the pages it provides, so the shell never names a
-// feature file and builds before any feature exists. Features never import each other: they
-// share only src/api, src/chem, src/components, src/state, router.ts and this file.
+// feature file and builds before any feature exists. Features never import each other's pages:
+// they share src/api, src/chem, src/components, src/state, router.ts and this file. One
+// exception: predict reuses the workbench's drawing modules (sketch/: the sketcher, its
+// renderer and molfile reader; viewer/useGLViewer), never its page or its stores.
 //
 //   // src/features/predict/index.tsx
 //   import { registerPage } from "../../registry";

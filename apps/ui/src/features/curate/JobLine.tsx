@@ -1,5 +1,5 @@
 // JobLine: one batch job of this page (export or re-check), polled with api/poll.ts until it ends.
-// The job id lives in the hash (export=<id>, recheck=<id>, recheckall=<id>), so a reload rejoins
+// The job id lives in the hash (recheck=<id>, recheckall=<id>), so a reload rejoins
 // the job and shows its report again. `onFinished` runs once per job when it reaches a terminal
 // status, so the caller can reload what the job changed.
 import { useEffect, useRef, type ReactNode } from "react";

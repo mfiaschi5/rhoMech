@@ -3,7 +3,7 @@
 // Values that carry a data-testid (physics-ks3, floor-rank, ...) are written with an ASCII
 // "-" so a test can parse them with Number(); typographic minus signs appear only in prose
 // labels (HOMO−1, "−P +S").
-import type { CentreOut, OrbitalDescBrief } from "../api/types.gen";
+import type { CentreOut } from "../api/types.gen";
 
 /** A fixed-decimal number, or "–" for null / NaN / inf. */
 export function fmt(value: number | null | undefined, digits = 3): string {
@@ -47,21 +47,6 @@ export function centreText(c: CentreOut): string {
   return `${c.element}${c.map} ${fmt(c.weight, 2)}`;
 }
 
-/** The model-input descriptors of an orbital token as one line of plain text. */
-export function descText(d: OrbitalDescBrief): string {
-  const centres = d.centres.map(centreText).join(", ");
-  const spd = d.spd0.map((v) => fmt(v, 2)).join("/");
-  const spectral = d.spectral_set
-    .slice(0, 3)
-    .map(([e, w]) => `${fmt(e, 2)} (${fmt(w, 2)})`)
-    .join(", ");
-  const more = d.spectral_set.length > 3 ? ` +${d.spectral_set.length - 3}` : "";
-  return (
-    `occ ${fmt(d.occupation, 2)} · ${d.n_centers} centre${d.n_centers === 1 ? "" : "s"}: ${centres}` +
-    ` · s/p/d ${spd} · |cos| ${fmt(d.cos_a, 2)}/${fmt(d.cos_b, 2)} · overlap sign ${d.overlap_sign}` +
-    ` · spectral ${spectral}${more}`
-  );
-}
 
 /** Seconds as "12 s" / "3 min 4 s". */
 export function fmtSeconds(s: number | null | undefined): string {

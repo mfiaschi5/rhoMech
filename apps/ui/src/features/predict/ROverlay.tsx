@@ -1,0 +1,167 @@
+// ROverlay: the reaction matrix and its curved arrows drawn over a pool drawing (SVG, screen px).
+//   bond +1 on a non-bonded pair   green dashed line (a forming bond)
+//   bond +1 on a bond              green dashed line beside it (the order goes up)
+//   bond -1                        the bond in red with a cross at its midpoint
+//   lone ±2                        a badge on the atom's free side
+//   formal-charge change           a circled new charge at the upper right of the atom
+//   arrows                         cubic Bézier arrows with filled heads (arrowPath.ts)
+// Atoms with an issue are haloed (highlight), the bond tool's first atom ringed (pending).
+//
+// DOM (prefix = the canvas test id): <g data-testid="<prefix>-r-bond-<i>-<j>" data-delta
+// data-forming>, <g data-testid="<prefix>-r-lone-<i>" data-delta>, <g data-testid=
+// "<prefix>-charge-<i>" data-delta data-charge>, <g data-testid="<prefix>-arrow-<k>" data-kind
+// data-source data-target data-mx data-my (a point on the curve, px)> with path.pv-arrow-line, polygon.pv-arrow-head, path.pv-arrow-hit.
+import type { PointerEvent as ReactPointerEvent } from "react";
+import { layoutReading, lonePairPoint, type ArrowGeomContext, type Vec } from "./arrowPath";
+import type { PoolStructure } from "./poolStructure";
+import { chargeDeltas } from "./rmatrix";
+import type { ArrowReadingOut, MatrixIO } from "./v9types";
+import type { PoolView } from "./poolView";
+
+export interface ROverlayProps {
+  structure: PoolStructure;
+  pv: PoolView;
+  ctx: ArrowGeomContext;
+  prefix: string;
+  matrix: MatrixIO | null;
+  arrows: readonly ArrowReadingOut[];
+  arrowsFaded?: boolean;
+  /** Formal charges after R (the check's), by atom; else q + Δq from R. */
+  chargesAfter?: ReadonlyMap<number, number> | null;
+  highlight?: ReadonlySet<number>;
+  pending?: number | null;
+  selectedKeys?: ReadonlySet<string>;
+  onArrowPointerDown?: (index: number, e: ReactPointerEvent<SVGPathElement>) => void;
+}
+
+const sub = (p: Vec, q: Vec): Vec => [p[0] - q[0], p[1] - q[1]];
+const unit = (p: Vec): Vec => {
+  const l = Math.hypot(p[0], p[1]) || 1;
+  return [p[0] / l, p[1] / l];
+};
+const signed = (v: number) => (v > 0 ? `+${v}` : v < 0 ? `−${-v}` : "0");
+
+function BondMark({ a, b, delta, order, testId, selected }: { a: Vec; b: Vec; delta: number; order: number; testId: string; selected: boolean }) {
+  const u = unit(sub(b, a));
+  const n: Vec = [-u[1], u[0]];
+  const trim = 9;
+  const p: Vec = [a[0] + u[0] * trim, a[1] + u[1] * trim];
+  const q: Vec = [b[0] - u[0] * trim, b[1] - u[1] * trim];
+  const m: Vec = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const forming = delta > 0 && order === 0;
+  const off = delta > 0 && !forming ? 5 + 2.5 * order : 0;
+  const cls = `pv-rbond ${delta > 0 ? "pv-form" : "pv-break"}${selected ? " pv-selected" : ""}`;
+  return (
+    <g className={cls} data-testid={testId} data-delta={delta} data-forming={forming ? "true" : "false"}>
+      {delta > 0 ? (
+        <line x1={p[0] + n[0] * off} y1={p[1] + n[1] * off} x2={q[0] + n[0] * off} y2={q[1] + n[1] * off} className="pv-form-line" />
+      ) : (
+        <>
+          <line x1={p[0]} y1={p[1]} x2={q[0]} y2={q[1]} className="pv-break-line" />
+          <path className="pv-cross" d={`M ${m[0] - 5} ${m[1] - 5} L ${m[0] + 5} ${m[1] + 5} M ${m[0] - 5} ${m[1] + 5} L ${m[0] + 5} ${m[1] - 5}`} />
+        </>
+      )}
+      {Math.abs(delta) !== 1 && (
+        <text x={m[0] + n[0] * 12} y={m[1] + n[1] * 12} className="pv-mark-text">
+          {signed(delta)}
+        </text>
+      )}
+    </g>
+  );
+}
+
+function Badge({ at, text, cls, testId, data }: { at: Vec; text: string; cls: string; testId: string; data: Record<string, string> }) {
+  const w = 7 + 6.5 * text.length;
+  return (
+    <g className={cls} data-testid={testId} {...data}>
+      <rect x={at[0] - w / 2} y={at[1] - 8} width={w} height={16} rx={8} />
+      <text x={at[0]} y={at[1] + 0.5} textAnchor="middle" dominantBaseline="central">
+        {text}
+      </text>
+    </g>
+  );
+}
+
+function LoneMarks({ m, ctx, prefix, selected }: { m: MatrixIO; ctx: ArrowGeomContext; prefix: string; selected?: ReadonlySet<string> }) {
+  return (
+    <>
+      {m.lone.map(([i, d]) => {
+        const p = ctx.pos(i);
+        const lp = lonePairPoint(ctx, i);
+        if (!lp || !p) return null;
+        // beside the lone pair's direction (an arrow tail leaves along it), 0.62 bonds out
+        const t = Math.atan2(lp.dir[1], lp.dir[0]) + (65 * Math.PI) / 180;
+        const at: Vec = [p[0] + Math.cos(t) * 0.62 * ctx.bondPx, p[1] + Math.sin(t) * 0.62 * ctx.bondPx];
+        const cls = `pv-badge ${d > 0 ? "pv-form" : "pv-break"}${selected?.has(`l:${i}`) ? " pv-selected" : ""}`;
+        return <Badge key={i} at={at} text={signed(d)} cls={cls} testId={`${prefix}-r-lone-${i}`} data={{ "data-delta": String(d) }} />;
+      })}
+    </>
+  );
+}
+
+function ChargeMarks({ s, pv, m, after, prefix }: { s: PoolStructure; pv: PoolView; m: MatrixIO; after?: ReadonlyMap<number, number> | null; prefix: string }) {
+  const deltas = chargeDeltas(m);
+  return (
+    <>
+      {[...deltas].map(([i, d]) => {
+        const p = pv.xy.get(i);
+        const a = s.atom(i);
+        if (!p || !a) return null;
+        const q = after?.get(i) ?? a.charge + d;
+        const at: Vec = [p[0] + 0.36 * pv.bondPx, p[1] - 0.36 * pv.bondPx];
+        return (
+          <g key={i} className="pv-charge" data-testid={`${prefix}-charge-${i}`} data-delta={d} data-charge={q}>
+            <title>{`formal charge ${signed(a.charge)} → ${signed(q)}`}</title>
+            <circle cx={at[0]} cy={at[1]} r={8.5} />
+            <text x={at[0]} y={at[1] + 0.5} textAnchor="middle" dominantBaseline="central">
+              {q === 0 ? "0" : q > 0 ? (q === 1 ? "+" : `${q}+`) : q === -1 ? "−" : `${-q}−`}
+            </text>
+          </g>
+        );
+      })}
+    </>
+  );
+}
+
+function Arrows(props: { arrows: readonly ArrowReadingOut[]; ctx: ArrowGeomContext; prefix: string; faded?: boolean; onDown?: ROverlayProps["onArrowPointerDown"] }) {
+  const paths = layoutReading(props.arrows, props.ctx);
+  return (
+    <g className={`pv-arrows${props.faded ? " pv-faded" : ""}`}>
+      {paths.map((p, k) => {
+        const a = props.arrows[k];
+        if (!p) return null;
+        return (
+          <g key={k} className="pv-arrow" data-testid={`${props.prefix}-arrow-${k}`} data-kind={a.kind} data-source={a.source.join(",")} data-target={a.target.join(",")} data-mx={p.mid[0].toFixed(1)} data-my={p.mid[1].toFixed(1)}>
+            <path className="pv-arrow-hit" d={p.d} onPointerDown={props.onDown ? (e) => props.onDown?.(k, e) : undefined} />
+            <path className="pv-arrow-line" d={p.d} />
+            <polygon className="pv-arrow-head" points={p.head.map((v) => `${v[0].toFixed(2)},${v[1].toFixed(2)}`).join(" ")} />
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+export function ROverlay(props: ROverlayProps) {
+  const { structure: s, pv, ctx, prefix, matrix } = props;
+  return (
+    <g className="pv-overlay">
+      {[...(props.highlight ?? [])].map((i) => {
+        const p = pv.xy.get(i);
+        return p ? <circle key={`h${i}`} className="pv-halo" cx={p[0]} cy={p[1]} r={14} data-testid={`${prefix}-halo-${i}`} /> : null;
+      })}
+      {props.pending != null && pv.xy.get(props.pending) && (
+        <circle className="pv-pending" cx={pv.xy.get(props.pending)![0]} cy={pv.xy.get(props.pending)![1]} r={12} data-testid={`${prefix}-pending`} />
+      )}
+      {matrix?.bonds.map(([i, j, d]) => {
+        const a = pv.xy.get(i);
+        const b = pv.xy.get(j);
+        if (!a || !b) return null;
+        return <BondMark key={`${i}-${j}`} a={a} b={b} delta={d} order={s.bondOrder(i, j)} testId={`${prefix}-r-bond-${i}-${j}`} selected={!!props.selectedKeys?.has(`b:${i}-${j}`)} />;
+      })}
+      {matrix && <LoneMarks m={matrix} ctx={ctx} prefix={prefix} selected={props.selectedKeys} />}
+      {matrix && <ChargeMarks s={s} pv={pv} m={matrix} after={props.chargesAfter} prefix={prefix} />}
+      <Arrows arrows={props.arrows} ctx={ctx} prefix={prefix} faded={props.arrowsFaded} onDown={props.onArrowPointerDown} />
+    </g>
+  );
+}

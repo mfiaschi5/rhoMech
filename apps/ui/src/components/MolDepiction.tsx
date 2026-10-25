@@ -7,8 +7,7 @@
 //   stateId        string                  written to data-state-id (default: depiction.ref)
 //   width, height  number                  pixel size (default 320 x 220)
 //   highlightMaps  number[]                atoms to highlight, by map number
-//   arrows         TokenArrowLike[]        token arrows to draw (ArrowOut[], or
-//                                          [arrowFromCandidate(c)] for a candidate preview)
+//   arrows         TokenArrowLike[]        token arrows to draw 
 //   datasetArrows  DatasetArrowOut[]       dataset arrows (map mode)
 //   edgeId         string                  data-edge of the arrows
 //   onArrowClick   (index) => void         click on a main arrow (opens the physics panel)

@@ -3,8 +3,9 @@
 // - Nodes: background-image = data-URI SVG of display_smiles (RDKit.js, 110 x 80); the label
 //   gives the species counts; the border shows the status (failed: --error, TERMINAL(TURNOVER):
 //   double --cycle border, pruned: dashed).
-// - Edges: predicted width mapData(probability, 0, 1, 1, 9); .corrected orange, solid, width 5,
-//   labelled "corrected"; .superseded dotted at opacity 0.35; .recurrence a looping bezier;
+// - Edges: predicted width mapData(weight, 0, 1, 1, 9), weight = exp(logp) or the score over the
+//   network's largest |score| (network.edgeWeights); labelled "p .." or "score .." as the
+//   predictor's scores are probabilities or not; .corrected orange, solid, width 5, labelled "user"; .superseded dotted at opacity 0.35; .recurrence a looping bezier;
 //   turnover virtual edges from cycles[].virtual_edge (teal, dashed, unbundled-bezier, "−P +S");
 //   .cycle members of the shown cycles in purple; edges of the shown pathway thickened. Edge labels
 //   are --fg on a --panel box, so they follow the light / dark theme.
@@ -20,16 +21,16 @@
 //   cycleEdges      Set<string>         edge ids drawn in the cycle colour
 //   onSelectNode    (id) => void        a tap on a node
 //   onSelectEdge    (id) => void        a tap on a real edge (virtual edges are not selectable)
+//   probabilities   boolean             the predictor's scores are probabilities (edge labels)
 //   height          number              default 420
 //
-// DOM: <div data-testid="network-view" data-node-count data-edge-count> (real edges only).
+// DOM: <div data-testid="predict-network" data-node-count data-edge-count> (real edges only).
 import cytoscape from "cytoscape";
 import { useEffect, useMemo, useRef } from "react";
-import type { NetworkOut, PathwayOut } from "../../api/types.gen";
 import { smilesToSvg, svgDataUri, useRDKit, type RDKitModule } from "../../chem/rdkit";
-import { fmtProb } from "../../components/format";
 import { useLatest } from "../../api/hooks";
-import { speciesLabel, virtualEdgeId } from "./network";
+import { edgeWeights, scoreText, speciesLabel, virtualEdgeId } from "./network";
+import type { NetworkOut, PathwayOut } from "./v9types";
 
 export interface NetworkViewProps {
   net: NetworkOut;
@@ -39,6 +40,7 @@ export interface NetworkViewProps {
   cycleEdges: ReadonlySet<string>;
   onSelectNode: (id: string) => void;
   onSelectEdge: (id: string) => void;
+  probabilities: boolean;
   height?: number;
 }
 
@@ -113,7 +115,7 @@ function nodeStyles(c: Palette) {
 function edgeStyles(c: Palette) {
   const edge = {
     "curve-style": "bezier",
-    width: "mapData(probability, 0, 1, 1, 9)",
+    width: "mapData(weight, 0, 1, 1, 9)",
     "line-color": c.muted,
     "target-arrow-shape": "triangle",
     "target-arrow-color": c.muted,
@@ -137,7 +139,7 @@ function edgeStyles(c: Palette) {
   };
   return [
     { selector: "edge", style: edge },
-    { selector: "edge.in-pathway", style: { width: "mapData(probability, 0, 1, 5, 13)", "line-color": c.accent, "target-arrow-color": c.accent } },
+    { selector: "edge.in-pathway", style: { width: "mapData(weight, 0, 1, 5, 13)", "line-color": c.accent, "target-arrow-color": c.accent } },
     { selector: "edge.recurrence", style: { "curve-style": "unbundled-bezier", "control-point-distances": [70], "control-point-weights": [0.5], "line-style": "dashed" } },
     { selector: "edge.cycle", style: { "line-color": c.cycle, "target-arrow-color": c.cycle } },
     { selector: "edge.superseded", style: { "line-style": "dotted", opacity: 0.35 } },
@@ -163,6 +165,7 @@ interface Built {
 function buildElements(p: NetworkViewProps, images: Map<string, string | null>): Built {
   const pathwayEdges = new Set(p.pathway?.edge_ids ?? []);
   const pathwayNodes = new Set(p.pathway?.node_ids ?? []);
+  const weights = edgeWeights(p.net);
   const defs: cytoscape.ElementDefinition[] = p.net.nodes.map((n) => {
     const cls = [`status-${n.status}`];
     if (n.is_root) cls.push("root");
@@ -179,15 +182,15 @@ function buildElements(p: NetworkViewProps, images: Map<string, string | null>):
     if (p.cycleEdges.has(e.id)) cls.push("cycle");
     if (pathwayEdges.has(e.id)) cls.push("in-pathway");
     if (e.id === p.selectedEdge) cls.push("selected");
-    const label = e.kind === "corrected" ? "corrected" : fmtProb(e.probability);
-    defs.push({ group: "edges", data: { id: e.id, source: e.source, target: e.target, probability: e.probability ?? 0, label }, classes: cls.join(" ") });
+    const label = scoreText(e, p.probabilities);
+    defs.push({ group: "edges", data: { id: e.id, source: e.source, target: e.target, weight: weights.get(e.id) ?? 0, label }, classes: cls.join(" ") });
   }
   const ids = new Set(p.net.nodes.map((n) => n.id));
   for (const c of p.net.cycles) {
     const v = c.virtual_edge;
     if (!v || !ids.has(v.source) || !ids.has(v.target)) continue;
     const label = v.label ?? "";
-    defs.push({ group: "edges", data: { id: virtualEdgeId(c.id), source: v.source, target: v.target, label, probability: 0, virtual: 1 }, classes: "turnover-virtual" });
+    defs.push({ group: "edges", data: { id: virtualEdgeId(c.id), source: v.source, target: v.target, label, weight: 0, virtual: 1 }, classes: "turnover-virtual" });
   }
   return { defs, nodeCount: p.net.nodes.length, edgeCount: p.net.edges.length };
 }
@@ -270,7 +273,7 @@ export function NetworkView(props: NetworkViewProps) {
     <div
       ref={container}
       className="network-view"
-      data-testid="network-view"
+      data-testid="predict-network"
       data-node-count={built.nodeCount}
       data-edge-count={built.edgeCount}
       data-revision={net.revision}

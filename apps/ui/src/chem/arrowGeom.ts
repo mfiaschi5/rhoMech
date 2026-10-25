@@ -8,14 +8,14 @@
 // Implied sink arrow: from the b-d midpoint to d (sink_partner_map), thinner, not clickable.
 // Dataset arrows (map mode): tail at the source atom or bond midpoint, head at the sink atom or
 // bond midpoint; a radical source gets the half arrowhead.
-import type { CandidateOut, DatasetArrowOut } from "../api/types.gen";
+import type { DatasetArrowOut } from "../api/types.gen";
 import type { Point } from "./depict";
 
 export type { Point } from "./depict";
 
 export type ArrowRole = "main" | "implied" | "dataset";
 
-/** What a token arrow needs to be drawn; ArrowOut satisfies it, arrowFromCandidate builds it. */
+/** What a token arrow needs to be drawn (the v3 token arrows; dataset arrows are drawn by map). */
 export interface TokenArrowLike {
   donor: number;
   donor_site: number;
@@ -241,21 +241,4 @@ export function layoutDatasetArrows(
     items.push({ role: "dataset", index, key: `dataset-${index}`, curve, electrons, data });
   });
   return { items, missing };
-}
-
-/** A candidate tuple as a drawable token arrow (no bond-source or sink partner is known). */
-export function arrowFromCandidate(c: CandidateOut): TokenArrowLike {
-  return {
-    donor: c.donor,
-    donor_site: c.donor_site,
-    acceptor: c.acceptor,
-    acceptor_site: c.acceptor_site,
-    donor_site_map: c.donor_site_map,
-    acceptor_site_map: c.acceptor_site_map,
-    donor_element: c.donor_site_element,
-    acceptor_element: c.acceptor_site_element,
-    source_partner_map: null,
-    sink_partner_map: null,
-    electrons: 2,
-  };
 }

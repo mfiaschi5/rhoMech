@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { curate, getPathways, toApiError, type ApiError } from "../../api/client";
 import { useJobPoll } from "../../api/poll";
-import type { CurateIn, JobOut, NetworkOut, OverrideResultOut, PathwayOut } from "../../api/types.gen";
+import type { CurateIn, JobOut, NetworkOut, PathwayOut } from "../../api/types.gen";
 import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { useCapability } from "../../state/store";
@@ -31,13 +31,12 @@ function isNetwork(r: JobOut["result"] | undefined): r is NetworkOut {
   return !!r && typeof r === "object" && "nodes" in r && "edges" in r && "pathways" in r;
 }
 
-/** The network a job shows: its own result, or (an override job) its parent's network. */
+/** The network a job shows: its own result, or (an expand job) its parent's network. */
 function useJobNetwork(jobId: string) {
   const primary = useJobPoll(jobId);
   const job = primary.job;
   const own = job && isNetwork(job.result) ? job.result : null;
-  const overrideResult = job?.result_kind === "override" ? (job.result as OverrideResultOut | null) : null;
-  const parentId = !own && job ? (overrideResult?.parent_job_id ?? job.parent_job_id) : null;
+  const parentId = !own && job ? job.parent_job_id : null;
   const parent = useJobPoll(parentId);
   const network = own ?? (parent.job && isNetwork(parent.job.result) ? parent.job.result : null);
   return { job, network, error: primary.error ?? parent.error, parentId };
@@ -54,7 +53,7 @@ function PathwayChooser({ jobId, network }: { jobId: string; network: NetworkOut
         {network.pathways.map((p) => (
           <li key={p.id}>
             <a href={curateHash(jobId, p.id)} data-testid={`curate-pathway-choice-${p.rank}`}>
-              #{p.rank}: {p.n_steps} step{p.n_steps === 1 ? "" : "s"}, p {fmtProb(p.probability)}, ends with {p.ends_with}
+              #{p.rank}: {p.n_steps} step{p.n_steps === 1 ? "" : "s"}, {p.probability !== null ? `p ${fmtProb(p.probability)}` : `log score ${fmtProb(p.logp)}`}, ends with {p.ends_with}
               {p.n_corrected > 0 ? `, ${p.n_corrected} corrected` : ""}
             </a>
           </li>
@@ -209,7 +208,7 @@ function PathwayBody({ route, jobId, network, pathway, blockedReason }: BodyProp
   return (
     <>
       <p className="muted" data-testid="curate-pathway-summary">
-        Pathway #{pathway.rank}: {pathway.n_steps} step(s), probability {fmtProb(pathway.probability)}, ends with{" "}
+        Pathway #{pathway.rank}: {pathway.n_steps} step(s), {pathway.probability !== null ? `probability ${fmtProb(pathway.probability)}` : `log score ${fmtProb(pathway.logp)} (the predictor gives scores, not probabilities)`}, ends with{" "}
         {pathway.ends_with}
         {pathway.closes_cycle ? ", closes a cycle" : ""}. <a href={curateHash(jobId)}>other pathways</a>
       </p>

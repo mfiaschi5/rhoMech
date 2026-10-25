@@ -8,13 +8,17 @@
 //   maxRows    number                     meta.limits.max_species (default 6)
 //   maxCount   number                     meta.limits.max_count (default 4)
 //
-// DOM per row i: smiles-input-{i}, stoich-input-{i}, input-depiction-{i} and
-// preflight-{i}[data-ok="true|false|pending|empty|unchecked"] (unchecked: another field failed the
-// whole request).
+// Each row has a "Draw" button that opens the workbench sketcher (DrawModal) and takes its SMILES.
+//
+// DOM per row i (prefix: the prop, default "predict"): <prefix>-smiles-{i}, <prefix>-count-{i},
+// <prefix>-draw-{i}, <prefix>-remove-{i}, <prefix>-depiction-{i} and
+// <prefix>-preflight-{i}[data-ok="true|false|pending|empty|unchecked"] (unchecked: another field
+// failed the whole request); <prefix>-add-reactant; the DrawModal's <prefix>-draw-* ids.
 import { useEffect, useState } from "react";
 import { ApiError, isAbort, normalize, toApiError } from "../../api/client";
 import type { NormalizeOut, SpeciesPreflightOut } from "../../api/types.gen";
 import { useDebounced } from "../../api/hooks";
+import { DrawModal } from "./DrawModal";
 import { NumberField } from "./NumberField";
 import { SmilesInput } from "./SmilesInput";
 
@@ -124,9 +128,9 @@ function SpeciesBadges({ s }: { s: SpeciesPreflightOut }) {
   );
 }
 
-function PreflightBadge({ index, row }: { index: number; row: RowPreflight }) {
+function PreflightBadge({ index, row, prefix }: { index: number; row: RowPreflight; prefix: string }) {
   return (
-    <div className={`preflight preflight-${row.state}`} data-testid={`preflight-${index}`} data-ok={row.state === "ok" ? "true" : row.state === "error" ? "false" : row.state}>
+    <div className={`preflight preflight-${row.state}`} data-testid={`${prefix}-preflight-${index}`} data-ok={row.state === "ok" ? "true" : row.state === "error" ? "false" : row.state}>
       {row.state === "empty" && <span className="muted">enter a SMILES</span>}
       {row.state === "pending" && <span className="muted">checking…</span>}
       {row.state === "ok" && <span className="badge badge-ok">ok</span>}
@@ -144,39 +148,55 @@ export interface ReactantRowsProps {
   preflight: Preflight;
   maxRows?: number;
   maxCount?: number;
+  prefix?: string;
 }
 
-export function ReactantRows({ rows, onChange, preflight, maxRows = 6, maxCount = 4 }: ReactantRowsProps) {
+export function ReactantRows({ rows, onChange, preflight, maxRows = 6, maxCount = 4, prefix = "predict" }: ReactantRowsProps) {
   const set = (i: number, patch: Partial<ReactantRow>) => onChange(rows.map((r, k) => (k === i ? { ...r, ...patch } : r)));
   const remove = (i: number) => onChange(rows.filter((_, k) => k !== i));
+  const [drawing, setDrawing] = useState<number | null>(null);
   return (
     <div className="reactant-rows stack">
+      {drawing !== null && (
+        <DrawModal
+          prefix={prefix}
+          initial={rows[drawing]?.smiles ?? ""}
+          onClose={() => setDrawing(null)}
+          onUse={(smiles) => {
+            set(drawing, { smiles });
+            setDrawing(null);
+          }}
+        />
+      )}
       {rows.map((row, i) => (
         <div key={i} className="reactant-row row" data-row={i}>
-          <SmilesInput index={i} value={row.smiles} onChange={(smiles) => set(i, { smiles })} />
+          <SmilesInput index={i} prefix={prefix} value={row.smiles} onChange={(smiles) => set(i, { smiles })} />
           <div className="stack">
             <NumberField
               label="count"
-              testId={`stoich-input-${i}`}
+              testId={`${prefix}-count-${i}`}
               value={row.count}
               min={1}
               max={maxCount}
               onChange={(count) => count !== null && set(i, { count })}
             />
+            <button type="button" className="btn btn-small" data-testid={`${prefix}-draw-${i}`} onClick={() => setDrawing(i)} title="draw this reactant in the sketcher">
+              Draw
+            </button>
             {rows.length > 1 && (
-              <button type="button" className="btn btn-small" onClick={() => remove(i)} data-testid={`remove-reactant-${i}`}>
+              <button type="button" className="btn btn-small" onClick={() => remove(i)} data-testid={`${prefix}-remove-${i}`}>
                 remove
               </button>
             )}
           </div>
-          <PreflightBadge index={i} row={preflight.rows[i] ?? { state: "pending", species: [], message: null }} />
+          <PreflightBadge index={i} prefix={prefix} row={preflight.rows[i] ?? { state: "pending", species: [], message: null }} />
         </div>
       ))}
       <div className="row">
         <button
           type="button"
           className="btn"
-          data-testid="add-reactant"
+          data-testid={`${prefix}-add-reactant`}
           disabled={rows.length >= maxRows}
           title={rows.length >= maxRows ? `at most ${maxRows} species` : undefined}
           onClick={() => onChange([...rows, { smiles: "", count: 1 }])}

@@ -439,20 +439,15 @@ def test_curate_posts_the_edge_chain_not_pathway_id(ui_probe):
     assert ui_probe["curate"]["withConditions"]["conditions"] == "MeOH, 25 C"
 
 
-def test_export_panel_says_what_an_export_rewrites(ui_probe):
+def test_export_panel_says_what_a_download_holds(ui_probe):
     e = ui_probe["export"]
-    assert "earlier exports" not in e["panel"]
-    assert (
-        "from the database on every export (mechanisms of the chosen statuses only)" in e["panel"]
-    )
-    assert "within the export by (reactant pool key, product pool key)" in e["panel"]
-    assert "steps no longer exported are counted as withdrawn" in e["panel"]
+    assert "built from the database on every download" in e["panel"]
+    assert "Rejected mechanisms are never exported" in e["panel"]
+    assert "not training data" in e["panel"]
     assert "export-withdraw-warning" not in e["panel"]  # both statuses are checked at first
     warn = e["withdrawValidated"]
     assert 'class="cu-hint-warn"' in warn and 'data-unchecked="validated"' in warn
-    assert (
-        "previously exported validated steps will be withdrawn from steps.parquet" in warn.lower()
-    )
+    assert "validated mechanisms are left out of this download" in warn
     assert e["withdrawNone"] == ""
 
 

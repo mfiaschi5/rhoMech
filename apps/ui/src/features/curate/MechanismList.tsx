@@ -1,6 +1,7 @@
 // The stored mechanisms (GET /curate) with status, stale and predictor filters, a batch re-check
 // (POST /curate/recheck) and the Export panel (design §11.8, §9.4, §9.6). Filters and the job ids
-// live in the hash: #/curate?status=&stale=&predictor=&offset=&recheckall=<job>&export=<job>.
+// live in the hash: #/curate?status=&stale=&predictor=&offset=&recheckall=<job> (the export is a
+// direct CSV download, no job).
 // DOM: table[data-testid=mechanism-list] with tr[data-testid=mechanism-row-{id}][data-status][data-stale].
 import { useState } from "react";
 import { listMechanisms, recheckMechanisms, toApiError, type ApiError } from "../../api/client";

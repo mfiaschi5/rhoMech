@@ -1,6 +1,7 @@
 // The webServer command of the e2e smoke test (design §13.3); run with cwd apps/ui.
 //
-// 1. Reset the data root apps/ui/.e2e-data (gitignored, outside test-results/) unless
+// 1. Reset the data root apps/ui/.e2e-data (gitignored, outside test-results/; .e2e-data/port-<p>
+//    for a KSMECH_E2E_PORT other than 8765, so a parallel run has its own) unless
 //    KSMECH_E2E_KEEP=1.
 // 2. Build dist/ when dist/index.html is missing or older than the newest build input (BUILD_INPUTS:
 //    src/**, scripts/**, index.html, vite.config.ts, tsconfig.json, package.json,
@@ -14,7 +15,8 @@
 //    anything else -> "synthetic". "real" is accepted only when set explicitly (user
 //    acceptance runs).
 // 4. Write <dataRoot>/chemistry.txt and print "e2e chemistry: <c>".
-// 5. Spawn `uv run --no-sync --project ../.. ksmech-serve --port 8765 --chemistry <c>` with one
+// 5. Spawn `uv run --no-sync --project ../.. ksmech-serve --port <port> --chemistry <c>` (port:
+//    KSMECH_E2E_PORT, default 8765) with one
 //    compute worker, no auto index, no stub predictor and one BLAS/OpenMP thread; forward
 //    SIGINT/SIGTERM to it and exit with its code.
 // The steps run only when this file is the node entry point; importing it (tests) gives
@@ -26,8 +28,8 @@ import { fileURLToPath } from "node:url";
 
 const uiDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(uiDir, "..", "..");
-const dataRoot = join(uiDir, ".e2e-data");
-const PORT = "8765";
+const PORT = String(Number.parseInt(process.env.KSMECH_E2E_PORT ?? "", 10) || 8765);
+const dataRoot = PORT === "8765" ? join(uiDir, ".e2e-data") : join(uiDir, ".e2e-data", `port-${PORT}`);
 const CHEMISTRIES = ["auto", "cached", "synthetic", "real"];
 // The smoke test's reactants, the workbench test's ethanol and the projection test's camphor
 // (e2e/workbench.spec.ts).

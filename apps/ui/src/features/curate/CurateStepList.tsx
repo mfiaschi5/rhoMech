@@ -1,13 +1,14 @@
 // The step lists of the Curate page (design §11.8):
-//   PathwayStepList   the steps of a predicted pathway (EdgeOut): the source state's depiction
-//                     with the edge's ArrowOut list, and an "independent of previous step" toggle
-//                     on every step after the first (the order groups of POST /curate);
+//   PathwayStepList   the steps of a predicted pathway (spec-v9 EdgeOut): the source state's
+//                     depiction, the step's reaction matrix and its arrow reading as text, and an
+//                     "independent of previous step" toggle on every step after the first (the
+//                     order groups of POST /curate);
 //   MechanismStepList the steps of a stored mechanism (CuratedStepOut + its StepDoc), with the
 //                     original arrows of every corrected step and the latest re-check row.
 // DOM: <ol> of <li data-testid="curate-step-{i}" data-order-group data-corrected data-edge>, each
 // with input[data-testid="independent-toggle-{i}"] for i >= 1.
 import type { ReactNode } from "react";
-import type { CuratedStepOut, DatasetArrowOut, EdgeOut, NetworkOut, PathwayOut } from "../../api/types.gen";
+import type { ArrowReadingOut, CuratedStepOut, DatasetArrowOut, EdgeOut, MatrixIO, NetworkOut, PathwayOut } from "../../api/types.gen";
 import type { TokenArrowLike } from "../../chem/arrowGeom";
 import { correctHash } from "../../router";
 import type { IndependenceHint } from "./orderGroups";
@@ -145,33 +146,46 @@ interface EdgeDetailsProps {
   sourceKey: string;
 }
 
+/** "+3–5 −5–9 lp 3 −2": R on the pool atoms. */
+function matrixText(m: MatrixIO): string {
+  const bonds = m.bonds.map(([i, j, d]) => `${d > 0 ? "+" : "−"}${i}–${j}`);
+  const lone = m.lone.map(([i, d]) => `lp ${i} ${d > 0 ? "+" : "−"}${Math.abs(d)}`);
+  return [...bonds, ...lone].join(" ") || "(empty)";
+}
+
+const readingText = (a: ArrowReadingOut) =>
+  `${a.source.length === 1 ? `lp ${a.source[0]}` : a.source.join("–")} → ${a.target.length === 1 ? `lp ${a.target[0]}` : a.target.join("–")}`;
+
 function EdgeDetails({ index, jobId, edge, sourceKey }: EdgeDetailsProps) {
   return (
     <>
-      <ArrowTextList arrows={edge.arrows} />
+      <ul className="cu-arrow-text">
+        {edge.arrows.map((a, k) => (
+          <li key={k}>{readingText(a)}</li>
+        ))}
+      </ul>
       <dl className="kv cu-kv">
-        <dt>probability</dt>
-        <dd className="num">{fmtProb(edge.probability)}</dd>
+        <dt>R</dt>
+        <dd>
+          <code>{matrixText(edge.matrix)}</code>
+        </dd>
+        <dt>log p</dt>
+        <dd className="num">{fmtNum(edge.logp)}</dd>
         <dt>score</dt>
         <dd className="num">{fmtNum(edge.score)}</dd>
         <dt>rank</dt>
-        <dd>{edge.rank ?? "–"}{edge.n_alternatives > 0 ? ` (${edge.n_alternatives} alternatives)` : ""}</dd>
+        <dd>{edge.rank > 0 ? edge.rank : "user"}{edge.n_alternatives > 0 ? ` (${edge.n_alternatives} alternatives)` : ""}</dd>
         <dt>pools</dt>
         <dd>
           <code>{sourceKey}</code> → <code>{edge.target_pool_key}</code>
         </dd>
         <dt>product</dt>
         <dd>
-          <code>{edge.product_smiles}</code>
+          <code>{edge.product_smiles.join(".")}</code>
         </dd>
         <dt>PMechDB code</dt>
         <dd>{edge.pmechdb_code ? <code>{edge.pmechdb_code}</code> : "–"}</dd>
       </dl>
-      {edge.encode_reason && (
-        <div className="cu-hint-warn">
-          <code>ARROW_ENCODING_FAILED</code> {edge.encode_reason}: an export will skip this step
-        </div>
-      )}
       <a className="btn btn-small" href={correctHash(jobId, { edge: edge.id })} data-testid={`curate-correct-link-${index}`}>
         correct this step
       </a>
@@ -208,9 +222,6 @@ export function PathwayStepList(p: PathwayStepListProps) {
           );
         }
         const source = nodes.get(edge.source);
-        const original = edge.original
-          ? { arrows: edge.original.arrows, note: `original prediction (p ${fmtProb(edge.original.probability)})` }
-          : null;
         return (
           <StepCard
             key={id}
@@ -220,8 +231,8 @@ export function PathwayStepList(p: PathwayStepListProps) {
             edgeId={edge.id}
             stateId={edge.source_state_id}
             fallbackSmiles={source?.display_smiles ?? ""}
-            arrows={edge.arrows}
-            original={original}
+            arrows={[]}
+            original={null}
             hints={p.hints.filter((h) => h.step === i)}
             toggle={i > 0 ? { checked: !!p.independent[i], disabled: p.disabled, onChange: (v) => p.onToggle(i, v) } : null}
           >
@@ -234,7 +245,7 @@ export function PathwayStepList(p: PathwayStepListProps) {
           <div className="cu-step-head">
             <strong>Product</strong> <code>{last.target_pool_key}</code>
           </div>
-          <StateDepiction stateId={last.product_state_id} fallbackSmiles={last.product_smiles} />
+          <StateDepiction stateId={last.product_state_id} fallbackSmiles={last.product_smiles.join(".")} />
         </li>
       )}
     </ol>
