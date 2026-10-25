@@ -163,6 +163,10 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
         f"{report['n_samples']} samples from {report['n_training_steps']} training steps; "
         f"skipped {report['skipped']}"
     )
+    console.print(
+        f"edit-label classes {report['class_size']}, anchors {report['anchor_kind']}; "
+        f"orbital reading {report['orbital_reading']}"
+    )
     if report["label_filter"]:
         console.print("labeled pairs that pair_valid rejects, by group (LABEL_FILTERED):")
         for group, n in report["label_filter"].items():

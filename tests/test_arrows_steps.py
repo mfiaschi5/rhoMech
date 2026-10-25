@@ -10,7 +10,9 @@ import torch
 
 from ksmech.arrows.cli import main as arrows_main
 from ksmech.arrows.steps import (
+    ANCHOR_SIDE,
     PARTS,
+    READING_ALIGNED,
     SAMPLE_VERSION,
     MechanismSample,
     SkipReason,
@@ -89,6 +91,10 @@ def test_samples_round_trip_through_the_store(mini_steps, token_loader, pair_ker
     s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
     (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))
     assert back.labels == s.labels and back.product_key == s.product_key
+    assert back.edit_label == s.edit_label and back.orbital_reading == s.orbital_reading
+    for name in ("bonds", "lone_pairs", "wiberg"):
+        a, b = getattr(back, name), getattr(s, name)
+        assert a.dtype == b.dtype and np.array_equal(a, b), name
     assert (back.orbital_features == s.orbital_features).all()
     valid = s.pair_valid
     assert np.array_equal(back.pair_valid, valid)
@@ -109,8 +115,54 @@ def test_skip_reasons(token_loader, pair_kernels):
         "[CH3+:10].[Br-:11]",
         [Arrow("bond", (10, 11), "atom", (11,))],
     )
-    assert sample_for_step(lone, token_loader, pair_kernels) == SkipReason.UNALIGNED_ARROW
     assert sample_for_step(lone, lambda key: None, pair_kernels) == SkipReason.MISSING_TOKENS
+    s = sample_for_step(lone, token_loader, pair_kernels)  # a lone heterolysis is a sample
+    assert isinstance(s, MechanismSample)
+    assert s.labels == [] and s.orbital_reading == "HETEROLYSIS_ONLY"
+    c, br = (int(np.flatnonzero(s.atom_map == m)[0]) for m in (10, 11))
+    (r,) = s.edit_label.variants
+    assert r.bonds == ((min(c, br), max(c, br), -1),) and r.lone == ((br, 2),)
+    assert s.edit_label.anchors == (((min(c, br), max(c, br), "break"),),)
+
+
+def test_a_resonance_step_has_no_sample(mini_steps, token_loader, pair_kernels):
+    """Its edit label is RESONANCE_STEP: it is not part of the training target."""
+    out = sample_for_step(mini_steps["resonance"], token_loader, pair_kernels)
+    assert out == SkipReason.RESONANCE_STEP
+
+
+def _reproduces(s: MechanismSample, prod, r) -> bool:
+    """On the mapped token atoms of `s`, its bond orders + R are the bond orders of `prod`, and
+    its lone pairs + R the non-bonding electrons of `prod`."""
+    from ksmech.arrows.apply import nonbonding_electrons
+
+    by_map = {a.GetAtomMapNum(): a for a in prod.GetAtoms() if a.GetAtomMapNum()}
+    mapped = {int(m): g for g, m in enumerate(s.atom_map) if m}
+    after = {(int(i), int(j)): int(o) for i, j, o in s.bonds}
+    for i, j, d in r.bonds:
+        after[(i, j)] = after.get((i, j), 0) + d
+    lone = {i: 2 * int(s.lone_pairs[i]) + d for i, d in r.lone}
+    for m, g in mapped.items():
+        if lone.get(g, 2 * int(s.lone_pairs[g])) != nonbonding_electrons(by_map[m]):
+            return False
+    for m, g in mapped.items():
+        for n, h in mapped.items():
+            if m < n:
+                bond = prod.GetBondBetweenAtoms(by_map[m].GetIdx(), by_map[n].GetIdx())
+                want = 0 if bond is None else int(bond.GetBondTypeAsDouble())
+                if after.get((min(g, h), max(g, h)), 0) != want:
+                    return False
+    return True
+
+
+def test_the_edit_label_takes_the_reactant_to_the_drawn_product(mini_steps, token_loader):
+    """On the mapped token atoms, reactant bond orders + R give the drawn product's orders,
+    and reactant lone pairs + R its lone pairs, for a variant of every training step."""
+    for name in ("sn2", "proton_transfer", "carbonyl_addition", "e2"):
+        step = mini_steps[name]
+        s = sample_for_step(step, token_loader)
+        prod = chem.parse_mapped(step.products_smiles)
+        assert any(_reproduces(s, prod, r) for r in s.edit_label.variants), name
 
 
 def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pair_kernels):
@@ -133,11 +185,19 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pa
 
 
 def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
-    batch = [
-        sample_for_step(mini_steps[k], token_loader, pair_kernels)
-        for k in ("sn2", "e2", "resonance")
-    ]
+    lone = ElementaryStep(
+        "x",
+        "pmechdb",
+        None,
+        None,
+        "[CH3:10][Br:11]",
+        "[CH3+:10].[Br-:11]",
+        [Arrow("bond", (10, 11), "atom", (11,))],
+    )
+    batch = [sample_for_step(mini_steps[k], token_loader, pair_kernels) for k in ("sn2", "e2")]
+    batch.append(sample_for_step(lone, token_loader, pair_kernels))
     b = collate_samples(batch)
+    _check_edit_tensors(b, batch)
     n_atoms = max(s.n_atoms for s in batch)
     n = n_atoms + max(s.n_orbitals for s in batch)
     assert b["token_mask"].shape == (3, n) and b["incidence"].shape == (3, n, n_atoms)
@@ -159,6 +219,32 @@ def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
             assert b["occupied"][i, donors].all()
         assert b["label_mask"][i].sum() == len(s.labels)
     assert (b["donor_site"][~b["label_mask"]] == -1).all()
+
+
+def _check_edit_tensors(b: dict, batch: list) -> None:
+    """The R targets are the labels' entries (symmetric), every anchor is one the masks
+    allow, the reactant tensors hold the stored structure, and padding is empty."""
+    a = max(s.n_atoms for s in batch)
+    assert b["r_pairs"].shape[2:] == (a, a) and b["bond_order"].shape == (len(batch), a, a)
+    for i, s in enumerate(batch):
+        assert b["variant_mask"][i].sum() == len(s.edit_label.variants)
+        slots = zip(s.edit_label.variants, s.edit_label.anchors, strict=True)
+        for x, (r, anchors) in enumerate(slots):
+            for p, q, d in r.bonds:
+                assert b["r_pairs"][i, x, p, q] == b["r_pairs"][i, x, q, p] == d
+            assert int(b["r_pairs"][i, x].ne(0).sum()) == 2 * len(r.bonds)
+            assert int(b["r_atoms"][i, x].ne(0).sum()) == len(r.lone)
+            for p, q, kind in anchors:
+                assert b["r_anchors"][i, x, p, q, ANCHOR_SIDE[kind]]
+                mask = b["can_form"] if kind == "form" else b["can_break"]
+                assert mask[i, p, q] and mask[i, q, p]
+        for p, q, o in s.bonds:
+            assert b["bond_order"][i, p, q] == b["bond_order"][i, q, p] == o > 0
+        n = s.n_atoms
+        assert (b["graph_distance"][i, :n, :n].diagonal() == 0).all()
+        assert (b["graph_distance"][i, n:] == -1).all() and not b["can_form"][i, n:].any()
+    assert b["orbital_reading"] == [READING_ALIGNED, READING_ALIGNED, "HETEROLYSIS_ONLY"]
+    assert not b["r_anchors"][2, :, :, :, ANCHOR_SIDE["form"]].any()  # a heterolysis breaks
 
 
 def test_loader_and_cli(mini_processed, token_loader, contact_tables, monkeypatch, capsys):
@@ -379,3 +465,5 @@ def test_the_parallel_build_matches_the_sequential_one(mini_steps, mini_token_ca
         other = two[0][sid]
         assert other.labels == s.labels and np.array_equal(other.pair_valid, s.pair_valid)
         assert np.allclose(other.pair_z, s.pair_z, rtol=1e-12, atol=1e-12)
+        assert other.edit_label == s.edit_label and np.array_equal(other.bonds, s.bonds)
+        assert np.array_equal(other.wiberg, s.wiberg)

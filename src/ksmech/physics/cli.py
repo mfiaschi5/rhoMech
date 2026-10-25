@@ -131,10 +131,12 @@ def _load_parts(
         except ValueError as exc:  # an old sample store: rebuild, never reinterpret
             console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows samples`")
             return None
-        out[part] = [contacts.with_legacy(s, legacy.pop(s.step_id)) for s in samples]
+        read = [s for s in samples if s.labels]  # the ranking reads the first ArrowLabel
+        out[part] = [contacts.with_legacy(s, legacy.pop(s.step_id)) for s in read]
         console.print(
             f"{args.split}_{part}: {len(out[part])} samples with contacts, "
-            f"{len(ids) - len(out[part])} without"
+            f"{len(ids) - len(samples)} without, {len(samples) - len(read)} without an orbital "
+            "label (NO_ORBITAL_READING)"
         )
     return out
 
@@ -414,10 +416,11 @@ def _untrained(cs, features: str) -> dict[str, np.ndarray]:
     return {"gap_kernel": bl.gap_score(cs, "stage_a")}
 
 
-def _read_part(args, features: str, part: str, loader, visit) -> tuple[int, int]:
-    """`visit(sample, candidate_set)` for every sample of one part, one shard at a time (with
-    `contact`, only the samples that have a legacy contact entry, joined with it). Returns
-    (stored samples of the view, samples visited)."""
+def _read_part(args, features: str, part: str, loader, visit) -> tuple[int, int, int]:
+    """`visit(sample, candidate_set)` for every sample of one part that has ArrowLabels (the
+    candidate sets rank the first arrow's orbital pairs), one shard at a time (with `contact`,
+    only the samples that have a legacy contact entry, joined with it). Returns (stored
+    samples of the view, samples visited, samples without an orbital label)."""
     from ksmech.arrows.steps import iter_samples
     from ksmech.physics import baseline as bl
 
@@ -427,13 +430,16 @@ def _read_part(args, features: str, part: str, loader, visit) -> tuple[int, int]
     if features == "contact":
         view_dir = source_dir(args.source, args.processed_dir)
         legacy = contacts.load_contacts(view_dir, args.split, ids=ids)
-    n = 0
+    n = no_reading = 0
     for s in iter_samples(path, ids=ids if legacy is None else legacy):
+        if not s.labels:
+            no_reading += 1
+            continue
         if legacy is not None:
             s = contacts.with_legacy(s, legacy.pop(s.step_id))
         visit(s, bl.candidate_set(s, loader, GBDT_PAIRS[features]))
         n += 1
-    return len(ids), n
+    return len(ids), n, no_reading
 
 
 def _train_rows(args, features: str, loader, cfg) -> dict:
@@ -452,7 +458,8 @@ def _train_rows(args, features: str, loader, cfg) -> dict:
         if not pools:
             out["held"].add(cs, hard, cfg)
 
-    out["n_view"], out["n"] = _read_part(args, features, "train", loader, visit)
+    read = _read_part(args, features, "train", loader, visit)
+    out["n_view"], out["n"], out["n_no_orbital_reading"] = read
     return out
 
 
@@ -470,7 +477,8 @@ def _eval_part(args, features: str, part: str, loader) -> dict:
         out["sets"].append(cs)
         out["textbook"].append(bool(pools_in(s.fragment_keys)))
 
-    out["n_view"], out["n"] = _read_part(args, features, part, loader, visit)
+    read = _read_part(args, features, part, loader, visit)
+    out["n_view"], out["n"], out["n_no_orbital_reading"] = read
     return out
 
 
@@ -551,7 +559,11 @@ def _lgbm_report(args, train: dict, parts: dict, fit: dict, results: dict, cfg) 
         "features": args.features,
         "results": results,
         "counts": {
-            p: {"read": d["n"], "stored": d["n_view"]}
+            p: {
+                "read": d["n"],
+                "stored": d["n_view"],
+                "no_orbital_reading": d["n_no_orbital_reading"],
+            }
             for p, d in (("train", train), *parts.items())
         },
         "train_rows": {"all": train["all"].n_rows, "held": train["held"].n_rows},
@@ -577,7 +589,10 @@ def _read_all(args, loader, cfg, console: Console) -> tuple[dict, dict] | None:
         console.print(f"[red]{exc}[/red]; rebuild it (`ksmech-arrows samples` / `contacts`)")
         return None
     for p, d in (("train", train), *parts.items()):
-        console.print(f"{args.split}_{args.features} {p}: {d['n']} samples read of {d['n_view']}")
+        console.print(
+            f"{args.split}_{args.features} {p}: {d['n']} samples read of {d['n_view']}, "
+            f"{d['n_no_orbital_reading']} without an orbital label (NO_ORBITAL_READING)"
+        )
     console.print(f"textbook pools in {args.split}_train: {train['seen'] or 'none'}")
     return train, parts
 

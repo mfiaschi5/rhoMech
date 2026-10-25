@@ -1,9 +1,13 @@
-"""Training samples: one aligned elementary step with the tokens of its whole reactant side.
+"""Training samples: one elementary step with the tokens of its whole reactant side.
 
 `MechanismSample` holds the model inputs of every reactant fragment in one global index space
 (atoms first, then orbitals; `ksmech.arrows.reactants`), the fragment of every token, the
-candidate masks, the token-to-centre incidence (orbital, atom, weight), the `ArrowLabel`s with
-their sites, and the products' sigma key. It also stores the pair-track features z_rs of
+candidate masks, the token-to-centre incidence (orbital, atom, weight), the target and the
+products' sigma key. The target is the reaction matrix (spec v8): the step's edit-label class
+with its anchors on the token atoms (`arrows.delta_be`), with the reactant's Lewis structure on
+the same atoms (bonds, lone pairs, Wiberg indices: `arrows.lewis`). The `ArrowLabel`s, the
+orbital reading of the arrows, are kept where every arrow aligns; `orbital_reading` says
+whether they do. It also stores the pair-track features z_rs of
 every (occupied r, virtual s) pair, computed at K = eps = 1 (`physics.params.REDUCED`;
 `params.to_params` applies other values), their `defined` mask, the sign of G (bookkeeping: the
 logs drop it), the validity filter, and the symmetric atom-atom Coulomb matrix (also at eps =
@@ -15,8 +19,10 @@ built with contact kernels (textbook cases, tests) or joined with the legacy con
 `MoleculeTokens` (coefficients, S, F) are not copied into every sample: `fragment_keys` names
 the token files, and `MechanismSample.tokens(loader)` reloads them.
 
-A step becomes a sample only when every reactant fragment has tokens and every arrow is
-aligned or absorbed; every other step is skipped with a reason code and counted.
+A step becomes a sample when every reactant fragment has tokens and the step has an edit
+label that is a valid edit of its reactant (`lewis.check_edit`); every other step is skipped with
+a reason code and counted. A step whose arrows do not all align (a lone heterolysis has no
+donor-acceptor pair) is a sample without ArrowLabels.
 
 `build_all_samples(source)` writes the sample store (`arrows.store`) and one
 `data/processed/<source>/samples_<split>.json` view per split, with
@@ -45,6 +51,8 @@ from rich.console import Console
 from ksmech.arrows import store
 from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
 from ksmech.arrows.apply_predicted import PredictedArrow, leaving_labels, with_leaving
+from ksmech.arrows.delta_be import EditLabel, EditSkip, edit_label, to_global
+from ksmech.arrows.lewis import MissingBondIndex, check_edit, graph_distances, reactant_lewis
 from ksmech.arrows.reactants import (
     CorrespondenceError,
     MissingTokens,
@@ -72,7 +80,7 @@ from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 14  # 14: product_key is the sigma key, product_key_flag is gone
+SAMPLE_VERSION = 15  # 15: the reaction-matrix target and the reactant's Lewis structure
 PARTS = ("train", "val", "test")
 STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
@@ -83,8 +91,17 @@ DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
 class SkipReason(StrEnum):
     MISSING_TOKENS = "MISSING_TOKENS"  # a reactant fragment has no token file (yet)
     CORRESPONDENCE = "CORRESPONDENCE"  # drawn fragment cannot be matched onto its record
-    UNALIGNED_ARROW = "UNALIGNED_ARROW"  # an arrow has no label (a lone heterolysis)
-    LABEL_FILTERED = "LABEL_FILTERED"  # a label has no pair left that pair_valid allows
+    EDIT_FAILED = "EDIT_FAILED"  # the edit-label codes (`delta_be.EditSkip`), passed through
+    PRODUCT_MISMATCH = "PRODUCT_MISMATCH"
+    RESONANCE_STEP = "RESONANCE_STEP"
+    NO_ANCHOR = "NO_ANCHOR"
+    ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
+    NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond has no Wiberg index
+    R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
+
+
+READING_ALIGNED = "aligned"  # every arrow has its ArrowLabel
+READING_FILTERED = "LABEL_FILTERED"  # a label had no pair left that pair_valid allows
 
 
 @dataclass
@@ -114,8 +131,15 @@ class MechanismSample:
     #   amplitude's argmax (donor site, acceptor site), oriented kernel; -1 for other kernels
     #   and for stage-A samples
     atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric
-    labels: list[ArrowLabel] = field(default_factory=list)
+    labels: list[ArrowLabel] = field(default_factory=list)  # empty unless `orbital_reading`
+    #   is READING_ALIGNED
     product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
+    edit_label: EditLabel | None = None  # the R class and its anchors on the global atoms
+    bonds: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.int16))  # (E, 3)
+    #   int16 (i, j, order), i < j: the reactant as drawn (Kekulé), implicit H included
+    lone_pairs: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))  # (A,)
+    wiberg: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float16))  # (E,)
+    orbital_reading: str = ""  # READING_ALIGNED, READING_FILTERED or the first unaligned reason
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
     label_filter: dict[str, int] = field(default_factory=dict)  # labeled (donor, acceptor)
     #   cells that pair_valid rejects, by group (`_filter_group`); never dropped silently
@@ -143,6 +167,8 @@ class MechanismSample:
                 value = torch.from_numpy(np.ascontiguousarray(value))
             elif f.name == "labels":
                 value = [lab.to_dict() for lab in value]
+            elif f.name == "edit_label" and value is not None:
+                value = value.to_dict()
             out[f.name] = value
         return out
 
@@ -150,6 +176,8 @@ class MechanismSample:
     def from_dict(cls, d: dict) -> MechanismSample:
         kw = {k: v.numpy() if isinstance(v, torch.Tensor) else v for k, v in d.items()}
         kw["labels"] = [ArrowLabel.from_dict(x) for x in d["labels"]]
+        if kw.get("edit_label") is not None:
+            kw["edit_label"] = EditLabel.from_dict(kw["edit_label"])
         return cls(**kw)
 
 
@@ -171,7 +199,8 @@ def make_sample(
     labels: list[ArrowLabel],
     kernels: PairKernels | None = None,
 ) -> MechanismSample:
-    """The sample of an aligned step (the product key and pair features are computed here)."""
+    """The sample of a step with these ArrowLabels (the product key and pair features are
+    computed here)."""
     sample = reactant_sample(step.step_id, str(step.source), rt, kernels)
     sample.labels = labels
     sample.product_key = sigma_key(chem.parse_mapped(step.products_smiles))
@@ -247,7 +276,7 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
     its set and the label is flagged LABEL_FILTERED; every rejected cell is counted by group in
     `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells, and the
     leaving bonds are read on the teacher arrows in step order (`leaving_labels`). None when a
-    label has no valid cell left (the step is skipped as LABEL_FILTERED)."""
+    label has no valid cell left (the sample then keeps no ArrowLabels: READING_FILTERED)."""
     row, col = _pair_index(sample)
 
     def valid(r: int, s: int) -> bool:
@@ -279,9 +308,45 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
     return [with_leaving(x, lab) for x, lab in zip(out, leaving, strict=True)]
 
 
+def edit_target(step: ElementaryStep, rt: ReactantTokens) -> tuple | SkipReason:
+    """(the edit label on the global atoms, bonds, lone pairs, Wiberg indices) of a step, or
+    why it has none: an edit-label code, a bond without a Wiberg index, or a label that is no
+    valid edit of the reactant (`lewis.check_edit`)."""
+    label = edit_label(step)
+    if not isinstance(label, EditSkip):
+        label = to_global(label, rt.global_atom)
+    if isinstance(label, EditSkip):
+        return SkipReason(str(label))
+    try:
+        bonds, lone_pairs, wiberg = reactant_lewis(rt)
+    except MissingBondIndex as exc:
+        log.info("%s: %s", step.step_id, exc)
+        return SkipReason.NO_BOND_INDEX
+    problem = check_edit(label, bonds, lone_pairs)
+    if problem is not None:
+        log.info("%s: the edit label is no valid edit of the reactant (%s)", step.step_id, problem)
+        return SkipReason.R_CHECK_FAILED
+    return label, bonds, lone_pairs, wiberg
+
+
+def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment) -> None:
+    """The ArrowLabels restricted to valid pairs when every arrow aligns, and the reading."""
+    if not alignment.complete:
+        sample.labels, sample.orbital_reading = [], str(alignment.unaligned[0].reason)
+        return
+    labels = filter_labels(sample, rt)
+    if labels is None:
+        log.info("%s: a label has no valid pair: %s", sample.step_id, sample.label_filter)
+        sample.labels, sample.orbital_reading = [], READING_FILTERED
+    else:
+        sample.labels, sample.orbital_reading = labels, READING_ALIGNED
+
+
 def sample_for_step(
     step: ElementaryStep, loader: TokenLoader, kernels: PairKernels | None = None
 ) -> MechanismSample | SkipReason:
+    """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
+    the edit label, and the ArrowLabels when every arrow aligns (`orbital_reading`)."""
     with prov.collecting() as used:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
@@ -289,15 +354,13 @@ def sample_for_step(
             return SkipReason.MISSING_TOKENS
         except CorrespondenceError:
             return SkipReason.CORRESPONDENCE
+        target = edit_target(step, rt)
+        if isinstance(target, SkipReason):
+            return target
         alignment = align_step(step, rt)
-        if not alignment.complete:
-            return SkipReason.UNALIGNED_ARROW
-        sample = make_sample(step, rt, alignment.labels, kernels)
-    labels = filter_labels(sample, rt)
-    if labels is None:
-        log.info("%s: a label has no valid pair: %s", step.step_id, sample.label_filter)
-        return SkipReason.LABEL_FILTERED
-    sample.labels = labels
+        sample = make_sample(step, rt, alignment.labels if alignment.complete else [], kernels)
+    sample.edit_label, sample.bonds, sample.lone_pairs, sample.wiberg = target
+    _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))
     return sample
 
@@ -407,14 +470,21 @@ def load_split_file(path: Path) -> dict[str, list[str]]:
 
 
 def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> dict:
-    """The counts of one split: steps, samples, skip reasons, labels, filtered labels."""
+    """The counts of one split: steps, samples, skip reasons, edit-label class sizes and
+    anchor kinds, orbital readings, ArrowLabels and filtered ArrowLabels."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
+    sizes = Counter(min(len(s.edit_label.variants), 4) for s in kept if s.edit_label)
     return {
         "split": split,
         "n_steps": len(ids),
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
+        "class_size": {("4+" if k == 4 else str(k)): v for k, v in sorted(sizes.items())},
+        "anchor_kind": dict(
+            Counter(s.edit_label.anchors[0][0][2] for s in kept if s.edit_label).most_common()
+        ),
+        "orbital_reading": dict(Counter(s.orbital_reading for s in kept).most_common()),
         "n_labels": sum(len(s.labels) for s in kept),
         "n_labels_filtered": sum(
             AlignFlag.LABEL_FILTERED in lab.flags for s in kept for lab in s.labels
@@ -451,11 +521,12 @@ def build_all_samples(
     samples, skipped = build_step_samples_parallel(steps, loader or TokenCache(), None, n_workers)
     out_dir = source_dir(source, processed_dir)
     index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION)
+    every = split_report("all", sorted(samples), samples, {})
     report = {
         "n_training_steps": len(steps),
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
-        "label_filter": split_report("all", sorted(samples), samples, {})["label_filter"],
+        **{k: every[k] for k in ("class_size", "anchor_kind", "orbital_reading", "label_filter")},
         "splits": {},
         "strategies_not_applicable": {},
     }
@@ -614,14 +685,79 @@ def _label_tensors(batch: list[MechanismSample], n_atoms: int, n_orb: int) -> di
     return out
 
 
+def _reactant_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
+    """The reactant's Lewis structure on the padded atoms (bond orders, Wiberg indices, graph
+    distances, -1 between molecules and on padding, lone pairs) and the decoder's masks: a bond
+    may break, a pair of distinct atoms may gain an order while it stays at most 3, an atom
+    with a lone pair may lose one (spec v8, Edit decoder)."""
+    b = len(batch)
+    order = torch.zeros(b, n_atoms, n_atoms, dtype=torch.int8)
+    wiberg = torch.zeros(b, n_atoms, n_atoms)
+    dist = torch.full((b, n_atoms, n_atoms), -1, dtype=torch.int16)
+    lone = torch.zeros(b, n_atoms, dtype=torch.int8)
+    real = torch.zeros(b, n_atoms, dtype=torch.bool)
+    for k, s in enumerate(batch):
+        i, j = (torch.from_numpy(s.bonds[:, c].astype(np.int64)) for c in (0, 1))
+        order[k, i, j] = order[k, j, i] = torch.from_numpy(s.bonds[:, 2].astype(np.int8))
+        wiberg[k, i, j] = wiberg[k, j, i] = torch.from_numpy(s.wiberg.astype(np.float32))
+        na = s.n_atoms
+        dist[k, :na, :na] = torch.from_numpy(graph_distances(s.bonds, na))
+        lone[k, :na] = torch.from_numpy(s.lone_pairs)
+        real[k, :na] = True
+    pair = real[:, :, None] & real[:, None, :] & ~torch.eye(n_atoms, dtype=torch.bool)
+    return {
+        "bond_order": order,
+        "wiberg": wiberg,
+        "graph_distance": dist,
+        "lone_pairs": lone,
+        "can_break": order > 0,
+        "can_form": pair & (order < 3),
+        "can_lose_pair": lone > 0,
+    }
+
+
+ANCHOR_SIDE = {"form": 0, "break": 1}  # the last axis of `r_anchors`
+
+
+def _edit_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
+    """The reaction-matrix targets on the padded atoms, one slot per variant of the label
+    class: the pair entries (-1, 0, +1, symmetric), the atom entries (-2, 0, +2) and the
+    admissible anchors (last axis ANCHOR_SIDE); `variant_mask` marks the real slots."""
+    b = len(batch)
+    v = max([1] + [len(s.edit_label.variants) for s in batch if s.edit_label is not None])
+    out = {
+        "r_pairs": torch.zeros(b, v, n_atoms, n_atoms, dtype=torch.int8),
+        "r_atoms": torch.zeros(b, v, n_atoms, dtype=torch.int8),
+        "r_anchors": torch.zeros(b, v, n_atoms, n_atoms, 2, dtype=torch.bool),
+        "variant_mask": torch.zeros(b, v, dtype=torch.bool),
+    }
+    for k, s in enumerate(batch):
+        if s.edit_label is None:
+            continue
+        slots = zip(s.edit_label.variants, s.edit_label.anchors, strict=True)
+        for x, (variant, anchors) in enumerate(slots):
+            for i, j, d in variant.bonds:
+                out["r_pairs"][k, x, i, j] = out["r_pairs"][k, x, j, i] = d
+            for i, d in variant.lone:
+                out["r_atoms"][k, x, i] = d
+            for i, j, kind in anchors:
+                c = ANCHOR_SIDE[kind]
+                out["r_anchors"][k, x, i, j, c] = out["r_anchors"][k, x, j, i, c] = True
+            out["variant_mask"][k, x] = True
+    return out
+
+
 def collate_samples(batch: list[MechanismSample]) -> dict:
     """Pad a batch. Token positions: atoms at [0, A), orbitals at [A, A + O), where A and O
-    are the largest atom and orbital counts in the batch; sites index atoms directly."""
+    are the largest atom and orbital counts in the batch; sites index atoms directly. The
+    reaction-matrix targets and the reactant's structure are on the atoms (`_edit_tensors`,
+    `_reactant_tensors`); the ArrowLabel tensors are empty for samples without them."""
     n_atoms = max(s.n_atoms for s in batch)
     n_orb = max(s.n_orbitals for s in batch)
     out = {
         "step_id": [s.step_id for s in batch],
         "product_key": [s.product_key for s in batch],
+        "orbital_reading": [s.orbital_reading for s in batch],
         "atom_categorical": _pad([s.atom_categorical for s in batch], n_atoms),
         "atom_features": _pad([s.atom_features for s in batch], n_atoms),
         "atom_missing": _pad([s.atom_missing for s in batch], n_atoms, False),
@@ -633,6 +769,8 @@ def collate_samples(batch: list[MechanismSample]) -> dict:
     }
     out.update(_token_masks(batch, n_atoms, n_orb))
     out.update(_label_tensors(batch, n_atoms, n_orb))
+    out.update(_reactant_tensors(batch, n_atoms))
+    out.update(_edit_tensors(batch, n_atoms))
     return out
 
 

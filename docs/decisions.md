@@ -3860,3 +3860,43 @@ is now v7.5, sha256 6c6a023f66dd).
   - Drawn R parsimonious in 11,774 steps.
   - Rejected variants: 0.
   - Truncated enumerations: 978.
+
+## 2026-10-25 — The samples carry the reaction-matrix target; alignment no longer gates them
+
+- **Why.** The sample store was still shaped for the orbital-pair target of spec v7. A step was
+  a sample only if every arrow aligned to a filled and an empty orbital, so the 643 lone
+  heterolyses of the training set were left out. Two more steps were left out because the
+  candidate mask removed their whole orbital label (LABEL_FILTERED). The spec v8 target is R,
+  and its label needs no alignment (spec, "Edit labels"); `ksmech-arrows edit-labels` computed
+  it for every step but stored only counts.
+- **What a sample holds (`SAMPLE_VERSION` 15).**
+  - `edit_label`: the parsimonious class with its anchors, on the token atoms
+    (`delta_be.edit_label` + `to_global`).
+  - The reactant's Lewis structure on the same atoms (`arrows.lewis`): `bonds` (i < j,
+    order), `lone_pairs` and `wiberg` per bond.
+    - The structure is the reactant as drawn, in its Kekulé form, since the labels are computed
+      on it (user decision).
+    - An H the drawing leaves implicit gets a single bond to its record neighbour.
+  - `orbital_reading`: `aligned`, `LABEL_FILTERED` or the first unaligned reason, such as
+    `HETEROLYSIS_ONLY`. The ArrowLabels are kept only when it is `aligned`.
+  - `collate_samples` adds:
+    - the per-variant targets `r_pairs`, `r_atoms` and `r_anchors`, with `variant_mask`;
+    - `bond_order`, `wiberg`, `graph_distance` (-1 between molecules) and `lone_pairs`;
+    - the decoder masks `can_break`, `can_form` and `can_lose_pair`.
+- **What gates a sample.** Tokens; then an edit label whose atoms all have tokens; then a
+  Wiberg index for every bond (NO_BOND_INDEX); then `lewis.check_edit`, which asks every
+  variant to conserve electrons, keep bond orders in [0, 3] and lone pairs non-negative, and
+  asks every anchor to pass the decoder's masks (R_CHECK_FAILED). The alignment no longer gates.
+  The plan also asked for "B + R has the product's sigma key". That already holds by
+  construction: every class member passes `reproduces` when the class is built, and
+  `test_the_edit_label_takes_the_reactant_to_the_drawn_product` checks it on the token atoms.
+- **Readers of the orbital labels.** `ks-rank`, `baseline` and the LightGBM ranker rank the
+  first arrow's orbital pairs. They skip samples without ArrowLabels and count them as
+  NO_ORBITAL_READING, so they read the same steps as before.
+- **PMechDB** (a dry run of the builder over the 12,464 training steps).
+  - 12,418 samples: 11,773 aligned, 643 HETEROLYSIS_ONLY and 2 LABEL_FILTERED.
+  - 46 skipped as MISSING_TOKENS. No R_CHECK_FAILED, no NO_BOND_INDEX.
+  - Class size 1 / 2 / 3 / 4+: 11,733 / 619 / 59 / 7. Anchors: 11,694 form, 724 break. Both
+    are the edit-labels report's numbers.
+- **Later (user decision).** Resonance augmentation will precompute a few forms per sample,
+  each with its own Lewis structure and label class.

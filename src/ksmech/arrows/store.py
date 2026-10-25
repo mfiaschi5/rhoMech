@@ -56,7 +56,11 @@ def pack(sample: MechanismSample) -> tuple[dict[str, np.ndarray], dict[str, Any]
         if isinstance(value, np.ndarray):
             arrays[f.name] = value
         else:
-            meta[f.name] = [lab.to_dict() for lab in value] if f.name == "labels" else value
+            if f.name == "labels":
+                value = [lab.to_dict() for lab in value]
+            elif f.name == "edit_label" and value is not None:
+                value = value.to_dict()
+            meta[f.name] = value
     valid = sample.pair_valid
     for name in VALID_ONLY:
         arrays[name] = arrays[name][valid]
@@ -82,6 +86,7 @@ def unpack(
 ) -> MechanismSample:
     """The dense MechanismSample of `pack`'s output (cls: MechanismSample)."""
     from ksmech.arrows.align import ArrowLabel
+    from ksmech.arrows.delta_be import EditLabel
 
     meta = dict(meta)
     n_feat = meta.pop("n_pair_features")
@@ -110,6 +115,8 @@ def unpack(
     coul[np.triu_indices(n_atoms)] = arrays["atom_coulomb"].astype(np.float32)
     out["atom_coulomb"] = np.triu(coul) + np.triu(coul, 1).T
     meta["labels"] = [ArrowLabel.from_dict(x) for x in meta["labels"]]
+    if meta.get("edit_label") is not None:
+        meta["edit_label"] = EditLabel.from_dict(meta["edit_label"])
     return cls(**out, **dense, **meta)
 
 

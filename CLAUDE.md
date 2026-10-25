@@ -159,8 +159,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   ksmech-arrows align --source pmechdb` (arrow-to-orbital labels by atom, unaligned groups,
   predicted-arrow round trip, `alignment_report.json`; `--workers N` spawned processes), `uv run
   ksmech-arrows samples --source
-  pmechdb` (the sample store `samples/shard_*.npz` + `index.json` with the geometry-free stage-A
-  pair features, one `samples_<strategy>_<part>.json` view per split of `molecule`, `scaffold` and
+  pmechdb` (the sample store `samples/shard_*.npz` + `index.json`: every training step with
+  tokens, its reaction-matrix label class and anchors, the reactant's Lewis structure on the token
+  atoms (bonds, lone pairs, Wiberg indices), the geometry-free stage-A pair features, and the
+  orbital-pair labels where every arrow aligns; one `samples_<strategy>_<part>.json` view per
+  split of `molecule`, `scaffold` and
   `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`), `uv run

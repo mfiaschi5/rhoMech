@@ -178,3 +178,43 @@ def test_components_carry_fragment_and_clash_flags(samples, components):
     for s, c in zip(samples, components, strict=True):
         assert c["inter"].dtype == bool and c["clash"].dtype == bool
         assert np.array_equal(c["clash"], s.pair_z[..., F["clash"]] > 0.5)  # same kernel
+
+
+def test_physics_loaders_skip_and_count_samples_without_an_orbital_label(
+    mini_processed,  # noqa: F811
+    token_loader,
+    pair_kernels,
+    monkeypatch,
+):
+    """A sample whose arrows have no orbital pair (a lone heterolysis) has no first arrow to
+    rank: `ks-rank` / `baseline` (`_load_parts`) and the GBDT (`_read_part`) skip it and count
+    it as NO_ORBITAL_READING."""
+    import argparse
+    import dataclasses
+
+    from rich.console import Console
+
+    import ksmech.arrows.steps as steps
+    import ksmech.physics.cli as cli
+    from ksmech.arrows.contacts import build_all_contacts
+
+    loader = missing_iodide(token_loader)
+    build_all_samples("pmechdb", ["molecule"], mini_processed, loader)
+    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, loader)
+    args = argparse.Namespace(source="pmechdb", processed_dir=mini_processed, split="molecule")
+
+    def strip_first(samples):
+        return [dataclasses.replace(s, labels=[]) if k == 0 else s for k, s in enumerate(samples)]
+
+    full = cli._load_parts(args, Console(quiet=True))
+    real_load, real_iter = cli.load_samples, steps.iter_samples
+    monkeypatch.setattr(cli, "load_samples", lambda *a, **k: strip_first(real_load(*a, **k)))
+    console = Console(record=True, width=200)
+    parts = cli._load_parts(args, console)
+    assert all(len(parts[p]) == len(full[p]) - (len(full[p]) > 0) for p in full)
+    assert "without an orbital label (NO_ORBITAL_READING)" in console.export_text()
+    monkeypatch.setattr(
+        steps, "iter_samples", lambda *a, **k: iter(strip_first(real_iter(*a, **k)))
+    )
+    n_view, n, no_reading = cli._read_part(args, "geomfree", "train", token_loader, lambda *a: 0)
+    assert no_reading == 1 and n == n_view - 1
