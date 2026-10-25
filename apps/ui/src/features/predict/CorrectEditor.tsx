@@ -105,7 +105,7 @@ export function CorrectEditor({ jobId, stateId, initial, onApplied, extra }: Cor
   const res = check.current ? check.result : null;
   const shownArrows = state.arrows.length ? state.arrows : (check.result?.arrows ?? []);
   const [allH, setAllH] = useState(false);
-  const drawn = useDrawnStructure(pool, state.matrix, shownArrows, allH);
+  const drawn = useDrawnStructure(pool, state.matrix, shownArrows, allH, initial?.matrix ?? null);
   const charges = useMemo(() => (res ? new Map(res.formal_charges) : null), [res]);
   const interaction: CanvasInteraction = {
     tool: state.tool,

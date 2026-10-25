@@ -7,7 +7,9 @@
 // parent's maps in a new atom order, so maps never give pool atoms). The H atoms a depiction
 // hides are listed per atom in `hidden_h_atoms`: they are atoms of the structure (bonded to
 // their parent, counted in n) and drawn only when asked (`show`: the ones an R entry or an arrow
-// touches, or all), placed in the widest free gaps around their parent.
+// touches, or all), placed in the widest free gaps around their parent. Crowded fragments get
+// their own boxes (fragments.ts), and the atoms in `label` (those R touches) are drawn with their
+// symbol, so a carbon at the end of a forming or breaking bond is visible.
 //
 // Lone pairs: B_ii = V - q - sum_j B_ij - (implicit H) - (unpaired electrons), in pairs; V is the
 // element's valence-electron count (null for elements outside VALENCE: no lone-pair mask).
@@ -17,6 +19,8 @@ import type { SketchAtom, SketchBond, SketchModel } from "../workbench/sketch/mo
 import { fromMolblock } from "../workbench/sketch/molfile.ts";
 // @ts-ignore TS5097: see above
 import { BOND_LENGTH } from "../workbench/sketch/model.ts";
+// @ts-ignore TS5097: see above
+import { separateFragments } from "./fragments.ts";
 import type { BondContext } from "./rmatrix";
 import type { ArrowReadingOut, MatrixIO } from "./v9types";
 
@@ -113,6 +117,15 @@ function placeHydrogens(model: SketchModel, parentId: number, hs: number[], next
   return out;
 }
 
+/** The pool atoms an R or a reading touches. */
+export function touchedAtoms(matrix: MatrixIO | null, arrows: readonly ArrowReadingOut[] = []): Set<number> {
+  const out = new Set<number>();
+  for (const [i, j] of matrix?.bonds ?? []) out.add(i).add(j);
+  for (const [i] of matrix?.lone ?? []) out.add(i);
+  for (const a of arrows) for (const i of [...a.source, ...a.target]) out.add(i);
+  return out;
+}
+
 /** The hidden H pool atoms an R or a reading touches. */
 export function touchedHydrogens(dep: DepictionOut, matrix: MatrixIO | null, arrows: readonly ArrowReadingOut[] = []): Set<number> {
   const hidden = new Set(dep.atoms.flatMap((a) => a.hidden_h_atoms ?? []));
@@ -124,7 +137,17 @@ export function touchedHydrogens(dep: DepictionOut, matrix: MatrixIO | null, arr
   return out;
 }
 
-export function poolStructure(dep: DepictionOut, show: ReadonlySet<number> | "all" = new Set()): PoolStructure {
+export interface StructureOptions {
+  /** Hidden H to draw: these pool atoms, or all. */
+  show?: ReadonlySet<number> | "all";
+  /** Pool atoms drawn with their symbol (a carbon R touches). */
+  label?: ReadonlySet<number>;
+  /** Pool atom pairs of the bonds R forms (crowded fragments are drawn facing along them). */
+  facing?: readonly (readonly [number, number])[];
+}
+
+export function poolStructure(dep: DepictionOut, opts: StructureOptions = {}): PoolStructure {
+  const show = opts.show ?? new Set<number>();
   const base: SketchModel = fromMolblock(dep.molblock, { normalize: true });
   const byPos = new Map(dep.atoms.map((a) => [a.depiction_idx, a] as const));
   const atoms: PoolAtom[] = [];
@@ -148,7 +171,22 @@ export function poolStructure(dep: DepictionOut, show: ReadonlySet<number> | "al
     }
   });
   for (const b of base.bonds) bonds.push({ i: indexOfSketch.get(b.a)!, j: indexOfSketch.get(b.b)!, order: b.order, sketchId: b.id });
-  return assemble(atoms, bonds, model);
+  return assemble(atoms, bonds, finishModel(model, atoms, opts));
+}
+
+/** Fragments apart, the labelled atoms flagged, and the atoms' coordinates read back. */
+function finishModel(model: SketchModel, atoms: PoolAtom[], opts: StructureOptions): SketchModel {
+  const sketch = new Map(atoms.filter((a) => a.sketchId !== null).map((a) => [a.index, a.sketchId!] as const));
+  const flagged = new Set([...(opts.label ?? [])].map((i) => sketch.get(i)).filter((x): x is number => x !== undefined));
+  const facing = (opts.facing ?? []).map(([i, j]) => [sketch.get(i), sketch.get(j)] as const).filter((p): p is readonly [number, number] => p[0] !== undefined && p[1] !== undefined);
+  const hidden = new Set(atoms.filter((a) => a.parent !== null && a.sketchId !== null).map((a) => a.sketchId!));
+  const out = separateFragments({ ...model, atoms: model.atoms.map((a) => (flagged.has(a.id) ? { ...a, explicitH: true } : a)) }, facing, hidden);
+  const at = new Map(out.atoms.map((a) => [a.id, a] as const));
+  for (const a of atoms) {
+    const m = a.sketchId !== null ? at.get(a.sketchId) : undefined;
+    if (m) [a.x, a.y] = [m.x, m.y];
+  }
+  return out;
 }
 
 function assemble(atoms: PoolAtom[], bonds: PoolBond[], model: SketchModel): PoolStructure {
@@ -162,9 +200,11 @@ function assemble(atoms: PoolAtom[], bonds: PoolBond[], model: SketchModel): Poo
   }
   const drawn = atoms.filter((a) => a.sketchId !== null);
   const hCounts = new Map<number, number>();
+  const flagged = new Set(model.atoms.filter((a) => a.explicitH).map((a) => a.id));
   for (const a of drawn) {
     const undrawn = atoms.filter((h) => h.parent === a.index && h.sketchId === null).length;
-    hCounts.set(a.sketchId!, a.implicitH + undrawn);
+    // a carbon labelled because R touches it reads "C": its H count would sit on a forming bond
+    hCounts.set(a.sketchId!, a.el === "C" && flagged.has(a.sketchId!) ? 0 : a.implicitH + undrawn);
   }
   return {
     atoms,

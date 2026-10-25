@@ -2,8 +2,9 @@
 //   bond +1 on a non-bonded pair   green dashed line (a forming bond)
 //   bond +1 on a bond              green dashed line beside it (the order goes up)
 //   bond -1                        the bond in red with a cross at its midpoint
-//   lone ±2                        a badge on the atom's free side
-//   formal-charge change           a circled new charge at the upper right of the atom
+//   lone ±2                        a badge beside the atom's lone-pair side
+//   formal-charge change           a circled new charge, upper right of the atom by preference
+// Badges are placed clear of labels, bonds, arrows and each other (badges.ts).
 //   arrows                         cubic Bézier arrows with filled heads (arrowPath.ts)
 // Atoms with an issue are haloed (highlight), the bond tool's first atom ringed (pending).
 //
@@ -12,7 +13,8 @@
 // "<prefix>-charge-<i>" data-delta data-charge>, <g data-testid="<prefix>-arrow-<k>" data-kind
 // data-source data-target data-mx data-my (a point on the curve, px)> with path.pv-arrow-line, polygon.pv-arrow-head, path.pv-arrow-hit.
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { layoutReading, lonePairPoint, type ArrowGeomContext, type Vec } from "./arrowPath";
+import { cubicPoint, layoutReading, lonePairPoint, type ArrowGeomContext, type ArrowPath, type Vec } from "./arrowPath";
+import { boxAround, placeBadges, segmentBoxes, type BadgeRequest, type Box } from "./badges";
 import type { PoolStructure } from "./poolStructure";
 import { chargeDeltas } from "./rmatrix";
 import type { ArrowReadingOut, MatrixIO } from "./v9types";
@@ -82,39 +84,76 @@ function Badge({ at, text, cls, testId, data }: { at: Vec; text: string; cls: st
   );
 }
 
-function LoneMarks({ m, ctx, prefix, selected }: { m: MatrixIO; ctx: ArrowGeomContext; prefix: string; selected?: ReadonlySet<string> }) {
+const chargeText = (q: number) => (q === 0 ? "0" : q > 0 ? (q === 1 ? "+" : `${q}+`) : q === -1 ? "−" : `${-q}−`);
+
+/** What the badges must not cover: atom labels, bonds (the reactant's and R's), arrow curves. */
+function obstacles(s: PoolStructure, pv: PoolView, m: MatrixIO | null, paths: readonly (ArrowPath | null)[]): Box[] {
+  const out: Box[] = [];
+  const shown = new Map(s.model.atoms.map((a) => [a.id, a] as const));
+  for (const a of s.drawn) {
+    const p = pv.xy.get(a.index);
+    const sk = shown.get(a.sketchId!);
+    if (!p || !sk) continue;
+    const h = s.hCounts.get(a.sketchId!) ?? 0;
+    const labelled = a.el !== "C" || sk.explicitH || a.charge !== 0;
+    const chars = a.el.length + (h > 0 ? (h > 1 ? 2 : 1) : 0);
+    out.push(boxAround(p, labelled ? 4 + 4.5 * chars : 4, labelled ? 8 : 4));
+  }
+  const pairs = [...s.bonds.map((b) => [b.i, b.j] as const), ...(m?.bonds ?? []).map(([i, j]) => [i, j] as const)];
+  for (const [i, j] of pairs) {
+    const p = pv.xy.get(i);
+    const q = pv.xy.get(j);
+    if (p && q) out.push(...segmentBoxes(p, q));
+  }
+  for (const c of paths) {
+    if (!c) continue;
+    for (let k = 0; k < 20; k++) out.push(...segmentBoxes(cubicPoint(c.tail, c.c1, c.c2, c.tip, k / 20), cubicPoint(c.tail, c.c1, c.c2, c.tip, (k + 1) / 20), 4, 2));
+  }
+  return out;
+}
+
+/** Centres of the lone-pair badges ("l:<i>") and the charge marks ("q:<i>"), collision-aware. */
+function badgeLayout(s: PoolStructure, pv: PoolView, ctx: ArrowGeomContext, m: MatrixIO, paths: readonly (ArrowPath | null)[]): Map<string, Vec> {
+  const reqs: BadgeRequest[] = [];
+  for (const [i, d] of m.lone) {
+    const p = ctx.pos(i);
+    const lp = lonePairPoint(ctx, i);
+    if (p && lp) reqs.push({ key: `l:${i}`, at: p, w: 7 + 6.5 * signed(d).length, h: 16, prefer: Math.atan2(lp.dir[1], lp.dir[0]) + (65 * Math.PI) / 180 });
+  }
+  for (const [i] of chargeDeltas(m)) {
+    const p = pv.xy.get(i);
+    if (p) reqs.push({ key: `q:${i}`, at: p, w: 18, h: 18, prefer: -Math.PI / 4 });
+  }
+  return placeBadges(reqs, obstacles(s, pv, m, paths), pv.bondPx);
+}
+
+function LoneMarks({ m, at, prefix, selected }: { m: MatrixIO; at: Map<string, Vec>; prefix: string; selected?: ReadonlySet<string> }) {
   return (
     <>
       {m.lone.map(([i, d]) => {
-        const p = ctx.pos(i);
-        const lp = lonePairPoint(ctx, i);
-        if (!lp || !p) return null;
-        // beside the lone pair's direction (an arrow tail leaves along it), 0.62 bonds out
-        const t = Math.atan2(lp.dir[1], lp.dir[0]) + (65 * Math.PI) / 180;
-        const at: Vec = [p[0] + Math.cos(t) * 0.62 * ctx.bondPx, p[1] + Math.sin(t) * 0.62 * ctx.bondPx];
+        const p = at.get(`l:${i}`);
+        if (!p) return null;
         const cls = `pv-badge ${d > 0 ? "pv-form" : "pv-break"}${selected?.has(`l:${i}`) ? " pv-selected" : ""}`;
-        return <Badge key={i} at={at} text={signed(d)} cls={cls} testId={`${prefix}-r-lone-${i}`} data={{ "data-delta": String(d) }} />;
+        return <Badge key={i} at={p} text={signed(d)} cls={cls} testId={`${prefix}-r-lone-${i}`} data={{ "data-delta": String(d) }} />;
       })}
     </>
   );
 }
 
-function ChargeMarks({ s, pv, m, after, prefix }: { s: PoolStructure; pv: PoolView; m: MatrixIO; after?: ReadonlyMap<number, number> | null; prefix: string }) {
-  const deltas = chargeDeltas(m);
+function ChargeMarks({ s, m, at, after, prefix }: { s: PoolStructure; m: MatrixIO; at: Map<string, Vec>; after?: ReadonlyMap<number, number> | null; prefix: string }) {
   return (
     <>
-      {[...deltas].map(([i, d]) => {
-        const p = pv.xy.get(i);
+      {[...chargeDeltas(m)].map(([i, d]) => {
+        const p = at.get(`q:${i}`);
         const a = s.atom(i);
         if (!p || !a) return null;
         const q = after?.get(i) ?? a.charge + d;
-        const at: Vec = [p[0] + 0.36 * pv.bondPx, p[1] - 0.36 * pv.bondPx];
         return (
           <g key={i} className="pv-charge" data-testid={`${prefix}-charge-${i}`} data-delta={d} data-charge={q}>
             <title>{`formal charge ${signed(a.charge)} → ${signed(q)}`}</title>
-            <circle cx={at[0]} cy={at[1]} r={8.5} />
-            <text x={at[0]} y={at[1] + 0.5} textAnchor="middle" dominantBaseline="central">
-              {q === 0 ? "0" : q > 0 ? (q === 1 ? "+" : `${q}+`) : q === -1 ? "−" : `${-q}−`}
+            <circle cx={p[0]} cy={p[1]} r={8.5} />
+            <text x={p[0]} y={p[1] + 0.5} textAnchor="middle" dominantBaseline="central">
+              {chargeText(q)}
             </text>
           </g>
         );
@@ -123,8 +162,8 @@ function ChargeMarks({ s, pv, m, after, prefix }: { s: PoolStructure; pv: PoolVi
   );
 }
 
-function Arrows(props: { arrows: readonly ArrowReadingOut[]; ctx: ArrowGeomContext; prefix: string; faded?: boolean; onDown?: ROverlayProps["onArrowPointerDown"] }) {
-  const paths = layoutReading(props.arrows, props.ctx);
+function Arrows(props: { arrows: readonly ArrowReadingOut[]; paths: readonly (ArrowPath | null)[]; prefix: string; faded?: boolean; onDown?: ROverlayProps["onArrowPointerDown"] }) {
+  const { paths } = props;
   return (
     <g className={`pv-arrows${props.faded ? " pv-faded" : ""}`}>
       {paths.map((p, k) => {
@@ -144,6 +183,8 @@ function Arrows(props: { arrows: readonly ArrowReadingOut[]; ctx: ArrowGeomConte
 
 export function ROverlay(props: ROverlayProps) {
   const { structure: s, pv, ctx, prefix, matrix } = props;
+  const paths = layoutReading(props.arrows, ctx);
+  const at = matrix ? badgeLayout(s, pv, ctx, matrix, paths) : new Map<string, Vec>();
   return (
     <g className="pv-overlay">
       {[...(props.highlight ?? [])].map((i) => {
@@ -159,9 +200,9 @@ export function ROverlay(props: ROverlayProps) {
         if (!a || !b) return null;
         return <BondMark key={`${i}-${j}`} a={a} b={b} delta={d} order={s.bondOrder(i, j)} testId={`${prefix}-r-bond-${i}-${j}`} selected={!!props.selectedKeys?.has(`b:${i}-${j}`)} />;
       })}
-      {matrix && <LoneMarks m={matrix} ctx={ctx} prefix={prefix} selected={props.selectedKeys} />}
-      {matrix && <ChargeMarks s={s} pv={pv} m={matrix} after={props.chargesAfter} prefix={prefix} />}
-      <Arrows arrows={props.arrows} ctx={ctx} prefix={prefix} faded={props.arrowsFaded} onDown={props.onArrowPointerDown} />
+      {matrix && <LoneMarks m={matrix} at={at} prefix={prefix} selected={props.selectedKeys} />}
+      {matrix && <ChargeMarks s={s} m={matrix} at={at} after={props.chargesAfter} prefix={prefix} />}
+      <Arrows arrows={props.arrows} paths={paths} prefix={prefix} faded={props.arrowsFaded} onDown={props.onArrowPointerDown} />
     </g>
   );
 }

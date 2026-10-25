@@ -49,7 +49,7 @@ test("pool atoms come from pool_atom; hidden H are bonded atoms of the structure
 });
 
 test("a shown hidden H is drawn beside its parent and leaves the parent's label", () => {
-  const s = poolStructure(DEP, new Set([3]));
+  const s = poolStructure(DEP, { show: new Set([3]) });
   assert.deepEqual(s.drawn.map((a) => a.index).sort(), [0, 1, 3]);
   const c = s.atom(0);
   const h = s.atom(3);
@@ -59,7 +59,7 @@ test("a shown hidden H is drawn beside its parent and leaves the parent's label"
   assert.equal(s.hCounts.get(c.sketchId), 2);
   assert.equal(s.model.atoms.length, 3);
   assert.equal(s.model.bonds.length, 2);
-  assert.equal(poolStructure(DEP, "all").drawn.length, 6);
+  assert.equal(poolStructure(DEP, { show: "all" }).drawn.length, 6);
 });
 
 test("the hidden H an R or its arrows touch", () => {
