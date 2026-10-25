@@ -308,6 +308,50 @@ def pair_sites(rt: ReactantTokens, r: int, s: int) -> tuple[int, int] | None:
     return None if best is None else (best[1], best[2])
 
 
+def _read_lgbm(path: Path, lgbm):
+    """The ranker of a verified file (`load_lgbm` without its own verify, which would resolve
+    the inputs against this checkout)."""
+    import json
+
+    import lightgbm as lgb
+
+    with np.load(path, allow_pickle=False) as z:
+        meta = json.loads(str(z["meta"]))
+        booster = lgb.Booster(model_str=str(z["model"]))
+    return lgbm.LGBMRanker(booster, meta["features"], meta["history"])
+
+
+def gbdt_problems(path: Path, root: Path | None, features: list[str]) -> list[str]:
+    """What makes the LightGBM file stale (empty when current): `physics.lgbm.load_lgbm`'s
+    checks (kind, version, features, every `file:` input re-hashed, a clean build), with the
+    relative inputs resolved against `root`, the shared checkout that built the model, and not
+    against this checkout (`provenance.input_path`)."""
+    from ksmech.data import provenance as prov
+    from ksmech.physics.lgbm import LGBM_VERSION
+    from ksmech.serve.loader import _resolve_input
+
+    header = prov.read_header(path)
+    if header is None:
+        return ["no provenance header"]
+    out = []
+    if header.kind != "baseline_lgbm" or header.schema_version != LGBM_VERSION:
+        out.append(
+            f"{header.kind} v{header.schema_version}, expected baseline_lgbm v{LGBM_VERSION}"
+        )
+    if header.config.get("features") != features:
+        out.append("features differ from physics.baseline.FEATURE_NAMES")
+    for name, was in header.inputs.items():
+        if name.startswith("file:"):
+            p = _resolve_input(name, root)
+            if not p.is_file():
+                out.append(f"input missing: {p}")
+            elif prov.current_hash(p) != was:
+                out.append(f"input changed: {p}")
+    if header.code_dirty:
+        out.append(f"built from a dirty tree (HEAD {header.code_git_hash[:12]})")
+    return out
+
+
 class GBDTPredictor(Predictor):
     """The geometry-free LightGBM ranker; loaded (and verified) on first use, again whenever
     the file's mtime or size changed."""
@@ -315,9 +359,10 @@ class GBDTPredictor(Predictor):
     name = "gbdt"
     kind = "gbdt"
 
-    def __init__(self, path: Path, fp: str) -> None:
+    def __init__(self, path: Path, fp: str, root: Path | None = None) -> None:
         self.path = Path(path)
         self.fp = fp
+        self.root = root  # the checkout the model was built in (its relative inputs)
         self._state: _GBDTState | None = None
         self._lock = threading.Lock()
 
@@ -337,7 +382,10 @@ class GBDTPredictor(Predictor):
             from ksmech.physics import baseline as bl
             from ksmech.physics import lgbm
 
-            model = lgbm.load_lgbm(self.path, bl.FEATURE_NAMES)
+            problems = gbdt_problems(self.path, self.root, list(bl.FEATURE_NAMES))
+            if problems:
+                return _GBDTState("STALE_ARTIFACT", "; ".join(problems), sha, None)
+            model = _read_lgbm(self.path, lgbm)  # verified above, against the shared root
         except ValueError as exc:
             return _GBDTState(Code.GBDT_FEATURES_MISMATCH, f"{exc}", sha, None)
         except Exception as exc:  # noqa: BLE001 - reported as unavailable (StaleArtifact, ...)
@@ -476,7 +524,7 @@ class PredictorRegistry:
         self.fp = fp
         self._predictors: dict[str, Predictor] = {
             "floor": FloorPredictor(fp),
-            "gbdt": GBDTPredictor(settings.gbdt_file, fp),
+            "gbdt": GBDTPredictor(settings.gbdt_file, fp, settings.shared_root),
             "network": NetworkPredictor(settings, network),
         }
 

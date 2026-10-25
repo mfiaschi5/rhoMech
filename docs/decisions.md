@@ -4794,3 +4794,13 @@ stay valid.
   The serve token loader attaches the layer's sidecar (`data/cache/bond_index` for the shared
   tokens, `data/serve/bond_index` for serve-built ones), and the synthetic and real
   featurizers write the sidecar when they build tokens.
+
+## 2026-10-26 — Serve verifies the GBDT model against the shared root
+
+- `physics.lgbm.load_lgbm` resolves the model's relative `file:` inputs (its sample views)
+  against the checkout it runs from, so a serve worktree saw the shared
+  `gbdt_lgbm_molecule_geomfree.npz` as stale (input missing). Serve now runs the same checks
+  (`predictors.gbdt_problems`: kind, version, features, every input re-hashed, a clean build)
+  with the inputs resolved against `KSMECH_SHARED_CACHE_ROOT`, as the token loader does, and
+  reads the booster without upstream's verify. On the host the model is available and ranks
+  the MeO- + MeCl SN2 product first.

@@ -223,3 +223,27 @@ def test_network_adapter_with_a_fake_model(synthetic_runtime, synthetic_settings
     assert len(cands) == 1 and cands[0].logp == -0.1
     assert cands[0].anchor == (*sorted((o, c)), "form")
     assert dict(cands[0].matrix.lone) == {o: -2, cl: 2}
+
+
+def test_gbdt_inputs_resolve_against_the_shared_root(tmp_path):
+    """A model whose relative sample inputs live under the shared root is current there and
+    stale against any other root."""
+    import json
+
+    from ksmech.data import provenance as prov
+    from ksmech.physics import baseline as bl
+    from ksmech.serve.predictors import gbdt_problems
+
+    root = tmp_path / "shared"
+    sample = root / "data" / "processed" / "pmechdb" / "samples.json"
+    sample.parent.mkdir(parents=True)
+    sample.write_text("{}")
+    arrays = {"model": np.array("m"), "meta": np.array(json.dumps({"features": []}))}
+    inputs = {"file:data/processed/pmechdb/samples.json": prov.current_hash(sample)}
+    config = {"model": "lgbm_lambdarank", "features": list(bl.FEATURE_NAMES)}
+    header = prov.stamp("baseline_lgbm", 1, inputs, config, prov.array_digest(arrays))
+    path = prov.save_npz(tmp_path / "m.npz", arrays, header)
+    problems = gbdt_problems(path, root, list(bl.FEATURE_NAMES))
+    assert not [p for p in problems if "input" in p]
+    assert any("input missing" in p for p in gbdt_problems(path, tmp_path, list(bl.FEATURE_NAMES)))
+    assert any("features" in p for p in gbdt_problems(path, root, ["x"]))
