@@ -3973,3 +3973,20 @@ is now v7.5, sha256 6c6a023f66dd).
 - **Still sequential in ks-rank.** After the parallel part, about 2.5 minutes of the 5 run in
   the parent. Its failure-class step reads each sample's token files again, because the
   workers, not the parent, warmed the token cache.
+
+## 2026-10-25 — git in provenance and its tests ignores the hook's GIT_* variables
+
+- **Why.** Two `git commit --only` attempts failed with "files were modified by this hook",
+  though every test passed.
+  - For `git commit --only` (and `git commit <paths>`), git builds the commit in a temporary
+    index and exports its absolute path to the hooks as GIT_INDEX_FILE.
+  - `test_code_state_sees_tracked_edits_and_untracked_sources` runs `git init / add / commit`
+    in a scratch repository. It inherited the variable and wrote the scratch repository into
+    that index. A copy of the real index went from 154 files to 1. pre-commit noticed the
+    change and refused the commit; unnoticed, the commit would have held the wrong files.
+  - `provenance.code_state`, pointed at the scratch repository, read the same index.
+  - A plain `git commit` was safe, apparently because the path it exports is relative and
+    resolves inside the scratch repository.
+- **Change.** `provenance.git_env()` is the environment without GIT_* variables. `code_state`
+  and the tests' git helper run git with it. A test sets GIT_INDEX_FILE to a sentinel file and
+  checks that it is left untouched and that `code_state` still reads the scratch repository.

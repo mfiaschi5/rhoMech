@@ -121,9 +121,20 @@ def array_digest(arrays: Mapping[str, Any]) -> str:
     return h.hexdigest()
 
 
+def git_env() -> dict[str, str]:
+    """The environment without git's own variables. A hook of `git commit --only` (or `git
+    commit <paths>`) exports GIT_INDEX_FILE, the absolute path of the temporary index being
+    committed; a git run inside the hook would read and refresh it as this checkout's index."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git(*args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True, check=True
+        ["git", "-C", str(REPO_ROOT), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env(),
     ).stdout
 
 

@@ -148,11 +148,20 @@ def test_dirty_builds_are_flagged_and_refused_for_training(monkeypatch, tmp_path
     assert legacy.code_dirty and legacy.code_git_hash == "b" * 40  # pre-flag headers
 
 
-def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_path):
+def _git(repo, *args):
+    """git in a scratch repository, without the GIT_* variables a commit hook exports
+    (`prov.git_env`): with `git commit --only`, `git add` here overwrote the index being
+    committed."""
     import subprocess
 
+    subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, env=prov.git_env()
+    )
+
+
+def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_path):
     def git(*args):
-        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+        _git(tmp_path, *args)
 
     git("init", "-q")
     (tmp_path / "src").mkdir()
@@ -188,3 +197,22 @@ def test_a_dirty_sample_store_is_refused_unless_allow_stale(
     with pytest.raises(prov.StaleArtifact, match="dirty tree"):
         load_samples(view)
     assert len(load_samples(view, allow_stale=True)) == 1
+
+
+def test_git_never_touches_an_inherited_index(monkeypatch, tmp_path):
+    """A hook of `git commit --only` exports GIT_INDEX_FILE, the absolute path of git's
+    temporary commit index. Neither the tests' git nor `code_state` may read or write it: once,
+    a copy of the index went from 154 files to 1."""
+    commit_index = tmp_path / "next-index.lock"
+    commit_index.write_bytes(b"the index being committed")
+    monkeypatch.setenv("GIT_INDEX_FILE", str(commit_index))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.py").write_text("x = 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a")
+    monkeypatch.setattr(prov, "REPO_ROOT", repo)
+    head, dirty, _ = REAL_CODE_STATE.__wrapped__()
+    assert len(head) == 40 and not dirty
+    assert commit_index.read_bytes() == b"the index being committed"
