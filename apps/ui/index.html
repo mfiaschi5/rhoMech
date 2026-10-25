@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>ksmech</title>
+    <link rel="icon" href="data:," />
+    <!-- Classic scripts copied into public/vendor by scripts/vendor.mjs; they define the window
+         globals initRDKitModule and $3Dmol (src/types/rdkit.d.ts, src/types/3dmol.d.ts). -->
+    <script src="/vendor/RDKit_minimal.js"></script>
+    <script src="/vendor/3Dmol-min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

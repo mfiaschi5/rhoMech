@@ -1,0 +1,35 @@
+{
+  "name": "ksmech-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ksmech-serve frontend: predict, correct, curate and browse mechanisms",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs",
+    "predev": "node scripts/vendor.mjs",
+    "prebuild": "node scripts/vendor.mjs",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "3dmol": "2.5.5",
+    "@rdkit/rdkit": "2026.9.1",
+    "cytoscape": "3.34.3",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.2"
+  }
+}
