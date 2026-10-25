@@ -132,7 +132,8 @@ ranked a step's first arrow worse than G alone.
 ## Commands
 
 ```bash
-uv sync                       # install everything into .venv
+uv sync                       # install everything into .venv (torch: the ROCm build)
+uv sync --no-group rocm --group cuda   # an NVIDIA host: the CUDA build of torch
 uv run pytest -n 14 -m "not realdata"  # unit tests in 14 processes (pytest-xdist; -x stops at the first failure)
 uv run pytest -m realdata     # real-data tests one at a time, each pass in 14 spawned processes
 uv run ruff check .           # lint
@@ -184,5 +185,18 @@ Main CLI entry points are added phase by phase and listed here as they land:
   model's training marked; builds missing QM records and tokens). After a token rebuild:
   `ksmech-arrows samples` (geometry-free pair features and `pair_feature_stats_<strategy>.json`
   from each training part), then `ksmech-physics gbdt`, then `textbook`.
-- Training: _not yet_
-- Evaluation: _not yet_
+- Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
+  [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
+  [--resume]` (the spec-v9 model on one split; `--encoder`: `dense` the pair track of spec v9,
+  `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
+  learned indexer, dense during the LR warm-up; `--stop-weight` is lambda_stop of the END_MECH head,
+  by default 0.5 and 0 on PMechDB; `data/models/<source>/<run>/`: `run.json` with the provenance of
+  the views and pair statistics, `train.log` in the `step n / total` format `ksmech-eta` reads,
+  `metrics.jsonl` per epoch, `last.pt` and `best.pt` by validation anchor top-1; batches by a
+  padded-cell budget, samples over `--max-tokens` skipped as TOO_LARGE and counted; the override is
+  for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); every `ModelConfig` field is an option,
+  e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
+  run)
+- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
+  anchors ranked by |G^atom| over the valid orbital pairs, no learned parameter, val and test
+  top-1/3/5, `anchor_floor_report_<split>.json`)

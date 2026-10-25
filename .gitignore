@@ -27,3 +27,6 @@ graphify-out/
 
 # editor swap files
 *.swp
+
+# Trained models (data/models/<source>/<run>/)
+data/models/

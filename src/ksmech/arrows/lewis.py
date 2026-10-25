@@ -13,6 +13,8 @@ anchor one the decoder's masks allow.
 from __future__ import annotations
 
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import shortest_path
 
 from ksmech.arrows.apply import nonbonding_electrons
 from ksmech.arrows.delta_be import EditLabel, _order
@@ -70,19 +72,12 @@ def reactant_lewis(rt: ReactantTokens) -> tuple[np.ndarray, np.ndarray, np.ndarr
 
 
 def graph_distances(bonds: np.ndarray, n_atoms: int) -> np.ndarray:
-    """(A, A) int16 bond-graph distances, -1 between atoms of different molecules."""
-    adj = np.zeros((n_atoms, n_atoms), dtype=np.uint8)
-    adj[bonds[:, 0], bonds[:, 1]] = adj[bonds[:, 1], bonds[:, 0]] = 1
-    dist = np.full((n_atoms, n_atoms), -1, dtype=np.int16)
-    np.fill_diagonal(dist, 0)
-    reached = np.eye(n_atoms, dtype=bool)
-    frontier, d = reached.copy(), 0
-    while frontier.any():
-        d += 1
-        frontier = ((frontier.astype(np.uint8) @ adj) > 0) & ~reached
-        dist[frontier] = d
-        reached |= frontier
-    return dist
+    """(A, A) int16 bond-graph distances, -1 between atoms of different molecules (breadth-first
+    search per atom: an integer matrix product per level took 0.8 s on a 411-atom pool)."""
+    i, j = bonds[:, 0].astype(np.int64), bonds[:, 1].astype(np.int64)
+    adj = csr_matrix((np.ones(len(i)), (i, j)), shape=(n_atoms, n_atoms))
+    d = shortest_path(adj, directed=False, unweighted=True)
+    return np.where(np.isfinite(d), d, -1).astype(np.int16)
 
 
 def check_edit(label: EditLabel, bonds: np.ndarray, lone_pairs: np.ndarray) -> str | None:

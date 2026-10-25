@@ -4128,3 +4128,225 @@ stay valid.
   - G^atom sums over every occupied x virtual pair, the donor's own antibond included, which
     can inflate it on bonded pairs. Decide whether it should run over `pair_valid` only before
     the floor is built.
+
+## 2026-10-25 — Training preparation: ROCm torch, the model, the trainer and the anchor floor (spec v9)
+
+- **Device (user decision).** Train on the AMD RX 6600 XT (8 GB, gfx1032) through ROCm, and
+  keep the CUDA path for NVIDIA cards.
+  - torch left the main dependencies for two conflicting uv groups:
+    - `rocm`, the default: torch 2.14.1+rocm7.2, with triton-rocm 3.8.0, from
+      download.pytorch.org/whl/rocm7.2. PyPI has only triton-rocm 3.0.0rc1, so the lock failed
+      until triton-rocm got the same index.
+    - `cuda`: cu130. An NVIDIA host runs `uv sync --no-group rocm --group cuda`.
+  - The lock covers linux x86_64 only (`tool.uv.environments`). The Windows fork failed on the
+    ROCm wheels.
+  - gfx1032 has no rocBLAS kernels of its own: run with HSA_OVERRIDE_GFX_VERSION=10.3.0 (the
+    gfx1030 kernels). Ollama on this host already ran ROCm 7.2 on the card that way.
+    `select_device` runs one small product, so a missing override fails at start with a hint
+    rather than mid-run.
+  - Mixed precision:
+    - ROCm: float16 with a GradScaler (RDNA2 has no fast bfloat16);
+    - CUDA: bfloat16 where supported;
+    - CPU: none.
+    - The attention logits, softmax and loss stay in float32.
+- **G^atom over the valid pairs (the user left it open; chosen here).** Eq. (Gatom) and the
+  pooled means of y_ij run over `pair_valid`:
+  - the store keeps no other cells, so pooling over all pairs would need the token files or a
+    schema bump;
+  - the donor's own antibond, which `pair_valid` drops, would inflate every bonded pair.
+  - The spec's equation now names the set.
+- **Model choices the spec leaves open** (`ksmech.model`):
+  - Token inputs are standardized with training statistics (`FeatureStats`, stored in every
+    checkpoint). A missing atom descriptor is 0 with its own flag.
+  - z enters the pair track on both cells of an (occupied, virtual) pair with an orientation
+    channel, so a virtual token's attention also sees its donors. Further channels: the centre
+    weight between an orbital and its atoms, and a one-hot pair kind (the spec's pair-track
+    paragraph now lists them).
+  - MLP_U has hidden width d_p, its first layer split over [p_ij, h_i, h_j].
+  - Each encoder layer, and MLP_P, is recomputed in the backward pass (`checkpoint`):
+    activation memory becomes about one layer's.
+  - The decoder reads the symmetrized atom-pair vectors (p_ij + p_ji) / 2, since R is
+    symmetric. The anchor context c holds:
+    - h_a + h_b;
+    - the sum of the pair vectors joining the entry's atoms to a and b;
+    - an embedding of the graph distances of i and j to the nearer anchor atom (0..6; 7 for
+      another molecule), as an unordered pair.
+  - y_ij = pooled standardized means (11), log1p(pooled weight), asinh(G^atom), WBI.
+  - The stop head is built after all (the entry "Three encoders behind one interface, and the
+    stop head", below); lambda_stop = 0 on PMechDB, which has no stop labels.
+- **Loss.** The exact marginal over the class variants and their admissible anchors (one
+  logsumexp per sample over the (variant, anchor) rows). A test recomputes it for every sample
+  with a Python loop over all entries. The anchor-only NLL and the greedy R (top anchor,
+  argmax entries, no beam) are reported beside it.
+- **Batches by a cell budget** (`train.batching`):
+  - Samples are pooled by 1,024, sorted by size inside a pool, and packed while
+    B x (N_max + 1)^2 <= `--cell-budget`; the batches are then shuffled. The order depends only
+    on (seed, epoch).
+  - Samples over `--max-tokens` (default 1,024) are skipped as TOO_LARGE and counted in
+    `run.json` and in every metrics line.
+- **Loader.**
+  - `lewis.graph_distances` is a breadth-first search (scipy csgraph). The integer matrix
+    product per level took about 0.8 s per collation of the 411-atom pool; the search takes
+    9 ms.
+  - The DataLoader workers fork, so the 4.4 GB of loaded training samples are shared. Spawned
+    workers would each reload them for 163 s.
+- **Distances.** `torch.cdist`'s matrix-product form lost about 2e-3 A near zero distance once
+  the molecule sat away from the origin; the rotation-invariance test caught it. The pair
+  channels use the direct difference.
+- **Physics floor** (`ksmech-eval floor`, molecule split). Each candidate pair is proposed
+  once, with the sign form when its order may rise and break otherwise.
+
+  | part | n | top-1 | top-3 | top-5 | median rank | unreachable |
+  |---|---|---|---|---|---|---|
+  | val | 1,239 | 15.2% | 25.8% | 30.8% | 26 | 39 |
+  | test | 1,182 | 17.1% | 27.2% | 31.5% | 26 | 77 |
+
+  `unreachable` counts steps whose only admissible anchors break a bond that could also form;
+  the floor never proposes them. These are anchor accuracies over atom pairs and cannot be
+  compared with the orbital-pair rankers of the first arrow (G 20.4% top-1), which rank
+  another candidate set.
+- **On the card (RX 6600 XT, ROCm 7.2, gfx1030 kernels).**
+  - Matrix products run at 5.6 TFLOPS in float32 and 8.0 in float16.
+  - Without the override, `torch.cuda.is_available()` is True but the first kernel segfaults
+    (exit 139), which no exception handler catches. So `ksmech-train` sets
+    HSA_OVERRIDE_GFX_VERSION=10.3.0 itself (`train.loop.rocm_override`), but only when:
+    - the build is ROCm;
+    - the variable is unset;
+    - a KFD node reports an RDNA2 target without kernels (gfx_target_version 100301-100306;
+      this card is 100302).
+- **Memory and speed, default model** (7.34 M parameters, d = 256, d_p = 64, L = 8, H = 8,
+  float16, per-layer recomputation). Molecule split, 9,994 training samples. 3 samples are
+  over 1,024 tokens and skipped as TOO_LARGE; the largest kept has 966 tokens (935k cells).
+
+  | cell budget | batches / epoch | peak, fullest batch | epoch (12-batch estimate) |
+  |---|---|---|---|
+  | 1.0 M | 460 | 3.2 GiB | ~7.7 min |
+  | 1.6 M | 319 | 4.9 GiB | ~6.7 min |
+  | 2.4 M | 248 | 7.1 GiB | ~4.9 min |
+
+  - From 1.6 M up the caching allocator logged failed allocations and retried; 2.4 M sits at
+    the 8 GiB limit.
+  - The default `--cell-budget` is 1.1 M: about 7.5 min per epoch, about 4 h for 30 epochs.
+- **Gradient scaler.** float16 starts at a scale of 2^10. At the default 2^16, the first
+  losses (~700 nats, a sum over every entry) overflowed the first ten backward passes, and
+  those steps were skipped.
+- **Smoke run** (`--limit 256 --epochs 2`). The forked loader workers, validation,
+  `metrics.jsonl`, `last.pt` / `best.pt` with provenance and the `step n / total` log all ran
+  on the card. A real run should start from a committed tree: `load_model` refuses a checkpoint
+  trained from a dirty one.
+
+## 2026-10-25 — Three encoders behind one interface, and the stop head (spec v9)
+
+- **One interface (user decision: keep the dense model, add flex and sparse).** The encoder is
+  `ModelConfig.encoder` (`--encoder dense|flex|sparse`, default `dense`). Every encoder takes
+  the same prepared inputs: the token inputs, z-hat and its defined flags. It returns:
+  - the token vectors (B, N + 1, d);
+  - the atom-pair vectors (B, A, A, d_p);
+  - a dict of auxiliary losses, which the trainer adds to the loss.
+
+  The decoder, the loss and the metrics are shared.
+  - `dense` is spec v9 with its pair track.
+  - `flex` and `sparse` keep no pair state. Their decoder input comes from `AtomPairHead`: a
+    linear map of the static atom-pair channels, plus h_a * h_b and h_a + h_b, then GELU to
+    d_p. The channels are RBF times the same-fragment flag, bonded, order, capped graph
+    distance, Wiberg index and the same-fragment flag.
+- **flex** (`model.flex`, FlexAttention). Each layer and head adds a learned bias, linear in
+  the pair features, inside `score_mod`:
+  - a radial function of the distance, within a fragment;
+  - on atom pairs, tables over bond order and graph distance, and a Wiberg weight;
+  - a same-fragment weight;
+  - z on the (occupied, virtual) cells, projected per head. This (B, R, C, H) block is the
+    only one materialized.
+
+  Padding is a block mask.
+  - *Tabulated radial function.* FlexAttention cannot index a tensor that requires gradients
+    more than once in a `score_mod`, and the 32-term sum over the RBF weights did. So each
+    head's sum_k w_hk RBF_k(d) is tabulated from the weights, 50 points per A up to 10 A, and
+    interpolated linearly from two tensors (the lower and the upper neighbour of each bin). The
+    table is built from the weights, so it stays differentiable.
+  - *An integer grid constant.* FlexAttention is compiled with dynamic shapes, one compile for
+    every batch shape. Under it, dynamo traced the float grid step 0.02 as a symbolic float, and
+    Inductor failed to lower the `score_mod` (`LoweringException: unbacked_bindings`).
+    - A term-by-term bisect showed that only the radial term failed. Every term passed with
+      `dynamic=False`, but then every new batch shape would recompile.
+    - The grid is now 50 bins per A, an int, and it compiles.
+  - *GPU only.* FlexAttention has no backward on the CPU. `FlexBias.dense` builds the same bias
+    as a (B, H, N + 1, N + 1) tensor for SDPA. It is a test oracle, not a training path (user:
+    "use only gpu"). The test compares, on the card, the outputs and the gradient of every
+    encoder parameter between the kernel and the reference.
+- **sparse** (`model.sparse`, after DeepSeek Sparse Attention). It selects single tokens, not
+  blocks, since the tokens are a set with no order.
+  - An indexer scores every key: I_ij = sum_h w_ih ReLU(q_ih . k_j), 4 heads of width 32, on
+    the token vectors detached. Each query attends to MECH, itself and its top-64 other real
+    keys.
+  - The pair bias is MLP_P of `inputs.pair_channels_at` on the selected cells only, projected
+    per head. These are the dense track's input channels, computed per cell, so no N^2 tensor
+    is built.
+  - The indexer is trained only by KL(main attention, averaged over heads and detached ||
+    indexer softmax over the same keys), returned as the auxiliary loss `indexer_kl`.
+  - *Dense warm-up.* During the LR warm-up (the first `--warmup` steps) the attention runs over
+    every key, with the bias on the full grid, and the indexer learns from it. Validation runs
+    in the mode of the last training step. With k >= N the two paths agree (a test).
+  - *Per-query copies of the small tables.* The first flex run took 7.6 s per batch, against
+    0.9 s for dense; its backward took 1.2-3.1 s against a 0.1 s forward. The term-by-term
+    timing on the card (6 batches with N >= 128) gave these backward times:
+
+    | score_mod term | backward |
+    |---|---|
+    | none | 0.09 s |
+    | radial table | 0.32 s |
+    | order, distance, Wiberg and fragment tables, read directly | 2.28 s |
+    | the same, one copy per (sample, head, query) | 0.30 s |
+    | z | 0.12 s |
+
+    - Read directly, every cell of a head adds its gradient to the same few addresses, and the
+      atomic adds serialize.
+    - The four small tables are now copied per (sample, head, query). That is
+      B x H x N x 14 numbers, and the copies' backward is a plain sum.
+    - The radial table gained little from copies (0.32 s to 0.26 s) and would cost
+      B x H x N x 500 numbers, so it is read directly.
+  - *Compiled variants.* Each of these compiles its own variant, 60-100 s on the card on a cold
+    Inductor cache: a batch of one, fewer than 128 queries (FlexAttention's decoding kernel),
+    and the forward without gradient used in validation.
+    - That makes 8 variants, dynamo's default limit; past it, dynamo would fall back to the slow
+      eager path. `compiled_flex` raises the limit to 16.
+    - A probe run hit 5 variants.
+- **Trainer wiring.** `train_epoch` adds the auxiliary losses and passes
+  `dense_warmup = step < --warmup`. Validation reports the same metrics for every encoder.
+- **Memory and speed per encoder** (default sizes, d = 256, L = 8, H = 8; float16, per-layer
+  recomputation, the stop head included). Molecule split, `--cell-budget` 1.1 M (425 batches
+  per epoch). The fullest batch is B = 24, N = 213. The time per batch is the mean of 12
+  random batches after the compiles.
+
+  | encoder | parameters | peak, fullest batch | s / batch | epoch |
+  |---|---|---|---|---|
+  | dense | 7.37 M | 3.14 GiB | 0.87 | ~6.2 min |
+  | flex | 7.11 M | 0.59 GiB | 0.54 | ~3.8 min |
+  | sparse, top-64 | 7.52 M | 1.23 GiB | 0.70 | ~5.0 min |
+  | sparse, dense warm-up | 7.52 M | 1.34 GiB | 0.52 | ~3.7 min |
+
+  - At PMechDB's sizes a query has a few hundred keys, so the top-64 selection saves memory,
+    not time. Its gathers cost more than the dense product.
+  - Flex adds the one-off compiles (above) to each run.
+- **The stop head (user request relayed by the review session; spec, "Stop head").** It
+  replaces "the stop head is not built" in the entry above.
+  - P(END_MECH) = sigmoid(MLP(h_MECH)). The MLP is d to `decoder_hidden` to 1, in
+    `EditDecoder`, so every encoder shares it.
+  - L = L_step + lambda_stop BCE, masked per sample. The optional batch key `stop_label` (B,)
+    is 1 when the mechanism ends after the step, 0 when it goes on, and -1 when unknown.
+  - The masked samples' targets are clamped to 0 before the BCE. Otherwise a NaN target would
+    leak a NaN gradient through the mask.
+  - lambda_stop is `--stop-weight`. Below 0 (the default) the source decides: 0.5, or 0 on
+    PMechDB, whose steps are isolated.
+  - With no label in the batch, or lambda_stop = 0, the term is not added, so the loss equals
+    L_step bit for bit (a test). A hand-computed case and a masked batch are tested too.
+  - P(END_MECH) is returned in the loss parts (`p_stop`). Its validation mean is `val_p_stop`
+    in `metrics.jsonl`.
+  - No source has stop labels yet. The sample store and `collate_samples` get the field with
+    the first source that has pathways.
+- **Smoke runs on the card**, one per encoder (`--limit 256 --epochs 2 --warmup 5`, so the
+  sparse encoder leaves its dense warm-up). Each ran training, validation, `metrics.jsonl`
+  (with `val_p_stop`), `last.pt` / `best.pt` and the log, with lambda_stop resolved to 0.
+  - Wall time was about 100 s each, mostly loading the samples; flex took 207 s with its
+    compiles. Peak RSS was 6 GB.
+  - The run directories were deleted.

@@ -223,6 +223,31 @@ into the N x N pair track, and `pair_features` (the column names); `atom_coulomb
 `pair_contact_sites` are not collated. The reactant's Lewis structure and the reaction-matrix
 targets are the `_reactant_tensors` and `_edit_tensors` keys.
 
+**`anchor_floor_report_<strategy>.json`** (same directory, `ksmech-eval floor`): a provenance
+header (kind `anchor_floor`; inputs the val and test views; config the split) and, per part,
+`top1`, `top3`, `top5`, `median_rank`, `n` and `unreachable`: the physics floor, anchors
+ranked by |G^atom| over the valid pairs (`eval.floor`).
+
+## Training runs: `data/models/<source>/<run>/` (`ksmech-train fit`)
+
+- `run.json`: a provenance header (kind `train_run`, schema `train.loop.TRAIN_VERSION`). Its
+  inputs are the train and val views and `pair_feature_stats_<split>.json`; its config is
+  `{train, model, sample_version}`. `extra.parts` holds, per part, `n`, `used` and `skipped`
+  (`{TOO_LARGE: count}`). Beside the header: the device and the autocast dtype.
+- `train.log`: timestamped `step n / total ...` lines (the format `ksmech-eta` reads) and one
+  `epoch e of E done: ...` line per epoch.
+- `metrics.jsonl`: one JSON object per epoch:
+  - `train_loss` and `seconds`;
+  - `val_loss`, `val_anchor_nll`, `val_top1/3/5` (anchor, set marginalization), `val_r_exact`
+    (greedy R in the label class), `val_p_stop` (mean P(END_MECH)) and `val_n`;
+  - `epoch`, `step` and `skipped`.
+- `last.pt`, and `best.pt` (best `val_top1`, ties broken by `val_loss`): a torch dict with
+  - `provenance` (the run header), `model_config`, `feature_stats`, `pair_stats`,
+    `state_dict`;
+  - `optimizer`, `scheduler`, `scaler`, `epoch`, `step`, `best`, `metrics`.
+
+  Read it with `train.loop.load_model`, which refuses a run trained from a dirty tree.
+
 ## QM cache: `data/cache/qm/<sha256>.npz`
 
 Written by `ksmech.qm` (one file per molecule and conformer). Fields were listed from a real
