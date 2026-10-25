@@ -1,8 +1,9 @@
 """The chemistry a network is built with (design 2.3): `Chemistry` is the protocol `network.py`
 and the jobs use; `MolecularChemistry` serves the real, cached and synthetic modes through the
-scheduler (every heavy step runs in the compute worker: featurize, expand, apply).
+scheduler (every heavy step runs in the compute worker: featurize, expand). A user's step is
+applied on the API side (`serve.steps`), not through the chemistry.
 
-Persistence contract: every `PoolState` returned by `root`, `expand` or `apply` has been saved
+Persistence contract: every `PoolState` returned by `root` or `expand` has been saved
 with `pools.save_state` (the worker tasks save what they return); `MolecularChemistry` checks
 that each returned state file exists, and a missing one is CONSISTENCY_FAILED.
 """
@@ -13,14 +14,7 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
-from ksmech.serve.contracts import (
-    ArrowSpec,
-    ExpandRequest,
-    Expansion,
-    JobContext,
-    PoolState,
-    StepOutcome,
-)
+from ksmech.serve.contracts import ExpandRequest, Expansion, JobContext, PoolState
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.pools import SpeciesInput, preflight_inputs, save_state, state_path
 from ksmech.serve.settings import ServeSettings
@@ -32,7 +26,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 EXPAND_TIMEOUT_S = 900
-APPLY_TIMEOUT_S = 900
 FEATURIZE_SLACK_S = 120
 QM_MEDIAN_S = 3.4  # per molecule, from the PMechDB QM manifest (p90 41 s)
 QM_MEDIAN_ATOMS = 20
@@ -45,16 +38,6 @@ class Chemistry(Protocol):
     def root(self, inputs: list[SpeciesInput]) -> PoolState: ...  # API side, cheap; raises
 
     def expand(self, state: PoolState, req: ExpandRequest, ctx: JobContext) -> Expansion: ...
-
-    def apply(
-        self,
-        state: PoolState,
-        arrows: Sequence[ArrowSpec],
-        allow_invalid: bool,
-        predictor: str,
-        temperature: float | None,
-        ctx: JobContext,
-    ) -> StepOutcome: ...  # raises ServeError
 
 
 def _n_atoms(key: str) -> int | None:
@@ -179,47 +162,3 @@ class MolecularChemistry:
         if missing:
             return Expansion.failed(Code.CONSISTENCY_FAILED, f"state not persisted: {missing[0]}")
         return ex
-
-    def apply(
-        self,
-        state: PoolState,
-        arrows: Sequence[ArrowSpec],
-        allow_invalid: bool,
-        predictor: str,
-        temperature: float | None,
-        ctx: JobContext,
-    ) -> StepOutcome:
-        """Featurize, then the `apply` task. Raises ServeError (the 422 codes of design 4.6
-        step 2 keep their status across the worker boundary)."""
-        failed = self._featurize(state, ctx)
-        if failed is not None:
-            raise ServeError(failed.code, failed.detail, status=422, upstream=failed.upstream)
-        label = f"apply {len(arrows)} arrow(s) to {state.pool_key}"
-        ctx.progress(phase="apply", message=label)
-        payload = {
-            "state": state.to_dict(),
-            "arrows": [a.to_dict() for a in arrows],
-            "allow_invalid": bool(allow_invalid),
-            "predictor": predictor,
-            "temperature": temperature,
-        }
-        r = self.scheduler.run(
-            "apply",
-            payload,
-            priority=Priority.JOB,
-            timeout_s=APPLY_TIMEOUT_S,
-            owner=ctx.job_id,
-            label=label,
-        )
-        self._forward_events(r, ctx)
-        if not r.ok:
-            raise ServeError.from_task(r)
-        try:
-            out = StepOutcome.from_dict(r.result or {})
-        except (KeyError, TypeError, ValueError) as exc:
-            detail = f"malformed apply result: {type(exc).__name__}: {exc}"
-            raise ServeError(Code.CONSISTENCY_FAILED, detail, status=500) from exc
-        if self._missing_states([out.state]):
-            msg = f"state not persisted: {out.state.state_id}"
-            raise ServeError(Code.CONSISTENCY_FAILED, msg, status=500)
-        return out

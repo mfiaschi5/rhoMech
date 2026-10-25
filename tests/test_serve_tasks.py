@@ -14,6 +14,7 @@ import pytest
 from ksmech.serve import tasks
 from ksmech.serve.errors import STATUS, Code, Pending, ServeError, error_body, jsonable
 from ksmech.serve.settings import TaskEnv, assert_writable, load_settings, pin_threads
+from ksmech.serve.testing import requires
 from ksmech.serve.worker import (
     InlineScheduler,
     Priority,
@@ -33,7 +34,7 @@ from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     synthetic_settings,
 )
 
-SPEC_RE = re.compile(r"^v8\+[0-9a-f]{12};tok\d+;smp\d+;ori\d+;qm\d+$")
+SPEC_RE = re.compile(r"^v9\+[0-9a-f]{12};tok\d+;smp\d+;qm\d+$")
 PROVENANCE_KEYS = {
     "predictor",
     "predictor_version",
@@ -45,7 +46,6 @@ PROVENANCE_KEYS = {
     "ks_params",
     "temperature",
     "candidate_scope",
-    "contact_distance_ang",
     "candidate_config",
     "notes",
 }
@@ -62,8 +62,6 @@ META_KEYS = {
     "qm_method",
     "token_method",
     "ks_params",
-    "primary_distance_ang",
-    "feature_distances_ang",
     "candidate_config",
     "limits",
     "worker",
@@ -150,12 +148,8 @@ def test_task_registry_is_fixed():
         "diag_crash",
         "featurize",
         "analyze",
-        "score",
         "expand",
-        "apply",
-        "site_pairs",
         "orbital_cube",
-        "contact",
         "index_chunk",
         "recheck_step",
         "wb_orbital_set",
@@ -293,31 +287,10 @@ def test_interactive_pending_and_dedup():
 # ---- WorkerRuntime
 
 
-def test_worker_runtime(synthetic_runtime, synthetic_settings, sn2_state):  # noqa: F811
-    from ksmech.physics.pairs import PairKernels
-    from ksmech.serve.loader import LayeredTokenLoader
-
-    rt = synthetic_runtime
-    assert tasks.runtime(TaskEnv(synthetic_settings)) is rt  # one per process and env
-    assert rt.settings == synthetic_settings and rt.featurizer.mode == "synthetic"
-    assert isinstance(rt.loader, LayeredTokenLoader) and rt.loader is rt.featurizer.loader()
-    assert set(rt.scorers) == {"floor", "stub"}  # gbdt missing in the tmp root
-    assert rt.rt_cache.maxsize == 16 and rt.sample_cache.maxsize == 16
-    k = rt.kernels
-    assert isinstance(k, PairKernels) and k.main.config.oriented.distance == 2.3
-    assert k.main.config.oriented.cache_dir == synthetic_settings.oriented_dir
-    r1 = rt.reactant_tokens(sn2_state)
-    assert rt.reactant_tokens(sn2_state) is r1 and sn2_state.state_id in rt.rt_cache
-    assert r1.n_atoms == sn2_state.n_atoms
-    occ = rt.occupations("CCl")
-    assert occ is not None and occ.sum() == 14
-    assert (synthetic_settings.oriented_dir / "token_digests.json").is_file()
-    assert tasks.runtime(TaskEnv(synthetic_settings, enable_diag_tasks=True)) is not rt
-
-
 # ---- ApiContext
 
 
+@requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_ensure_analysis(synthetic_context, sn2_state):  # noqa: F811
     from ksmech.serve.analysis import PoolAnalysis
 
@@ -331,42 +304,6 @@ def test_api_context_ensure_analysis(synthetic_context, sn2_state):  # noqa: F81
     with pytest.raises(ServeError) as e:
         ctx.state("s" + "9" * 20)
     assert e.value.code == Code.POOL_NOT_FOUND and e.value.status == 404
-
-
-def test_api_context_scores(synthetic_context, sn2_state):  # noqa: F811
-    ctx = synthetic_context
-    an = ctx.ensure_analysis(sn2_state)
-    assert np.array_equal(ctx.scores(sn2_state, an, "floor"), an.score_floor)
-    assert np.array_equal(ctx.scores(sn2_state, an, "stub"), an.score_stub)
-    for name, status, code in (
-        ("gbdt", 409, "PREDICTOR_UNAVAILABLE"),
-        ("transformer", 409, "PREDICTOR_UNAVAILABLE"),
-        ("nope", 422, "PREDICTOR_UNKNOWN"),
-    ):
-        with pytest.raises(ServeError) as e:
-            ctx.scores(sn2_state, an, name)
-        assert e.value.status == status and e.value.code == code
-
-
-def test_api_context_scores_through_the_task(serve_settings, synthetic_settings, sn2_state):  # noqa: F811
-    from ksmech.physics import baseline as bl
-    from ksmech.serve.analysis import PoolAnalysis
-    from ksmech.serve.context import build_context
-    from ksmech.serve.pools import save_state
-
-    model = bl.GBDTRanker(edges=[np.array([0.0])] * len(bl.FEATURE_NAMES), trees=[])
-    path = bl.save_gbdt(model, serve_settings().data_root / "gbdt.npz")
-    s = serve_settings(chemistry="synthetic", gbdt_path=path)
-    shutil.copytree(synthetic_settings.serve, s.serve, ignore=shutil.ignore_patterns("pools"))
-    save_state(sn2_state, s)
-    ctx = build_context(s)
-    an = ctx.ensure_analysis(sn2_state)
-    assert "score_gbdt" in an
-    stripped = PoolAnalysis(an.state_id, {k: v for k, v in an.members.items() if k != "score_gbdt"})
-    got = ctx.scores(sn2_state, stripped, "gbdt")
-    assert np.array_equal(got, an.score_gbdt)
-    assert ctx.scheduler.history[-1][0] == "score"
-    assert list((s.pools / sn2_state.state_id).glob("scores-*.npz"))
 
 
 def test_api_context_not_analyzed(serve_settings):  # noqa: F811
@@ -391,6 +328,7 @@ def test_api_context_not_analyzed(serve_settings):  # noqa: F811
     assert e.value.code == Code.POOL_NOT_ANALYZED and e.value.detail["code"] == "MISSING_TOKENS"
 
 
+@requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_featurizes_then_analyzes(serve_settings):  # noqa: F811
     from ksmech.serve.context import build_context
     from ksmech.serve.pools import SpeciesInput, initial_state, save_state
@@ -411,17 +349,17 @@ def test_provenance(synthetic_context):  # noqa: F811
     ctx = synthetic_context
     p = ctx.provenance("floor")
     assert set(p) == PROVENANCE_KEYS
-    assert p["predictor"] == "floor" and p["predictor_version"].startswith("floor/ks3+ks2/d2.3/")
+    assert p["predictor"] == "floor" and p["predictor_version"].startswith("floor/g-atom/")
     assert p["checkpoint_hash"] is None and SPEC_RE.match(p["spec_version"])
     assert p["chemistry"] == "synthetic" and p["temperature"] == 1.0
-    assert p["ks_params"] == {"K": 1.75, "eps": 4.0, "tau": 1.0}
-    assert p["contact_distance_ang"] == 2.3 and p["candidate_scope"] == "all"
+    assert p["ks_params"] == {"K": 1.75, "eps": 4.0}
+    assert p["candidate_scope"] == "all"
     assert p["candidate_config"]["site_weight"] == 0.20  # upstream CandidateConfig default
     assert any("END_MECH" in n for n in p["notes"]) and any("synthetic" in n for n in p["notes"])
     q = ctx.provenance(None, scope="inter", notes=("hello",))
     assert q["predictor"] == "none" and q["temperature"] is None and q["notes"][0] == "hello"
     assert any("inter" in n for n in q["notes"])
-    assert ctx.provenance("stub", temperature=0.5)["temperature"] == 0.5
+    assert ctx.provenance("floor", temperature=0.5)["temperature"] == 0.5
     json.dumps(p, allow_nan=False)
 
 
@@ -430,11 +368,11 @@ def test_meta(synthetic_context):  # noqa: F811
 
     m = meta(synthetic_context)
     assert set(m) == META_KEYS
-    assert m["api_schema"] == 1 and m["spec_label"] == "v8" and SPEC_RE.match(m["spec_version"])
-    assert m["spec_version"].startswith(f"v8+{m['spec_sha256_12']};")
-    assert set(m["capabilities"]) >= {"predict", "contact", "export"}
+    assert m["api_schema"] == 1 and m["spec_label"] == "v9" and SPEC_RE.match(m["spec_version"])
+    assert m["spec_version"].startswith(f"v9+{m['spec_sha256_12']};")
+    assert set(m["capabilities"]) >= {"predict", "correct", "export"}
+    assert "contact" not in m["capabilities"] and "site_pairs" not in m["capabilities"]
     assert m["token_method"] == "SYNTHETIC-EHT/v1" and m["chemistry"] == "synthetic"
-    assert m["feature_distances_ang"] == [2.0, 2.3, 3.0] and m["primary_distance_ang"] == 2.3
     assert set(m["worker"]) == WORKER_KEYS and m["limits"]["max_atoms"] == 150
     json.dumps(m, allow_nan=False)
 
@@ -448,30 +386,26 @@ def test_spec_version_and_artifacts(synthetic_settings):  # noqa: F811
     from ksmech.qm.records import SCHEMA_VERSION as QM
     from ksmech.qm.xtb_calc import QMConfig
     from ksmech.serve import versions
-    from ksmech.serve.upstream import oriented_module
-
-    ORIENTED_VERSION = oriented_module().ORIENTED_VERSION  # noqa: N806
 
     v = versions.artifact_versions()
     assert v == {
         "tokens": TOK,
         "samples": SAMPLE_VERSION,
-        "oriented": ORIENTED_VERSION,
         "qm": QM,
         "qm_method": QMConfig().method,
     }
     sv = versions.spec_version(synthetic_settings.spec_path)
     assert SPEC_RE.match(sv), sv
-    assert sv.endswith(f";tok{TOK};smp{SAMPLE_VERSION};ori{ORIENTED_VERSION};qm{QM}")
+    assert sv.endswith(f";tok{TOK};smp{SAMPLE_VERSION};qm{QM}")
     assert versions.spec_sha12(synthetic_settings.spec_path) == sv[3:15]
     assert versions.spec_sha12(synthetic_settings.data_root / "missing.tex") is None
     assert versions.spec_version(synthetic_settings.data_root / "missing.tex").startswith(
-        "v8+unknown;"
+        "v9+unknown;"
     )
-    assert versions.floor_version("abc") == "floor/ks3+ks2/d2.3/abc"
-    assert re.match(r"^[0-9a-f]{12}$", versions.oriented_fingerprint())
+    assert versions.floor_version("abc") == "floor/g-atom/abc"
+    assert re.match(r"^[0-9a-f]{12}$", versions.token_fingerprint())
     assert re.match(r"^[0-9a-f]{12}$", versions.physics_fingerprint())
-    assert versions.physics_fingerprint() != versions.oriented_fingerprint()
+    assert versions.physics_fingerprint() != versions.token_fingerprint()
 
 
 def _tree(tmp_path):
@@ -479,7 +413,7 @@ def _tree(tmp_path):
 
     src = versions.SRC_ROOT
     root = tmp_path / "src"
-    for kind in ("oriented", "physics"):
+    for kind in ("token", "physics"):
         for rel in versions.fingerprint_files(kind):
             if (src / rel).is_file():
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -494,23 +428,24 @@ def test_fingerprints_change_only_with_their_own_files(tmp_path):
 
     def both():
         return (
-            compute_fingerprint("oriented", root, "M"),
+            compute_fingerprint("token", root, "M"),
             compute_fingerprint("physics", root, "M"),
         )
 
     base = both()
     assert base == (
-        compute_fingerprint("oriented", root, "M"),
+        compute_fingerprint("token", root, "M"),
         compute_fingerprint("physics", root, "M"),
     )
     edits = {
-        "physics/pairs.py": (True, True),
+        "serve/gto.py": (True, True),
         "orbitals/tokens.py": (True, True),
+        "physics/pairs.py": (False, True),
         "orbitals/classify.py": (False, True),
         "arrows/steps.py": (False, True),
         "serve/analysis.py": (False, True),
-        "serve/physics_view.py": (False, False),  # display-only: invalidates nothing
-        "serve/geometry.py": (False, False),
+        "serve/reading.py": (False, True),
+        "serve/geometry.py": (False, False),  # display-only: invalidates nothing
     }
     for rel, (ori, phy) in edits.items():
         path = root / rel
@@ -525,7 +460,7 @@ def test_fingerprints_change_only_with_their_own_files(tmp_path):
             path.write_bytes(old)
         assert both() == base, rel
     assert compute_fingerprint("physics", root, "other method") != base[1]
-    assert compute_fingerprint("oriented", root, "other method") == base[0]
+    assert compute_fingerprint("token", root, "other method") == base[0]
 
 
 def test_fingerprint_tolerates_missing_files(tmp_path):
@@ -539,7 +474,7 @@ def test_fingerprint_tolerates_missing_files(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     assert re.match(r"^[0-9a-f]{12}$", compute_fingerprint("physics", empty, "M"))
-    assert "physics/*.py" in fingerprint_files("oriented", empty)  # unmatched glob kept
+    assert "physics/*.py" in fingerprint_files("physics", empty)  # unmatched glob kept
     with pytest.raises(ValueError):
         fingerprint_files("other")
 
@@ -551,17 +486,16 @@ def test_settings_defaults(tmp_path):
     s = load_settings({}, data_root=tmp_path)
     assert s.data_root == tmp_path.resolve() and s.data_root.is_absolute()
     assert s.shared_cache_root == s.data_root and s.auto_index is False
-    assert s.chemistry == "real" and s.workers == 1 and not s.enable_stub_predictor
+    assert s.chemistry == "real" and s.workers == 1
     assert s.shared_qm == s.data_root / "data" / "cache" / "qm"
     assert s.shared_tokens == s.data_root / "data" / "cache" / "tokens"
     assert s.serve_qm == s.data_root / "data" / "serve" / "qm"
-    assert s.gbdt_path == s.processed / "pmechdb" / "baseline_gbdt_random.npz"
+    assert s.gbdt_path == s.processed / "pmechdb" / "gbdt_lgbm_molecule_geomfree.npz"
     assert s.frontend_dist == s.repo_root / "apps" / "ui" / "dist"
     assert s.spec_path == s.repo_root / "docs" / "ksmech_architecture.tex"
     assert s.curation_db == s.data_root / "data" / "curation" / "curation.sqlite"
-    from ksmech.serve.versions import oriented_fingerprint
-
-    assert s.oriented_dir == s.serve / "oriented" / oriented_fingerprint()
+    assert s.serve_bond_index == s.serve / "bond_index"
+    assert s.shared_bond_index == s.data_root / "data" / "cache" / "bond_index"
     assert s.limits.max_beam == 10 and s.limits.max_nodes == 200
     assert pickle.loads(pickle.dumps(TaskEnv(s))) == TaskEnv(s)
 
@@ -571,14 +505,13 @@ def test_settings_env_parsing(tmp_path):
         "KSMECH_DATA_ROOT": str(tmp_path),
         "KSMECH_SERVE_CHEMISTRY": "synthetic",
         "KSMECH_SERVE_WORKERS": "7",
-        "KSMECH_SERVE_STUB_PREDICTOR": "1",
         "KSMECH_SERVE_AUTO_INDEX": "true",
         "KSMECH_SHARED_CACHE_ROOT": str(tmp_path / "shared"),
         "KSMECH_SERVE_GBDT": str(tmp_path / "m.npz"),
     }
     s = load_settings(env)
     assert s.chemistry == "synthetic" and s.workers == 2  # clamped to [1, 2]
-    assert s.enable_stub_predictor and s.auto_index
+    assert s.auto_index
     assert s.shared_qm == (tmp_path / "shared").resolve() / "data" / "cache" / "qm"
     assert s.gbdt_path == (tmp_path / "m.npz").resolve()
     assert load_settings({**env, "KSMECH_SERVE_WORKERS": "0"}).workers == 1
@@ -587,7 +520,7 @@ def test_settings_env_parsing(tmp_path):
     with pytest.raises(ValueError):
         load_settings({**env, "KSMECH_SERVE_CHEMISTRY": "quantum"})
     with pytest.raises(ValueError):
-        load_settings({**env, "KSMECH_SERVE_STUB_PREDICTOR": "maybe"})
+        load_settings({**env, "KSMECH_SERVE_AUTO_INDEX": "maybe"})
     with pytest.raises(ValueError):
         load_settings({**env, "KSMECH_SERVE_WORKERS": "two"})
     with pytest.raises(TypeError):
@@ -734,10 +667,17 @@ def test_qm_featurizer_real_mode_wiring(serve_settings, synthetic_settings, monk
         ]
 
     def fake_build(key, config):
+        from ksmech.qm.bond_index import bond_index_path
+        from ksmech.serve.synthetic import SYNTHETIC_METHOD
+
         calls["build"] = config
         out = build.tokens_path(config.out_dir, key, 0, config.method)
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(tok_src, out)
+        side = bond_index_path(s.serve_bond_index, key, 0, config.method)  # the Wiberg sidecar
+        side.parent.mkdir(parents=True, exist_ok=True)
+        src = bond_index_path(synthetic_settings.serve_bond_index, "CO", 0, SYNTHETIC_METHOD)
+        shutil.copy(src, side)
         return build.BuildRow(key, "built")
 
     monkeypatch.setattr(batch, "process_molecule", fake_qm)
@@ -853,13 +793,13 @@ def _rewrite_tokens(path):
 @pytest.fixture
 def fresh_settings(serve_settings, synthetic_settings, sn2_state):  # noqa: F811
     """Synthetic settings (stub on) on a new data root holding a copy of the synthetic
-    tokens, QM records and oriented blocks, with the SN2 state saved: these token files may
+    tokens, QM records and Wiberg sidecars, with the SN2 state saved: these token files may
     be rewritten (the session's synthetic root never is)."""
     from ksmech.serve.pools import save_state
 
-    s = serve_settings(chemistry="synthetic", enable_stub_predictor=True)
-    for name in ("tokens", "qm", "oriented"):
-        if (synthetic_settings.serve / name).is_dir():  # no oriented blocks without physics
+    s = serve_settings(chemistry="synthetic")
+    for name in ("tokens", "qm", "bond_index"):
+        if (synthetic_settings.serve / name).is_dir():
             shutil.copytree(synthetic_settings.serve / name, s.serve / name)
     save_state(sn2_state, s)
     return s
@@ -895,57 +835,7 @@ def test_layered_loader_follows_a_rewritten_file(tmp_path, synthetic_settings): 
     assert not loader.has("CCl") and loader("CCl") is None
 
 
-def test_worker_runtime_follows_a_token_rebuild(fresh_settings, sn2_state):  # noqa: F811
-    from ksmech.serve.upstream import oriented_module
-
-    oriented = oriented_module()
-    from ksmech.serve.analysis import analysis_digest, pool_work, t_score
-
-    rt = tasks.runtime(TaskEnv(fresh_settings))
-    sid, payload = sn2_state.state_id, {"state": sn2_state.to_dict(), "predictor": "floor"}
-    work = pool_work(rt, sn2_state)  # rt_cache and sample_cache hold the state
-    scores = t_score(rt, payload)["path"]
-    kernels, digest = rt.kernels, analysis_digest(rt.loader, sn2_state)
-    assert sid in rt.rt_cache and sid in rt.sample_cache
-    rt.drain_events()
-    oriented._BLOCKS["serve-test-sentinel"] = None
-    _rewrite_tokens(rt.loader.path_of("CCl"))
-    r2 = rt.reactant_tokens(sn2_state)
-    assert r2 is not work.rt and sid not in rt.sample_cache
-    ccl = [f.key for f in r2.fragments].index("CCl")
-    assert r2.fragments[ccl].tokens is not work.rt.fragments[ccl].tokens
-    assert rt.reactant_tokens(sn2_state) is r2  # an unchanged digest: the cached object
-    assert [e["code"] for e in rt.drain_events()] == ["ORIENTED_CACHE_WIPED"]
-    assert "serve-test-sentinel" not in oriented._BLOCKS  # the upstream memory was cleared
-    assert rt.kernels is not kernels  # rebuilt on the fresh oriented directory
-    work2 = pool_work(rt, sn2_state)
-    after = analysis_digest(rt.loader, sn2_state)
-    assert after != digest and work2.npz != work.npz and work2.npz.name.endswith(f"-{after}.npz")
-    assert work2.rt is r2 and t_score(rt, payload)["path"] != scores  # keyed by the digest
-
-
-def test_uncleared_upstream_caches_fail_transiently(fresh_settings, sn2_state, monkeypatch):  # noqa: F811
-    from ksmech.serve.analysis import TRANSIENT
-
-    rt = tasks.runtime(TaskEnv(fresh_settings))
-    rt.reactant_tokens(sn2_state)
-    rt.drain_events()
-    _rewrite_tokens(rt.loader.path_of("CCl"))
-    monkeypatch.setattr(tasks, "UPSTREAM_ORIENTED_CACHES", ("_BLOCKS", "_NO_SUCH_CACHE"))
-    for _ in range(2):  # this process keeps refusing until it is recycled
-        with pytest.raises(ServeError) as e:
-            rt.reactant_tokens(sn2_state)
-        err = e.value
-        assert (err.code, err.status) == ("TOKENS_CHANGED", 503) and err.code in TRANSIENT
-        assert err.detail == {"keys": ["CCl"], "uncleared": ["_NO_SUCH_CACHE"]}
-        assert [ev["code"] for ev in rt.drain_events()] == ["ORIENTED_CACHE_WIPED"]
-    monkeypatch.undo()
-    assert rt.reactant_tokens(sn2_state).n_atoms == sn2_state.n_atoms
-    assert [ev["code"] for ev in rt.drain_events()] == ["ORIENTED_CACHE_WIPED"]
-    rt.reactant_tokens(sn2_state)
-    assert rt.drain_events() == []
-
-
+@requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_follows_a_token_rebuild(fresh_settings, sn2_state):  # noqa: F811
     from ksmech.serve.context import build_context
 
@@ -962,37 +852,7 @@ def test_api_context_follows_a_token_rebuild(fresh_settings, sn2_state):  # noqa
     assert an2.path != an1.path and an2.meta["analysis_digest"] != an1.meta["analysis_digest"]
 
 
-def test_api_scores_need_the_current_version(fresh_settings, sn2_state, monkeypatch, caplog):  # noqa: F811
-    from ksmech.serve.analysis import PoolAnalysis
-    from ksmech.serve.context import build_context
-
-    ctx = build_context(fresh_settings)
-    an = ctx.ensure_analysis(sn2_state)
-    version = ctx.registry.info_of("stub").version
-    assert an.meta["predictor_versions"]["stub"] == version
-    n = len(ctx.scheduler.history)
-    assert np.array_equal(ctx.scores(sn2_state, an, "stub"), an.score_stub)
-    assert len(ctx.scheduler.history) == n  # the stored member: no task
-    stale = an.members | {"score_stub": an.score_stub + 1.0}  # what an older model stored
-    old = PoolAnalysis(an.state_id, stale, {"predictor_versions": {"stub": "stub/old"}})
-    assert np.array_equal(ctx.scores(sn2_state, old, "stub"), an.score_stub)
-    assert ctx.scheduler.history[-1][0] == "score"
-    bare = PoolAnalysis(an.state_id, stale, {})  # no recorded versions (an unreadable sidecar)
-    assert np.array_equal(ctx.scores(sn2_state, bare, "stub"), an.score_stub)
-    res = ctx.interactive(
-        "score",
-        {"state": sn2_state.to_dict(), "predictor": "stub"},
-        label="x",
-        timeout_s=60,
-    )
-    assert res["version"] == version
-    drift = res | {"version": "stub/other-worker"}
-    monkeypatch.setattr(ctx, "interactive", lambda *a, **k: drift)
-    with caplog.at_level("WARNING", logger="ksmech.serve.context"):
-        assert np.array_equal(ctx.scores(sn2_state, old, "stub"), an.score_stub)
-    assert "PREDICTOR_VERSION_DRIFT" in caplog.text and "stub/other-worker" in caplog.text
-
-
+@requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_passes_tokens_changed_through(fresh_settings, sn2_state, monkeypatch):  # noqa: F811
     from ksmech.serve import analysis
     from ksmech.serve.context import build_context

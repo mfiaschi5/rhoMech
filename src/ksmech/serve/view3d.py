@@ -1,7 +1,7 @@
 """The 3D view and depiction services (design 6.4 `view3d`), API side.
 
 Services take an `ApiContext` and return `schemas` models (or `str` for cube files). Heavy work
-(cube grids, the contact placement) runs in the worker through `ctx.interactive`, which raises
+(cube grids) runs in the worker through `ctx.interactive`, which raises
 `Pending` while a task runs; the API side only reads the files the worker wrote (and checks
 that every path it reads lies under `data/serve`). Geometry and depictions are computed here:
 RDKit and the token files already in memory.
@@ -12,20 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from ksmech.serve import cubes as cubemod
-from ksmech.serve import depict, geometry, placement, schemas
+from ksmech.serve import depict, geometry, schemas
 from ksmech.serve.analysis import analysis_digest
 from ksmech.serve.context import ApiContext
 from ksmech.serve.contracts import PoolState
 from ksmech.serve.errors import Code, ServeError
 
 CUBE_TIMEOUT_S = 180
-CONTACT_TIMEOUT_S = 300
-WHICH = ("donor", "acceptor")
-CUBE_MODES = ("urls", "inline")
-CONTACT_NOTE = (
-    "the oriented contact placement behind the floor's KS3 (kernels.main, 2.3 Angstrom): the "
-    "donor fragment and the acceptor's placed cap"
-)
 
 
 def _tokens(ctx: ApiContext, state: PoolState):
@@ -106,81 +99,3 @@ def depiction_out(
             rt = None  # a correspondence failure: depict without global sites
     body = depict.pool_depiction(state, rt, set(keep_maps), bool(server_svg))
     return schemas.DepictionOut(**body)
-
-
-def _contact_ids(donor, donor_site, acceptor, acceptor_site) -> tuple[int, int, int, int]:
-    return int(donor), int(donor_site), int(acceptor), int(acceptor_site)
-
-
-def _contact_record(ctx: ApiContext, state_id: str, ids: tuple[int, int, int, int]) -> dict:
-    """The contact JSON the worker wrote (the `contact` task when it is missing). The ids are
-    validated against the analysis first (NOT_AN_ORBITAL_TOKEN, SITE_NOT_A_CENTRE)."""
-    import json
-
-    state = ctx.state(state_id)
-    placement.check_source_version()  # PHYSICS_VERSION_MISMATCH (409) before any work
-    an = ctx.ensure_analysis(state)
-    rt = ctx.reactant_tokens(state)
-    placement.resolve_ids(rt, an, *ids)
-    digest = _digest(ctx, state)
-    path = placement.contact_path(ctx.settings, state.state_id, ids, ctx.physics_fp, digest)
-    if not path.is_file():
-        keys = ("donor", "donor_site", "acceptor", "acceptor_site")
-        payload = {"state": state.to_dict(), **dict(zip(keys, ids, strict=True))}
-        label = f"contact placement {ids[0]}@{ids[1]} -> {ids[2]}@{ids[3]} in {state.pool_key}"
-        res = ctx.interactive("contact", payload, label=label, timeout_s=CONTACT_TIMEOUT_S)
-        path = Path(res["path"])
-    return json.loads(_read_serve_file(ctx, path))
-
-
-def contact_url(state_id: str, ids: tuple[int, int, int, int], which: str) -> str:
-    return f"/api/contact/{state_id}/{ids[0]}/{ids[1]}/{ids[2]}/{ids[3]}/cube/{which}"
-
-
-def contact_out(
-    ctx: ApiContext,
-    state_id: str,
-    donor: int,
-    donor_site: int,
-    acceptor: int,
-    acceptor_site: int,
-    *,
-    cubes: str = "urls",
-) -> schemas.ContactOut:
-    """The oriented placement of (donor, donor_site, acceptor, acceptor_site), verified
-    (`consistent`), with both cube URLs, or both cubes inline with `cubes="inline"`."""
-    if cubes not in CUBE_MODES:
-        raise ServeError(Code.REQUEST_INVALID, f"cubes must be one of {CUBE_MODES}, got {cubes!r}")
-    ids = _contact_ids(donor, donor_site, acceptor, acceptor_site)
-    record = _contact_record(ctx, state_id, ids)
-    notes = [CONTACT_NOTE]
-    if record.get("checks", {}).get(str(Code.ANALYTIC_OVERLAP_DRIFT)):
-        notes.append(f"{Code.ANALYTIC_OVERLAP_DRIFT}: the analytic overlap differs from S")
-    inline = None
-    if cubes == "inline":
-        inline = {w: _read_serve_file(ctx, record["cube_paths"][w]) for w in WHICH}
-    record |= {
-        "cube_urls": {w: contact_url(state_id, ids, w) for w in WHICH},
-        "cubes": inline,
-        "iso_default": float(cubemod.ISO_DEFAULT),
-        "provenance": ctx.provenance(None, notes=notes),
-    }
-    return schemas.ContactOut(**record)
-
-
-def contact_cube_text(
-    ctx: ApiContext,
-    state_id: str,
-    donor: int,
-    donor_site: int,
-    acceptor: int,
-    acceptor_site: int,
-    which: str,
-) -> str:
-    """One cube of the contact view: "donor" (the whole donor LMO) or "acceptor" (the placed,
-    cap-truncated acceptor LMO), both on one grid."""
-    if which not in WHICH:
-        raise ServeError(Code.POOL_NOT_FOUND, f"no contact cube {which!r}", status=404)
-    ids = _contact_ids(donor, donor_site, acceptor, acceptor_site)
-    record = _contact_record(ctx, state_id, ids)
-    return _read_serve_file(ctx, record["cube_paths"][which])

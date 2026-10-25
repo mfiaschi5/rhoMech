@@ -63,7 +63,7 @@ def test_the_sidecar_round_trips_and_goes_stale_with_its_record(sp_record, tmp_p
 
 
 def test_tokens_without_their_sidecar_count_as_missing(token_loader, sp_record, tmp_path):
-    from ksmech.arrows.reactants import TokenCache
+    from ksmech.arrows.reactants import MissingTokens, ReactantTokens, TokenCache
     from ksmech.orbitals.build import tokens_path
     from ksmech.orbitals.tokens import save_tokens
 
@@ -73,9 +73,22 @@ def test_tokens_without_their_sidecar_count_as_missing(token_loader, sp_record, 
         token_loader(rec.smiles), tokens_path(cache.tokens_dir, rec.smiles, 0, cache.method)
     )
     assert cache(rec.smiles) is None and "bond-index" in cache.stale[rec.smiles]
+    assert cache.missing_reason(rec.smiles) == "NO_BOND_INDEX"
+    assert cache.missing_reason("O") == "MISSING_TOKENS"  # never served: no file
+    with pytest.raises(MissingTokens) as exc:
+        ReactantTokens.from_smiles("[CH3:1][Cl:2].[OH2:3]", cache)
+    assert exc.value.reasons == {rec.smiles: "NO_BOND_INDEX", "O": "MISSING_TOKENS"}
+    assert exc.value.reason == "NO_BOND_INDEX"  # what a step with both is counted as
     save_bond_indices(rec, save_record(rec, tmp_path / "rec.npz"), tmp_path / "wbi")
     fresh = TokenCache(tmp_path / "tokens", bond_index_dir=tmp_path / "wbi")
     tokens = fresh(rec.smiles)
     assert tokens is not None and tokens.bond_index == load_bond_indices(
         bond_index_path(tmp_path / "wbi", rec.smiles, 0, rec.method)
     )
+    rec.energy_ha += 1.0  # the record is recomputed: its sidecar is stale, never "missing"
+    save_record(rec, tmp_path / "rec.npz")
+    stale = TokenCache(tmp_path / "tokens", bond_index_dir=tmp_path / "wbi")
+    assert stale(rec.smiles) is None and stale.missing_reason(rec.smiles) == prov.STALE_ARTIFACT
+    with pytest.raises(MissingTokens) as exc:
+        ReactantTokens.from_smiles("[CH3:1][Cl:2].[OH2:3]", stale)
+    assert exc.value.reason == prov.STALE_ARTIFACT

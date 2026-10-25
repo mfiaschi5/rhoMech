@@ -1,5 +1,13 @@
 """The GFN2-xTB valence basis as contracted Gaussians, and analytic two-centre overlaps.
 
+Vendored into serve, bit-identical, from `src/ksmech/physics/gto.py` at commit 46adf6b (with
+its table `physics/data/sto_ng.json`, now `serve/data/sto_ng.json`): main removed the module
+with the contact model (spec v9; the contact code is archived on `archive/stage-b`), and the
+workbench's orbital and density surfaces (`cubes`, `densities`) and the synthetic chemistry
+(`synthetic`) still evaluate AOs and overlaps with it. Only this paragraph differs from the
+original (the table path is relative to the module); `tests/test_serve_gto.py` pins stored
+values and compares the code with the original.
+
 Every shell is tblite's STO-nG expansion of a Slater function:
 
 - the Slater exponent, principal quantum number and number of primitives come from the GFN2

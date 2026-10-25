@@ -6,9 +6,9 @@ Import them with the repo's pattern:
 
 `synthetic_app` is a `TestClient` (lifespan entered) over
 `create_app(synthetic_settings, scheduler=InlineScheduler(TaskEnv(synthetic_settings)),
-jobs_inline=True)`: synthetic EHT chemistry, the stub predictor enabled, every job run inline
+jobs_inline=True)`: synthetic EHT chemistry, every job run inline
 before its POST returns. `fresh_synthetic_settings` is a new data root that holds a copy of the
-synthetic tokens, QM records and oriented blocks, so a test gets an empty curation database and
+synthetic tokens, QM records and Wiberg sidecars, so a test gets an empty curation database and
 job store without rebuilding any token. `NeverScheduler` never finishes a task (202 Pending).
 """
 
@@ -31,7 +31,7 @@ from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
 pytestmark = pytest.mark.serve
 
 SN2_REACTANTS = ["C[O-]", "CCl"]
-SN2_REQUEST = {"reactants_smiles": SN2_REACTANTS, "predictor": "stub", "beam": 2, "max_steps": 1}
+SN2_REQUEST = {"reactants_smiles": SN2_REACTANTS, "predictor": "floor", "beam": 2, "max_steps": 1}
 SN2_TUPLE = {
     "donor_species": "C[O-]",
     "donor_site_element": "O",
@@ -42,8 +42,8 @@ SN2_TUPLE = {
 }
 CH_TUPLE = SN2_TUPLE | {"acceptor_site_element": "H", "acceptor_centre_elements": ["C", "H"]}
 ARROW_KEYS = ("donor", "donor_site", "acceptor", "acceptor_site")
-SPEC_RE = r"^v8\+[0-9a-f]{12};tok\d+;smp\d+;ori\d+;qm\d+$"
-COPIED_DIRS = ("tokens", "qm", "oriented")
+SPEC_RE = r"^v9\+[0-9a-f]{12};tok\d+;smp\d+;qm\d+$"
+COPIED_DIRS = ("tokens", "qm", "bond_index")
 
 
 class NeverScheduler:
@@ -112,7 +112,7 @@ def synthetic_app(synthetic_settings):  # noqa: F811
 
 
 def copy_synthetic_root(src: Path, dst: Path) -> Path:
-    """Copy the synthetic tokens, QM records and oriented blocks of `src` into the data root
+    """Copy the synthetic tokens, QM records and Wiberg sidecars of `src` into the data root
     `dst` (nothing else: no pools, jobs or curation database). Returns `dst`."""
     for name in COPIED_DIRS:
         source = Path(src) / "data" / "serve" / name
@@ -128,7 +128,7 @@ def fresh_synthetic_settings(tmp_path, synthetic_root):  # noqa: F811
     from ksmech.serve.settings import load_settings
 
     root = copy_synthetic_root(synthetic_root, tmp_path / "root")
-    return load_settings({}, data_root=root, chemistry="synthetic", enable_stub_predictor=True)
+    return load_settings({}, data_root=root, chemistry="synthetic")
 
 
 def services(client):

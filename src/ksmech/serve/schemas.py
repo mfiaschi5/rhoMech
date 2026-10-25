@@ -123,9 +123,8 @@ class PendingOut(_Out):
 
 
 class KSParamsOut(_Out):
-    K: float
+    K: float  # Wolfsberg-Helmholz constant of the cross-centre coupling
     eps: float
-    tau: float
 
 
 class CandidateConfigOut(_Out):
@@ -148,7 +147,6 @@ class Provenance(_Out):
     ks_params: KSParamsOut
     temperature: float | None
     candidate_scope: Literal["all", "inter"]
-    contact_distance_ang: float
     candidate_config: CandidateConfigOut
     notes: list[str]
 
@@ -177,7 +175,7 @@ class CapabilityOut(_Out):
 class MetaOut(_Out):
     api_schema: int
     app_version: str
-    spec_label: str  # "v8"
+    spec_label: str  # "v9"
     spec_sha256_12: str | None
     spec_version: str
     artifact_versions: dict[str, int | str]
@@ -186,21 +184,19 @@ class MetaOut(_Out):
     qm_method: str
     token_method: str
     ks_params: KSParamsOut
-    primary_distance_ang: float
-    feature_distances_ang: list[float]
     candidate_config: CandidateConfigOut
     limits: LimitsOut
     worker: WorkerStatusOut
     frontend_built: bool
     dev: bool
     data_root: str
-    capabilities: dict[str, CapabilityOut]  # capabilities.CAPABILITIES (spec v8 port)
+    capabilities: dict[str, CapabilityOut]  # capabilities.CAPABILITIES
 
 
 class PredictorInfoOut(_Out):
     name: str
     label: str
-    kind: Literal["physics_floor", "baseline", "model", "stub"]
+    kind: Literal["floor", "gbdt", "network"]
     available: bool
     code: str | None
     reason: str | None
@@ -210,6 +206,7 @@ class PredictorInfoOut(_Out):
     default_temperature: float
     warnings: list[str]
     description: str
+    scores_are_probabilities: bool  # False: `score` ranks candidates, `logp` is null
     spec_version: str  # the spec version the predictor runs under (brief item 1)
 
 
@@ -256,6 +253,8 @@ class NormalizeOut(_Out):
 
 class PredictIn(NormalizeIn):
     conditions: str | None = Field(None, max_length=500)  # recorded only; no predictor reads it
+    # floor | gbdt | network, or "user": a network of the root alone, built by the user's
+    # steps (POST /jobs/{id}/override) and expansions (POST /jobs/{id}/expand)
     predictor: str = "floor"
     beam: int = Field(5, ge=1, le=10)
     max_steps: int = Field(8, ge=1, le=12)
@@ -275,123 +274,75 @@ class JobCreatedOut(_Out):
     provenance: Provenance | None = None  # prediction and override jobs; None for the others
 
 
-# ---- arrows, edges, nodes
+# ---- reaction matrices, readings, edges, nodes
 
 
-class DominantBriefOut(_Out):
-    """The dominant canonical MO pair (k, m) of G (design §7.5)."""
+class MatrixIO(_In):
+    """A reaction matrix on pool atoms: bond changes [i, j, delta] (i < j) and lone-electron
+    changes [i, delta] (delta +-2)."""
 
-    k_canonical: int
-    m_canonical: int
+    bonds: list[tuple[int, int, int]]
+    lone: list[tuple[int, int]]
+
+
+class AnchorOut(_Out):
+    i: int
+    j: int
+    sign: Literal["form", "break"]
+
+
+class ArrowReadingOut(_Out):
+    """One electron-pair move of the reading of R (serve.reading)."""
+
+    kind: Literal["lone_pair_to_bond", "bond_to_bond", "bond_to_lone_pair"]
+    source: list[int]  # [a] a lone pair on a, or [a, c] the bond whose pair moves
+    target: list[int]  # [a, b] the forming bond (a the donor end), or [k] the receiving atom
+
+
+class CanonicalPairOut(_Out):
+    """The dominant canonical MO pair (k, m) of G(r, s)."""
+
+    k: int  # canonical MO of the donor's molecule
+    m: int  # canonical MO of the acceptor's molecule
+    e_k_ev: float
+    e_m_ev: float
     k_label: str  # "HOMO-1"
     m_label: str  # "LUMO"
-    E_k: float  # eV, canonical energy of k
-    E_m: float  # eV, canonical energy of m
-    term: float  # T[k, m] (1/eV)
-    share: float  # T[k, m] / G
-    index_source: str
-    same_molecule: bool
+    term: float  # 2 p_rk p_sm / (E_k - E_m), 1/eV
+    share: float | None  # term / G
+    index_source: str  # "qm_occupations" | "aufbau" | ...
 
 
-class ArrowPhysicsBrief(_Out):
-    """Inline on every network arrow (the spec §10 serving contract)."""
+class OrbitalReadingOut(_Out):
+    """The orbital reading of a forming bond i-j: the channel (r, s) with the largest term of
+    G_atom[i, j]. donor_diag / acceptor_diag are diagnostic labels, never model inputs."""
 
-    pair_valid: bool
-    reason: str | None
-    ks1: float | None
-    ks2: float | None
-    ks2_form: Literal["difference", "contact", "undefined"]
-    ks3: float
-    G: float
-    beta2: float
-    amplitude_S: float
-    dominant: DominantBriefOut | None  # null only with the CONSISTENCY_FAILED flag
-    contact_distance_ang: float  # 2.30: the oriented placement distance
-    contact_sites: tuple[int, int]
-    clash: bool
-    floor: float
-    floor_rank: int | None
-    n_valid: int
-    frozen_logit: float
-    frozen_weight: float | None
-    tau: float
-    frozen_source: Literal["untrained_kernel", "checkpoint"]
-    flags: list[str]
+    i: int
+    j: int
+    g_atom: float
+    donor_token: int
+    acceptor_token: int
+    g_rs: float
+    term: float
+    donor_diag: str | None
+    acceptor_diag: str | None
+    canonical: CanonicalPairOut | None
 
 
-class SitePairOut(_Out):
-    donor_site: int
-    acceptor_site: int
-    donor_site_map: int
-    acceptor_site_map: int
-    S: float
-    beta: float
-    clash: bool
-    ks3_site: float
-    site_rule_excluded: bool
-    is_contact: bool
-
-
-class ArrowOut(_Out):
-    donor: int
-    donor_site: int
-    acceptor: int
-    acceptor_site: int
-    donor_site_map: int
-    acceptor_site_map: int
-    donor_element: str
-    acceptor_element: str
-    donor_species: str
-    acceptor_species: str
-    electrons: Literal[1, 2] = 2  # 1 reserved for radicals, never emitted
-    source_kind: Literal["lone_pair", "bond", "unknown"]
-    source_partner: int | None  # c of a bond source
-    source_partner_map: int | None
-    sink_partner: int | None  # d of the implied sink heterolysis
-    sink_partner_map: int | None
-    site_source: Literal["contact", "main_centre", "rule", "user"]
-    row: int
-    col: int
-    donor_centres_map: dict[str, float]  # map number -> centre weight
-    acceptor_centres_map: dict[str, float]
-    diagnostic: dict[str, str]  # {"donor_class", "acceptor_class"}: display only
-    physics: ArrowPhysicsBrief | None
-    # user sites that differ from the cell's contact sites: their site-pair row (design 7.4)
-    site_pair: SitePairOut | None = None
-
-
-class DatasetArrowOut(_Out):
-    source_kind: str
-    source_atoms: list[int]  # map numbers
-    sink_kind: str
-    sink_atoms: list[int]
+class StepIssueOut(_Out):
+    code: str
+    message: str
+    atoms: list[int]
 
 
 class AlternativeOut(_Out):
-    arrows: list[ArrowOut]
+    """Another candidate R of the predictor with the same product pool key."""
+
+    matrix: MatrixIO
+    anchor: AnchorOut
     score: float
-    probability: float
+    logp: float | None
     rank: int
-
-
-class EdgeOriginalOut(_Out):
-    edge_id: str
-    target: str
-    target_pool_key: str
-    arrows: list[ArrowOut]
-    score: float | None
-    probability: float | None
-    rank: int | None
-    predictor: str | None
-    predictor_version: str | None
-
-
-class PredictorViewOut(_Out):
-    score: float | None
-    probability: float | None
-    rank: int | None
-    pair_valid: bool
-    reason: str | None
 
 
 class NodeOut(_Out):
@@ -417,34 +368,37 @@ class NodeOut(_Out):
 
 
 class EdgeOut(_Out):
+    """One elementary step. Atom indices are pool atoms of the source state."""
+
     id: str
     source: str
     target: str
     target_pool_key: str
-    kind: Literal["predicted", "corrected"]
+    kind: Literal["predicted", "corrected"]  # "corrected": a user step (predictor "user")
     status: Literal["active", "superseded"]
     source_state_id: str
     product_state_id: str
-    product_smiles: str  # display (unmapped)
     source_mapped_smiles: str
     product_mapped_smiles: str
-    arrows: list[ArrowOut]
-    dataset_arrows: list[DatasetArrowOut] | None
-    pmechdb_code: str | None
-    encoding_base_smiles: str | None  # the Kekulé base the encoding used (StepDoc reactants_mapped)
-    encode_reason: str | None
+    matrix: MatrixIO
+    anchor: AnchorOut | None
+    arrows: list[ArrowReadingOut]
+    readings: list[OrbitalReadingOut]
+    pmechdb_code: str | None  # the reading as a PMechDB arrow code on map numbers
+    score: float | None  # the predictor's score (|G_atom| of the anchor for a user step)
+    logp: float | None  # null unless the predictor gives probabilities
+    weight: float  # log beam weight (0 for a user step)
+    predictor: str
+    predictor_version: str | None
+    rank: int  # 1-based among the predictor's candidates; 0 for a user step
+    product_smiles: list[str]
+    sigma_keys: list[str]
+    formal_charges: list[tuple[int, int]]
     touched_maps: list[int]
-    score: float | None
-    probability: float | None
-    logp: float
-    rank: int | None
     n_alternatives: int
     alternatives: list[AlternativeOut]
-    predictor: str | None
-    predictor_version: str | None
-    original: EdgeOriginalOut | None
+    channel: dict | None  # how the predictor completed R (diagnostic)
     superseded_by: str | None
-    predictor_view: list[PredictorViewOut] | None
     recurrence: bool
     closes_cycle: bool
     cycle_ids: list[str]
@@ -469,8 +423,8 @@ class PathwayOut(_Out):
     rank: int
     node_ids: list[str]
     edge_ids: list[str]
-    logp: float
-    probability: float
+    logp: float  # summed beam weights (a log-probability only with scores_are_probabilities)
+    probability: float | None  # null unless the predictor gives probabilities
     n_steps: int
     n_corrected: int
     ends_with: str
@@ -481,8 +435,8 @@ class PathwayOut(_Out):
 class FailedProposalOut(_Out):
     node: str
     rank: int
-    arrows: list[ArrowOut]
-    probability: float
+    matrix: MatrixIO
+    score: float | None
     code: str
     detail: str
 
@@ -512,6 +466,7 @@ class NetworkOut(_Out):
     params: NetParamsOut
     request: PredictIn
     provenance: Provenance
+    scores_are_probabilities: bool
 
 
 # ---- jobs
@@ -540,34 +495,58 @@ class ProgressOut(_Out):
     updated_at: datetime
 
 
-class ArrowIn(_In):
-    donor: int
-    donor_site: int
-    acceptor: int
-    acceptor_site: int
-
-
 class OverrideIn(_In):
-    edge_id: str | None = None  # exactly one of edge_id / node_id
-    node_id: str | None = None
-    arrows: list[ArrowIn] = Field(min_length=1, max_length=6)  # applied in order
-    allow_invalid: bool = False
-    continue_prediction: bool = True
-    continue_steps: int | None = Field(None, ge=0, le=12)
+    """A user step: R on the pool atoms of `parent_state_id` (a node's state or alias)."""
+
+    parent_state_id: str
+    matrix: MatrixIO
 
 
 class OverrideResultOut(_Out):
-    parent_job_id: str
+    edge: EdgeOut
+    node: NodeOut
+
+
+class ExpandIn(_In):
+    node_id: str
+    steps: int = Field(1, ge=1, le=12)
+    predictor: str | None = None  # default: the network's predictor (floor for a user network)
+    beam: int | None = Field(None, ge=1, le=10)
+
+
+class ExpandResultOut(_Out):
+    network_id: str
     network_revision: int
-    corrected_edge_id: str
-    target_node: str
-    continued_from: str | None
-    issues: list[ErrorBody]
+    node_id: str
+    predictor: str
+    n_nodes: int
+    n_edges: int
+
+
+class StepCheckIn(_In):
+    state_id: str
+    matrix: MatrixIO
+
+
+class StepCheckOut(_Out):
+    ok: bool
+    issues: list[StepIssueOut]
+    product_smiles: list[str]
+    sigma_keys: list[str]
+    formal_charges: list[tuple[int, int]]
+    arrows: list[ArrowReadingOut]
+    readings: list[OrbitalReadingOut]
+    anchor: AnchorOut | None
+    product_state_id: str | None
+    pmechdb_code: str | None
+    # ready: readings from the pool's analysis; pending: the analysis is being computed
+    # (retry); unavailable: the pool cannot be analyzed (no tokens), arrows read without G
+    readings_status: Literal["ready", "pending", "unavailable"]
 
 
 class JobOut(_Out):
     job_id: str
-    kind: Literal["predict", "override", "recheck", "export", "index"]
+    kind: Literal["predict", "override", "expand", "recheck", "export", "index"]
     status: Literal["queued", "running", "done", "failed", "cancelled"]
     created_at: datetime
     started_at: datetime | None
@@ -579,9 +558,9 @@ class JobOut(_Out):
     partial: bool
     unchanged: bool = False
     provenance: Provenance | None
-    result_kind: Literal["network", "override", "export", "recheck", "index"] | None
+    result_kind: Literal["network", "expand", "export", "recheck", "index"] | None
     result: (
-        NetworkOut | OverrideResultOut | ExportReportOut | RecheckReportOut | IndexStatusOut | None
+        NetworkOut | ExpandResultOut | ExportReportOut | RecheckReportOut | IndexStatusOut | None
     )
 
 
@@ -718,179 +697,6 @@ class TokensOut(_Out):
 # ---- candidates and site pairs
 
 
-class OrbitalDescBrief(_Out):
-    occupation: float
-    n_centers: int
-    centres: list[CentreOut]
-    spd0: list[float]
-    cos_a: float
-    cos_b: float
-    overlap_sign: int
-    spectral_set: list[tuple[float, float]]
-
-
-class CandidateOut(_Out):
-    rank: int | None
-    pair_rank: int | None
-    row: int
-    col: int
-    donor: int
-    donor_site: int
-    acceptor: int
-    acceptor_site: int
-    donor_site_map: int
-    acceptor_site_map: int
-    donor_site_element: str
-    acceptor_site_element: str
-    donor_species: str
-    acceptor_species: str
-    acceptor_centre_elements: list[str]  # sorted unique element symbols, e.g. ["C", "Cl"]
-    is_contact_site_pair: bool
-    contact_sites: tuple[int, int]
-    score: float | None
-    probability: float | None
-    ks1: float | None
-    ks2: float | None
-    ks3: float
-    clash: bool
-    donor_desc: OrbitalDescBrief
-    acceptor_desc: OrbitalDescBrief
-    diagnostic: dict[str, str]  # donor_class / acceptor_class (greyed)
-    valid: bool
-    reason: str | None  # PairReason name, or SELF_SITE_PAIR / SCOPE_EXCLUDED
-
-
-class CandidatesOut(_Out):
-    state_id: str
-    predictor: str
-    temperature: float
-    scope: str
-    n_valid_pairs: int
-    n_tuples: int
-    total: int
-    offset: int
-    limit: int
-    candidates: list[CandidateOut]
-    excluded_counts: dict[str, int]
-    provenance: Provenance
-
-
-class SitePairsOut(_Out):
-    state_id: str
-    donor: int
-    acceptor: int
-    G: float
-    site_pairs: list[SitePairOut]
-    note: str
-    provenance: Provenance | None = None
-
-
-# ---- physics panel
-
-
-class DominantPairOut(_Out):
-    k: int
-    m: int
-    k_canonical: int
-    m_canonical: int
-    k_label: str
-    m_label: str
-    index_source: Literal[
-        "qm_occupations", "aufbau", "qm_occupations_unchecked", "aufbau_unchecked"
-    ]
-    donor_species: str
-    acceptor_species: str
-    E_k: float
-    E_m: float
-    gap: float  # E_k - E_m (eV), clamped as in G
-    p_rk: float
-    p_sm: float
-    term: float
-    share: float
-    ks3_part: float
-    same_molecule: bool
-
-
-class FrozenHeadOut(_Out):
-    logit: float
-    weight: float | None
-    tau: float
-    source: Literal["untrained_kernel", "checkpoint"]
-    normalization: str
-
-
-class Ks2DetailOut(_Out):
-    form: Literal["difference", "contact", "undefined"]
-    main_centres: tuple[int, int]
-    q_donor: float
-    q_acceptor: float
-    R_contact: float
-    R_geometric: float | None
-    eps: float
-
-
-class LevelOut(_Out):
-    canonical: int
-    label: str
-    energy: float
-    weight: float | None
-
-
-class EnergyLevelsOut(_Out):
-    donor_species: str
-    acceptor_species: str
-    donor_levels: list[LevelOut]
-    acceptor_levels: list[LevelOut]
-    donor_lmo_energy: float
-    acceptor_lmo_energy: float
-    homo_lumo_gap: float  # E_LUMO(acceptor) - E_HOMO(donor)
-
-
-class PhysicsOut(_Out):
-    state_id: str
-    donor: int
-    donor_site: int
-    acceptor: int
-    acceptor_site: int
-    row: int
-    col: int
-    units: dict[str, str]
-    pair_valid: bool
-    reason: str | None
-    ks1: float
-    ks1_defined: bool
-    ks2: float
-    ks2_defined: bool
-    ks2_detail: Ks2DetailOut
-    ks3: float
-    G: float
-    G_exact: float
-    beta: float
-    beta2: float
-    beta2_by_distance: dict[str, float]
-    amplitude_S: float
-    contact_sites: tuple[int, int]
-    requested_sites_are_contact: bool
-    site_pair: SitePairOut | None
-    contact_distance_ang: float
-    clash: bool
-    floor: float
-    floor_rank: int | None
-    n_valid: int
-    predictor: str
-    score: float | None
-    probability: float | None
-    rank: int | None
-    frozen_head: FrozenHeadOut
-    dominant_pair: DominantPairOut
-    energy_levels: EnergyLevelsOut
-    flags: list[str]
-    provenance: Provenance
-
-
-# ---- geometry, depiction, 3D
-
-
 class AtomXYZOut(_Out):
     global_site: int | None
     record_index: int
@@ -921,6 +727,8 @@ class GeometryOut(_Out):
 
 class DepictAtomOut(_Out):
     depiction_idx: int
+    pool_atom: int  # the atom index of parse_mapped(mapped_smiles): R and the readings use it
+    hidden_h_atoms: list[int]  # pool atoms of the H atoms hidden on this atom
     global_site: int | None
     map: int
     element: str
@@ -934,54 +742,6 @@ class DepictionOut(_Out):
     atoms: list[DepictAtomOut]
     server_svg: str | None
     server_coords: list[tuple[float, float]] | None
-
-
-class LobeOut(_Out):
-    site: int
-    origin: tuple[float, float, float]
-    direction: tuple[float, float, float]
-    tied: list[tuple[float, float, float]]
-    opposite: tuple[float, float, float] | None
-
-
-class CapOut(_Out):
-    atoms: list[AtomXYZOut]
-    bonds: list[tuple[int, int, int]]
-    molblock: str
-    local_ids: list[int]
-
-
-class ContactOut(_Out):
-    state_id: str
-    donor: int
-    donor_site: int
-    acceptor: int
-    acceptor_site: int
-    same_fragment: bool
-    is_contact_argmax: bool
-    donor_fragment: SpeciesGeometryOut
-    cap: CapOut
-    acceptor_context: CapOut | None
-    donor_lobe: LobeOut
-    acceptor_lobe_placed: LobeOut
-    acceptor_lobe_own_frame: LobeOut
-    distance_ang: float
-    clash_limit_ang: float
-    S: float
-    beta: float
-    clash: bool
-    tier: Literal[1, 2]
-    roll_step: int
-    roll_deg: float
-    slots: tuple[int, int]
-    ks3_site: float
-    G: float
-    consistent: bool
-    checks: dict[str, float | bool]
-    cube_urls: dict[str, str]
-    cubes: dict[str, str] | None
-    iso_default: float
-    provenance: Provenance
 
 
 # ---- curation, export, recheck
@@ -1055,11 +815,7 @@ class MechanismPatchIn(_In):
     order_groups: list[int] | None = None
 
 
-class ExportIn(_In):
-    statuses: list[Literal["validated", "corrected"]] = ["validated", "corrected"]
-
-
-class ExportReportOut(_Out):
+class ExportReportOut(_Out):  # the spec-v3 export jobs, readable on disk only
     export_id: str
     created_at: datetime
     spec_version: str
@@ -1141,6 +897,13 @@ class SearchOut(_Out):
     truncated: bool
     index: IndexStatusOut
     results: list[StepSummaryOut]
+
+
+class DatasetArrowOut(_Out):
+    source_kind: str
+    source_atoms: list[int]  # map numbers
+    sink_kind: str
+    sink_atoms: list[int]
 
 
 class StepViewOut(_Out):

@@ -18,6 +18,7 @@ global atom index), then orbital tokens fragment by fragment in each file's own 
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -29,7 +30,7 @@ from rdkit import Chem, rdBase
 
 from ksmech.data import chem
 from ksmech.data import provenance as prov
-from ksmech.data.provenance import StaleArtifact
+from ksmech.data.provenance import STALE_ARTIFACT, StaleArtifact
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR, tokens_path
 from ksmech.orbitals.tokens import (
     CandidateConfig,
@@ -42,6 +43,8 @@ from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, bond_index_path, load_b
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.xtb_calc import QMConfig
 
+log = logging.getLogger(__name__)
+
 _IDX = "_ksmech_frag_idx"
 _MAX_MATCHES = 256
 
@@ -52,12 +55,30 @@ class CorrespondenceError(ValueError):
     """The drawn fragment cannot be matched onto its token record."""
 
 
-class MissingTokens(LookupError):
-    """At least one reactant fragment has no token file (yet)."""
+MISSING_TOKENS = "MISSING_TOKENS"  # no token file (yet)
+NO_BOND_INDEX = "NO_BOND_INDEX"  # a token file without its Wiberg sidecar
+# a step's code when several fragments lack tokens: the first of these that any has
+MISSING_PRECEDENCE = (STALE_ARTIFACT, NO_BOND_INDEX, MISSING_TOKENS)
 
-    def __init__(self, keys: list[str]):
-        super().__init__(f"no tokens for {keys}")
+
+class MissingTokens(LookupError):
+    """At least one reactant fragment has no usable token file. `reasons` gives each key's
+    code as the loader reports it (`TokenCache.missing_reason`): MISSING_TOKENS (no file),
+    STALE_ARTIFACT (a header no longer matches) or NO_BOND_INDEX (no Wiberg sidecar)."""
+
+    def __init__(self, keys: list[str], reasons: dict[str, str] | None = None):
         self.keys = keys
+        self.reasons = {k: (reasons or {}).get(k, MISSING_TOKENS) for k in keys}
+        super().__init__(f"no tokens for {self.reasons}")
+
+    def __reduce__(self):  # picklable across worker processes (`provenance.StaleArtifact`)
+        return type(self), (self.keys, self.reasons)
+
+    @property
+    def reason(self) -> str:
+        """The step's skip code: the first of MISSING_PRECEDENCE among its fragments, so a
+        stale file is never reported as a missing one."""
+        return min(self.reasons.values(), key=MISSING_PRECEDENCE.index)
 
 
 def _heavy_by_canonical_order(frag: Chem.Mol, key: str) -> dict[int, int] | None:
@@ -189,8 +210,9 @@ class TokenCache:
     A file whose provenance header no longer matches (schema, config or its QM record) is
     treated as absent and its reason kept in `stale` (STALE_ARTIFACT), unless `allow_stale`
     (diagnostics only). So is a molecule without its Wiberg bond-index sidecar
-    (`ksmech-qm bond-index`), which is attached to the tokens. Every token file and sidecar
-    served is reported to `provenance.note_input`."""
+    (`ksmech-qm bond-index`, NO_BOND_INDEX), which is attached to the tokens. Both are logged,
+    and `missing_reason` gives the code, which `load_fragments` puts on MissingTokens. Every
+    token file and sidecar served is reported to `provenance.note_input`."""
 
     def __init__(
         self,
@@ -207,12 +229,21 @@ class TokenCache:
         self.conformer_id = conformer_id
         self.maxsize = maxsize
         self.allow_stale = allow_stale
-        self.stale: dict[str, str] = {}
+        self.stale: dict[str, str] = {}  # key -> why its files were not served
+        self._codes: dict[str, str] = {}  # key -> STALE_ARTIFACT or NO_BOND_INDEX
         self._memo: OrderedDict[str, MoleculeTokens | None] = OrderedDict()
 
     def __getstate__(self) -> dict:
         """A copy sent to a worker process starts with nothing in memory."""
-        return {**self.__dict__, "stale": {}, "_memo": OrderedDict()}
+        return {**self.__dict__, "stale": {}, "_codes": {}, "_memo": OrderedDict()}
+
+    def missing_reason(self, key: str) -> str:
+        """Why `key` was served as None: STALE_ARTIFACT, NO_BOND_INDEX or MISSING_TOKENS."""
+        return self._codes.get(key, MISSING_TOKENS)
+
+    def _unusable(self, key: str, code: str, detail: str) -> None:
+        self.stale[key], self._codes[key] = detail, code
+        log.info("%s: %s (%s)", key, code, detail)
 
     def _load(self, key: str) -> MoleculeTokens | None:
         path = tokens_path(self.tokens_dir, key, self.conformer_id, self.method)
@@ -222,14 +253,15 @@ class TokenCache:
             tokens = load_tokens(path, verify=not self.allow_stale)
             side = bond_index_path(self.bond_index_dir, key, self.conformer_id, self.method)
             if not side.exists():
-                self.stale[key] = f"{side}: no bond indices (run `ksmech-qm bond-index`)"
+                detail = f"{side}: no bond indices (run `ksmech-qm bond-index`)"
+                self._unusable(key, NO_BOND_INDEX, detail)
                 return None
             tokens.bond_index = load_bond_indices(side, verify=not self.allow_stale)
             header = prov.read_header(side)
             tokens.bond_index_input = (prov.file_input_name(side), header.content_sha256)
             return tokens
         except StaleArtifact as exc:
-            self.stale[key] = str(exc)
+            self._unusable(key, STALE_ARTIFACT, str(exc))
             return None
 
     def __call__(self, key: str) -> MoleculeTokens | None:
@@ -262,14 +294,16 @@ def _fragment_keys(mol: Chem.Mol) -> list[tuple[tuple[int, ...], Chem.Mol, str |
 
 
 def load_fragments(mol: Chem.Mol, loader: TokenLoader) -> list[FragmentTokens]:
-    """Tokens and atom correspondence of every fragment. Raises MissingTokens."""
+    """Tokens and atom correspondence of every fragment. Raises MissingTokens, with each
+    key's reason when the loader gives one (`TokenCache.missing_reason`)."""
     parts = _fragment_keys(mol)
     found = {key: loader(key) for _, _, key in parts if key is not None}
     missing = sorted(
         {key or "<uncanonicalizable>" for _, _, key in parts if key is None or found[key] is None}
     )
     if missing:
-        raise MissingTokens(missing)
+        why = getattr(loader, "missing_reason", None)
+        raise MissingTokens(missing, {k: why(k) for k in missing} if why else None)
     out = []
     for atoms, frag, key in parts:
         record = prepare_mol(key)
@@ -393,23 +427,26 @@ class ReactantTokens:
 
     @cached_property
     def donor_ok(self) -> np.ndarray:
-        """(n_orbitals,) the donor candidate mask: doubly occupied, not fractional."""
-        c, occ = self.candidate, self._occupations
-        frac = np.array([c.is_fractional(x) for x in occ], dtype=bool)
-        return self.occupied & (occ > c.full) & ~frac
+        """(n_orbitals,) the donor candidate mask (`MoleculeTokens.donor_candidates`): doubly
+        occupied, not fractional."""
+        return self._candidates(lambda t: t.donor_candidates(self.candidate))
 
     @cached_property
     def acceptor_ok(self) -> np.ndarray:
-        """(n_orbitals,) the acceptor candidate mask before the donor-partner exclusion:
-        empty, not fractional, not d-type unless `allow_d_acceptors`."""
-        c, occ = self.candidate, self._occupations
-        frac = np.array([c.is_fractional(x) for x in occ], dtype=bool)
-        ok = ~self.occupied & (occ < c.empty) & ~frac
-        return ok if c.allow_d_acceptors else ok & ~self.d_type
+        """(n_orbitals,) the acceptor candidate mask before the donor-partner exclusion
+        (`MoleculeTokens.acceptor_candidates` without a donor): empty, not fractional, not
+        d-type unless `allow_d_acceptors`."""
+        return self._candidates(lambda t: t.acceptor_candidates(self.candidate))
 
-    @cached_property
-    def _occupations(self) -> np.ndarray:
-        return np.array([o.descriptors.occupation for o in self.orbitals], dtype=float)
+    def _candidates(self, pick: Callable[[MoleculeTokens], list[OrbitalToken]]) -> np.ndarray:
+        """(n_orbitals,) True for the tokens `pick` chooses in each fragment's tokens: the
+        candidate rule lives in `MoleculeTokens` only, and `physics.pairs.valid_pairs` reads
+        the same methods."""
+        chosen = [{id(o) for o in pick(f.tokens)} for f in self.fragments]
+        return np.array(
+            [id(o) in chosen[k] for k, f in enumerate(self.fragments) for o in f.tokens.orbitals],
+            dtype=bool,
+        )
 
     @cached_property
     def atom_positions(self) -> np.ndarray:

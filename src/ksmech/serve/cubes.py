@@ -1,20 +1,17 @@
 """Orbital cubes: a localized orbital on a grid around its cap, as a Gaussian cube (adapter A15).
 
-- **Grid** (`grid_around`): the token's cap atoms (`oriented.cap_atoms`: its centres and their
+- **Grid** (`grid_around`): the token's cap atoms (`cap_atoms`: its centres and their
   bonded neighbours) +- `padding`, at `spacing` (default 0.2 / 4.0 Angstrom), so the box stays
   local to the LMO; `n_i = ceil((hi_i - lo_i) / spacing) + 1`. More than 4,000,000 points is
   `CUBE_TOO_LARGE` (422).
 - **Values**: `gto.ao_values(Z, xyz, points) @ coeff_vector` over every AO of the fragment, in
   chunks of 20,000 points: the LMO exactly, in bohr^-3/2. The Pipek-Mezey phase is arbitrary.
-- **Placed acceptor** (contact view): the cap-truncated LMO, which is exactly what the oriented
-  kernel evaluated, moved rigidly; it is evaluated at the back-transformed points
-  `x_orig = rot^T (X - shift) + anchor`, exact for a rigid motion.
 - **Cube file**: bohr throughout; two comment lines, the atom count and origin, three diagonal
   axis lines, one `Z Z.0 x y z` line per atom, then the values in %13.5E, six per line, x
   outermost and z innermost, a line break after each z column.
 
 Cube files are cached under `data/serve/cubes/<sha>.cube`, keyed by the state, the token, the
-oriented fingerprint (the basis code and the token schema), the fragments' token digest, the
+token fingerprint (the basis code and the token schema), the fragments' token digest, the
 spacing, the padding and `CUBE_VERSION`. Upstream modules are imported inside the functions, so
 the API side can import the path helpers.
 """
@@ -24,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,8 +32,7 @@ from ksmech.serve.contracts import PoolState, Runtime
 from ksmech.serve.errors import Code, ServeError
 
 if TYPE_CHECKING:
-    from ksmech.orbitals.tokens import MoleculeTokens
-    from ksmech.serve.placement import Placement
+    from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
     from ksmech.serve.settings import ServeSettings
 
 CUBE_VERSION = 1
@@ -130,7 +126,7 @@ def fragment_arrays(t: MoleculeTokens) -> tuple[np.ndarray, np.ndarray]:
 
 def lmo_values_at(t: MoleculeTokens, k: int, points_ang: np.ndarray) -> np.ndarray:
     """The whole LMO `t.orbitals[k]` at the points (bohr^-3/2), every AO of the fragment."""
-    from ksmech.physics.gto import ao_values
+    from ksmech.serve.gto import ao_values
 
     z, xyz = fragment_arrays(t)
     return ao_values(z, xyz, points_ang) @ t.orbitals[k].coeff_vector
@@ -139,31 +135,6 @@ def lmo_values_at(t: MoleculeTokens, k: int, points_ang: np.ndarray) -> np.ndarr
 def lmo_values(t: MoleculeTokens, k: int, g: Grid) -> np.ndarray:
     """`lmo_values_at` on every grid point, in chunks of `CHUNK_POINTS`."""
     return on_grid(g, lambda pts: lmo_values_at(t, k, pts))
-
-
-def cap_coefficients(t: MoleculeTokens, k: int, atoms: Sequence[int]) -> np.ndarray:
-    """The LMO's coefficients on the AOs of `atoms` (in that order, each atom's AOs in tblite
-    order): the cap truncation of `oriented._Side.cap`."""
-    c = np.asarray(t.orbitals[k].coeff_vector, dtype=float)
-    return np.concatenate([c[np.flatnonzero(t.ao_atom == a)] for a in atoms])
-
-
-def placed_cap_values_at(t_G: MoleculeTokens, s: int, pl: Placement, points_ang) -> np.ndarray:
-    """The placed, cap-truncated acceptor LMO at points of the donor frame: the original LMO
-    at the back-transformed points `rot^T (X - shift) + anchor` (Angstrom)."""
-    from ksmech.physics.gto import ao_values
-
-    b = bohr_ang()
-    z, xyz = fragment_arrays(t_G)
-    atoms = np.asarray(pl.cap_atoms, dtype=int)
-    X = np.asarray(points_ang, dtype=float).reshape(-1, 3)
-    x_orig = (X - pl.shift_bohr * b) @ pl.rot + pl.anchor_bohr * b  # rows: rot^T (X - shift)
-    return ao_values(z[atoms], xyz[atoms], x_orig) @ cap_coefficients(t_G, s, atoms)
-
-
-def placed_cap_values(t_G: MoleculeTokens, s: int, pl: Placement, g: Grid) -> np.ndarray:
-    """`placed_cap_values_at` on every grid point, in chunks of `CHUNK_POINTS`."""
-    return on_grid(g, lambda pts: placed_cap_values_at(t_G, s, pl, pts))
 
 
 def _one_line(text: str) -> str:
@@ -203,9 +174,9 @@ def cube_path(
     s: ServeSettings, state_id: str, token: int, spacing: float, padding: float, digest: str
 ) -> Path:
     """`data/serve/cubes/<sha>.cube` of one orbital cube."""
-    from ksmech.serve.versions import oriented_fingerprint
+    from ksmech.serve.versions import token_fingerprint
 
-    key = ["orbital", state_id, int(token), oriented_fingerprint(), digest]
+    key = ["orbital", state_id, int(token), token_fingerprint(), digest]
     key += [float(spacing), float(padding), CUBE_VERSION]
     sha = hashlib.sha256(json.dumps(key).encode()).hexdigest()[:32]
     return s.cubes / f"{sha}.cube"
@@ -214,9 +185,6 @@ def cube_path(
 def orbital_cube(t: MoleculeTokens, k: int, spacing: float, padding: float, header: str) -> str:
     """The cube text of LMO k of one fragment on the grid around its cap."""
     from ksmech.orbitals.tokens import OrbitalKind
-    from ksmech.serve.upstream import oriented_module
-
-    cap_atoms = oriented_module().cap_atoms
 
     o = t.orbitals[k]
     z, xyz = fragment_arrays(t)
@@ -224,6 +192,21 @@ def orbital_cube(t: MoleculeTokens, k: int, spacing: float, padding: float, head
     kind = "occ" if o.kind == OrbitalKind.OCCUPIED else "virt"
     first = f"{header} kind={kind} E_r={float(o.energy_ev):.6f}"
     return write_cube(g, z, xyz, lmo_values(t, k, g), (first, UNITS_COMMENT))
+
+
+def cap_atoms(o: OrbitalToken, t: MoleculeTokens) -> np.ndarray:
+    """The token's local cap: its centre atoms and their first bonded neighbours (hydrogens
+    included), sorted. Vendored from `physics/contact/legacy_fixed23.cap_atoms` (46adf6b; the
+    module is archived on `archive/stage-b`), with its `bonded_neighbours`
+    (`tokens.bonded_matrix`: within 1.3x the covalent-radii sum)."""
+    from ksmech.orbitals.tokens import bonded_matrix
+
+    centres = {int(a) for a in o.descriptors.all_center_atoms}
+    bonded = bonded_matrix(t)
+    cap = set(centres)
+    for a in centres:
+        cap.update(int(n) for n in np.flatnonzero(bonded[a]))
+    return np.array(sorted(cap))
 
 
 def worker_tokens(rt: Runtime, state: PoolState):

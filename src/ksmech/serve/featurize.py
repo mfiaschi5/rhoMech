@@ -253,7 +253,9 @@ class QMFeaturizer(_Base):
         self.allow_compute = bool(allow_compute)
         dirs = [settings.shared_tokens, settings.serve_tokens]
         roots = [settings.shared_root, None]  # shared files name their QM inputs from there
-        super().__init__(settings, KeyedMethodLoader(dirs, self.method, roots=roots))
+        bonds = [settings.shared_bond_index, settings.serve_bond_index]
+        loader = KeyedMethodLoader(dirs, self.method, roots=roots, bond_dirs=bonds)
+        super().__init__(settings, loader)
 
     def ensure(self, key: str) -> FeaturizeResult:
         t0 = time.perf_counter()
@@ -317,7 +319,28 @@ class QMFeaturizer(_Base):
             return self._fail(key, t0, Code.TOKENS_FAILED, f"{row.status}: {row.detail}", qm=qm)
         status = FeaturizeStatus.BUILT if row.status == "built" else FeaturizeStatus.CACHED
         tokens = build.tokens_path(s.serve_tokens, key, 0, method)
+        failed = self._bond_sidecar(key, qm, method)
+        if failed is not None:
+            return self._fail(key, t0, Code.TOKENS_FAILED, failed, "NO_BOND_INDEX", qm=qm)
         return _result(key, status, t0, tokens=tokens, qm=qm, warn=warnings)
+
+    def _bond_sidecar(self, key: str, qm: Path, method: str) -> str | None:
+        """Write the Wiberg sidecar of a serve-built record (real mode: the record was just
+        computed, so `load_record` may probe tblite); the reason when it cannot."""
+        from ksmech.qm.bond_index import bond_index_path, save_bond_indices
+        from ksmech.qm.records import load_record
+
+        s = self.settings
+        if bond_index_path(s.serve_bond_index, key, 0, method).is_file():
+            return None
+        if not self.allow_compute:
+            return f"no Wiberg sidecar for {key} (cached mode never computes one)"
+        try:
+            assert_writable(s.serve_bond_index, s)
+            save_bond_indices(load_record(qm), qm, s.serve_bond_index)
+        except Exception as exc:  # noqa: BLE001 - reported with its reason code
+            return f"Wiberg sidecar of {key}: {type(exc).__name__}: {exc}"
+        return None
 
 
 class SyntheticFeaturizer(_Base):
@@ -326,7 +349,10 @@ class SyntheticFeaturizer(_Base):
     def __init__(self, settings: ServeSettings) -> None:
         self.mode = "synthetic"
         self.method = SYNTHETIC_METHOD
-        super().__init__(settings, LayeredTokenLoader([settings.serve_tokens], SYNTHETIC_METHOD))
+        loader = LayeredTokenLoader(
+            [settings.serve_tokens], SYNTHETIC_METHOD, bond_dirs=[settings.serve_bond_index]
+        )
+        super().__init__(settings, loader)
 
     def ensure(self, key: str) -> FeaturizeResult:
         t0 = time.perf_counter()
@@ -347,6 +373,7 @@ class SyntheticFeaturizer(_Base):
         from ksmech.data import provenance as prov
         from ksmech.orbitals.build import tokens_path
         from ksmech.orbitals.tokens import build_molecule_tokens, save_tokens, token_config
+        from ksmech.qm.bond_index import save_bond_indices
         from ksmech.qm.records import cache_path, save_record
         from ksmech.serve.synthetic import eht_record
 
@@ -357,6 +384,7 @@ class SyntheticFeaturizer(_Base):
         for path in (qm, out):
             assert_writable(path, s)
         save_record(rec, qm)
+        save_bond_indices(rec, qm, s.serve_bond_index)  # the Wiberg sidecar the pair features need
         # stamped as `orbitals.build` does: the QM record as input, the default token config
         save_tokens(build_molecule_tokens(rec), out, prov.file_input(qm), token_config())
         return qm, out, rec.warnings

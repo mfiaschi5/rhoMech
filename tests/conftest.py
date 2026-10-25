@@ -106,41 +106,6 @@ def sp_record():
 
 
 @pytest.fixture(scope="session")
-def contact_tables(sp_record):
-    """Contact tables from a few small molecules at force-field geometries: enough to exercise
-    every backoff level. The real table is built from the token cache."""
-    from ksmech.orbitals.tokens import build_molecule_tokens
-    from ksmech.physics.contact_table import tables_from_tokens
-
-    smiles = ["CCO", "CC(=O)C", "CCCl", "OCCCCCl", "CC(=O)OC", "C=CC=O", "CCN", "CC#N", "CCCC"]
-    return tables_from_tokens([build_molecule_tokens(sp_record(s)) for s in smiles], min_count=3)
-
-
-@pytest.fixture(scope="session")
-def contact_kernel():
-    """The default (oriented) contact kernel, without a disk cache."""
-    from ksmech.physics.contact_kernel import ContactKernel
-
-    return ContactKernel()
-
-
-@pytest.fixture(scope="session")
-def pair_kernels():
-    """The oriented kernel at every pair-feature distance, without a disk cache."""
-    from ksmech.physics.pairs import oriented_kernels
-
-    return oriented_kernels()
-
-
-@pytest.fixture(scope="session")
-def table_kernel(contact_tables):
-    """The vdW-contact table kernel over the fixture tables (an ablation baseline)."""
-    from ksmech.physics.contact_kernel import ContactConfig, ContactKernel
-
-    return ContactKernel(contact_tables, ContactConfig(kernel="table"))
-
-
-@pytest.fixture(scope="session")
 def token_loader(sp_record):
     """token_loader(key) -> MoleculeTokens from a gas-phase single point at the force-field
     geometry (`sp_record`), memoized: a fast stand-in for the token cache in arrow tests."""

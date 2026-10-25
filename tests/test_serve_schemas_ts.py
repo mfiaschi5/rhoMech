@@ -33,7 +33,7 @@ def test_ts_models_cover_every_model_of_the_module():
     }
     public = {n for n in defined if not n.startswith("_")}
     assert {m.__name__ for m in schemas.TS_MODELS} == public
-    assert len(public) == 109  # 84: CapabilityOut (spec v8 port); +15: workbench; +6: depict2d;
+    assert len(public) == 98  # spec v9: -20 v3 arrow and contact models, +9 R and readings;
     # +4: point group
 
 
@@ -53,11 +53,20 @@ def _interface(name: str) -> dict[str, str]:
 
 
 def test_typescript_mapping():
-    arrow = _interface("ArrowOut")
-    assert arrow["electrons"] == "1 | 2"  # enum, and defaulted output fields are required
-    assert arrow["site_source"] == '"contact" | "main_centre" | "rule" | "user"'
-    assert arrow["donor_centres_map"] == "Record<string, number>"
-    assert arrow["physics"] == "ArrowPhysicsBrief | null"
+    edge = _interface("EdgeOut")
+    assert edge["matrix"] == "MatrixIO" and edge["anchor"] == "AnchorOut | null"
+    assert edge["arrows"] == "ArrowReadingOut[]" and edge["readings"] == "OrbitalReadingOut[]"
+    assert edge["logp"] == "number | null" and edge["product_smiles"] == "string[]"
+    assert edge["formal_charges"] == "[number, number][]"
+    assert _interface("MatrixIO") == {
+        "bonds": "[number, number, number][]",
+        "lone": "[number, number][]",
+    }
+    reading = _interface("ArrowReadingOut")
+    assert reading["kind"] == '"lone_pair_to_bond" | "bond_to_bond" | "bond_to_lone_pair"'
+    assert _interface("OrbitalReadingOut")["canonical"] == "CanonicalPairOut | null"
+    assert _interface("StepCheckOut")["readings_status"] == '"ready" | "pending" | "unavailable"'
+    assert _interface("PredictorInfoOut")["kind"] == '"floor" | "gbdt" | "network"'
     assert _interface("PendingOut")["status"] == '"pending"'
     assert _interface("OrbitalDiagnosticOut")["diagnostic"] == "true"
     assert _interface("OrbitalModelInputOut")["spectral_set"] == "[number, number][]"
@@ -70,15 +79,15 @@ def test_typescript_mapping():
     )
     job = _interface("JobOut")
     assert job["result"] == " | ".join(
-        ["NetworkOut", "OverrideResultOut", "ExportReportOut", "RecheckReportOut"]
+        ["NetworkOut", "ExpandResultOut", "ExportReportOut", "RecheckReportOut"]
         + ["IndexStatusOut", "null"]
     )
     assert job["unchanged"] == "boolean"
     predict = _interface("PredictIn")  # request: defaulted fields are optional
     assert predict["reactants_smiles"] == "string[]"
     assert predict["beam?"] == "number" and predict["candidate_scope?"] == '"all" | "inter"'
-    assert _interface("ExportIn")["statuses?"] == '("validated" | "corrected")[]'
     assert _interface("NetworkOut")["request"] == "PredictIn"
+    assert _interface("DepictAtomOut")["hidden_h_atoms"] == "number[]"
 
 
 def test_write_typescript(tmp_path):
@@ -87,60 +96,23 @@ def test_write_typescript(tmp_path):
     assert TYPES_GEN.parts[-4:] == ("ui", "src", "api", "types.gen.ts")
 
 
-def _brief(**kw) -> schemas.ArrowPhysicsBrief:
-    base = dict(
-        pair_valid=True,
-        reason=None,
-        ks1=None,
-        ks2=0.1,
-        ks2_form="contact",
-        ks3=-0.5,
-        G=0.2,
-        beta2=1.0,
-        amplitude_S=0.1,
-        dominant=None,
-        contact_distance_ang=2.3,
-        contact_sites=(1, 5),
-        clash=False,
-        floor=0.4,
-        floor_rank=1,
-        n_valid=10,
-        frozen_logit=0.3,
-        frozen_weight=0.5,
-        tau=1.0,
-        frozen_source="untrained_kernel",
-        flags=[],
-    )
-    return schemas.ArrowPhysicsBrief(**{**base, **kw})
-
-
 def test_nan_and_inf_serialize_as_null():
-    b = _brief(ks3=math.nan, G=math.inf, frozen_weight=-math.inf, ks2=math.nan)
-    for dumped in (json.loads(b.model_dump_json()), b.model_dump(mode="json")):
-        assert dumped["ks3"] is None and dumped["G"] is None
-        assert dumped["frozen_weight"] is None and dumped["ks2"] is None
-        assert dumped["contact_distance_ang"] == 2.3
-    assert math.isnan(b.model_dump()["ks3"])  # python mode keeps the float
-    levels = schemas.EnergyLevelsOut(
-        donor_species="C[O-]",
-        acceptor_species="CCl",
-        donor_levels=[schemas.LevelOut(canonical=0, label="HOMO", energy=math.nan, weight=None)],
-        acceptor_levels=[],
-        donor_lmo_energy=-9.0,
-        acceptor_lmo_energy=math.inf,
-        homo_lumo_gap=1.0,
-    )
-    text = levels.model_dump_json()
-    assert "NaN" not in text and "Infinity" not in text
-    assert json.loads(text)["donor_levels"][0]["energy"] is None
-    assert levels.model_dump(mode="json")["acceptor_lmo_energy"] is None
+    r = schemas.OrbitalReadingOut(
+        i=0, j=1, g_atom=math.nan, donor_token=3, acceptor_token=4, g_rs=math.inf,
+        term=-math.inf, donor_diag=None, acceptor_diag=None, canonical=None,
+    )  # fmt: skip
+    for dumped in (json.loads(r.model_dump_json()), r.model_dump(mode="json")):
+        assert dumped["g_atom"] is None and dumped["g_rs"] is None and dumped["term"] is None
+        assert dumped["donor_token"] == 3
+    assert math.isnan(r.model_dump()["g_atom"])  # python mode keeps the float
 
 
 def test_nan_inside_dicts_tuples_and_lists():
-    sitepair = schemas.SitePairsOut(
-        state_id="s" + "0" * 20, donor=3, acceptor=4, G=math.nan, site_pairs=[], note=""
-    )
-    assert json.loads(sitepair.model_dump_json())["G"] is None
+    canonical = schemas.CanonicalPairOut(
+        k=1, m=2, e_k_ev=math.nan, e_m_ev=1.0, k_label="HOMO", m_label="LUMO", term=0.1,
+        share=None, index_source="aufbau",
+    )  # fmt: skip
+    assert json.loads(canonical.model_dump_json())["e_k_ev"] is None
     phys = {"ks3": math.nan, "levels": [1.0, math.inf]}
     step = schemas.CuratedStepOut(
         step_index=0,
@@ -190,11 +162,12 @@ def test_input_models_are_the_request_bodies():
     assert names == {
         "NormalizeIn",
         "PredictIn",
-        "ArrowIn",
+        "MatrixIO",
         "OverrideIn",
+        "ExpandIn",
+        "StepCheckIn",
         "CurateIn",
         "MechanismPatchIn",
-        "ExportIn",
         "RecheckIn",
         "RecheckOneIn",
         "MoleculeIn",
@@ -213,7 +186,7 @@ def test_predict_in_defaults_and_bounds():
     with pytest.raises(ValidationError):
         schemas.PredictIn(reactants_smiles=["C"] * 7)
     with pytest.raises(ValidationError):
-        schemas.OverrideIn(edge_id="e0123456789abcdef", arrows=[])
+        schemas.OverrideIn(parent_state_id="s" + "0" * 20, matrix={"bonds": []})
 
 
 def test_output_models_ignore_unknown_fields_and_keep_defaults():
@@ -221,6 +194,4 @@ def test_output_models_ignore_unknown_fields_and_keep_defaults():
         job_id="j0123456789abcdef", kind="predict", status="queued", status_url="/api/jobs/x", x=1
     )
     assert job.parent_job_id is None and "x" not in job.model_dump()
-    arrow_fields = schemas.ArrowOut.model_fields
-    assert arrow_fields["electrons"].default == 2
     assert schemas.PendingOut.model_fields["status"].default == "pending"

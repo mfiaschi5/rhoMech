@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from ksmech.serve.contracts import Limits
-from ksmech.serve.versions import oriented_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +43,7 @@ class ServeSettings:
     repo_root: Path  # Path(ksmech.__file__).resolve().parents[2]
     chemistry: str = "real"  # real | cached | synthetic (KSMECH_SERVE_CHEMISTRY)
     workers: int = 1  # KSMECH_SERVE_WORKERS, clamped [1, 2]
-    gbdt_path: Path | None = None  # KSMECH_SERVE_GBDT; default processed/pmechdb/baseline_...
-    enable_stub_predictor: bool = False  # KSMECH_SERVE_STUB_PREDICTOR=1
+    gbdt_path: Path | None = None  # KSMECH_SERVE_GBDT; default <shared>/data/processed/pmechdb/...
     shared_cache_root: Path | None = None  # KSMECH_SHARED_CACHE_ROOT; default data_root
     auto_index: bool = False  # KSMECH_SERVE_AUTO_INDEX=1 or --index-on-start
     interactive_wait_s: float = 15.0
@@ -73,6 +71,10 @@ class ServeSettings:
         return self.shared_root / "data" / "cache" / "tokens"
 
     @property
+    def shared_bond_index(self) -> Path:
+        return self.shared_root / "data" / "cache" / "bond_index"
+
+    @property
     def processed(self) -> Path:
         return self.data_root / "data" / "processed"
 
@@ -90,17 +92,12 @@ class ServeSettings:
         return self.serve / "tokens"
 
     @property
-    def oriented_dir(self) -> Path:
-        """Oriented-block cache, namespaced by the oriented fingerprint (never data/cache)."""
-        return self.serve / "oriented" / oriented_fingerprint()
+    def serve_bond_index(self) -> Path:
+        return self.serve / "bond_index"
 
     @property
     def pools(self) -> Path:
         return self.serve / "pools"
-
-    @property
-    def contact(self) -> Path:
-        return self.serve / "contact"
 
     @property
     def cubes(self) -> Path:
@@ -158,7 +155,8 @@ class ServeSettings:
 
     @property
     def gbdt_file(self) -> Path:
-        return self.gbdt_path or self.processed / "pmechdb" / "baseline_gbdt_random.npz"
+        default = "pmechdb/gbdt_lgbm_molecule_geomfree.npz"  # `ksmech-physics gbdt` writes it
+        return self.gbdt_path or self.shared_root / "data" / "processed" / default
 
     @property
     def dist(self) -> Path:
@@ -202,7 +200,6 @@ _ENV = {
     "KSMECH_SERVE_CHEMISTRY": ("chemistry", str),
     "KSMECH_SERVE_WORKERS": ("workers", int),
     "KSMECH_SERVE_GBDT": ("gbdt_path", Path),
-    "KSMECH_SERVE_STUB_PREDICTOR": ("enable_stub_predictor", bool),
     "KSMECH_SHARED_CACHE_ROOT": ("shared_cache_root", Path),
     "KSMECH_SERVE_AUTO_INDEX": ("auto_index", bool),
     "KSMECH_SERVE_DIST": ("frontend_dist", Path),
@@ -230,7 +227,7 @@ def _from_env(env: Mapping[str, str]) -> dict[str, Any]:
 
 def load_settings(env: Mapping[str, str] = os.environ, **overrides: Any) -> ServeSettings:
     """Settings from the environment variables above, then keyword overrides (tests call
-    `load_settings({}, data_root=tmp, chemistry="synthetic", enable_stub_predictor=True)`);
+    `load_settings({}, data_root=tmp, chemistry="synthetic")`);
     every path resolved to an absolute path."""
     known = {f.name for f in fields(ServeSettings)}
     unknown = set(overrides) - known

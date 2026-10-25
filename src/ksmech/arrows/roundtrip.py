@@ -31,6 +31,7 @@ from ksmech.arrows.reactants import (
 )
 from ksmech.data import chem
 from ksmech.data.schema import ElementaryStep
+from ksmech.processes import chunked, in_processes
 
 N_EXAMPLES = 3
 CHUNK = 64  # consecutive steps per task of a parallel alignment pass
@@ -168,8 +169,8 @@ def _align_pass(steps: list[ElementaryStep], loader: TokenLoader, member_check: 
     for step in steps:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
-        except MissingTokens:
-            out.skipped["MISSING_TOKENS"] += 1
+        except MissingTokens as exc:
+            out.skipped[exc.reason] += 1
             continue
         except CorrespondenceError:
             out.skipped["CORRESPONDENCE"] += 1
@@ -189,22 +190,6 @@ def _align_task(task: tuple) -> _AlignPass:
     return _align_pass(*task)
 
 
-def _parallel_align_pass(steps, loader, member_check: bool, n_workers: int) -> _AlignPass:
-    """`_align_pass` over chunks of `CHUNK` consecutive steps in `n_workers` spawned processes
-    (one BLAS thread each); each task gets its own copy of `loader`, which must pickle (a
-    `TokenCache` does, and its copy starts empty)."""
-    from multiprocessing import get_context
-
-    from ksmech.orbitals.build import single_threaded_children
-
-    tasks = [(steps[k : k + CHUNK], loader, member_check) for k in range(0, len(steps), CHUNK)]
-    out = _AlignPass()
-    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
-        for part in pool.imap(_align_task, tasks):
-            out += part
-    return out
-
-
 def evaluate_alignment(
     steps: Iterable[ElementaryStep],
     loader: TokenLoader,
@@ -214,12 +199,13 @@ def evaluate_alignment(
     """One pass over `steps`: align every step whose reactants are tokenized, apply the
     labeled tuples of every completely aligned step from their sites, and (optionally) swap
     in every other set member. Returns the alignment report with a `predicted` section, the
-    same for any `n_workers` (spawned processes; `loader` must then pickle)."""
-    steps = list(steps)
-    if n_workers > 1:
-        acc = _parallel_align_pass(steps, loader, member_check, n_workers)
-    else:
-        acc = _align_pass(steps, loader, member_check)
+    same for any `n_workers`: chunks of `CHUNK` consecutive steps, in spawned processes when
+    `n_workers` > 1 (`processes.in_processes`; `loader` must then pickle, and a `TokenCache`
+    copy starts empty)."""
+    tasks = [(chunk, loader, member_check) for chunk in chunked(list(steps), CHUNK)]
+    acc = _AlignPass()
+    for part in in_processes(_align_task, tasks, n_workers):
+        acc += part
     members = acc.members
     out = alignment_report(acc.alignments, acc.skipped)
     out["predicted"] = summarize(acc.predicted)

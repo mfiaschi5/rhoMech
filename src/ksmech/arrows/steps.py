@@ -7,17 +7,14 @@ products' sigma key. The target is the reaction matrix (spec v8): the step's edi
 with its anchors on the token atoms (`arrows.delta_be`), with the reactant's Lewis structure on
 the same atoms (bonds, lone pairs, Wiberg indices: `arrows.lewis`). The `ArrowLabel`s, the
 orbital reading of the arrows, are kept where every arrow aligns; `orbital_reading` says
-whether they do. It also stores the pair-track features z_rs of
-every (occupied r, virtual s) pair, computed at K = eps = 1 (`physics.params.REDUCED`;
-`params.to_params` applies other values), their `defined` mask, the sign of G (bookkeeping: the
-logs drop it), the validity filter, and the symmetric atom-atom Coulomb matrix (also at eps =
-1). `pair_features` names the columns: the geometry-free stage-A features
-(`physics.stage_a.STAGE_A_FEATURES`) in the sample store, or the legacy contact features
-(`physics.pairs.PAIR_FEATURES`, with the contact amplitude's argmax sites) when a sample is
-built with contact kernels (textbook cases, tests) or joined with the legacy contact sidecar
-(`arrows.contacts`, for the physics floor and the GBDT). The full
-`MoleculeTokens` (coefficients, S, F) are not copied into every sample: `fragment_keys` names
-the token files, and `MechanismSample.tokens(loader)` reloads them.
+whether they do. It also stores the geometry-free pair-track features z_rs of every (occupied r,
+virtual s) pair (`physics.stage_a.STAGE_A_FEATURES`, named by `pair_features`), computed at
+K = eps = 1 (`physics.params.REDUCED`; `params.to_params` applies other values), their
+`defined` mask, the sign of G (bookkeeping), and the validity filter. Two fields are kept only
+so the schema-15 store stays readable and leave at the next schema bump: `pair_contact_sites`
+(always -1) and the symmetric atom-atom Coulomb matrix `atom_coulomb` (at eps = 1); neither is
+a model input. The full `MoleculeTokens` (coefficients, S, F) are not copied into every sample:
+`fragment_keys` names the token files, and `MechanismSample.tokens(loader)` reloads them.
 
 A step becomes a sample when every reactant fragment has tokens and the step has an edit
 label that is a valid edit of its reactant (`lewis.check_edit`); every other step is skipped with
@@ -29,7 +26,8 @@ donor-acceptor pair) is a sample without ArrowLabels.
 `split = "<strategy>_<part>"`: strategy `molecule` (the default), `scaffold`, `loco-<class>`
 (leave one mechanism class out) or, only when named, `random_leaky` (per step), part `train`,
 `val` or `test`.
-`collate_samples` pads a batch and builds the masks the model needs.
+`arrows.batches.collate_samples` pads a batch and builds the masks the model needs; it lives
+apart so that this module does not import torch.
 """
 
 from __future__ import annotations
@@ -39,20 +37,18 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
 
 import numpy as np
-import torch
 from rich.console import Console
 
 from ksmech.arrows import store
 from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
 from ksmech.arrows.apply_predicted import PredictedArrow, leaving_labels, with_leaving
-from ksmech.arrows.delta_be import EditLabel, EditSkip, edit_label, to_global
-from ksmech.arrows.lewis import MissingBondIndex, check_edit, graph_distances, reactant_lewis
+from ksmech.arrows.delta_be import EditLabel, EditSkip, class_shape, edit_label, to_global
+from ksmech.arrows.lewis import MissingBondIndex, check_edit, reactant_lewis
 from ksmech.arrows.reactants import (
     CorrespondenceError,
     MissingTokens,
@@ -66,17 +62,10 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_di
 from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import MoleculeTokens
-from ksmech.physics.pairs import (
-    PAIR_FEATURES,
-    PairKernels,
-    PairStats,
-    atom_coulomb_matrix,
-    fit_pair_stats,
-    pair_block,
-    valid_pairs,
-)
+from ksmech.physics.pairs import PairStats, atom_coulomb_matrix, fit_pair_stats, valid_pairs
 from ksmech.physics.params import REDUCED, KSParams, to_params
 from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
@@ -90,13 +79,14 @@ DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
 
 class SkipReason(StrEnum):
     MISSING_TOKENS = "MISSING_TOKENS"  # a reactant fragment has no token file (yet)
+    STALE_ARTIFACT = "STALE_ARTIFACT"  # a fragment's token file or sidecar no longer matches
     CORRESPONDENCE = "CORRESPONDENCE"  # drawn fragment cannot be matched onto its record
     EDIT_FAILED = "EDIT_FAILED"  # the edit-label codes (`delta_be.EditSkip`), passed through
     PRODUCT_MISMATCH = "PRODUCT_MISMATCH"
     RESONANCE_STEP = "RESONANCE_STEP"
     NO_ANCHOR = "NO_ANCHOR"
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
-    NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond has no Wiberg index
+    NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
 
 
@@ -127,10 +117,9 @@ class MechanismSample:
     pair_defined: np.ndarray  # (n_occ, n_virt, F) bool
     pair_gap_sign: np.ndarray  # (n_occ, n_virt) int8 sign of G (bookkeeping, not a feature)
     pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair
-    pair_contact_sites: np.ndarray  # (n_occ, n_virt, 2) int64 global atoms of the contact
-    #   amplitude's argmax (donor site, acceptor site), oriented kernel; -1 for other kernels
-    #   and for stage-A samples
-    atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric
+    pair_contact_sites: np.ndarray  # (n_occ, n_virt, 2) int64, always -1 (schema 15 only)
+    atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric (schema
+    #   15 only, no model input)
     labels: list[ArrowLabel] = field(default_factory=list)  # empty unless `orbital_reading`
     #   is READING_ALIGNED
     product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
@@ -143,8 +132,8 @@ class MechanismSample:
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
     label_filter: dict[str, int] = field(default_factory=dict)  # labeled (donor, acceptor)
     #   cells that pair_valid rejects, by group (`_filter_group`); never dropped silently
-    inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file and
-    #   contact block this sample was built from (`file:<path>` -> content sha256)
+    inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file this
+    #   sample was built from (`file:<path>` -> content sha256)
     pair_features: tuple[str, ...] = STAGE_A_FEATURES  # the columns of pair_z / pair_defined
 
     @property
@@ -158,27 +147,6 @@ class MechanismSample:
     def tokens(self, loader: TokenLoader) -> list[MoleculeTokens]:
         """The full token objects of every fragment, in fragment order."""
         return [loader(key) for key in self.fragment_keys]
-
-    def to_dict(self) -> dict:
-        out = {}
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if isinstance(value, np.ndarray):
-                value = torch.from_numpy(np.ascontiguousarray(value))
-            elif f.name == "labels":
-                value = [lab.to_dict() for lab in value]
-            elif f.name == "edit_label" and value is not None:
-                value = value.to_dict()
-            out[f.name] = value
-        return out
-
-    @classmethod
-    def from_dict(cls, d: dict) -> MechanismSample:
-        kw = {k: v.numpy() if isinstance(v, torch.Tensor) else v for k, v in d.items()}
-        kw["labels"] = [ArrowLabel.from_dict(x) for x in d["labels"]]
-        if kw.get("edit_label") is not None:
-            kw["edit_label"] = EditLabel.from_dict(kw["edit_label"])
-        return cls(**kw)
 
 
 def _incidence(rt: ReactantTokens) -> np.ndarray:
@@ -197,27 +165,20 @@ def make_sample(
     step: ElementaryStep,
     rt: ReactantTokens,
     labels: list[ArrowLabel],
-    kernels: PairKernels | None = None,
 ) -> MechanismSample:
     """The sample of a step with these ArrowLabels (the product key and pair features are
     computed here)."""
-    sample = reactant_sample(step.step_id, str(step.source), rt, kernels)
+    sample = reactant_sample(step.step_id, str(step.source), rt)
     sample.labels = labels
     sample.product_key = sigma_key(chem.parse_mapped(step.products_smiles))
     return sample
 
 
-def reactant_sample(
-    step_id: str, source: str, rt: ReactantTokens, kernels: PairKernels | None = None
-) -> MechanismSample:
+def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
-    hand-built reactant sets, e.g. the textbook selectivity checks). Pair features: stage A,
-    or the legacy contact features with `kernels`."""
+    hand-built reactant sets, e.g. the textbook selectivity checks)."""
     tok = [f.tokens for f in rt.fragments]
-    if kernels is None:
-        block, names = stage_a_block(tok, REDUCED), STAGE_A_FEATURES
-    else:
-        block, names = pair_block(tok, kernels, REDUCED), PAIR_FEATURES
+    block = stage_a_block(tok, REDUCED)
     return MechanismSample(
         step_id=step_id,
         source=source,
@@ -243,7 +204,7 @@ def reactant_sample(
         pair_contact_sites=block.sites,
         atom_coulomb=atom_coulomb_matrix(tok, REDUCED).astype(np.float32),
         fermi_smeared=any(t.fermi_smeared for t in tok),
-        pair_features=names,
+        pair_features=STAGE_A_FEATURES,
     )
 
 
@@ -342,23 +303,22 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
         sample.labels, sample.orbital_reading = labels, READING_ALIGNED
 
 
-def sample_for_step(
-    step: ElementaryStep, loader: TokenLoader, kernels: PairKernels | None = None
-) -> MechanismSample | SkipReason:
+def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
     """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
     the edit label, and the ArrowLabels when every arrow aligns (`orbital_reading`)."""
     with prov.collecting() as used:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
-        except MissingTokens:
-            return SkipReason.MISSING_TOKENS
+        except MissingTokens as exc:
+            log.info("%s: %s", step.step_id, exc)
+            return SkipReason(exc.reason)
         except CorrespondenceError:
             return SkipReason.CORRESPONDENCE
         target = edit_target(step, rt)
         if isinstance(target, SkipReason):
             return target
         alignment = align_step(step, rt)
-        sample = make_sample(step, rt, alignment.labels if alignment.complete else [], kernels)
+        sample = make_sample(step, rt, alignment.labels if alignment.complete else [])
     sample.edit_label, sample.bonds, sample.lone_pairs, sample.wiberg = target
     _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))
@@ -366,12 +326,12 @@ def sample_for_step(
 
 
 def build_step_samples(
-    steps: Iterable[ElementaryStep], loader: TokenLoader, kernels: PairKernels | None = None
+    steps: Iterable[ElementaryStep], loader: TokenLoader
 ) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
     """Samples of every step that has one, and the skip reason of every other step."""
     samples, skipped = {}, {}
     for step in steps:
-        out = sample_for_step(step, loader, kernels)
+        out = sample_for_step(step, loader)
         if isinstance(out, MechanismSample):
             samples[step.step_id] = out
         else:
@@ -383,33 +343,25 @@ CHUNK = 32  # steps per task of the parallel build
 
 
 def _chunk_worker(task: tuple) -> tuple[dict, dict]:
-    steps, loader, kernels = task
-    return build_step_samples(steps, loader, kernels)
+    steps, loader = task
+    return build_step_samples(steps, loader)
 
 
 def build_step_samples_parallel(
     steps: list[ElementaryStep],
     loader: TokenLoader,
-    kernels: PairKernels | None = None,
     n_workers: int = 1,
 ) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
-    """`build_step_samples` over `n_workers` spawned processes (one BLAS thread each), in
-    chunks of consecutive steps. Each process keeps its own token and block memory; block files
-    are written atomically, so two processes computing one block cannot corrupt it."""
-    if n_workers <= 1:
-        return build_step_samples(steps, loader, kernels)
-    from multiprocessing import get_context
-
-    from ksmech.orbitals.build import single_threaded_children
-
-    tasks = [(steps[k : k + CHUNK], loader, kernels) for k in range(0, len(steps), CHUNK)]
+    """`build_step_samples` in chunks of `CHUNK` consecutive steps, over `n_workers` spawned
+    processes when above 1 (`processes.in_processes`). Each process keeps its own token
+    memory."""
+    tasks = [(chunk, loader) for chunk in chunked(steps, CHUNK)]
     samples, skipped = {}, {}
-    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
-        for done, (s, k) in enumerate(pool.imap_unordered(_chunk_worker, tasks), 1):
-            samples.update(s)
-            skipped.update(k)
-            if done % 20 == 0 or done == len(tasks):
-                log.info("samples: %d / %d chunks, %d samples", done, len(tasks), len(samples))
+    for done, (s, k) in enumerate(in_processes(_chunk_worker, tasks, n_workers), 1):
+        samples.update(s)
+        skipped.update(k)
+        if done % 20 == 0 or done == len(tasks):
+            log.info("samples: %d / %d chunks, %d samples", done, len(tasks), len(samples))
     return samples, skipped
 
 
@@ -474,16 +426,12 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
     anchor kinds, orbital readings, ArrowLabels and filtered ArrowLabels."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
-    sizes = Counter(min(len(s.edit_label.variants), 4) for s in kept if s.edit_label)
     return {
         "split": split,
         "n_steps": len(ids),
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
-        "class_size": {("4+" if k == 4 else str(k)): v for k, v in sorted(sizes.items())},
-        "anchor_kind": dict(
-            Counter(s.edit_label.anchors[0][0][2] for s in kept if s.edit_label).most_common()
-        ),
+        **class_shape([s.edit_label for s in kept if s.edit_label]),
         "orbital_reading": dict(Counter(s.orbital_reading for s in kept).most_common()),
         "n_labels": sum(len(s.labels) for s in kept),
         "n_labels_filtered": sum(
@@ -513,12 +461,11 @@ def build_all_samples(
     n_workers: int = 1,
 ) -> dict:
     """Build every step's sample once into the store, then one split file per strategy and one
-    view per split. A strategy that cannot run on the source is reported, not raised. Pair
-    features: stage A (the legacy contact features go to `arrows.contacts`)."""
+    view per split. A strategy that cannot run on the source is reported, not raised."""
     console = console or Console()
     parquet = steps_path(source, processed_dir)
     steps = read_training_steps(parquet)
-    samples, skipped = build_step_samples_parallel(steps, loader or TokenCache(), None, n_workers)
+    samples, skipped = build_step_samples_parallel(steps, loader or TokenCache(), n_workers)
     out_dir = source_dir(source, processed_dir)
     index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION)
     every = split_report("all", sorted(samples), samples, {})
@@ -548,7 +495,7 @@ def build_all_samples(
             if split.endswith("_train"):
                 train = [samples[i] for i in members if i in samples]
                 stats_path = pair_stats_path(source, split[: -len("_train")], processed_dir)
-                stats_path.write_text(pair_stats(train).to_json() + "\n")
+                write_pair_stats(stats_path, pair_stats(train), view, index)
     return report
 
 
@@ -559,21 +506,60 @@ def pair_stats_path(source: str, name: str, processed_dir: Path = DEFAULT_PROCES
 
 
 def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -> PairStats:
-    """Statistics of the defined pair features of `samples` at the physical K and eps."""
+    """Statistics of the pair features of `samples` at the physical K and eps, over what a
+    loaded sample holds: the defined entries of the valid cells (`pair_valid`; the store keeps
+    no others), with the values rounded to float16 as stored. The statistics of samples just
+    built therefore equal those refitted from the store."""
     params = params or KSParams()
     names = samples[0].pair_features if samples else STAGE_A_FEATURES
     if any(s.pair_features != names for s in samples):
         raise ValueError("pair statistics over samples with different pair features")
-    blocks = ((to_params(s.pair_z, params, names), s.pair_defined) for s in samples)
+    blocks = (
+        (
+            to_params(s.pair_z.astype(np.float16), params, names),
+            s.pair_defined & s.pair_valid[..., None],
+        )
+        for s in samples
+    )
     return fit_pair_stats(blocks, names)
+
+
+def write_pair_stats(path: Path, stats: PairStats, view: Path, index: Path) -> Path:
+    """The statistics with a provenance header: the training view and the store index they were
+    fitted on are its inputs, the physical K and eps and the features its configuration."""
+    params = KSParams()
+    config = {
+        "sample_version": SAMPLE_VERSION,
+        "pair_features": list(stats.names),
+        "cells": "valid",
+        "params": {"K": params.K, "eps": params.eps},
+    }
+    body = {"features": stats.to_dict()}
+    header = prov.stamp(
+        "pair_stats",
+        SAMPLE_VERSION,
+        {**prov.file_input(view), **prov.file_input(index)},
+        config,
+        prov.sha256_text(json.dumps(body, sort_keys=True)),
+    )
+    return prov.write_json(path, body, header)
+
+
+def load_pair_stats(path: Path, allow_stale: bool = False) -> PairStats:
+    """The statistics of `pair_feature_stats_<strategy>.json`, verified like the samples (its
+    training view and the store index unchanged, built from a clean tree); StaleArtifact
+    otherwise, unless `allow_stale` (diagnostics)."""
+    prov.verify_clean(path, "pair_stats", SAMPLE_VERSION, allow_stale=allow_stale)
+    d = json.loads(Path(path).read_text())["features"]
+    return PairStats.from_dict(d, tuple(d))
 
 
 def load_samples(
     path: Path, allow_stale: bool = False, ids: Iterable[str] | None = None
 ) -> list[MechanismSample]:
     """The samples of one split view (`samples_<split>.json`), only `ids` when given. The view,
-    the store index and every shard read are verified first (parquet, split file, token files,
-    contact blocks); StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs
+    the store index and every shard read are verified first (parquet, split file, token
+    files); StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs
     only: the mismatch is logged and the store is read anyway."""
     return store.load_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids)
 
@@ -589,199 +575,3 @@ def iter_samples(
     """As `load_samples`, one shard at a time (shard order), for callers that reduce each
     sample and drop it."""
     return store.iter_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids)
-
-
-class SampleDataset(torch.utils.data.Dataset):
-    def __init__(self, path: Path):
-        self.samples = load_samples(path)
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, i: int) -> MechanismSample:
-        return self.samples[i]
-
-
-def _pad(arrays: list[np.ndarray], length: int, fill=0) -> torch.Tensor:
-    """Stack arrays along a new batch axis, padding axis 0 to `length` with `fill`."""
-    out = np.full((len(arrays), length, *arrays[0].shape[1:]), fill, dtype=arrays[0].dtype)
-    for i, a in enumerate(arrays):
-        out[i, : len(a)] = a
-    return torch.from_numpy(out)
-
-
-def _token_masks(batch: list[MechanismSample], n_atoms: int, n_orb: int) -> dict:
-    """Per-token masks in the batch layout: atoms at [0, A), orbitals at [A, A + O)."""
-    b, n = len(batch), n_atoms + n_orb
-    m = {
-        k: torch.zeros(b, n, dtype=torch.bool)
-        for k in (
-            "token_mask",
-            "is_atom",
-            "is_orbital",
-            "occupied",
-            "virtual",
-            "donor_mask",
-            "acceptor_mask",
-        )
-    }
-    fragment = torch.full((b, n), -1, dtype=torch.long)
-    for i, s in enumerate(batch):
-        na, no = s.n_atoms, s.n_orbitals
-        orb = slice(n_atoms, n_atoms + no)
-        occ = torch.from_numpy(s.orbital_occupied)
-        m["token_mask"][i, :na] = m["token_mask"][i, orb] = True
-        m["is_atom"][i, :na] = True
-        m["is_orbital"][i, orb] = True
-        m["occupied"][i, orb], m["virtual"][i, orb] = occ, ~occ
-        m["donor_mask"][i, orb] = torch.from_numpy(s.donor_mask)
-        m["acceptor_mask"][i, orb] = torch.from_numpy(s.acceptor_mask)
-        fragment[i, :na] = torch.from_numpy(s.atom_fragment)
-        fragment[i, orb] = torch.from_numpy(s.orbital_fragment)
-    real = m["token_mask"]
-    m["fragment"] = fragment
-    m["same_fragment"] = (
-        (fragment[:, :, None] == fragment[:, None, :]) & real[:, :, None] & real[:, None, :]
-    )
-    return m
-
-
-def _incidence_matrix(batch: list[MechanismSample], n_atoms: int, n_orb: int) -> torch.Tensor:
-    """(B, N, A) token-to-centre weights: an orbital row holds w_a over its centres, an atom
-    row is one-hot on itself (the site pointer's support)."""
-    out = torch.zeros(len(batch), n_atoms + n_orb, n_atoms)
-    for i, s in enumerate(batch):
-        idx = torch.arange(s.n_atoms)
-        out[i, idx, idx] = 1.0
-        if len(s.incidence):
-            j = torch.from_numpy(s.incidence[:, 0]).long() + n_atoms
-            g = torch.from_numpy(s.incidence[:, 1]).long()
-            out[i, j, g] = torch.from_numpy(s.incidence[:, 2])
-    return out
-
-
-def _label_tensors(batch: list[MechanismSample], n_atoms: int, n_orb: int) -> dict:
-    """Multi-hot donor / acceptor sets over batch token positions and the site atoms."""
-    b, n = len(batch), n_atoms + n_orb
-    k = max(1, max(len(s.labels) for s in batch))
-    out = {
-        "donor_sets": torch.zeros(b, k, n, dtype=torch.bool),
-        "acceptor_sets": torch.zeros(b, k, n, dtype=torch.bool),
-        "donor_site": torch.full((b, k), -1, dtype=torch.long),
-        "acceptor_site": torch.full((b, k), -1, dtype=torch.long),
-        "label_mask": torch.zeros(b, k, dtype=torch.bool),
-    }
-    for i, s in enumerate(batch):
-
-        def pos(t: int, s=s) -> int:
-            return t if t < s.n_atoms else n_atoms + t - s.n_atoms
-
-        for j, lab in enumerate(s.labels):
-            out["donor_sets"][i, j, [pos(t) for t in lab.donor_ids]] = True
-            out["acceptor_sets"][i, j, [pos(t) for t in lab.acceptor_ids]] = True
-            out["donor_site"][i, j] = lab.donor_site
-            out["acceptor_site"][i, j] = lab.acceptor_site
-            out["label_mask"][i, j] = True
-    return out
-
-
-def _reactant_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
-    """The reactant's Lewis structure on the padded atoms (bond orders, Wiberg indices, graph
-    distances, -1 between molecules and on padding, lone pairs) and the decoder's masks: a bond
-    may break, a pair of distinct atoms may gain an order while it stays at most 3, an atom
-    with a lone pair may lose one (spec v8, Edit decoder)."""
-    b = len(batch)
-    order = torch.zeros(b, n_atoms, n_atoms, dtype=torch.int8)
-    wiberg = torch.zeros(b, n_atoms, n_atoms)
-    dist = torch.full((b, n_atoms, n_atoms), -1, dtype=torch.int16)
-    lone = torch.zeros(b, n_atoms, dtype=torch.int8)
-    real = torch.zeros(b, n_atoms, dtype=torch.bool)
-    for k, s in enumerate(batch):
-        i, j = (torch.from_numpy(s.bonds[:, c].astype(np.int64)) for c in (0, 1))
-        order[k, i, j] = order[k, j, i] = torch.from_numpy(s.bonds[:, 2].astype(np.int8))
-        wiberg[k, i, j] = wiberg[k, j, i] = torch.from_numpy(s.wiberg.astype(np.float32))
-        na = s.n_atoms
-        dist[k, :na, :na] = torch.from_numpy(graph_distances(s.bonds, na))
-        lone[k, :na] = torch.from_numpy(s.lone_pairs)
-        real[k, :na] = True
-    pair = real[:, :, None] & real[:, None, :] & ~torch.eye(n_atoms, dtype=torch.bool)
-    return {
-        "bond_order": order,
-        "wiberg": wiberg,
-        "graph_distance": dist,
-        "lone_pairs": lone,
-        "can_break": order > 0,
-        "can_form": pair & (order < 3),
-        "can_lose_pair": lone > 0,
-    }
-
-
-ANCHOR_SIDE = {"form": 0, "break": 1}  # the last axis of `r_anchors`
-
-
-def _edit_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
-    """The reaction-matrix targets on the padded atoms, one slot per variant of the label
-    class: the pair entries (-1, 0, +1, symmetric), the atom entries (-2, 0, +2) and the
-    admissible anchors (last axis ANCHOR_SIDE); `variant_mask` marks the real slots."""
-    b = len(batch)
-    v = max([1] + [len(s.edit_label.variants) for s in batch if s.edit_label is not None])
-    out = {
-        "r_pairs": torch.zeros(b, v, n_atoms, n_atoms, dtype=torch.int8),
-        "r_atoms": torch.zeros(b, v, n_atoms, dtype=torch.int8),
-        "r_anchors": torch.zeros(b, v, n_atoms, n_atoms, 2, dtype=torch.bool),
-        "variant_mask": torch.zeros(b, v, dtype=torch.bool),
-    }
-    for k, s in enumerate(batch):
-        if s.edit_label is None:
-            continue
-        slots = zip(s.edit_label.variants, s.edit_label.anchors, strict=True)
-        for x, (variant, anchors) in enumerate(slots):
-            for i, j, d in variant.bonds:
-                out["r_pairs"][k, x, i, j] = out["r_pairs"][k, x, j, i] = d
-            for i, d in variant.lone:
-                out["r_atoms"][k, x, i] = d
-            for i, j, kind in anchors:
-                c = ANCHOR_SIDE[kind]
-                out["r_anchors"][k, x, i, j, c] = out["r_anchors"][k, x, j, i, c] = True
-            out["variant_mask"][k, x] = True
-    return out
-
-
-def collate_samples(batch: list[MechanismSample]) -> dict:
-    """Pad a batch. Token positions: atoms at [0, A), orbitals at [A, A + O), where A and O
-    are the largest atom and orbital counts in the batch; sites index atoms directly. The
-    reaction-matrix targets and the reactant's structure are on the atoms (`_edit_tensors`,
-    `_reactant_tensors`); the ArrowLabel tensors are empty for samples without them."""
-    n_atoms = max(s.n_atoms for s in batch)
-    n_orb = max(s.n_orbitals for s in batch)
-    out = {
-        "step_id": [s.step_id for s in batch],
-        "product_key": [s.product_key for s in batch],
-        "orbital_reading": [s.orbital_reading for s in batch],
-        "atom_categorical": _pad([s.atom_categorical for s in batch], n_atoms),
-        "atom_features": _pad([s.atom_features for s in batch], n_atoms),
-        "atom_missing": _pad([s.atom_missing for s in batch], n_atoms, False),
-        "atom_positions": _pad([s.atom_positions for s in batch], n_atoms),
-        "orbital_features": _pad([s.orbital_features for s in batch], n_orb),
-        "orbital_spectra": _pad([s.orbital_spectra for s in batch], n_orb),
-        "orbital_centroids": _pad([s.orbital_centroids for s in batch], n_orb),
-        "incidence": _incidence_matrix(batch, n_atoms, n_orb),
-    }
-    out.update(_token_masks(batch, n_atoms, n_orb))
-    out.update(_label_tensors(batch, n_atoms, n_orb))
-    out.update(_reactant_tensors(batch, n_atoms))
-    out.update(_edit_tensors(batch, n_atoms))
-    return out
-
-
-def make_loader(
-    path: Path, batch_size: int = 16, shuffle: bool = True, **kwargs: Any
-) -> torch.utils.data.DataLoader:
-    """DataLoader over one samples file with `collate_samples`."""
-    return torch.utils.data.DataLoader(
-        SampleDataset(path),
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=collate_samples,
-        **kwargs,
-    )

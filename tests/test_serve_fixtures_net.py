@@ -181,10 +181,9 @@ def test_toy_chemistries_are_well_formed(toy_cycle, keto_enol):
     assert branching().rules[4].form == "alt"
 
 
-def test_toy_arrow_is_a_complete_arrow_out():
-    from ksmech.serve.schemas import ArrowOut
-    from ksmech.serve.testing import toy_arrow
+def test_toy_step_encodes_the_rule():
+    from ksmech.serve.testing import toy_step
 
-    arrow = ArrowOut.model_validate(toy_arrow(2, rule("x", "A.B", "C", 1.0)))
-    assert arrow.donor == 2 and arrow.site_source == "rule" and arrow.physics is None
-    assert (arrow.donor_species, arrow.acceptor_species) == ("A", "B")
+    step = toy_step(2, rule("x", "A.B", "C", 1.0))
+    assert step["matrix"] == {"bonds": [[0, 1, 3]], "lone": []}
+    assert step["sigma_keys"] == ["C"] and step["anchor"]["sign"] == "form"

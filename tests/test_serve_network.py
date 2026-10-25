@@ -1,7 +1,7 @@
 """network.py on StubChemistry only: beam expansion, merging by pool key, exact edge
-probabilities, the scan stopping rule, the cycle rule on the worked example (anchors P0-P3),
-ranked pathways (including the RECURRENCE pathway [A, B, A]), overrides and byte-equal
-determinism of the JSON form."""
+weights, the cycle rule on the worked example (anchors P0-P3), ranked pathways (including the
+RECURRENCE pathway [A, B, A]), user steps, continuation and byte-equal determinism of the JSON
+form."""
 
 import json
 import math
@@ -9,14 +9,14 @@ import math
 import numpy as np
 import pytest
 
-from ksmech.serve.contracts import ArrowSpec, log_softmax_valid
-from ksmech.serve.errors import ServeError
+from ksmech.serve.contracts import log_softmax_valid
 from ksmech.serve.network import (
     NetHooks,
     NetParams,
     NodeStatus,
-    apply_override,
+    add_user_edge,
     build_network,
+    continue_from,
     network_from_dict,
     network_to_dict,
     rank_pathways,
@@ -166,42 +166,14 @@ def test_marginal_edge_probability(job_ctx):  # noqa: F811
     net = build(chem, [("A", 1)], job_ctx(), beam=3, max_steps=1)
     p = softmax([1.0, 0.5, 0.0])
     ab, ac = edge_between(net, "A", "B"), edge_between(net, "A", "C")
-    assert ab.probability == pytest.approx(p[0] + p[1], rel=1e-15)
-    assert ab.logp == pytest.approx(math.log(p[0] + p[1]), rel=1e-15)
+    assert math.exp(ab.weight) == pytest.approx(p[0] + p[1], rel=1e-15)
+    assert ab.logp == pytest.approx(math.log(p[0]), rel=1e-15)  # the representative's
     assert (ab.score, ab.rank, ab.n_alternatives) == (1.0, 1, 1)
     assert ab.alternatives[0]["rank"] == 2 and ab.alternatives[0]["score"] == 0.5
-    assert ac.probability == pytest.approx(p[2], rel=1e-15) and ac.rank == 3
+    assert math.exp(ac.weight) == pytest.approx(p[2], rel=1e-15) and ac.rank == 3
     root = net.nodes[net.root]
     assert root.scanned_mass == pytest.approx(1.0) and root.unscanned_mass == pytest.approx(0.0)
     assert root.n_valid == 3
-
-
-def test_scan_stops_on_the_strict_bound_only(job_ctx):  # noqa: F811
-    # p = (0.5, 0.25, 0.25) exactly. Beam 1. After r1: U = 0.5 == p_B - p_{B+1} = 0.5, so
-    # the scan goes on; r2 joins the same child: U = 0.25 < 0.75, a strict "bound" stop.
-    chem = StubChemistry(
-        [rule("r1", "A", "X", math.log(2)), rule("r2", "A", "X", 0.0), rule("r3", "A", "Y", 0.0)]
-    )
-    net = build(chem, [("A", 1)], job_ctx(), beam=1, max_steps=1)
-    root = net.nodes[net.root]
-    assert softmax([math.log(2), 0.0, 0.0]).tolist() == [0.5, 0.25, 0.25]
-    assert (root.scanned_mass, root.unscanned_mass) == (0.75, 0.25)
-    assert [n.pool_key for n in net.nodes.values()] == ["A", "X"]  # Y never scanned
-    assert edge_between(net, "A", "X").probability == 0.75
-
-
-def test_scan_keeps_going_at_equality(job_ctx):  # noqa: F811
-    # p = (0.5, 0.25, 0.25) on three different children: U equals p_B - p_{B+1} after each
-    # of the first two proposals (never strictly below), so all three are scanned.
-    chem = StubChemistry(
-        [rule("r1", "A", "X", math.log(2)), rule("r2", "A", "Y", 0.0), rule("r3", "A", "Z", 0.0)]
-    )
-    net = build(chem, [("A", 1)], job_ctx(), beam=1, max_steps=1)
-    root = net.nodes[net.root]
-    assert (root.scanned_mass, root.unscanned_mass) == (1.0, 0.0)
-    # every proposal was scanned, and the beam keeps the best child only
-    assert [n.pool_key for n in net.nodes.values()] == ["A", "X"]
-    assert edge_between(net, "A", "X").probability == 0.5
 
 
 # ---- stop conditions
@@ -299,132 +271,47 @@ def test_pathway_ranking_order(job_ctx):  # noqa: F811
     assert all(len(set(p.node_ids)) == len(p.node_ids) for p in paths)
 
 
-# ---- overrides (4.6)
+# ---- user steps and continuation
 
 
-def override(chem, net, ctx, **req):
-    req.setdefault("allow_invalid", False)
-    return apply_override(chem, net, req, net.params, NetHooks(ctx))
+def user_step(net, node_id, pool_key, n=1):
+    """A user step from `node_id` to the toy pool `pool_key` (the matrix encodes `n`)."""
+    parent = net.nodes[node_id]
+    child = toy_state(_counter(pool_key))
+    step = {"matrix": {"bonds": [[0, 1, n]], "lone": []}, "anchor": None, "score": None}
+    return add_user_edge(net, parent, parent.state, child, step)
 
 
-def arrow(i):
-    return ArrowSpec(i, 0, 0, 1).to_dict()
+def test_user_step_adds_a_corrected_edge_and_a_frontier_node(job_ctx):  # noqa: F811
+    net = build(branching(), [("A", 1)], job_ctx(), beam=2, max_steps=1)
+    e = user_step(net, net.root, "Q")
+    assert e.kind == "corrected" and e.id.startswith("c") and e.predictor == "user"
+    assert (e.weight, e.rank, e.logp) == (0.0, 0, None) and e.path_logp == 0.0
+    q = node_of(net, "Q")
+    assert q.status == NodeStatus.FRONTIER and q.best_logp == 0.0 and q.best_parent_edge == e.id
+    assert user_step(net, net.root, "Q").id == e.id  # idempotent
+    assert len([x for x in net.edges.values() if x.target == q.id]) == 1
+    path = next(p for p in rank_pathways(net) if p.node_ids[-1] == q.id)
+    assert path.logp == 0.0 and path.n_corrected == 1
 
 
-def test_override_records_a_corrected_edge(job_ctx):  # noqa: F811
-    ctx, chem = job_ctx(), branching()
-    net = build(chem, [("A", 1)], ctx, beam=2, max_steps=2)  # G pruned
-    old = edge_between(net, "C", "E")
-    rev = net.revision
-    out = override(chem, net, ctx, edge_id=old.id, arrows=[arrow(5)], continue_steps=1)
-    ce = net.edges[out["corrected_edge_id"]]
-    assert ce.kind == "corrected" and ce.id.startswith("c") and ce.logp == 0.0
-    assert (ce.score, ce.probability, ce.rank) == (None, None, None)
-    assert ce.original["edge_id"] == old.id and ce.original["target"] == old.target
-    assert ce.predictor_view[0]["pair_valid"] and ce.arrows[0]["site_source"] == "user"
-    assert (old.status, old.superseded_by) == ("superseded", ce.id)
-    g = node_of(net, "G")  # merged into the existing PRUNED node, then continued one layer
-    assert ce.target == g.id and out["target_node"] == g.id and out["continued_from"] == g.id
-    assert g.status == NodeStatus.EXPANDED and node_of(net, "H").terminal_reason == "MAX_STEPS"
-    assert out["network_revision"] == net.revision > rev and out["issues"] == []
-    assert all(old.id not in p.edge_ids for p in net.pathways)
-    (corrected,) = [p for p in net.pathways if ce.id in p.edge_ids]
-    assert corrected.n_corrected == 1 and corrected.node_ids[-1] == node_of(net, "H").id
-    assert corrected.logp == pytest.approx(node_of(net, "C").best_logp, abs=1e-15)
+def test_continuation_from_a_user_node(job_ctx):  # noqa: F811
+    chem = branching()
+    net = build(chem, [("A", 1)], job_ctx(), beam=2, max_steps=1)
+    user_step(net, net.root, "B.extra")
+    target = node_of(net, "B.extra")
+    other = ToyPredictorRef.__class__("other", "toy/2", None, 1.0)
+    continue_from(chem, net, target.id, 1, net.params, NetHooks(job_ctx()), other)
+    assert net.predictor == ToyPredictorRef  # restored after the run
+    assert target.status in (NodeStatus.EXPANDED, NodeStatus.TERMINAL)
+    assert ("expand", "B.extra") in chem.calls
 
 
-def test_corrected_edge_contributes_zero_logp(job_ctx):  # noqa: F811
-    ctx, chem = job_ctx(), branching()
-    net = build(chem, [("A", 1)], ctx, beam=2, max_steps=1)
-    out = override(chem, net, ctx, node_id=net.root, arrows=[arrow(7)], continue_steps=1)
-    ce = net.edges[out["corrected_edge_id"]]
-    x = node_of(net, "X")  # a new node (never scanned by the beam)
-    assert ce.original is None and ce.target == x.id and x.depth == 1
-    assert x.best_logp == 0.0 and x.best_parent_edge == ce.id  # P.best_logp + 0
-    assert x.terminal_reason == "NO_CANDIDATES" and out["continued_from"] == x.id
-    (path,) = [p for p in net.pathways if ce.id in p.edge_ids]
-    assert path.logp == 0.0 and path.probability == 1.0 and path.n_corrected == 1
-
-
-def test_override_continuation_targets(job_ctx):  # noqa: F811
-    ctx, chem = job_ctx(), branching()
-    net = build(chem, [("A", 1)], ctx, beam=2, max_steps=2)  # E, F: MAX_STEPS; G: PRUNED
-    out = override(chem, net, ctx, edge_id=edge_between(net, "B", "F").id, arrows=[arrow(2)])
-    e = node_of(net, "E")  # TERMINAL(MAX_STEPS): continued for max(1, 2 - 2) = 1 layer
-    assert out["continued_from"] == e.id and e.terminal_reason == "NO_CANDIDATES"
-    out = override(chem, net, ctx, node_id=net.root, arrows=[arrow(7)], continue_steps=0)
-    assert out["continued_from"] is None and node_of(net, "X").status == NodeStatus.FRONTIER
-    out = override(chem, net, ctx, node_id=net.root, arrows=[arrow(0)], continue_steps=2)
-    assert out["continued_from"] is None  # B was already expanded: never re-expanded
-    old = edge_between(net, "C", "E")
-    out = override(chem, net, ctx, edge_id=old.id, arrows=[arrow(5)], continue_prediction=False)
-    assert out["continued_from"] is None and node_of(net, "G").status == NodeStatus.PRUNED
-    assert chem.calls.count(("expand", "B")) == 1
-
-
-def test_correction_of_a_correction(job_ctx):  # noqa: F811
-    ctx, chem = job_ctx(), branching()
-    net = build(chem, [("A", 1)], ctx, beam=2, max_steps=1)
-    predicted = edge_between(net, "A", "B")
-    out1 = override(chem, net, ctx, edge_id=predicted.id, arrows=[arrow(1)], continue_steps=0)
-    c1 = net.edges[out1["corrected_edge_id"]]
-    out2 = override(chem, net, ctx, edge_id=c1.id, arrows=[arrow(7)], continue_steps=0)
-    c2 = net.edges[out2["corrected_edge_id"]]
-    assert (c1.status, c1.superseded_by) == ("superseded", c2.id)  # the audit trail
-    assert (predicted.status, predicted.superseded_by) == ("superseded", c1.id)
-    # the comparison baseline stays the predictor's step, not the user's first correction
-    assert c2.original["edge_id"] == predicted.id
-    assert c2.original["score"] == predicted.score and c2.original["rank"] == predicted.rank
-    assert c2.original["probability"] == predicted.probability
-    for paths in (net.pathways, rank_pathways(net), rank_pathways(net, include_pruned=True)):
-        assert all(c1.id not in p.edge_ids and predicted.id not in p.edge_ids for p in paths)
-    assert any(c2.id in p.edge_ids for p in net.pathways)
-
-
-def test_override_closing_a_turnover_does_not_continue(toy_cycle, job_ctx):  # noqa: F811
-    ctx = job_ctx()
-    net = build(toy_cycle, CYCLE, ctx, beam=2, max_steps=2)  # CP.S: TERMINAL(MAX_STEPS)
-    cp_s = node_of(net, "CP.S")
-    assert cp_s.terminal_reason == "MAX_STEPS"
-    n_nodes = len(net.nodes)
-    out = override(toy_cycle, net, ctx, node_id=cp_s.id, arrows=[arrow(2)])  # release
-    ce = net.edges[out["corrected_edge_id"]]
-    target = node_of(net, "Cat.P.S")
-    assert ce.closes_cycle and out["target_node"] == target.id
-    assert (target.status, target.terminal_reason) == (NodeStatus.TERMINAL, "TURNOVER")
-    assert out["continued_from"] is None and len(net.nodes) == n_nodes + 1
-    assert "CS.P" not in {n.pool_key for n in net.nodes.values()}
-    assert ("expand", "Cat.P.S") not in toy_cycle.calls
-
-
-def test_override_errors(job_ctx):  # noqa: F811
-    ctx, chem = job_ctx(), branching()
-    net = build(chem, [("A", 1)], ctx, beam=2, max_steps=1)
-    old = edge_between(net, "A", "B")
-    with pytest.raises(ServeError) as e:
-        override(chem, net, ctx, edge_id=old.id, arrows=[arrow(0)])
-    assert e.value.code == "OVERRIDE_NOOP" and e.value.status == 422
-    with pytest.raises(ServeError) as e:
-        override(chem, net, ctx, edge_id="e" + "0" * 16, arrows=[arrow(0)])
-    assert (e.value.code, e.value.status) == ("EDGE_NOT_FOUND", 404)
-    with pytest.raises(ServeError) as e:
-        override(chem, net, ctx, node_id="p" + "0" * 20, arrows=[arrow(0)])
-    assert (e.value.code, e.value.status) == ("NODE_NOT_FOUND", 404)
-    with pytest.raises(ServeError) as e:
-        override(chem, net, ctx, edge_id=old.id, node_id=net.root, arrows=[arrow(0)])
-    assert e.value.code == "REQUEST_INVALID"
-    n_edges, rev = len(net.edges), net.revision
-    with pytest.raises(ServeError) as e:
-        override(chem, net, ctx, edge_id=old.id, arrows=[arrow(2)])  # B -> E: not at A
-    assert e.value.code == "APPLY_FAILED"
-    assert old.status == "active" and (len(net.edges), net.revision) == (n_edges, rev)
-    override(chem, net, ctx, node_id=net.root, arrows=[arrow(1)], continue_prediction=False)
-    with pytest.raises(ServeError) as e:  # the same correction again
-        override(chem, net, ctx, node_id=net.root, arrows=[arrow(1)], continue_prediction=False)
-    assert e.value.code == "OVERRIDE_NOOP"
-
-
-# ---- determinism and the JSON form
+def test_user_step_closing_a_cycle_is_marked(keto_enol, job_ctx):  # noqa: F811
+    net = build(keto_enol, [("K", 1)], job_ctx(), beam=1, max_steps=1)
+    e_node = node_of(net, "E")
+    e = user_step(net, e_node.id, "K")
+    assert e.recurrence and e.cycle_ids
 
 
 def test_byte_equal_determinism_and_round_trip(toy_cycle, job_ctx):  # noqa: F811
@@ -440,7 +327,6 @@ def test_byte_equal_determinism_and_round_trip(toy_cycle, job_ctx):  # noqa: F81
     assert back.params == a.params and back.predictor == ToyPredictorRef
     chem = branching()
     net = build(chem, [("A", 1)], job_ctx(), beam=2, max_steps=2)
-    old = edge_between(net, "C", "E")
-    override(chem, net, job_ctx(), edge_id=old.id, arrows=[arrow(5)], continue_steps=1)
+    user_step(net, node_of(net, "C").id, "Q")
     assert dump(network_from_dict(json.loads(dump(net)))) == dump(net)
     assert "time" not in dump(net)  # no timestamps in the network

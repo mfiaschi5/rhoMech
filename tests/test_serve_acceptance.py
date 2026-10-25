@@ -1,32 +1,23 @@
-"""The brief's acceptance chain over HTTP (design 13.2), on a fresh synthetic data root:
+"""The acceptance chain over HTTP on a fresh synthetic data root (spec v9):
 
-1. predict MeO- + MeCl with the stub, and once with the floor (the SN2 tuple is in
-   /candidates and its physics panel resolves);
-2. validate the predicted SN2 pathway with POST /curate;
-3. override the first root edge to a different acceptor (sigma*(C-H)) with continue_steps=1:
-   the corrected target is no longer unexpanded;
+1. predict MeO- + MeCl with the floor: the SN2 product is an edge with its reaction matrix,
+   arrow reading and orbital readings;
+2. validate the SN2 pathway with POST /curate;
+3. a user step from the root (O takes an H of MeCl) through POST /jobs/{id}/override, then
+   POST /jobs/{id}/expand of its node: the node is expanded;
 4. GET /browse/search?q=COC&source=user_curated&status=validated returns curated:<mid>:0;
-5. POST /curate/export writes steps.parquet holding that step (read back with read_steps);
+5. GET /curate/export/pmechdb downloads that step as a PMechDB record;
 6. a re-check of the mechanism appends a Recheck row and leaves the status alone.
-
-The pathway is validated before the override because the override supersedes the SN2 edge,
-and pathways never run through superseded edges.
 """
 
 from __future__ import annotations
-
-import math
 
 import pytest
 
 from ksmech.serve import schemas as S
 from ksmech.serve.testing import requires
 from tests.test_serve_fixtures_api import (  # noqa: F401 (fixtures)
-    CH_TUPLE,
-    SN2_TUPLE,
     api_client,
-    arrow_of,
-    candidates,
     edge_to,
     fresh_synthetic_settings,
     no_xtb,
@@ -35,7 +26,8 @@ from tests.test_serve_fixtures_api import (  # noqa: F401 (fixtures)
     synthetic_root,
 )
 
-pytestmark = [pytest.mark.serve, requires("predict")]
+pytestmark = [pytest.mark.serve, requires("predict"), requires("correct")]
+SN2 = "[CH3][O][CH3]|0.[Cl]|-1"
 
 
 def _job(client, created: dict) -> dict:
@@ -44,52 +36,46 @@ def _job(client, created: dict) -> dict:
     return job
 
 
-def _floor_check(client) -> None:
-    job = predict(client, predictor="floor")
-    assert job["provenance"]["predictor"] == "floor"
-    sid = root_node(job["result"])["state_id"]
-    rows = candidates(client, sid, predictor="floor", **SN2_TUPLE)
-    assert rows, "the SN2 tuple (O -> sigma*(C-Cl) at sites O, C) is missing from /candidates"
-    r = client.get(f"/api/pool/{sid}/physics", params=arrow_of(rows[0]))
-    assert r.status_code == 200, r.text
-    p = S.PhysicsOut.model_validate(r.json())
-    assert p.pair_valid and math.isfinite(p.ks3) and p.floor_rank is not None
-    assert p.dominant_pair.k_label and math.isfinite(p.dominant_pair.gap)
-
-
 def _validate(client, job: dict) -> int:
     net = job["result"]
-    sn2 = edge_to(net, "COC.[Cl-]")
+    sn2 = edge_to(net, SN2)
+    assert sn2["readings"] and {a["kind"] for a in sn2["arrows"]} == {
+        "lone_pair_to_bond",
+        "bond_to_lone_pair",
+    }
     pathway = next(p for p in net["pathways"] if p["edge_ids"] == [sn2["id"]])
     body = {"job_id": job["job_id"], "pathway_id": pathway["id"], "action": "validate"}
     r = client.post("/api/curate", json=body | {"notes": "acceptance: SN2"})
     assert r.status_code == 201, r.text
     m = S.MechanismOut.model_validate(r.json())
     assert m.status == "validated" and m.n_steps == 1 and not m.stale
-    assert m.steps[0].product_pool_key == "COC.[Cl-]"
-    assert m.steps[0].step["pmechdb_code"] == "2=6;6,7=7"
+    assert m.steps[0].product_pool_key == SN2
+    assert m.steps[0].step["pmechdb_code"] == sn2["pmechdb_code"]
     return m.id
 
 
-def _override(client, job: dict) -> None:
-    net = job["result"]
-    root = root_node(net)
-    first = next(e for e in net["edges"] if e["source"] == root["id"])
-    rows = candidates(client, first["source_state_id"], **CH_TUPLE)
-    assert rows, "no O -> sigma*(C-H) tuple"
-    body = {"edge_id": first["id"], "arrows": [arrow_of(rows[0])], "continue_steps": 1}
+def _user_step(client, job: dict) -> None:
+    from ksmech.data import chem
+
+    root = root_node(job["result"])
+    mol = chem.parse_mapped(client.get(f"/api/pool/{root['state_id']}").json()["mapped_smiles"])
+    o = next(a.GetIdx() for a in mol.GetAtoms() if a.GetSymbol() == "O")
+    cl = next(a.GetIdx() for a in mol.GetAtoms() if a.GetSymbol() == "Cl")
+    c = mol.GetAtomWithIdx(cl).GetNeighbors()[0].GetIdx()
+    h = next(n.GetIdx() for n in mol.GetAtomWithIdx(c).GetNeighbors() if n.GetSymbol() == "H")
+    matrix = {"bonds": [[*sorted((o, h)), 1], [*sorted((c, h)), -1]], "lone": [[o, -2], [c, 2]]}
+    body = {"parent_state_id": root["state_id"], "matrix": matrix}
     r = client.post(f"/api/jobs/{job['job_id']}/override", json=body)
+    assert r.status_code == 200, r.text
+    out = S.OverrideResultOut.model_validate(r.json())
+    assert out.edge.predictor == "user" and out.node.status == "frontier"
+    r = client.post(f"/api/jobs/{job['job_id']}/expand", json={"node_id": out.node.id})
     assert r.status_code == 202, r.text
-    result = S.OverrideResultOut.model_validate(_job(client, r.json())["result"])
+    _job(client, r.json())
     after = client.get(f"/api/jobs/{job['job_id']}").json()["result"]
-    edges = {e["id"]: e for e in after["edges"]}
-    assert edges[result.corrected_edge_id]["kind"] == "corrected"
-    assert edges[first["id"]]["status"] == "superseded"
-    target = next(n for n in after["nodes"] if n["id"] == result.target_node)
-    assert target["status"] in ("expanded", "failed", "terminal"), target
-    assert target["status"] != "terminal" or target["terminal_reason"] != "MAX_STEPS"
-    assert target["status"] != "frontier"
-    assert len(after["nodes"]) > len(net["nodes"])
+    node = next(n for n in after["nodes"] if n["id"] == out.node.id)
+    assert node["status"] in ("expanded", "terminal", "failed"), node
+    assert node["status"] != "frontier"
 
 
 def _browse(client, mid: int) -> None:
@@ -105,44 +91,31 @@ def _browse(client, mid: int) -> None:
     assert step.reactants_depiction.server_svg and step.dataset_arrows
 
 
-def _export(client, settings, mid: int) -> None:
-    from ksmech.data.io import read_steps
-
-    r = client.post("/api/curate/export", json={})
-    assert r.status_code == 202, r.text
-    report = S.ExportReportOut.model_validate(_job(client, r.json())["result"])
-    assert report.n_steps_written == 1 and report.n_mechanisms == 1
-    path = settings.processed / "user_curated" / "steps.parquet"
-    assert report.paths["steps"] == str(path)
-    steps = read_steps(path)
-    assert [s.step_id for s in steps] == [report.steps[0]["step_id"]]
-    step = steps[0]
-    assert str(step.source) == "user_curated"
-    assert step.pathway_id == f"user_curated-path-{mid}" and step.step_index == 0
+def _export(client, mid: int) -> None:
+    r = client.get("/api/curate/export/pmechdb")
+    assert r.status_code == 200, r.text
     doc = client.get(f"/api/curate/{mid}").json()["steps"][0]["step"]
-    assert step.reactants_smiles == doc["reactants_mapped"]
-    assert step.products_smiles == doc["products_mapped"]
-    latest = client.get("/api/curate/export/latest").json()
-    assert latest["export_id"] == report.export_id
+    assert (
+        r.text.strip()
+        == f'"{doc["reactants_mapped"]}>>{doc["products_mapped"]} {doc["pmechdb_code"]}"'
+    )
 
 
 def _recheck(client, mid: int) -> None:
     r = client.post(f"/api/curate/{mid}/recheck", json={})
     assert r.status_code == 202, r.text
     report = S.RecheckReportOut.model_validate(_job(client, r.json())["result"])
-    assert report.n_steps == 1 and len(report.rows) == 1
+    assert report.n_steps == 1 and len(report.rows) == 1 and report.rows[0].reason is None
     m = client.get(f"/api/curate/{mid}").json()
     assert m["status"] == "validated" and len(m["rechecks"]) == 1
 
 
 def test_acceptance_chain(fresh_synthetic_settings):  # noqa: F811
-    s = fresh_synthetic_settings
-    with api_client(s) as client:
-        job = predict(client)
-        assert job["provenance"]["predictor"] == "stub"
-        _floor_check(client)
+    with api_client(fresh_synthetic_settings) as client:
+        job = predict(client, beam=5)
+        assert job["provenance"]["predictor"] == "floor"
         mid = _validate(client, job)
-        _override(client, job)
+        _user_step(client, job)
         _browse(client, mid)
-        _export(client, s, mid)
+        _export(client, mid)
         _recheck(client, mid)

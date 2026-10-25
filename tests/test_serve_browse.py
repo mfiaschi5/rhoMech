@@ -11,7 +11,6 @@ from ksmech.serve.browse import BrowseIndex, BrowseService, parse_query
 from ksmech.serve.contracts import LocalJobContext
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.settings import TaskEnv
-from ksmech.serve.testing import requires
 from ksmech.serve.worker import InlineScheduler
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
@@ -423,41 +422,6 @@ def test_curated_and_pmechdb_count_dataset_arrows(env, mini_steps):
     assert curated.n_arrows == pm_sn2.n_arrows == len(SN2_DOC["dataset_arrows"]) == 2
     assert by_ref[f"curated:{rejected}:0"].n_arrows == 0  # neither dataset nor token arrows
     assert service.step(f"curated:{validated}:0").step.n_arrows == 2
-
-
-def _export(env) -> dict:
-    from ksmech.serve.export import run_export
-
-    s, _, engine, *_ = env
-    job = LocalJobContext("j" + "7" * 16, s, None)
-    return run_export(job, {}, engine=engine, pairs=lambda c: None)
-
-
-def _exported_id(service, ref: str) -> tuple[str | None, str | None]:
-    """(exported_step_id in the search results, in the step view) of a curated step."""
-    by_ref = {r.ref: r for r in service.search(q="", sources=("user_curated",)).results}
-    return by_ref[ref].exported_step_id, service.step(ref).step.exported_step_id
-
-
-@requires("export")
-def test_exported_step_id_follows_the_newest_export(env):
-    """A step a later export withdrew from steps.parquet is no longer shown as exported."""
-    from ksmech.serve.curation import set_status
-
-    _, _, engine, (validated, _), _, service = env
-    ref = f"curated:{validated}:0"
-    assert _exported_id(service, ref) == (None, None)  # before any export
-    first = _export(env)
-    assert first["n_steps_written"] == 1
-    (written,) = [e["step_id"] for e in first["steps"] if e["mechanism_id"] == validated]
-    assert _exported_id(service, ref) == (written, written)
-    assert _export(env)["withdrawn"] == 0  # an unchanged re-export keeps it
-    assert _exported_id(service, ref) == (written, written)
-    with db.session(engine) as ses:
-        set_status(ses, ses.get(db.Mechanism, validated), "rejected")
-    second = _export(env)
-    assert second["n_steps_written"] == 0 and second["withdrawn"] == 1
-    assert _exported_id(service, ref) == (None, None)
 
 
 def test_substructure_cap_truncates():

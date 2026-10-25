@@ -57,6 +57,9 @@ class QMError(Exception):
         self.reason = reason
         self.detail = detail
 
+    def __reduce__(self):  # a worker's QMError keeps its reason code, not the message
+        return type(self), (self.reason, self.detail)
+
 
 @dataclass
 class QMRecord:

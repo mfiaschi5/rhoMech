@@ -59,9 +59,10 @@ def test_hash_comes_from_the_header_and_bytes_only_without_one(tmp_path):
 
 def test_framed_and_json_headers_round_trip(tmp_path):
     header = prov.stamp("samples", 3, {"a": "1"}, {"k": [1, 2]}, prov.sha256_bytes(b"data"))
-    prov.write_framed(tmp_path / "f.pt", b"data", header)
-    back, payload = prov.read_framed(tmp_path / "f.pt")
-    assert back == header and payload == b"data"
+    text = header.to_json().encode()  # an old framed sample file, as torch-era builds wrote it
+    framed = prov.MAGIC + len(text).to_bytes(8, "little") + text + b"data"
+    (tmp_path / "f.pt").write_bytes(framed)
+    assert prov.read_header(tmp_path / "f.pt") == header
     prov.write_json(tmp_path / "s.json", {"splits": {}}, header)
     assert prov.read_header(tmp_path / "s.json") == header
 
@@ -148,11 +149,20 @@ def test_dirty_builds_are_flagged_and_refused_for_training(monkeypatch, tmp_path
     assert legacy.code_dirty and legacy.code_git_hash == "b" * 40  # pre-flag headers
 
 
-def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_path):
+def _git(repo, *args):
+    """git in a scratch repository, without the GIT_* variables a commit hook exports
+    (`prov.git_env`): with `git commit --only`, `git add` here overwrote the index being
+    committed."""
     import subprocess
 
+    subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, env=prov.git_env()
+    )
+
+
+def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_path):
     def git(*args):
-        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+        _git(tmp_path, *args)
 
     git("init", "-q")
     (tmp_path / "src").mkdir()
@@ -172,12 +182,12 @@ def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_pa
 
 
 def test_a_dirty_sample_store_is_refused_unless_allow_stale(
-    mini_steps, token_loader, pair_kernels, monkeypatch, tmp_path
+    mini_steps, token_loader, monkeypatch, tmp_path
 ):
     from ksmech.arrows import store
     from ksmech.arrows.steps import SAMPLE_VERSION, load_samples, sample_for_step, write_split_file
 
-    s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
+    s = sample_for_step(mini_steps["e2"], token_loader)
     monkeypatch.setattr(prov, "code_state", lambda: ("a" * 40, True, "d" * 64))
     parquet = tmp_path / "steps.parquet"
     parquet.write_bytes(b"x")
@@ -188,3 +198,57 @@ def test_a_dirty_sample_store_is_refused_unless_allow_stale(
     with pytest.raises(prov.StaleArtifact, match="dirty tree"):
         load_samples(view)
     assert len(load_samples(view, allow_stale=True)) == 1
+
+
+def test_git_never_touches_an_inherited_index(monkeypatch, tmp_path):
+    """A hook of `git commit --only` exports GIT_INDEX_FILE, the absolute path of git's
+    temporary commit index. Neither the tests' git nor `code_state` may read or write it: once,
+    a copy of the index went from 154 files to 1."""
+    commit_index = tmp_path / "next-index.lock"
+    commit_index.write_bytes(b"the index being committed")
+    monkeypatch.setenv("GIT_INDEX_FILE", str(commit_index))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.py").write_text("x = 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a")
+    monkeypatch.setattr(prov, "REPO_ROOT", repo)
+    head, dirty, _ = REAL_CODE_STATE.__wrapped__()
+    assert len(head) == 40 and not dirty
+    assert commit_index.read_bytes() == b"the index being committed"
+
+
+def _raise_stale(_task) -> None:
+    raise prov.StaleArtifact("shard_00000.npz", ["input changed: tokens.npz"])
+
+
+def test_every_skip_exception_survives_pickling():
+    """Exceptions cross from spawned workers to the parent by pickle; one whose __init__ takes
+    other arguments than its message used to fail there (`StaleArtifact` hung the pool)."""
+    import pickle
+
+    from ksmech.arrows.apply import ApplyReason, ArrowApplyError
+    from ksmech.arrows.reactants import MissingTokens
+    from ksmech.data.validation import RejectReason, StepRejected
+    from ksmech.qm.records import QMError, ReasonCode
+
+    for exc, fields in (
+        (prov.StaleArtifact("a.npz", ["x", "y"]), ("path", "changes")),
+        (ArrowApplyError(ApplyReason.VALENCE, "atom 3"), ("reason", "detail")),
+        (StepRejected(RejectReason.ARROWS_MISMATCH, "bond"), ("reason", "detail")),
+        (QMError(ReasonCode.TIMEOUT, "600 s"), ("reason", "detail")),
+        (MissingTokens(["CC", "O"], {"O": prov.STALE_ARTIFACT}), ("keys", "reasons", "reason")),
+    ):
+        back = pickle.loads(pickle.dumps(exc))
+        assert type(back) is type(exc) and str(back) == str(exc)
+        for f in fields:
+            assert getattr(back, f) == getattr(exc, f), f
+
+
+def test_a_worker_stale_artifact_reaches_the_parent():
+    from multiprocessing import get_context
+
+    with get_context("spawn").Pool(1) as pool, pytest.raises(prov.StaleArtifact) as exc:
+        pool.apply_async(_raise_stale, (0,)).get(timeout=120)
+    assert exc.value.changes == ["input changed: tokens.npz"]

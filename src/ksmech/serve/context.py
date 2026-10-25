@@ -15,8 +15,6 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 from ksmech.serve import API_SCHEMA, capabilities
 from ksmech.serve.analysis import (
     TOKENS_CHANGED,
@@ -37,11 +35,10 @@ from ksmech.serve.settings import ServeSettings, TaskEnv
 from ksmech.serve.versions import (
     SPEC_LABEL,
     artifact_versions,
-    oriented_fingerprint,
     physics_fingerprint,
-    source_constant,
     spec_sha12,
     spec_version,
+    token_fingerprint,
 )
 from ksmech.serve.worker import InlineScheduler, Scheduler, interactive
 
@@ -65,7 +62,7 @@ NOTE_INTER = "candidate_scope=inter masks intramolecular pairs; the physics is u
 
 @cache
 def physics_constants() -> dict[str, Any]:
-    """KSParams, the default CandidateConfig and the oriented distances, as plain values."""
+    """KSParams and the default CandidateConfig, as plain values."""
     from ksmech.orbitals.tokens import CandidateConfig
     from ksmech.physics.params import KSParams
 
@@ -74,10 +71,6 @@ def physics_constants() -> dict[str, Any]:
     return {
         "ks_params": {k: float(v) for k, v in asdict(KSParams()).items()},
         "candidate_config": cc,
-        "primary_distance_ang": float(source_constant("physics/pairs.py", "PRIMARY_DISTANCE")),
-        "feature_distances_ang": [
-            float(d) for d in source_constant("physics/pairs.py", "FEATURE_DISTANCES")
-        ],
     }
 
 
@@ -91,7 +84,7 @@ class ApiContext:
     chemistry: str  # settings.chemistry, or "stub" when a StubChemistry is injected
     spec_version: str
     physics_fp: str
-    oriented_fp: str
+    token_fp: str
     artifact_versions: dict[str, int | str]
     rt_lru: LRU[str, ReactantTokens]  # 32 entries, by state_id
     analysis_lru: LRU[str, PoolAnalysis]  # 32 entries, by npz path
@@ -131,13 +124,15 @@ class ApiContext:
         self.rt_digests[sid] = dig
         return rt
 
-    def interactive(self, name: str, payload: dict, *, label: str, timeout_s: float) -> dict:
+    def interactive(
+        self, name: str, payload: dict, *, label: str, timeout_s: float, wait_s=None
+    ) -> dict:
         return interactive(
             self.scheduler,
             name,
             payload,
             label=label,
-            wait_s=self.settings.interactive_wait_s,
+            wait_s=self.settings.interactive_wait_s if wait_s is None else float(wait_s),
             timeout_s=timeout_s,
         )
 
@@ -155,14 +150,16 @@ class ApiContext:
             msg += f": {failure['detail']}"
         return ServeError(Code.POOL_NOT_ANALYZED, msg, status=409, detail=failure)
 
-    def _featurize_missing(self, state: PoolState) -> None:
+    def _featurize_missing(self, state: PoolState, wait_s=None) -> None:
         timeout = self.settings.qm_timeout_s + 120
         for key in dict.fromkeys(state.fragment_token_keys):
             if self.loader.has(key):
                 continue
             label = featurize_label(self.featurizer, key)
             try:
-                self.interactive("featurize", {"key": key}, label=label, timeout_s=timeout)
+                self.interactive(
+                    "featurize", {"key": key}, label=label, timeout_s=timeout, wait_s=wait_s
+                )
             except ServeError as exc:
                 extra = {"digest": None, "stage": "featurize", "key": key}
                 write_failure(self.settings, state, self.physics_fp, exc, **extra)
@@ -183,7 +180,7 @@ class ApiContext:
             self._featurize_missing(state)
         return self.reactant_tokens(state)
 
-    def ensure_analysis(self, state: PoolState) -> PoolAnalysis:
+    def ensure_analysis(self, state: PoolState, wait_s: float | None = None) -> PoolAnalysis:
         """The state's analysis: featurize the missing fragments, then the `analyze` task, then
         `load_analysis` (LRU by npz path). Raises `Pending` while a task runs, and
         POOL_NOT_ANALYZED (409, detail = the failure sidecar) when the analysis failed for the
@@ -198,11 +195,15 @@ class ApiContext:
         failure = read_failure(s, state.state_id, fp)
         if failure is not None and failure.get("digest") == digest:
             raise self._not_analyzed(state, failure)
-        self._featurize_missing(state)
+        self._featurize_missing(state, wait_s)
         label = f"analysis of {state.pool_key}"
         try:
             res = self.interactive(
-                "analyze", {"state": state.to_dict()}, label=label, timeout_s=ANALYZE_TIMEOUT_S
+                "analyze",
+                {"state": state.to_dict()},
+                label=label,
+                timeout_s=ANALYZE_TIMEOUT_S,
+                wait_s=wait_s,
             )
         except ServeError as exc:
             if str(exc.code) == TOKENS_CHANGED:
@@ -212,33 +213,6 @@ class ApiContext:
                 state, read_failure(s, state.state_id, fp) or fallback
             ) from exc
         return self._load(Path(res["npz"]))
-
-    def scores(self, state: PoolState, an: PoolAnalysis, predictor: str) -> np.ndarray:
-        """(n_occ, n_virt) scores of `predictor` (409 / 422 first if it is unavailable or
-        unknown): the analysis member `score_<name>` when the analysis recorded the predictor's
-        current version for it, else the version-keyed `score` task. A worker that scored
-        with another version (another model file) is logged as a WARNING."""
-        version = self.registry.get(predictor).info().version
-        stored = an.stored_scores(predictor, version)
-        if stored is not None:
-            return stored
-        payload = {"state": state.to_dict(), "predictor": predictor}
-        label = f"{predictor} scores of {state.pool_key}"
-        res = self.interactive("score", payload, label=label, timeout_s=SCORE_TIMEOUT_S)
-        if res.get("version") != version:
-            log.warning(
-                "PREDICTOR_VERSION_DRIFT %s scores of %s: the worker scored with %s, the API "
-                "reports %s",
-                predictor,
-                state.state_id,
-                res.get("version"),
-                version,
-            )
-        path = Path(res["path"]).resolve()
-        if not path.is_relative_to(self.settings.serve.resolve()):
-            raise ServeError(Code.CONSISTENCY_FAILED, f"score file outside data/serve: {path}")
-        with np.load(path, allow_pickle=False) as z:
-            return np.asarray(z["scores"])
 
     def provenance(
         self,
@@ -269,14 +243,13 @@ class ApiContext:
             "ks_params": dict(c["ks_params"]),
             "temperature": None if temperature is None else float(temperature),
             "candidate_scope": scope,
-            "contact_distance_ang": c["primary_distance_ang"],
             "candidate_config": dict(c["candidate_config"]),
             "notes": self._notes(predictor, info, scope, notes),
         }
 
     def _notes(self, predictor, info, scope: str, notes: Sequence[str]) -> list[str]:
         out = list(notes)
-        if predictor in ("floor", "gbdt", "stub"):
+        if predictor in ("floor", "gbdt", "user"):
             out.append(NOTE_NO_STOP)
         if info is not None:
             out += list(info.warnings)
@@ -307,7 +280,7 @@ def build_context(
         chemistry=settings.chemistry,
         spec_version=spec_version(settings.spec_path),
         physics_fp=physics_fp,
-        oriented_fp=oriented_fingerprint(),
+        token_fp=token_fingerprint(),
         artifact_versions=dict(artifact_versions()),
         rt_lru=LRU(32),
         analysis_lru=LRU(32),
@@ -331,8 +304,6 @@ def meta(ctx: ApiContext) -> dict:
         "qm_method": ctx.featurizer.method,
         "token_method": ctx.featurizer.method,
         "ks_params": dict(c["ks_params"]),
-        "primary_distance_ang": c["primary_distance_ang"],
-        "feature_distances_ang": list(c["feature_distances_ang"]),
         "candidate_config": dict(c["candidate_config"]),
         "limits": ctx.settings.limits.to_dict(),
         "worker": ctx.scheduler.status().to_dict(),

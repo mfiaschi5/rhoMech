@@ -189,12 +189,6 @@ def test_run_refuses_a_held_lock(env_root, fake_server, capsys):
     try:
         assert cli.main(["--port", str(_free_port())]) == 2
         assert "run" not in fake_server
-        assert cli.main(["export"]) == 2
-        err = capsys.readouterr().err
-        if CAPABILITIES["export"][0]:
-            assert "server running: use the web UI or POST /api/curate/export" in err
-        else:
-            assert "FEATURE_DISABLED: export is disabled" in err
         assert cli.main(["recheck", "--stale-only"]) == 2
         err = capsys.readouterr().err
         if CAPABILITIES["curate_recheck"][0]:
@@ -324,8 +318,12 @@ def test_probe_cache_exit_codes(env_root, synthetic_root, monkeypatch, capsys): 
 
 
 def test_disabled_commands_exit_2(env_root, capsys):
-    """`export` and `recheck` refuse with FEATURE_DISABLED (spec v8 port) and touch nothing."""
-    for cmd, cap in ((["export"], "export"), (["recheck", "--stale-only"], "curate_recheck")):
+    """`export` and `recheck` refuse with FEATURE_DISABLED while off and touch nothing."""
+    out = str(env_root / "x.csv")
+    for cmd, cap in (
+        (["export", "--out", out], "export"),
+        (["recheck", "--stale-only"], "curate_recheck"),
+    ):
         if CAPABILITIES[cap][0]:
             continue
         assert cli.main(cmd) == 2
@@ -339,11 +337,12 @@ def test_disabled_commands_exit_2(env_root, capsys):
 @requires("export")
 @requires("curate_recheck")
 def test_offline_export_and_recheck(env_root, capsys):
-    assert cli.main(["export"]) == 0
-    out = capsys.readouterr().out
-    report = json.loads(out)
+    out_file = env_root / "export" / "curated.csv"
+    assert cli.main(["export", "--out", str(out_file)]) == 0
+    report = json.loads(capsys.readouterr().out)
     assert report["n_steps_written"] == 0 and report["n_mechanisms"] == 0
-    assert (env_root / "data" / "processed" / "user_curated" / "steps.parquet").is_file()
+    assert out_file.is_file() and out_file.read_text() == ""
+    assert not (env_root / "data" / "processed" / "user_curated").exists()  # never training data
     assert cli.main(["recheck", "--stale-only"]) == 0
     assert json.loads(capsys.readouterr().out)["n_steps"] == 0
     assert (env_root / "data" / "serve" / "run" / "server.lock").is_file()

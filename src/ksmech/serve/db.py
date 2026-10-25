@@ -53,8 +53,8 @@ class Mechanism(SQLModel, table=True):
     reactants: str  # JSON list[str]: the input SMILES as entered
     stoichiometry: str  # JSON list[int], aligned with reactants
     conditions: str | None = None
-    predictor: str = Field(index=True)  # floor | gbdt | transformer | stub
-    # the predictor_version string (embeds the model sha256[:16] for gbdt/transformer and the
+    predictor: str = Field(index=True)  # floor | gbdt | network | user (spec v3: stub, ...)
+    # the predictor_version string (embeds the model sha256[:16] for gbdt and the
     # physics fingerprint for floor/gbdt); never null
     checkpoint_hash: str
     spec_version: str = Field(index=True)

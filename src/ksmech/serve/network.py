@@ -1,5 +1,7 @@
-"""The reaction network (design 4.1-4.6): beam expansion over pool states, merging by pool key,
-the cycle rule, ranked pathways, overrides, and the byte-deterministic JSON form.
+"""The reaction network (design 4.1-4.6, spec v9 "Inference"): beam expansion over pool states,
+merging by pool key, the cycle rule, ranked pathways, user steps, and the byte-deterministic
+JSON form. An edge is one elementary step: a reaction matrix R with its anchor, its arrow
+reading and the orbital readings of its forming bonds (`serve.edgestep`).
 
 Pure: no file I/O, no RDKit calls, no clock. The only view of the outside is a `Chemistry`
 (`expand` / `apply`) and the `NetHooks` (cancel flag, progress, reason-coded skips, snapshots).
@@ -7,9 +9,10 @@ Pure: no file I/O, no RDKit calls, no clock. The only view of the outside is a `
 - Nodes are keyed by pool id; a node keeps the representative state first reached in this
   network (ties by lower state id in the deterministic BFS order), and other states that reach
   the same pool key are listed as aliases.
-- One edge per (source node, child pool key) and kind; predicted edge probabilities are the
-  lower-bound marginals of the expansion, `logp = log(probability)`, and a corrected edge
-  contributes 0 to a path's log-probability.
+- One edge per (source state, R) and kind. A predicted edge carries the predictor's score, its
+  log-probability (None unless the predictor gives probabilities) and a log beam weight
+  (`expansion.beam_weights`); paths and the beam are ranked by the summed weights. A user step
+  (kind "corrected", predictor "user") contributes 0.
 - `revision` grows with every mutation (each node expansion, each layer, each override and the
   end of a build), so a client polling with `since_revision` sees every change.
 """
@@ -26,7 +29,6 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from ksmech.serve.contracts import (
-    ArrowSpec,
     ExpandRequest,
     Expansion,
     JobContext,
@@ -41,7 +43,7 @@ from ksmech.serve.keys import edge_id, split_pool_key
 if TYPE_CHECKING:
     from ksmech.serve.chemistry import Chemistry
 
-NETWORK_FORMAT = "ksmech-serve/network-v1"
+NETWORK_FORMAT = "ksmech-serve/network-v2"  # v2: edges are reaction matrices (spec v9)
 MAX_PATHWAY_POPS = 10_000
 CONTINUABLE_TERMINAL = ("MAX_STEPS", "NODE_BUDGET")
 MINUS = "−"
@@ -120,28 +122,30 @@ class Edge:
     id: str
     source: str
     target: str
-    kind: str  # "predicted" | "corrected"
+    kind: str  # "predicted" | "corrected" (a user step)
     status: str  # "active" | "superseded"
     source_state_id: str
     product_state_id: str
     source_mapped_smiles: str
     product_mapped_smiles: str
-    product_smiles: str  # display form: the product's token keys (unmapped)
-    arrows: list[dict]
-    encoded: dict | None
-    encode_reason: str | None
+    matrix: dict  # MatrixIO on the source state's pool atoms
+    anchor: dict | None  # {i, j, sign}
+    arrows: list[dict]  # ArrowReadingOut
+    readings: list[dict]  # OrbitalReadingOut
+    product_smiles: list[str]  # token keys of the product fragments
+    sigma_keys: list[str]  # their sigma keys
+    formal_charges: list[list[int]]
     touched_maps: list[int]
     score: float | None
-    probability: float | None
-    logp: float
-    rank: int | None
+    logp: float | None
+    weight: float  # log beam weight; a user step contributes 0
+    rank: int  # 1-based among the predictor's candidates; 0 for a user step
     n_alternatives: int = 0
     alternatives: list[dict] = field(default_factory=list)
     predictor: str | None = None
     predictor_version: str | None = None
-    original: dict | None = None  # corrected edge: EdgeOriginalOut of the edge it replaced
+    channel: dict | None = None  # how the predictor completed R (diagnostic)
     superseded_by: str | None = None
-    predictor_view: list[dict] | None = None
     recurrence: bool = False  # the target lay on the Viterbi path of the source
     closes_cycle: bool = False
     cycle_ids: list[str] = field(default_factory=list)
@@ -149,11 +153,8 @@ class Edge:
 
     @property
     def path_logp(self) -> float:
-        """The edge's term in a path log-probability: a corrected edge contributes 0."""
-        return 0.0 if self.kind == "corrected" else self.logp
-
-    def specs(self) -> list[list[int]]:
-        return [ArrowSpec.from_dict(a).as_list() for a in self.arrows]
+        """The edge's term in a path weight: a user step contributes 0."""
+        return 0.0 if self.kind == "corrected" else self.weight
 
     def to_dict(self) -> dict:
         return to_jsonable({k: getattr(self, k) for k in self.__dataclass_fields__})
@@ -161,9 +162,9 @@ class Edge:
     @classmethod
     def from_dict(cls, d: Mapping) -> Edge:
         kw = {k: d.get(k) for k in cls.__dataclass_fields__ if k in d}
-        kw["logp"] = _logp_in(d.get("logp"))
+        kw["weight"] = _logp_in(d.get("weight"))
         kw["score"] = _opt_float(d.get("score"))
-        kw["probability"] = _opt_float(d.get("probability"))
+        kw["logp"] = _opt_float(d.get("logp"))
         kw["touched_maps"] = [int(m) for m in d.get("touched_maps") or []]
         kw["cycle_ids"] = [str(c) for c in d.get("cycle_ids") or []]
         return cls(**kw)
@@ -354,13 +355,26 @@ def build_network(
 
 
 def continue_from(
-    chem: Chemistry, net: Network, node_id: str, steps: int, params: NetParams, hooks: NetHooks
+    chem: Chemistry,
+    net: Network,
+    node_id: str,
+    steps: int,
+    params: NetParams,
+    hooks: NetHooks,
+    predictor: PredictorRef | None = None,
 ) -> None:
-    """Run the build loop from one node (an override target) for `steps` layers."""
+    """Run the build loop from one node for `steps` layers, with `predictor` (default: the
+    network's own; a user network names one per expansion)."""
     node = net.nodes[node_id]
     node.status, node.terminal_reason = NodeStatus.FRONTIER, None
     run = _Run(total=1 + params.beam * max(0, steps - 1))
-    _run_layers(chem, net, [node_id], steps, params, hooks, run)
+    saved = net.predictor
+    if predictor is not None:
+        net.predictor = predictor
+    try:
+        _run_layers(chem, net, [node_id], steps, params, hooks, run)
+    finally:
+        net.predictor = saved
     net.touch()
 
 
@@ -455,7 +469,7 @@ def select_beam(net, proposals, params, hooks) -> list[str]:
     """Keep the `beam` best new pools of the layer (by parent best_logp + child logp); record
     every edge, merges included. Returns the next frontier."""
     scored = sorted(
-        ((net.nodes[p].best_logp + ch.logp, p, ch) for p, ch in proposals),
+        ((net.nodes[p].best_logp + ch.weight, p, ch) for p, ch in proposals),
         key=lambda x: (-x[0], x[1], x[2].state.pool_id),
     )
     new_best: dict[str, float] = {}
@@ -476,31 +490,47 @@ def select_beam(net, proposals, params, hooks) -> list[str]:
     return nxt
 
 
-def _predicted_edge(net: Network, parent: Node, ch: ProposedChild) -> Edge:
+def step_edge(net: Network, parent: Node, state: PoolState, step: Mapping, **kw: Any) -> Edge:
+    """An edge from `parent` to `state` with the fields of an `edgestep.step_record`."""
+    kind = kw.pop("kind", "predicted")
     return Edge(
-        id=edge_id("predicted", parent.state.state_id, [ArrowSpec.from_dict(a) for a in ch.arrows]),
+        id=edge_id(kind, parent.state.state_id, step["matrix"]),
         source=parent.id,
-        target=ch.state.pool_id,
-        kind="predicted",
+        target=state.pool_id,
+        kind=kind,
         status="active",
         source_state_id=parent.state.state_id,
-        product_state_id=ch.state.state_id,
+        product_state_id=state.state_id,
         source_mapped_smiles=parent.state.mapped_smiles,
-        product_mapped_smiles=ch.state.mapped_smiles,
-        product_smiles=display_smiles(ch.state),
-        arrows=list(ch.arrows),
-        encoded=ch.encoded,
-        encode_reason=ch.encode_reason,
-        touched_maps=[int(m) for m in ch.touched_maps],
+        product_mapped_smiles=state.mapped_smiles,
+        matrix=dict(step["matrix"]),
+        anchor=step.get("anchor"),
+        arrows=list(step.get("arrows") or []),
+        readings=list(step.get("readings") or []),
+        product_smiles=list(step.get("product_smiles") or []),
+        sigma_keys=list(step.get("sigma_keys") or []),
+        formal_charges=[list(x) for x in step.get("formal_charges") or []],
+        touched_maps=[int(m) for m in step.get("touched_maps") or []],
+        channel=step.get("channel"),
+        revision=net.revision,
+        **kw,
+    )
+
+
+def _predicted_edge(net: Network, parent: Node, ch: ProposedChild) -> Edge:
+    return step_edge(
+        net,
+        parent,
+        ch.state,
+        ch.step,
         score=float(ch.score),
-        probability=float(ch.probability),
-        logp=float(ch.logp),
+        logp=ch.logp,
+        weight=float(ch.weight),
         rank=int(ch.rank),
         n_alternatives=int(ch.n_alternatives),
         alternatives=list(ch.alternatives),
-        predictor=net.predictor.name,
+        predictor=str(ch.step.get("predictor") or net.predictor.name),
         predictor_version=net.predictor.version,
-        revision=net.revision,
     )
 
 
@@ -734,152 +764,41 @@ def rank_pathways(net: Network, limit: int = 20, include_pruned: bool = False) -
     return result
 
 
-# ---- overrides (4.6)
+# ---- user steps
 
 
-def _source_of(net: Network, req: Mapping) -> tuple[Node, Edge | None]:
-    eid, nid = req.get("edge_id"), req.get("node_id")
-    if (eid is None) == (nid is None):
-        raise ServeError(
-            Code.REQUEST_INVALID, "give exactly one of edge_id and node_id", status=422
-        )
-    if eid is not None:
-        e = net.edges.get(str(eid))
-        if e is None:
-            raise ServeError(Code.EDGE_NOT_FOUND, f"no edge {eid} in this network", status=404)
-        node = net.nodes[e.source]
-        if node.state.state_id != e.source_state_id:
-            msg = f"edge {eid} leaves {e.source_state_id}, not the representative of {node.id}"
-            raise ServeError(Code.CONSISTENCY_FAILED, msg, status=500)
-        return node, e
-    node = net.nodes.get(str(nid))
-    if node is None:
-        raise ServeError(Code.NODE_NOT_FOUND, f"no node {nid} in this network", status=404)
-    return node, None
+def node_of_state(net: Network, state_id: str) -> Node:
+    """The node whose representative or alias state is `state_id`; NODE_NOT_FOUND (404)."""
+    for node in net.nodes.values():
+        if node.state.state_id == state_id or state_id in node.alias_state_ids:
+            return node
+    raise ServeError(Code.NODE_NOT_FOUND, f"no node holds state {state_id}", status=404)
 
 
-def edge_original(e: Edge, net: Network) -> dict:
-    """`EdgeOriginalOut` fields of an edge."""
-    return {
-        "edge_id": e.id,
-        "target": e.target,
-        "target_pool_key": net.nodes[e.target].pool_key,
-        "arrows": list(e.arrows),
-        "score": e.score,
-        "probability": e.probability,
-        "rank": e.rank,
-        "predictor": e.predictor,
-        "predictor_version": e.predictor_version,
-    }
+def add_user_edge(net: Network, parent: Node, source: PoolState, child: PoolState, step) -> Edge:
+    """Record a user step from `source` (the parent's representative or one of its aliases)
+    to `child`: kind "corrected", predictor "user", no score of a predictor. Idempotent (the
+    same R from the same state is the same edge). A new target is a FRONTIER node, ready to
+    be expanded; the cycle rule runs as for a predicted edge."""
+    view = parent if source.state_id == parent.state.state_id else _alias_view(parent, source)
+    e = step_edge(
+        net, view, child, step, kind="corrected", score=step.get("score"), logp=None,
+        weight=0.0, rank=0, predictor="user", predictor_version="user/1",
+    )  # fmt: skip
+    e.source = parent.id
+    if e.id in net.edges:
+        return net.edges[e.id]
+    e.revision = net.touch()
+    net.edges[e.id] = e
+    created = _attach(net, parent, e, child, parent.best_logp)
+    mark_cycles(net, e, created, net.params.stop_at_turnover)
+    return e
 
 
-def _original_of(old: Edge | None, net: Network) -> dict | None:
-    """The comparison baseline of a correction of `old`: the prediction `old` replaced when
-    `old` is itself a correction of one (a correction of a correction keeps the predictor's
-    step), else `old` itself."""
-    if old is None:
-        return None
-    if old.kind == "corrected" and old.original is not None:
-        return dict(old.original)
-    return edge_original(old, net)
-
-
-def _corrected_edge(net: Network, p: Node, out, arrows, old: Edge | None) -> Edge:
-    return Edge(
-        id=edge_id("corrected", p.state.state_id, arrows),
-        source=p.id,
-        target=out.state.pool_id,
-        kind="corrected",
-        status="active",
-        source_state_id=p.state.state_id,
-        product_state_id=out.state.state_id,
-        source_mapped_smiles=p.state.mapped_smiles,
-        product_mapped_smiles=out.state.mapped_smiles,
-        product_smiles=display_smiles(out.state),
-        arrows=list(out.arrows),
-        encoded=out.encoded,
-        encode_reason=out.encode_reason,
-        touched_maps=[int(m) for m in out.touched_maps],
-        score=None,
-        probability=None,
-        logp=0.0,
-        rank=None,
-        predictor=net.predictor.name,
-        predictor_version=net.predictor.version,
-        original=_original_of(old, net),
-        predictor_view=list(out.predictor_view),
-        revision=net.revision + 1,
-    )
-
-
-def _record_correction(net: Network, p: Node, out, arrows, old: Edge | None) -> tuple[str, bool]:
-    """Add the corrected edge (or reuse the identical one), supersede `old`; returns
-    (corrected edge id, created the target)."""
-    ce = _corrected_edge(net, p, out, arrows, old)
-    existing = net.edges.get(ce.id)
-    if existing is not None and (old is None or old.superseded_by == ce.id or old.id == ce.id):
-        raise ServeError(Code.OVERRIDE_NOOP, f"this correction already exists: {ce.id}")
-    if old is not None:
-        old.status, old.superseded_by = "superseded", ce.id
-    if existing is not None:
-        return ce.id, False
-    net.edges[ce.id] = ce
-    created = _attach(net, p, ce, out.state, p.best_logp)
-    mark_cycles(net, ce, created, net.params.stop_at_turnover)
-    return ce.id, created
-
-
-def _continuable(node: Node, created: bool) -> bool:
-    """Whether an override target may be expanded further. A target the correction just
-    marked TERMINAL(TURNOVER) (it closes a catalytic cycle, stop_at_turnover) never is."""
-    if node.status == NodeStatus.TERMINAL and node.terminal_reason == str(Code.TURNOVER):
-        return False
-    if created or node.status in (NodeStatus.FRONTIER, NodeStatus.PRUNED):
-        return True
-    return node.status == NodeStatus.TERMINAL and node.terminal_reason in CONTINUABLE_TERMINAL
-
-
-def apply_override(
-    chem: Chemistry, net: Network, req: Mapping, params: NetParams, hooks: NetHooks
-) -> dict:
-    """Apply the user's arrows at an edge's source (or a node), record the corrected edge
-    (the original is kept, superseded), merge its target by pool key and continue prediction
-    from it if it has not been expanded. Returns the `OverrideResultOut` fields."""
-    p, old = _source_of(net, req)
-    arrows = [ArrowSpec.from_dict(a) for a in req["arrows"]]
-    hooks.progress(phase="apply", message=f"applying {len(arrows)} arrow(s) at {p.pool_key}")
-    out = chem.apply(
-        p.state,
-        arrows,
-        bool(req.get("allow_invalid", False)),
-        net.predictor.name,
-        net.params.temperature,
-        hooks.ctx,
-    )
-    specs = [a.as_list() for a in arrows]
-    if old is not None and old.target == out.state.pool_id and old.specs() == specs:
-        raise ServeError(Code.OVERRIDE_NOOP, f"edge {old.id} already applies these arrows")
-    cid, created = _record_correction(net, p, out, arrows, old)
-    net.touch()
-    hooks.snapshot(net)
-    target = net.nodes[net.edges[cid].target]
-    continued = None
-    if req.get("continue_prediction", True) and _continuable(target, created):
-        given = req.get("continue_steps")
-        steps = int(given) if given is not None else max(1, params.max_steps - target.depth)
-        if steps > 0:
-            continue_from(chem, net, target.id, steps, params, hooks)
-            continued = target.id
-    net.touch()
-    net.pathways = rank_pathways(net, params.n_pathways)
-    return {
-        "parent_job_id": net.network_id,
-        "network_revision": net.revision,
-        "corrected_edge_id": cid,
-        "target_node": target.id,
-        "continued_from": continued,
-        "issues": list(out.issues),
-    }
+def _alias_view(parent: Node, source: PoolState) -> Node:
+    """`parent` seen from one of its alias states (for the edge's source fields)."""
+    return Node(parent.id, parent.pool_key, source, [], parent.depth, parent.best_logp, None,
+                parent.status)  # fmt: skip
 
 
 # ---- JSON form

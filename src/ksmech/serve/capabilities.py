@@ -1,12 +1,14 @@
-"""Which serve features are on, and why the others are off (spec v8 port, Phase 0).
+"""Which serve features are on, and why the others are off (spec v9).
 
-The app was written for the spec-v3 target: one orbital-pair arrow per step, ranked by the
-Klopman-Salem floor and applied with `arrows.apply_predicted`. Spec v8 predicts each elementary
-step as a reaction matrix R = Delta(BE) decoded around a forming anchor bond, and
-`apply_predicted_arrows` now needs a leaving-bond choice per arrow. Every feature that ranks,
-applies or re-checks orbital-pair arrows is therefore off until it is ported; features that only
-read molecules (tokens, geometry, orbitals, depiction, PMechDB browse, the curation database,
-the molecule workbench) stay on; `workbench` is listed as a capability that is always on.
+Spec v9 predicts each elementary step as a reaction matrix R = Delta(BE) decoded around a
+forming anchor bond and reads the curved arrows back from R (`serve.reading`). The predict,
+correct and curation features work on that target: network edges carry R, its anchor, its
+arrow reading and the orbital readings of its forming bonds; `export` is a PMechDB-format
+file download of the curated steps, never training data. The spec-v3 panels that ranked
+single orbital-pair arrows from the Klopman-Salem contact terms (`candidates`, `physics`)
+have no v9 counterpart yet and stay off; the contact placement and the site-pair view were removed
+with the contact model (archived upstream on `archive/stage-b`). `workbench` is display-only
+and always on.
 
 `CAPABILITIES` is evaluated once at import: {name: (enabled, reason)}, reason None when on.
 `require(name)` is the FastAPI dependency of a gated route: ServeError FEATURE_DISABLED (503)
@@ -19,40 +21,27 @@ from typing import Any
 
 from ksmech.serve.errors import Code, ServeError
 
-_ARROW_TARGET = (
-    "spec v8 predicts each step as a reaction matrix R = Delta(BE) decoded around a forming "
-    "anchor bond; "
+_V3_PANEL = (
+    "spec v9 predicts each step as a reaction matrix R; this panel ranked spec-v3 single "
+    "orbital-pair arrows by the Klopman-Salem contact terms, which v9 does not compute. The "
+    "geometry-free physics of a step (the pooled gap factor of each forming bond, its dominant "
+    "orbital pair and canonical MO pair) is on every edge and in POST /api/step/check"
 )
-_ANALYSIS = (
-    _ARROW_TARGET + "this view ranks spec-v3 orbital-pair arrow candidates from the oriented "
-    "pair analysis (the -(KS3 + KS2) floor), which is not the v8 target"
-)
+_PORTING = "being ported to the spec-v9 reaction-matrix target"  # until the port lands
 _DISABLED: dict[str, str] = {
-    "predict": _ARROW_TARGET
-    + "the floor, GBDT and stub predictors rank single orbital-pair arrows, and the network "
-    "expansion applies them with apply_predicted_arrows, which now needs a leaving-bond choice "
-    "per arrow",
-    "correct": _ARROW_TARGET
-    + "an override applies orbital-pair arrows with apply_predicted_arrows, which now needs a "
-    "leaving-bond choice per arrow",
-    "candidates": _ANALYSIS,
-    "physics": _ANALYSIS,
-    "site_pairs": _ANALYSIS,
-    "curate_edit": "curated mechanisms are pathways of predict jobs (predict is off); the "
-    "curation database is read-only until predict is ported to spec v8",
-    "curate_recheck": _ARROW_TARGET
-    + "a re-check re-runs the predictors and apply_predicted_arrows on spec-v3 orbital-pair "
-    "arrows",
-    "export": "the user_curated source (data.user_curated, Source.USER_CURATED, curated steps "
-    "pinned to train) was not ported: it conflicts with the current data layer",
+    "predict": _PORTING,
+    "correct": _PORTING,
+    "candidates": _V3_PANEL,
+    "physics": _V3_PANEL,
+    "curate_edit": _PORTING,
+    "curate_recheck": _PORTING,
+    "export": _PORTING,
 }
 ORDER = (
     "predict",
     "correct",
     "candidates",
     "physics",
-    "site_pairs",
-    "contact",
     "curate_edit",
     "curate_recheck",
     "export",
@@ -61,31 +50,13 @@ ORDER = (
 ALWAYS_ON = frozenset({"workbench"})  # display-only features that read molecules
 
 
-def _contact() -> tuple[bool, str | None]:
-    """The placement replay is pinned to one oriented version (`placement`); off otherwise."""
-    from ksmech.serve.placement import PINNED_ORIENTED_VERSION
-    from ksmech.serve.upstream import ORIENTED_SOURCE
-    from ksmech.serve.versions import source_constant
-
-    try:
-        version = source_constant(ORIENTED_SOURCE, "ORIENTED_VERSION")
-    except LookupError:
-        version = None
-    if version == PINNED_ORIENTED_VERSION and "contact" not in _DISABLED:
-        return True, None
-    return False, (
-        f"the contact placement replay is pinned to ORIENTED_VERSION {PINNED_ORIENTED_VERSION}; "
-        f"{ORIENTED_SOURCE} has {version}; " + _ANALYSIS
-    )
-
-
 def _evaluate() -> dict[str, tuple[bool, str | None]]:
     out: dict[str, tuple[bool, str | None]] = {}
     for name in ORDER:
-        if name in ALWAYS_ON:
+        if name in ALWAYS_ON or name not in _DISABLED:
             out[name] = (True, None)
         else:
-            out[name] = _contact() if name == "contact" else (False, _DISABLED[name])
+            out[name] = (False, _DISABLED[name])
     return out
 
 

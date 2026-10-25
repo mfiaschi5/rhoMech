@@ -3,7 +3,7 @@
     ksmech-serve [run] --port 8000 [--host 127.0.0.1|0.0.0.0|<address>]
                        [--chemistry real|cached|synthetic] [--dev] [--no-ui] [--index-on-start]
     ksmech-serve recheck [--stale-only] [--predictor P] [--mechanism ID ...]
-    ksmech-serve export
+    ksmech-serve export --out FILE [--status validated corrected]
     ksmech-serve schema-ts [--out apps/ui/src/api/types.gen.ts]
     ksmech-serve probe-cache --smiles S [--smiles S ...]
     ksmech-serve gallery [--out DIR] [--only NAME ...] [--derive-templates]
@@ -12,9 +12,10 @@ There is no authentication. By default the server binds 127.0.0.1 (reach it thro
 `ssh -L 8000:localhost:8000 <server>`); `--host 0.0.0.0` (or one of this machine's addresses)
 opens it to the local network, and the Host / Origin checks then also accept this machine's
 addresses and host names (`lan_hosts`). A first token that is not a subcommand gets `run`
-inserted, so `ksmech-serve --port 8000` works. `run`, `recheck` and `export` hold
+inserted, so `ksmech-serve --port 8000` works. `run` and `recheck` hold
 `data/serve/run/server.lock` (flock), so at most one serve worker pool exists per data root;
-`recheck` and `export` refuse with exit 2 while a server runs.
+`recheck` refuses with exit 2 while a server runs. `export` only reads the curation database
+and writes the PMechDB-format file (a download, never training data).
 
 This module imports only the standard library at module level: `main` pins the BLAS / OpenMP
 threads to 1 before numpy (or anything that imports it) is loaded.
@@ -50,7 +51,7 @@ _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 LOCK_HELD = {
     "run": "another ksmech-serve already runs on this data root ({path})",
     "recheck": "server running: use the web UI or POST /api/curate/recheck ({path})",
-    "export": "server running: use the web UI or POST /api/curate/export ({path})",
+    "export": "server running: use the web UI or GET /api/curate/export/pmechdb ({path})",
 }
 _HELD_LOCKS: list[Any] = []  # open lock files, kept for the life of the process
 
@@ -91,7 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--stale-only", action="store_true", help="only stale mechanisms")
     rc.add_argument("--predictor", default=None, help="predictor (default: each mechanism's)")
     rc.add_argument("--mechanism", type=int, nargs="+", default=None, metavar="ID")
-    sub.add_parser("export", help="export curated steps to data/processed/user_curated")
+    ex = sub.add_parser("export", help="write the curated steps as PMechDB raw records (a file)")
+    ex.add_argument("--out", type=Path, required=True, help="the CSV to write")
+    ex.add_argument(
+        "--status", nargs="+", default=None, help="mechanism statuses (validated corrected)"
+    )
     ts = sub.add_parser("schema-ts", help="write the TypeScript mirror of the API models")
     ts.add_argument("--out", type=Path, default=None, help="default apps/ui/src/api/types.gen.ts")
     pc = sub.add_parser(
@@ -338,7 +343,7 @@ def _offline(settings: ServeSettings, name: str, body) -> int:
 
 
 def _disabled(capability: str) -> int | None:
-    """Exit 2 with the reason when `capability` is off (spec v8 port), else None."""
+    """Exit 2 with the reason when `capability` is off, else None."""
     from ksmech.serve.capabilities import CAPABILITIES
 
     on, reason = CAPABILITIES[capability]
@@ -366,24 +371,21 @@ def cmd_recheck(args: argparse.Namespace) -> int:
     return _offline(_settings(), "recheck", body)
 
 
-def _no_submit(kind: str, request: dict) -> dict:
-    from ksmech.serve.errors import Code, ServeError
-
-    raise ServeError(Code.REQUEST_INVALID, f"no job runner in the CLI (job {kind})")
-
-
 def cmd_export(args: argparse.Namespace) -> int:
-    from ksmech.serve.browse import BrowseService
-    from ksmech.serve.export import run_export
+    """The PMechDB-format file of the curated steps (`serve.export`; never training data)."""
+    from ksmech.serve import db
+    from ksmech.serve.export import DEFAULT_STATUSES, pmechdb_export
 
     if (rc := _disabled("export")) is not None:
         return rc
-
-    def body(ctx, job, engine) -> dict:
-        browse = BrowseService(ctx, engine, submit=_no_submit)
-        return run_export(job, {}, engine=engine, pairs=browse.pmechdb_pairs)
-
-    return _offline(_settings(), "export", body)
+    settings = _settings()
+    engine = db.make_engine(settings.curation_db)
+    db.init_db(engine)
+    text, report = pmechdb_export(engine, args.status or DEFAULT_STATUSES)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(text, encoding="utf-8")
+    print(json.dumps(report | {"path": str(args.out)}, indent=2, sort_keys=True))
+    return 0
 
 
 # ---- schema-ts and probe-cache

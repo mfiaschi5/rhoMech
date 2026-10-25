@@ -17,12 +17,10 @@ from ksmech.serve.curation import (
     STATUSES,
     check_order_groups,
     independence_issues,
-    original_doc,
     staleness,
     step_doc,
 )
 from ksmech.serve.errors import Code, ServeError
-from ksmech.serve.export import run_export
 from ksmech.serve.recheck import UNCHECKED, run_recheck
 from ksmech.serve.testing import requires
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
@@ -51,22 +49,13 @@ pytestmark = [pytest.mark.serve, requires("curate_edit")]
 
 
 @pytest.fixture
-def jobs(synthetic_settings, synthetic_context, curation_engine, tmp_path):  # noqa: F811
-    from ksmech.serve.settings import load_settings
-
-    export_settings = load_settings({}, data_root=tmp_path / "export-root")
+def jobs(synthetic_settings, synthetic_context, curation_engine):  # noqa: F811
     handlers = {
         "recheck": partial(
             run_recheck, engine=curation_engine, registry=synthetic_context.registry
         ),
-        "export": partial(run_export, engine=curation_engine, pairs=lambda ctx: None),
     }
-    return InlineJobs(
-        synthetic_settings,
-        synthetic_context.scheduler,
-        handlers,
-        settings_for={"export": export_settings},
-    )
+    return InlineJobs(synthetic_settings, synthetic_context.scheduler, handlers)
 
 
 @pytest.fixture
@@ -97,10 +86,11 @@ def test_create_actions(service, oh_sn2_network, action, status):  # noqa: F811
     assert out.status == status and out.n_steps == 1 and out.notes == "looks right"
     assert out.reactants == ["[OH-]", "CCl"] and out.stoichiometry == [1, 1]
     assert out.conditions == "water, 25 C"
-    assert out.predictor == "stub" and out.checkpoint_hash.startswith("stub/")
+    assert out.predictor == "floor" and out.checkpoint_hash.startswith("floor/g-atom/")
     assert out.spec_version == oh_sn2_network.provenance.spec_version
     (step,) = out.steps
-    assert (step.reactant_pool_key, step.product_pool_key) == ("CCl.[OH-]", "CO.[Cl-]")
+    keys = ("[CH3][Cl]|0.[OH]|-1", "[CH3][OH]|0.[Cl]|-1")
+    assert (step.reactant_pool_key, step.product_pool_key) == keys
     assert step.order_group == 0 and not step.was_corrected and step.original is None
     assert not out.stale and out.stale_reasons == [] and out.warnings == []
     assert service.get(out.id).model_dump() == out.model_dump()
@@ -110,57 +100,37 @@ def test_validate_with_a_corrected_edge(service, meo_corrected_network):  # noqa
     out = _create(service, meo_corrected_network, "validate", conditions="DMSO")
     assert out.status == "corrected" and out.conditions == "DMSO"
     (step,) = out.steps
-    original, corrected = meo_corrected_network.edges
+    _, corrected = meo_corrected_network.edges
     assert step.was_corrected and step.step["edge_kind"] == "corrected"
-    assert step.original["edge_id"] == original.id and step.original["dataset_arrows"] is None
-    assert step.original["score"] == 2.0 and step.original["probability"] == 0.7
-    assert step.original["products_mapped"] == original.product_mapped_smiles
-    assert step.original["arrows"][0]["acceptor_element"] == "H"
+    assert step.step["predictor"] == "user" and step.step["matrix"] == corrected.matrix.model_dump(
+        mode="json"
+    )
+    assert step.original is None  # a user step supersedes no prediction (spec v9)
 
 
 def test_step_doc_fields(oh_sn2_network):  # noqa: F811
     edge, prov = oh_sn2_network.edges[0], oh_sn2_network.provenance
     doc = step_doc(edge, job_id="j0123456789abcdef", provenance=prov)
-    assert doc["format"] == "ksmech-serve/step-v1" and doc["job_id"] == "j0123456789abcdef"
+    assert doc["format"] == "ksmech-serve/step-v2" and doc["job_id"] == "j0123456789abcdef"
     assert (doc["edge_id"], doc["edge_kind"]) == (edge.id, "predicted")
     assert doc["reactant_state_id"] == edge.source_state_id
     assert doc["product_state_id"] == edge.product_state_id
-    assert doc["reactants_mapped"] == edge.encoding_base_smiles
+    assert doc["reactants_mapped"] == edge.source_mapped_smiles
     assert doc["products_mapped"] == edge.product_mapped_smiles
-    assert doc["dataset_arrows"] == [a.model_dump() for a in edge.dataset_arrows]
-    assert doc["pmechdb_code"] == edge.pmechdb_code and doc["encode_reason"] is None
-    assert (doc["score"], doc["probability"], doc["rank"]) == (1.0, 0.5, 1)
-    assert (doc["predictor"], doc["predictor_version"]) == ("stub", edge.predictor_version)
+    m = edge.matrix.model_dump(mode="json")
+    assert doc["matrix"] == m and doc["reaction_matrix"] == [m["bonds"], m["lone"]]
+    assert doc["anchor"] == edge.anchor.model_dump(mode="json")
+    assert doc["arrows"] == [a.model_dump(mode="json") for a in edge.arrows]
+    assert doc["readings"] == [r.model_dump(mode="json") for r in edge.readings]
+    assert doc["pmechdb_code"] == edge.pmechdb_code and doc["sigma_keys"] == edge.sigma_keys
+    assert (doc["score"], doc["logp"], doc["rank"]) == (edge.score, None, 1)
+    assert (doc["predictor"], doc["predictor_version"]) == ("floor", edge.predictor_version)
     assert doc["spec_version"] == prov.spec_version
     assert doc["physics_fingerprint"] == prov.physics_fingerprint
     assert doc["touched_maps"] == edge.touched_maps
-    (arrow,) = doc["arrows"]
-    a = edge.arrows[0]
-    assert arrow["donor_centres_map"] == a.donor_centres_map
-    assert arrow["acceptor_centres_map"] == a.acceptor_centres_map
-    assert (arrow["donor_site_map"], arrow["sink_partner_map"]) == (
-        a.donor_site_map,
-        a.sink_partner_map,
-    )
-    keys = "donor donor_site acceptor acceptor_site donor_site_map acceptor_site_map"
-    keys += " donor_element acceptor_element source_kind source_partner_map sink_partner_map"
-    assert set(arrow) == set((keys + " donor_centres_map acceptor_centres_map").split())
+    kinds = {(a["source_kind"], a["sink_kind"]) for a in doc["dataset_arrows"]}
+    assert kinds == {("lone_pair", "atom"), ("bond", "atom")}
     json.dumps(doc, allow_nan=False)  # JSON-able
-
-
-def test_step_doc_falls_back_to_the_source_state(oh_sn2_network):  # noqa: F811
-    edge = oh_sn2_network.edges[0].model_copy(update={"encoding_base_smiles": None})
-    doc = step_doc(edge, job_id="j", provenance=oh_sn2_network.provenance)
-    assert doc["reactants_mapped"] == edge.source_mapped_smiles
-
-
-def test_original_doc_without_the_superseded_edge(meo_corrected_network):  # noqa: F811
-    corrected = meo_corrected_network.edges[1]
-    doc = original_doc(corrected, job_id="j", provenance=meo_corrected_network.provenance)
-    assert doc["edge_id"] == corrected.original.edge_id and doc["products_mapped"] is None
-    assert doc["target_pool_key"] == corrected.original.target_pool_key
-    assert doc["reactants_mapped"] == corrected.source_mapped_smiles
-    assert original_doc(meo_corrected_network.edges[0], job_id="j", provenance={}) is None
 
 
 def test_create_errors(service, oh_sn2_network, meo_corrected_network):  # noqa: F811
@@ -175,9 +145,6 @@ def test_create_errors(service, oh_sn2_network, meo_corrected_network):  # noqa:
     _raises(Code.EDGE_NOT_FOUND, 404, service.create, base | {"edge_ids": ["e" + "0" * 16]})
     missing = base | {"job_id": "j" + "0" * 16, "edge_ids": [edge]}
     _raises(Code.JOB_NOT_FOUND, 404, service.create, missing)
-    old = meo_corrected_network.edges[0].id
-    stale = {"job_id": meo_corrected_network.network_id, "action": "save", "edge_ids": [old]}
-    _raises(Code.REQUEST_INVALID, 422, service.create, stale)
     assert service.list() == []  # nothing was written
 
 
@@ -187,7 +154,7 @@ def test_create_by_edge_ids_and_chain_check(service, double_network):  # noqa: F
     out = service.create(base | {"edge_ids": [e1.id, e2.id]})
     assert [s.step_index for s in out.steps] == [0, 1]
     assert [s.order_group for s in out.steps] == [0, 1]
-    assert out.steps[1].reactant_pool_key == "CCl.COC.C[O-].[Cl-]"
+    assert out.steps[1].reactant_pool_key == double_network.nodes[1].pool_key
     err = _raises(Code.REQUEST_INVALID, 422, service.create, base | {"edge_ids": [e2.id, e1.id]})
     assert "chain" in err.message
 
@@ -256,7 +223,7 @@ def test_patch_order_groups(service, double_network):  # noqa: F811
 # ---- statuses
 
 
-def _insert(engine, status: str, corrected: bool, predictor="stub", version="stub/x/y", **kw):
+def _insert(engine, status: str, corrected: bool, predictor="floor", version="floor/x/y", **kw):
     with db.session(engine) as s:
         m = db.Mechanism(
             reactants=json.dumps(["[OH-]", "CCl"]),
@@ -384,25 +351,12 @@ def test_gbdt_version_staleness(service, curation_engine, monkeypatch):  # noqa:
 # ---- export and re-check through the service
 
 
-def test_export_job_and_latest(service, jobs, oh_sn2_network):  # noqa: F811
-    _raises(Code.EXPORT_NOT_FOUND, 404, service.latest_export)
-    _create(service, oh_sn2_network, "validate")
-    created = service.export({})
-    assert created.kind == "export" and created.status == "done"
-    report = jobs.results[created.job_id]
-    assert report["n_steps_written"] == 1 and report["warnings"][0].startswith(
-        "PMECHDB_UNAVAILABLE"
-    )
-    latest = service.latest_export()
-    assert latest.export_id == report["export_id"] and latest.sha256 == report["sha256"]
-
-
 def test_recheck_service_errors(service, oh_sn2_network):  # noqa: F811
     _raises(Code.PREDICTOR_UNKNOWN, 422, service.recheck, {"predictor": "nope"})
-    _raises(Code.PREDICTOR_UNAVAILABLE, 409, service.recheck, {"predictor": "transformer"})
+    _raises(Code.PREDICTOR_UNAVAILABLE, 409, service.recheck, {"predictor": "network"})
     _raises(Code.MECHANISM_NOT_FOUND, 404, service.recheck_one, 42, {})
     mid = _create(service, oh_sn2_network).id
-    _raises(Code.PREDICTOR_UNAVAILABLE, 409, service.recheck_one, mid, {"predictor": "gbdt"})
+    _raises(Code.PREDICTOR_UNAVAILABLE, 409, service.recheck_one, mid, {"predictor": "network"})
 
 
 def _rows(engine, mid):
@@ -417,13 +371,13 @@ def test_recheck_job_fills_rows(service, jobs, curation_engine, oh_sn2_network):
     report = jobs.results[created.job_id]
     assert report["n_steps"] == 1 and report["n_checked"] == 1 and report["skipped"] == {}
     (row,) = _rows(curation_engine, mid)
-    assert row.aligned and row.reason is None and row.predictor == "stub"
+    assert row.aligned and row.reason is None and row.predictor == "floor"
     assert row.first_arrow_rank == 1 and row.top1 and row.top5 and row.n_valid > 0
-    assert row.product_match in ("exact", "resonance")
-    assert row.top1_reproduces_product is True  # the stub's rule sites (O, C)
+    assert row.product_match == "FOUND"  # the floor's best product is the SN2 product
+    assert row.top1_reproduces_product is True
     assert row.physics_fingerprint == service.ctx.physics_fp
     assert row.spec_version == service.ctx.spec_version
-    assert report["top1"] == 1.0 and report["provenance"]["predictor"] == "stub"
+    assert report["top1"] == 1.0 and report["provenance"]["predictor"] == "floor"
     out = service.get(mid)
     assert out.status == "validated"  # never changed by a re-check
     assert out.steps[0].recheck.first_arrow_rank == 1 and out.last_recheck is not None
@@ -457,9 +411,7 @@ def test_stale_only_after_recheck(service, jobs, curation_engine, oh_sn2_network
     assert all(len(_rows(curation_engine, mid)) == 1 for mid in mids)
     out = service.get(mids[0])
     assert out.stale and out.stale_reasons[0].startswith("spec_version v3+older")  # not rewritten
-    # another predictor is not covered by the stub's rows; explicit ids without stale_only re-check
-    floor = jobs.results[service.recheck({"predictor": "floor"}).job_id]
-    assert floor["n_steps"] == 2 and "RECHECKED_AT_CURRENT_VERSIONS" not in floor["skipped"]
+    # explicit ids without stale_only re-check
     again = jobs.results[service.recheck_one(mids[0], {}).job_id]
     assert again["n_steps"] == 1 and again["skipped"] == {}
 
@@ -467,10 +419,10 @@ def test_stale_only_after_recheck(service, jobs, curation_engine, oh_sn2_network
 def test_stale_only_repeats_a_failed_recheck(service, jobs, curation_engine):  # noqa: F811
     """A step whose latest re-check failed (reason set) is re-checked again by stale_only."""
     mid = _insert(curation_engine, "validated", False)  # stale: older versions throughout
-    for _ in range(2):  # the StepDoc has no dataset arrows: ARROW_ENCODING_FAILED each time
+    for _ in range(2):  # a step-v1 document has no reaction matrix: REQUEST_INVALID each time
         report = jobs.results[service.recheck({}).job_id]
-        assert report["n_steps"] == 1 and report["skipped"] == {"ARROW_ENCODING_FAILED": 1}
-    assert [r.reason for r in _rows(curation_engine, mid)] == ["ARROW_ENCODING_FAILED"] * 2
+        assert report["n_steps"] == 1 and report["skipped"] == {"REQUEST_INVALID": 1}
+    assert [r.reason for r in _rows(curation_engine, mid)] == ["REQUEST_INVALID"] * 2
 
 
 def test_recheck_with_the_floor(service, jobs, curation_engine, oh_sn2_network):  # noqa: F811
@@ -489,21 +441,21 @@ def _doc(network) -> dict:
 
 def test_recheck_reasons(curation_engine, synthetic_context, synthetic_settings, oh_sn2_network):  # noqa: F811
     doc = _doc(oh_sn2_network)
-    no_arrows = doc | {"dataset_arrows": None, "encode_reason": "SOURCE_UNDERIVABLE"}
+    no_matrix = doc | {"matrix": None}
     mid = _insert(curation_engine, "validated", False)
     with db.session(curation_engine) as s:
-        s.get(db.CuratedStep, (mid, 0)).arrows_json = json.dumps(no_arrows)
-    gbdt = _insert(curation_engine, "validated", False, predictor="gbdt", version="gbdt/a/b")
+        s.get(db.CuratedStep, (mid, 0)).arrows_json = json.dumps(no_matrix)
+    gbdt = _insert(curation_engine, "validated", False, predictor="network", version="n/a/b")
     ctx = LocalJobContext("j" + "3" * 16, synthetic_settings, synthetic_context.scheduler)
     request = {"mechanism_ids": [mid, gbdt, 777], "stale_only": False}
     report = run_recheck(ctx, request, engine=curation_engine, registry=synthetic_context.registry)
-    want = {"ARROW_ENCODING_FAILED": 1, "MECHANISM_NOT_FOUND": 1, "PREDICTOR_UNAVAILABLE": 1}
+    want = {"REQUEST_INVALID": 1, "MECHANISM_NOT_FOUND": 1, "PREDICTOR_UNAVAILABLE": 1}
     assert report["skipped"] == want
     assert report["n_steps"] == 2 and report["n_checked"] == 0 and report["top1"] is None
     assert report["product_match"] == {UNCHECKED: 2}
     assert dict(ctx.skipped) == report["skipped"]
     (row,) = _rows(curation_engine, mid)
-    assert row.reason == "ARROW_ENCODING_FAILED" and not row.aligned
+    assert row.reason == "REQUEST_INVALID" and not row.aligned
 
 
 @pytest.fixture
@@ -513,10 +465,8 @@ def fresh_settings(tmp_path, synthetic_settings, synthetic_loader):  # noqa: F81
     from ksmech.serve.settings import load_settings
     from ksmech.serve.synthetic import SYNTHETIC_METHOD
 
-    fresh = load_settings(
-        {}, data_root=tmp_path / "fresh", chemistry="synthetic", enable_stub_predictor=True
-    )
-    for sub in ("tokens", "qm", "oriented"):
+    fresh = load_settings({}, data_root=tmp_path / "fresh", chemistry="synthetic")
+    for sub in ("tokens", "qm", "bond_index"):
         if (synthetic_settings.serve / sub).is_dir():
             shutil.copytree(synthetic_settings.serve / sub, fresh.serve / sub)
     (fresh.serve_tokens / synthetic_loader.path_of("[OH-]").name).unlink()

@@ -10,7 +10,8 @@
   join is unambiguous; it is not a SMILES, since a key ends in `|<charge>`); pool id
   "p" + sha256("pool-v2|" + key)[:20] (v2: the sigma key replaced the enumerated key);
 - state id "s" + sha256(mapped_smiles)[:20] (the mapped Lewis form addresses `/pool/{id}`);
-- edge id "e" (predicted) or "c" (corrected) + sha256(source state, arrows, kind)[:16].
+- edge id "e" (predicted) or "c" (corrected, a user step) + sha256(source state, reaction
+  matrix, kind)[:16].
 
 Upstream helpers (`ksmech.data.chem`, `ksmech.data.resonance`) are imported inside the
 functions, so importing this module loads only RDKit.
@@ -21,13 +22,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 from rdkit import Chem, rdBase
 
-from ksmech.serve.contracts import ArrowSpec
 from ksmech.serve.errors import Code, ServeError
 
 POOL_KEY_VERSION = 2
@@ -101,19 +102,14 @@ def state_id(mapped_smiles: str) -> str:
     return "s" + hashlib.sha256(mapped_smiles.encode()).hexdigest()[:20]
 
 
-def _arrow_list(a: ArrowSpec | Mapping | Sequence) -> list[int]:
-    if isinstance(a, ArrowSpec):
-        return a.as_list()
-    if isinstance(a, Mapping):
-        return ArrowSpec.from_dict(a).as_list()
-    return [int(x) for x in a]
-
-
-def edge_id(kind: str, source_state_id: str, arrows: Sequence[ArrowSpec]) -> str:
-    """Idempotent edge identity: the same arrows from the same state give the same id."""
+def edge_id(kind: str, source_state_id: str, matrix: Any) -> str:
+    """Idempotent edge identity: the same reaction matrix (`MatrixIO` or its list form) from
+    the same state gives the same id."""
     if kind not in EDGE_PREFIX:
         raise ValueError(f"edge kind must be one of {sorted(EDGE_PREFIX)}, got {kind!r}")
-    body = json.dumps([_arrow_list(a) for a in arrows])
+    if isinstance(matrix, Mapping):
+        matrix = [matrix["bonds"], matrix["lone"]]
+    body = json.dumps([[list(map(int, x)) for x in part] for part in matrix])
     raw = f"{source_state_id}|{body}|{kind}"
     return EDGE_PREFIX[kind] + hashlib.sha256(raw.encode()).hexdigest()[:16]
 

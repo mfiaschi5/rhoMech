@@ -49,7 +49,7 @@ def _cube(rt, key: str, **request) -> tuple[dict, dict, Path]:
 
 
 def test_canonical_cube_is_ao_values_times_c(wb_runtime):  # noqa: F811
-    from ksmech.physics.gto import ao_values
+    from ksmech.serve.gto import ao_values
 
     key = "CCO"
     rec, _, _ = osets.load_qm(wb_runtime, key)
@@ -69,7 +69,7 @@ def test_canonical_cube_is_ao_values_times_c(wb_runtime):  # noqa: F811
 
 
 def test_lmo_cube_is_the_token_coefficients(wb_runtime):  # noqa: F811
-    from ksmech.physics.gto import ao_values
+    from ksmech.serve.gto import ao_values
 
     key = "CCO"
     t = wb_runtime.loader(key)

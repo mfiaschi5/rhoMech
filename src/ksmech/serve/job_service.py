@@ -1,10 +1,13 @@
-"""The API-side job service (design 6.4): predict, job status, cancel, override, pathways, and
-the `NetworkSource` curation reads networks through. Services never import FastAPI; they take
-an `ApiContext` and return `schemas` models.
+"""The API-side job service (design 6.4): predict, job status, cancel, the user's steps
+(override), node expansion, pathways, and the `NetworkSource` curation reads networks through.
+Services never import FastAPI; they take an `ApiContext` and return `schemas` models.
 
 `network_out(net, request, provenance)` builds a fully typed `NetworkOut`: species display
-SMILES come from the token keys (a species key may be a charge-separated resonance form), and
-the dataset arrows, PMechDB code and encoding base of an edge come from its `encoded` step.
+SMILES come from the token keys (a species key may be a charge-separated resonance form).
+A user step (`override`) is synchronous: R is checked and applied on the API side
+(`serve.steps.check_step`, the same record the worker builds for a predicted edge), the edge
+and its child node are written to the network under the network's lock, and the child can then
+be expanded (`expand`, a job).
 """
 
 from __future__ import annotations
@@ -15,26 +18,37 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from ksmech.serve.contracts import LRU
+from ksmech.serve.contracts import LRU, USER_PREDICTOR
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.jobs import (
     Job,
     JobKind,
     JobRunner,
     JobStatus,
-    override_handler,
+    expand_handler,
     predict_handler,
     species_inputs,
 )
-from ksmech.serve.network import Network, display_smiles, network_from_dict, rank_pathways
+from ksmech.serve.network import (
+    Network,
+    add_user_edge,
+    display_smiles,
+    network_from_dict,
+    network_to_dict,
+    node_of_state,
+    rank_pathways,
+)
 from ksmech.serve.schemas import (
-    ArrowOut,
+    EdgeOut,
+    ExpandIn,
+    ExpandResultOut,
     ExportReportOut,
     IndexStatusOut,
     JobCreatedOut,
     JobOut,
     JobSummaryOut,
     NetworkOut,
+    NodeOut,
     OverrideIn,
     OverrideResultOut,
     PathwayOut,
@@ -50,11 +64,11 @@ log = logging.getLogger(__name__)
 
 CHEMISTRIES = ("real", "cached", "synthetic", "stub")
 RESULT_MODELS = {
+    JobKind.EXPAND: ExpandResultOut,
     JobKind.EXPORT: ExportReportOut,
     JobKind.RECHECK: RecheckReportOut,
     JobKind.INDEX: IndexStatusOut,
 }
-DATASET_ARROW_KEYS = ("source_kind", "source_atoms", "sink_kind", "sink_atoms")
 
 
 # ---- NetworkOut
@@ -108,53 +122,37 @@ def _node_out(n) -> dict:
     }
 
 
-def _dataset_arrows(encoded: Mapping) -> list[dict] | None:
-    arrows = encoded.get("arrows")
-    if not isinstance(arrows, list):
-        return None
-    out = []
-    for a in arrows:
-        if not isinstance(a, Mapping) or any(k not in a for k in DATASET_ARROW_KEYS):
-            log.warning("encoded arrow without the dataset-arrow fields: %r", a)
-            return None
-        out.append({k: a[k] for k in DATASET_ARROW_KEYS})
-    return out
-
-
 def _failed_proposal_out(fp: Mapping) -> dict:
-    """`FailedProposalOut` fields. An arrow dict not in `ArrowOut` form (a worker fallback)
-    is omitted, logged, and noted in the detail, so one bad example never hides the network."""
-    arrows, bad = [], 0
-    for a in fp.get("arrows") or []:
-        try:
-            ArrowOut.model_validate(a)
-            arrows.append(a)
-        except ValidationError:
-            bad += 1
-    detail = str(fp.get("detail") or "")
-    if bad:
-        log.warning("failed proposal at %s: %d arrow(s) not in ArrowOut form", fp.get("node"), bad)
-        detail += f" ({bad} arrow(s) not in ArrowOut form omitted)"
+    """`FailedProposalOut` fields."""
     return {
         "node": fp.get("node"),
-        "rank": fp.get("rank"),
-        "arrows": arrows,
-        "probability": fp.get("probability"),
+        "rank": int(fp.get("rank") or 0),
+        "matrix": fp.get("matrix") or {"bonds": [], "lone": []},
+        "score": fp.get("score"),
         "code": str(fp.get("code") or Code.UNEXPECTED),
-        "detail": detail,
+        "detail": str(fp.get("detail") or ""),
     }
 
 
 def _edge_out(e, net: Network) -> dict:
-    enc = e.encoded or {}
-    d = {k: getattr(e, k) for k in e.__dataclass_fields__ if k != "encoded"}
-    d.update(
-        target_pool_key=net.nodes[e.target].pool_key,
-        dataset_arrows=_dataset_arrows(enc) if enc else None,
-        pmechdb_code=enc.get("code"),
-        encoding_base_smiles=enc.get("base_smiles"),
-    )
+    from ksmech.serve import reading
+
+    d = {k: getattr(e, k) for k in e.__dataclass_fields__}
+    d["target_pool_key"] = net.nodes[e.target].pool_key
+    d["predictor"] = e.predictor or net.predictor.name
+    d["pmechdb_code"] = _pmech_code(e, reading)
     return d
+
+
+def _pmech_code(e, reading) -> str | None:
+    """The PMechDB arrow code of the edge's reading on the source state's map numbers."""
+    if not e.arrows:
+        return None
+    from ksmech.data import chem
+
+    mol = chem.parse_mapped(e.source_mapped_smiles)
+    moves = [reading.Move.from_dict(a) for a in e.arrows]
+    return reading.pmech_code(moves, lambda a: mol.GetAtomWithIdx(int(a)).GetAtomMapNum())
 
 
 def _params_out(net: Network) -> dict:
@@ -188,8 +186,19 @@ def network_provenance(net: Network, provenance: Mapping) -> dict:
     return out
 
 
-def network_out(net: Network, request: Mapping, provenance: Mapping) -> NetworkOut:
-    """The typed `NetworkOut` of a network (raises pydantic's ValidationError)."""
+def _pathway_out(p, probabilities: bool) -> dict:
+    d = p.to_dict()
+    if not probabilities:
+        d["probability"] = None
+    return d
+
+
+def network_out(
+    net: Network, request: Mapping, provenance: Mapping, probabilities: bool = False
+) -> NetworkOut:
+    """The typed `NetworkOut` of a network (raises pydantic's ValidationError).
+    `probabilities`: the network's predictor gives probabilities (else pathway probabilities
+    are null and `logp` is a summed beam weight)."""
     return NetworkOut.model_validate(
         {
             "network_id": net.network_id,
@@ -199,12 +208,13 @@ def network_out(net: Network, request: Mapping, provenance: Mapping) -> NetworkO
             "nodes": [_node_out(n) for n in net.nodes.values()],
             "edges": [_edge_out(e, net) for e in net.edges.values()],
             "cycles": [c.to_dict() for c in net.cycles.values()],
-            "pathways": [p.to_dict() for p in net.pathways],
+            "pathways": [_pathway_out(p, probabilities) for p in net.pathways],
             "failed_proposals": [_failed_proposal_out(fp) for fp in net.failed_proposals],
             "skipped": {k: int(v) for k, v in sorted(net.skipped.items())},
             "params": _params_out(net),
             "request": dict(request),
             "provenance": network_provenance(net, provenance),
+            "scores_are_probabilities": bool(probabilities),
         }
     )
 
@@ -221,7 +231,7 @@ class JobService:
         self.runner = runner
         self.chemistry = chemistry
         runner.register(JobKind.PREDICT, predict_handler(chemistry, ctx.registry.ref))
-        runner.register(JobKind.OVERRIDE, override_handler(chemistry, runner))
+        runner.register(JobKind.EXPAND, expand_handler(chemistry, runner, ctx.registry.ref))
         self._nets: LRU[str, tuple[tuple, Network]] = LRU(8)
 
     # ---- endpoints
@@ -230,7 +240,8 @@ class JobService:
         """Preflight (input and predictor errors are immediate 422 / 409), then queue."""
         request = body.model_dump(mode="json")
         inputs = species_inputs(request)
-        self.ctx.registry.get(body.predictor)
+        if body.predictor != USER_PREDICTOR:
+            self.ctx.registry.get(body.predictor)
         self.chemistry.root(inputs)
         prov = self._provenance(body.predictor, body.temperature, body.candidate_scope)
         label = f"{body.predictor}: " + " + ".join(
@@ -244,9 +255,9 @@ class JobService:
         out = self._job_base(job)
         if job.kind == JobKind.PREDICT:
             self._predict_result(job, out, since_revision)
-        elif job.kind == JobKind.OVERRIDE:
+        elif job.kind == JobKind.EXPAND:
             out["provenance"] = self._owner_provenance(job)
-            self._stored_result(job, out, OverrideResultOut, "override")
+            self._stored_result(job, out, ExpandResultOut, "expand")
         elif job.kind in RESULT_MODELS:
             self._stored_result(job, out, RESULT_MODELS[JobKind(job.kind)], job.kind)
         return JobOut.model_validate(out)
@@ -268,37 +279,73 @@ class JobService:
         self.runner.cancel(job_id, force=force)
         return self.get(job_id)
 
-    def override(self, job_id: str, body: OverrideIn) -> JobCreatedOut:
-        """Queue an override of the job's network. Errors at submission: exactly one of
-        edge_id / node_id (422), unknown job (404), no network yet (409 JOB_NOT_DONE),
-        unknown edge or node (404), a job queued or running on the network (409)."""
-        if (body.edge_id is None) == (body.node_id is None):
-            msg = "give exactly one of edge_id and node_id"
-            raise ServeError(Code.REQUEST_INVALID, msg, status=422)
+    def override(self, job_id: str, body: OverrideIn) -> OverrideResultOut:
+        """A user step on the job's network (synchronous): R on `parent_state_id` (a node's
+        state or alias), checked and applied; the edge (kind "corrected", predictor "user")
+        and its child node are written. 422 STEP_INVALID with the issues when R is no valid
+        step; 409 NETWORK_BUSY while a job runs on the network; 202 Pending while the pool's
+        analysis is computed for the readings."""
+        from ksmech.serve.pools import save_state
+        from ksmech.serve.steps import check_step, invalid_step
+
+        owner, _ = self._network_of_job(self.runner.get(job_id))
+        self._idle(owner.id)
+        state = self.ctx.state(body.parent_state_id)
+        rec = check_step(self.ctx, state, body.matrix.model_dump(), wait_s=None)
+        if not rec["ok"]:
+            raise invalid_step(rec)
+        child = rec["product_state"]
+        save_state(child, self.settings)
+        with self.runner.network_lock(owner.id):
+            self._idle(owner.id)
+            net = self._network(owner.id)
+            parent = node_of_state(net, state.state_id)
+            e = add_user_edge(net, parent, state, child, rec)
+            net.pathways = rank_pathways(net, net.params.n_pathways)
+            net.touch()
+            self.runner.store.write_network(owner.id, network_to_dict(net))
+        node = net.nodes[e.target]
+        return OverrideResultOut(
+            edge=EdgeOut.model_validate(_edge_out(e, net)), node=NodeOut(**_node_out(node))
+        )
+
+    def expand(self, job_id: str, body: ExpandIn) -> JobCreatedOut:
+        """Queue the expansion of one node of the job's network (`steps` layers)."""
         job = self.runner.get(job_id)
         owner, net = self._network_of_job(job)
-        if body.edge_id is not None and body.edge_id not in net.edges:
-            msg = f"no edge {body.edge_id} in the network of {owner.id}"
-            raise ServeError(Code.EDGE_NOT_FOUND, msg, status=404)
-        if body.node_id is not None and body.node_id not in net.nodes:
+        if body.node_id not in net.nodes:
             msg = f"no node {body.node_id} in the network of {owner.id}"
             raise ServeError(Code.NODE_NOT_FOUND, msg, status=404)
+        name = body.predictor or (
+            "floor" if net.predictor.name == USER_PREDICTOR else net.predictor.name
+        )
+        self.ctx.registry.get(name)
         request = {
             "network_id": owner.id,
             "parent_job_id": job.id,
-            "override": body.model_dump(mode="json"),
+            "expand": body.model_dump(mode="json") | {"predictor": name},
         }
-        target = body.edge_id or body.node_id
         created = self.runner.submit(
-            JobKind.OVERRIDE,
+            JobKind.EXPAND,
             request,
             parent_job_id=job.id,
             network_id=owner.id,
-            label=f"override of {target}",
+            label=f"expand {body.node_id} with {name}",
             exclusive=True,
             provenance=owner.provenance,
         )
         return JobCreatedOut(**created.created_out())
+
+    def _idle(self, network_id: str) -> None:
+        busy = self.runner.busy_job(network_id)
+        if busy is not None:
+            msg = f"job {busy} is queued or running on network {network_id}"
+            detail = {"network_id": network_id, "job_id": busy}
+            raise ServeError(Code.NETWORK_BUSY, msg, status=409, detail=detail)
+
+    @property
+    def settings(self):
+        return self.ctx.settings
 
     def pathways(self, job_id: str, *, limit: int = 20, include_pruned: bool = False):
         _, net = self._network_of_job(self.runner.get(job_id))
@@ -363,7 +410,11 @@ class JobService:
         data = self.runner.store.read_network(network_id)
         if data is None:
             return None
-        net = network_from_dict(data)
+        try:
+            net = network_from_dict(data)
+        except (ValueError, KeyError, TypeError) as exc:
+            msg = f"network {network_id} is not readable under spec v9 ({exc})"
+            raise ServeError(Code.CONSISTENCY_FAILED, msg, status=409) from exc
         self._nets.put(network_id, (stamp, net))
         return net
 
@@ -372,12 +423,20 @@ class JobService:
             net.predictor.name, net.predictor.temperature, net.params.candidate_scope
         )
         try:
-            return network_out(net, owner.request, prov)
+            return network_out(net, owner.request, prov, self._probabilities(net))
         except ValidationError as exc:
             log.error("network %s does not validate: %s", owner.id, exc)
             detail = {"errors": [f"{e.get('loc')}: {e.get('msg')}" for e in exc.errors()[:5]]}
             msg = f"the stored network of {owner.id} does not validate as NetworkOut"
             raise ServeError(Code.CONSISTENCY_FAILED, msg, status=500, detail=detail) from exc
+
+    def _probabilities(self, net: Network) -> bool:
+        if net.predictor.name == USER_PREDICTOR:
+            return False
+        try:
+            return bool(self.ctx.registry.info_of(net.predictor.name).scores_are_probabilities)
+        except ServeError:
+            return False
 
     def _current_task(self, job: Job) -> dict | None:
         current = getattr(self.ctx.scheduler, "current", None)

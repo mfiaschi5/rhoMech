@@ -1,7 +1,6 @@
 """contracts.py: value-type round trips, log_softmax_valid, LRU, ChildScan, LocalJobContext."""
 
 import json
-import math
 import threading
 
 import numpy as np
@@ -9,8 +8,6 @@ import pytest
 
 from ksmech.serve.contracts import (
     LRU,
-    ArrowSpec,
-    ChildScan,
     ExpandRequest,
     Expansion,
     Limits,
@@ -19,9 +16,7 @@ from ksmech.serve.contracts import (
     PredictorInfo,
     PredictorRef,
     ProposedChild,
-    ProposedStep,
     SpeciesCount,
-    StepOutcome,
     log_softmax_valid,
     to_jsonable,
 )
@@ -44,19 +39,16 @@ def _state() -> PoolState:
     )
 
 
-def _child(logp: float = -0.5) -> ProposedChild:
+def _child(weight: float = -0.5, logp: float | None = None) -> ProposedChild:
     return ProposedChild(
         state=_state(),
-        arrows=[{"donor": 16, "physics": {"ks3": -0.1, "flags": ["synthetic"]}}],
-        encoded={"code": "a=b;b,d=d"},
-        encode_reason=None,
-        touched_maps=[2, 6, 7],
+        step={"matrix": {"bonds": [[1, 5, 1], [5, 6, -1]], "lone": [[1, -2], [6, 2]]}},
         score=0.75,
-        probability=0.6,
         logp=logp,
+        weight=weight,
         rank=1,
         n_alternatives=2,
-        alternatives=[{"score": 0.5, "probability": 0.2, "rank": 3, "arrows": []}],
+        alternatives=[{"score": 0.5, "logp": None, "rank": 3, "matrix": {}}],
     )
 
 
@@ -68,24 +60,24 @@ def _roundtrip(obj):
 INFO = PredictorInfo(
     "gbdt",
     "GBDT",
-    "baseline",
+    "gbdt",
     False,
     "GBDT_MISSING",
     "no file",
     None,
     None,
-    "logit",
+    "rank score",
     1.0,
-    ("trained on sample-v5",),
+    ("scores rank candidates",),
     "a ranker",
+    False,
 )
 
 CASES = [
     SpeciesCount("C=C[O-]", ("C=C[O-]", "[CH2-]C=O"), 1, -1, "OK"),
     _state(),
-    ArrowSpec(16, 1, 28, 5),
     ExpandRequest("floor", 3, None, "all", 64),
-    ExpandRequest("stub", 2, 0.5, "inter", 64),
+    ExpandRequest("gbdt", 2, 0.5, "inter", 64),
     Limits(6, 4, 150, 10, 12, 200),
     _child(),
     Expansion(
@@ -93,7 +85,7 @@ CASES = [
         None,
         None,
         "",
-        [_child(), _child(-1.2)],
+        [_child(), _child(-1.2, -0.3)],
         98,
         7,
         0.9,
@@ -104,13 +96,8 @@ CASES = [
         ["w"],
     ),
     Expansion.failed("FEATURIZATION_FAILED", "scf", upstream="SCF_NOT_CONVERGED"),
-    StepOutcome(_state(), [{"donor": 1}], None, "no base", [1, 2], [{"rank": 4}], [{"code": "W"}]),
     INFO,
-    PredictorRef("floor", "floor/ks3+ks2/d2.3/abc", None, 1.0),
-    ProposedStep((ArrowSpec(16, 1, 28, 5),), ("rule",), 50.4, -0.01, 1, (6, 4)),
-    ProposedStep(
-        (ArrowSpec(1, 2, 3, 4), ArrowSpec(5, 6, 7, 8)), ("user", "user"), 1.0, -2.0, 2, None
-    ),
+    PredictorRef("floor", "floor/g-atom/abc", None, 1.0),
 ]
 
 
@@ -120,18 +107,11 @@ def test_roundtrip(obj):
 
 
 def test_tuples_become_lists_and_nonfinite_become_none():
-    d = _child(logp=float("-inf")).to_dict()
+    d = _child(weight=float("-inf")).to_dict()
     assert isinstance(d["state"]["species"], list) and isinstance(d["state"]["species"][0], dict)
-    assert d["logp"] is None
+    assert d["weight"] is None and d["logp"] is None
     back = ProposedChild.from_dict(json.loads(json.dumps(d)))
-    assert back.logp == float("-inf")
-    step = ProposedStep(
-        (ArrowSpec(1, 2, 3, 4),), ("contact",), float("nan"), float("-inf"), 1, None
-    )
-    s = step.to_dict()
-    assert s["score"] is None and s["logp"] is None
-    back = ProposedStep.from_dict(s)
-    assert math.isnan(back.score) and back.logp == float("-inf")
+    assert back.weight == float("-inf") and back.logp is None
 
 
 def test_to_jsonable_numpy():
@@ -239,80 +219,6 @@ def test_lru_threads():
 
 
 # ---- ChildScan
-
-
-def test_childscan_grouping_and_kept_order():
-    scan = ChildScan(beam=2, max_scan=10)
-    assert scan.add(0.25, "B") is True
-    assert scan.add(0.25, "A") is True
-    assert scan.add(0.125, None, "APPLY_FAILED:X") is False
-    assert scan.add(0.125, "C") is True
-    assert scan.add(0.0625, "C") is False  # second member of C
-    assert scan.mass == {"B": 0.25, "A": 0.25, "C": 0.1875}
-    assert scan.kept() == ["A", "B"]  # tie by key asc
-    assert scan.ranked() == ["A", "B", "C"]
-    assert scan.n_scanned == 5 and scan.scanned_mass == 0.8125
-    assert scan.failures == {"APPLY_FAILED:X": 1}
-    with pytest.raises(ValueError):
-        scan.add(0.1, None)
-    with pytest.raises(ValueError):
-        scan.add(0.1, "A", "BOTH")
-
-
-def test_childscan_exhausted_and_max_scan():
-    scan = ChildScan(beam=3, max_scan=2)
-    assert scan.should_stop(0) == "exhausted"
-    scan.add(0.1, "A")
-    assert scan.should_stop(5) is None
-    scan.add(0.1, "B")
-    assert scan.should_stop(5) == "max_scan"
-    assert scan.should_stop(0) == "exhausted"  # exhausted is checked first
-
-
-def test_childscan_bound_is_strict():
-    """beam 1: after A = 0.5 the unscanned mass U = 0.5 equals p_1 - p_2 = 0.5 - 0: keep
-    scanning; after B = 0.25, U = 0.25 == 0.5 - 0.25: keep scanning; after A += 0.125,
-    U = 0.125 < 0.625 - 0.25: stop on the bound."""
-    scan = ChildScan(beam=1, max_scan=100)
-    scan.add(0.5, "A")
-    assert scan.unscanned_mass == 0.5
-    assert scan.should_stop(10) is None
-    scan.add(0.25, "B")
-    assert scan.unscanned_mass == 0.25
-    assert scan.mass["A"] - scan.mass["B"] == 0.25
-    assert scan.should_stop(10) is None
-    scan.add(0.125, "A")
-    assert scan.should_stop(10) == "bound"
-    assert scan.kept() == ["A"]
-
-
-def test_childscan_bound_needs_beam_children():
-    scan = ChildScan(beam=2, max_scan=100)
-    scan.add(0.75, "A")  # U = 0.25 < 0.75, but only one child exists
-    assert scan.should_stop(3) is None
-    scan.add(0.125, "B")  # U = 0.125 == p_2 - p_3 = 0.125 - 0: keep scanning
-    assert scan.should_stop(3) is None
-    scan.add(0.0625, None, "RESONANCE_ONLY_STEP")  # a failure still counts: U = 0.0625 < 0.125
-    assert scan.should_stop(3) == "bound"
-
-
-def test_childscan_lower_bound_property():
-    """A kept child's mass is a lower bound: the true marginal is at most mass + U."""
-    rng = np.random.default_rng(0)
-    p = rng.dirichlet(np.ones(40))
-    children = rng.integers(0, 6, size=40).astype(str)
-    order = np.argsort(-p, kind="stable")
-    scan = ChildScan(beam=2, max_scan=40)
-    for n_done, k in enumerate(order):
-        if scan.should_stop(len(order) - n_done):
-            break
-        scan.add(float(p[k]), str(children[k]))
-    true = {c: float(p[children == c].sum()) for c in set(children)}
-    for c, m in scan.mass.items():
-        assert m <= true[c] + 1e-12
-        assert true[c] <= m + scan.unscanned_mass + 1e-12
-    full = sorted(true, key=lambda c: (-true[c], c))[:2]
-    assert set(scan.kept()) == set(full)  # the kept set is final once the bound stops the scan
 
 
 # ---- LocalJobContext

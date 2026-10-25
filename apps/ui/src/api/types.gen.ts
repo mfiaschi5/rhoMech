@@ -39,7 +39,6 @@ export interface PendingOut {
 export interface KSParamsOut {
   K: number;
   eps: number;
-  tau: number;
 }
 
 export interface CandidateConfigOut {
@@ -62,7 +61,6 @@ export interface Provenance {
   ks_params: KSParamsOut;
   temperature: number | null;
   candidate_scope: "all" | "inter";
-  contact_distance_ang: number;
   candidate_config: CandidateConfigOut;
   notes: string[];
 }
@@ -100,8 +98,6 @@ export interface MetaOut {
   qm_method: string;
   token_method: string;
   ks_params: KSParamsOut;
-  primary_distance_ang: number;
-  feature_distances_ang: number[];
   candidate_config: CandidateConfigOut;
   limits: LimitsOut;
   worker: WorkerStatusOut;
@@ -114,7 +110,7 @@ export interface MetaOut {
 export interface PredictorInfoOut {
   name: string;
   label: string;
-  kind: "physics_floor" | "baseline" | "model" | "stub";
+  kind: "floor" | "gbdt" | "network";
   available: boolean;
   code: string | null;
   reason: string | null;
@@ -124,6 +120,7 @@ export interface PredictorInfoOut {
   default_temperature: number;
   warnings: string[];
   description: string;
+  scores_are_probabilities: boolean;
   spec_version: string;
 }
 
@@ -188,115 +185,60 @@ export interface JobCreatedOut {
   provenance: Provenance | null;
 }
 
-export interface DominantBriefOut {
-  k_canonical: number;
-  m_canonical: number;
+export interface MatrixIO {
+  bonds: [number, number, number][];
+  lone: [number, number][];
+}
+
+export interface AnchorOut {
+  i: number;
+  j: number;
+  sign: "form" | "break";
+}
+
+export interface ArrowReadingOut {
+  kind: "lone_pair_to_bond" | "bond_to_bond" | "bond_to_lone_pair";
+  source: number[];
+  target: number[];
+}
+
+export interface CanonicalPairOut {
+  k: number;
+  m: number;
+  e_k_ev: number;
+  e_m_ev: number;
   k_label: string;
   m_label: string;
-  E_k: number;
-  E_m: number;
   term: number;
-  share: number;
+  share: number | null;
   index_source: string;
-  same_molecule: boolean;
 }
 
-export interface ArrowPhysicsBrief {
-  pair_valid: boolean;
-  reason: string | null;
-  ks1: number | null;
-  ks2: number | null;
-  ks2_form: "difference" | "contact" | "undefined";
-  ks3: number;
-  G: number;
-  beta2: number;
-  amplitude_S: number;
-  dominant: DominantBriefOut | null;
-  contact_distance_ang: number;
-  contact_sites: [number, number];
-  clash: boolean;
-  floor: number;
-  floor_rank: number | null;
-  n_valid: number;
-  frozen_logit: number;
-  frozen_weight: number | null;
-  tau: number;
-  frozen_source: "untrained_kernel" | "checkpoint";
-  flags: string[];
+export interface OrbitalReadingOut {
+  i: number;
+  j: number;
+  g_atom: number;
+  donor_token: number;
+  acceptor_token: number;
+  g_rs: number;
+  term: number;
+  donor_diag: string | null;
+  acceptor_diag: string | null;
+  canonical: CanonicalPairOut | null;
 }
 
-export interface SitePairOut {
-  donor_site: number;
-  acceptor_site: number;
-  donor_site_map: number;
-  acceptor_site_map: number;
-  S: number;
-  beta: number;
-  clash: boolean;
-  ks3_site: number;
-  site_rule_excluded: boolean;
-  is_contact: boolean;
-}
-
-export interface ArrowOut {
-  donor: number;
-  donor_site: number;
-  acceptor: number;
-  acceptor_site: number;
-  donor_site_map: number;
-  acceptor_site_map: number;
-  donor_element: string;
-  acceptor_element: string;
-  donor_species: string;
-  acceptor_species: string;
-  electrons: 1 | 2;
-  source_kind: "lone_pair" | "bond" | "unknown";
-  source_partner: number | null;
-  source_partner_map: number | null;
-  sink_partner: number | null;
-  sink_partner_map: number | null;
-  site_source: "contact" | "main_centre" | "rule" | "user";
-  row: number;
-  col: number;
-  donor_centres_map: Record<string, number>;
-  acceptor_centres_map: Record<string, number>;
-  diagnostic: Record<string, string>;
-  physics: ArrowPhysicsBrief | null;
-  site_pair: SitePairOut | null;
-}
-
-export interface DatasetArrowOut {
-  source_kind: string;
-  source_atoms: number[];
-  sink_kind: string;
-  sink_atoms: number[];
+export interface StepIssueOut {
+  code: string;
+  message: string;
+  atoms: number[];
 }
 
 export interface AlternativeOut {
-  arrows: ArrowOut[];
+  matrix: MatrixIO;
+  anchor: AnchorOut;
   score: number;
-  probability: number;
+  logp: number | null;
   rank: number;
-}
-
-export interface EdgeOriginalOut {
-  edge_id: string;
-  target: string;
-  target_pool_key: string;
-  arrows: ArrowOut[];
-  score: number | null;
-  probability: number | null;
-  rank: number | null;
-  predictor: string | null;
-  predictor_version: string | null;
-}
-
-export interface PredictorViewOut {
-  score: number | null;
-  probability: number | null;
-  rank: number | null;
-  pair_valid: boolean;
-  reason: string | null;
 }
 
 export interface NodeOut {
@@ -330,26 +272,27 @@ export interface EdgeOut {
   status: "active" | "superseded";
   source_state_id: string;
   product_state_id: string;
-  product_smiles: string;
   source_mapped_smiles: string;
   product_mapped_smiles: string;
-  arrows: ArrowOut[];
-  dataset_arrows: DatasetArrowOut[] | null;
+  matrix: MatrixIO;
+  anchor: AnchorOut | null;
+  arrows: ArrowReadingOut[];
+  readings: OrbitalReadingOut[];
   pmechdb_code: string | null;
-  encoding_base_smiles: string | null;
-  encode_reason: string | null;
-  touched_maps: number[];
   score: number | null;
-  probability: number | null;
-  logp: number;
-  rank: number | null;
+  logp: number | null;
+  weight: number;
+  predictor: string;
+  predictor_version: string | null;
+  rank: number;
+  product_smiles: string[];
+  sigma_keys: string[];
+  formal_charges: [number, number][];
+  touched_maps: number[];
   n_alternatives: number;
   alternatives: AlternativeOut[];
-  predictor: string | null;
-  predictor_version: string | null;
-  original: EdgeOriginalOut | null;
+  channel: Record<string, unknown> | null;
   superseded_by: string | null;
-  predictor_view: PredictorViewOut[] | null;
   recurrence: boolean;
   closes_cycle: boolean;
   cycle_ids: string[];
@@ -375,7 +318,7 @@ export interface PathwayOut {
   node_ids: string[];
   edge_ids: string[];
   logp: number;
-  probability: number;
+  probability: number | null;
   n_steps: number;
   n_corrected: number;
   ends_with: string;
@@ -386,8 +329,8 @@ export interface PathwayOut {
 export interface FailedProposalOut {
   node: string;
   rank: number;
-  arrows: ArrowOut[];
-  probability: number;
+  matrix: MatrixIO;
+  score: number | null;
   code: string;
   detail: string;
 }
@@ -417,6 +360,7 @@ export interface NetworkOut {
   params: NetParamsOut;
   request: PredictIn;
   provenance: Provenance;
+  scores_are_probabilities: boolean;
 }
 
 export interface TaskInfoOut {
@@ -442,34 +386,54 @@ export interface ProgressOut {
   updated_at: string;
 }
 
-export interface ArrowIn {
-  donor: number;
-  donor_site: number;
-  acceptor: number;
-  acceptor_site: number;
-}
-
 export interface OverrideIn {
-  edge_id?: string | null;
-  node_id?: string | null;
-  arrows: ArrowIn[];
-  allow_invalid?: boolean;
-  continue_prediction?: boolean;
-  continue_steps?: number | null;
+  parent_state_id: string;
+  matrix: MatrixIO;
 }
 
 export interface OverrideResultOut {
-  parent_job_id: string;
+  edge: EdgeOut;
+  node: NodeOut;
+}
+
+export interface ExpandIn {
+  node_id: string;
+  steps?: number;
+  predictor?: string | null;
+  beam?: number | null;
+}
+
+export interface ExpandResultOut {
+  network_id: string;
   network_revision: number;
-  corrected_edge_id: string;
-  target_node: string;
-  continued_from: string | null;
-  issues: ErrorBody[];
+  node_id: string;
+  predictor: string;
+  n_nodes: number;
+  n_edges: number;
+}
+
+export interface StepCheckIn {
+  state_id: string;
+  matrix: MatrixIO;
+}
+
+export interface StepCheckOut {
+  ok: boolean;
+  issues: StepIssueOut[];
+  product_smiles: string[];
+  sigma_keys: string[];
+  formal_charges: [number, number][];
+  arrows: ArrowReadingOut[];
+  readings: OrbitalReadingOut[];
+  anchor: AnchorOut | null;
+  product_state_id: string | null;
+  pmechdb_code: string | null;
+  readings_status: "ready" | "pending" | "unavailable";
 }
 
 export interface JobOut {
   job_id: string;
-  kind: "predict" | "override" | "recheck" | "export" | "index";
+  kind: "predict" | "override" | "expand" | "recheck" | "export" | "index";
   status: "queued" | "running" | "done" | "failed" | "cancelled";
   created_at: string;
   started_at: string | null;
@@ -481,8 +445,8 @@ export interface JobOut {
   partial: boolean;
   unchanged: boolean;
   provenance: Provenance | null;
-  result_kind: "network" | "override" | "export" | "recheck" | "index" | null;
-  result: NetworkOut | OverrideResultOut | ExportReportOut | RecheckReportOut | IndexStatusOut | null;
+  result_kind: "network" | "expand" | "export" | "recheck" | "index" | null;
+  result: NetworkOut | ExpandResultOut | ExportReportOut | RecheckReportOut | IndexStatusOut | null;
 }
 
 export interface JobSummaryOut {
@@ -605,171 +569,6 @@ export interface TokensOut {
   provenance: Provenance;
 }
 
-export interface OrbitalDescBrief {
-  occupation: number;
-  n_centers: number;
-  centres: CentreOut[];
-  spd0: number[];
-  cos_a: number;
-  cos_b: number;
-  overlap_sign: number;
-  spectral_set: [number, number][];
-}
-
-export interface CandidateOut {
-  rank: number | null;
-  pair_rank: number | null;
-  row: number;
-  col: number;
-  donor: number;
-  donor_site: number;
-  acceptor: number;
-  acceptor_site: number;
-  donor_site_map: number;
-  acceptor_site_map: number;
-  donor_site_element: string;
-  acceptor_site_element: string;
-  donor_species: string;
-  acceptor_species: string;
-  acceptor_centre_elements: string[];
-  is_contact_site_pair: boolean;
-  contact_sites: [number, number];
-  score: number | null;
-  probability: number | null;
-  ks1: number | null;
-  ks2: number | null;
-  ks3: number;
-  clash: boolean;
-  donor_desc: OrbitalDescBrief;
-  acceptor_desc: OrbitalDescBrief;
-  diagnostic: Record<string, string>;
-  valid: boolean;
-  reason: string | null;
-}
-
-export interface CandidatesOut {
-  state_id: string;
-  predictor: string;
-  temperature: number;
-  scope: string;
-  n_valid_pairs: number;
-  n_tuples: number;
-  total: number;
-  offset: number;
-  limit: number;
-  candidates: CandidateOut[];
-  excluded_counts: Record<string, number>;
-  provenance: Provenance;
-}
-
-export interface SitePairsOut {
-  state_id: string;
-  donor: number;
-  acceptor: number;
-  G: number;
-  site_pairs: SitePairOut[];
-  note: string;
-  provenance: Provenance | null;
-}
-
-export interface DominantPairOut {
-  k: number;
-  m: number;
-  k_canonical: number;
-  m_canonical: number;
-  k_label: string;
-  m_label: string;
-  index_source: "qm_occupations" | "aufbau" | "qm_occupations_unchecked" | "aufbau_unchecked";
-  donor_species: string;
-  acceptor_species: string;
-  E_k: number;
-  E_m: number;
-  gap: number;
-  p_rk: number;
-  p_sm: number;
-  term: number;
-  share: number;
-  ks3_part: number;
-  same_molecule: boolean;
-}
-
-export interface FrozenHeadOut {
-  logit: number;
-  weight: number | null;
-  tau: number;
-  source: "untrained_kernel" | "checkpoint";
-  normalization: string;
-}
-
-export interface Ks2DetailOut {
-  form: "difference" | "contact" | "undefined";
-  main_centres: [number, number];
-  q_donor: number;
-  q_acceptor: number;
-  R_contact: number;
-  R_geometric: number | null;
-  eps: number;
-}
-
-export interface LevelOut {
-  canonical: number;
-  label: string;
-  energy: number;
-  weight: number | null;
-}
-
-export interface EnergyLevelsOut {
-  donor_species: string;
-  acceptor_species: string;
-  donor_levels: LevelOut[];
-  acceptor_levels: LevelOut[];
-  donor_lmo_energy: number;
-  acceptor_lmo_energy: number;
-  homo_lumo_gap: number;
-}
-
-export interface PhysicsOut {
-  state_id: string;
-  donor: number;
-  donor_site: number;
-  acceptor: number;
-  acceptor_site: number;
-  row: number;
-  col: number;
-  units: Record<string, string>;
-  pair_valid: boolean;
-  reason: string | null;
-  ks1: number;
-  ks1_defined: boolean;
-  ks2: number;
-  ks2_defined: boolean;
-  ks2_detail: Ks2DetailOut;
-  ks3: number;
-  G: number;
-  G_exact: number;
-  beta: number;
-  beta2: number;
-  beta2_by_distance: Record<string, number>;
-  amplitude_S: number;
-  contact_sites: [number, number];
-  requested_sites_are_contact: boolean;
-  site_pair: SitePairOut | null;
-  contact_distance_ang: number;
-  clash: boolean;
-  floor: number;
-  floor_rank: number | null;
-  n_valid: number;
-  predictor: string;
-  score: number | null;
-  probability: number | null;
-  rank: number | null;
-  frozen_head: FrozenHeadOut;
-  dominant_pair: DominantPairOut;
-  energy_levels: EnergyLevelsOut;
-  flags: string[];
-  provenance: Provenance;
-}
-
 export interface AtomXYZOut {
   global_site: number | null;
   record_index: number;
@@ -800,6 +599,8 @@ export interface GeometryOut {
 
 export interface DepictAtomOut {
   depiction_idx: number;
+  pool_atom: number;
+  hidden_h_atoms: number[];
   global_site: number | null;
   map: number;
   element: string;
@@ -813,54 +614,6 @@ export interface DepictionOut {
   atoms: DepictAtomOut[];
   server_svg: string | null;
   server_coords: [number, number][] | null;
-}
-
-export interface LobeOut {
-  site: number;
-  origin: [number, number, number];
-  direction: [number, number, number];
-  tied: [number, number, number][];
-  opposite: [number, number, number] | null;
-}
-
-export interface CapOut {
-  atoms: AtomXYZOut[];
-  bonds: [number, number, number][];
-  molblock: string;
-  local_ids: number[];
-}
-
-export interface ContactOut {
-  state_id: string;
-  donor: number;
-  donor_site: number;
-  acceptor: number;
-  acceptor_site: number;
-  same_fragment: boolean;
-  is_contact_argmax: boolean;
-  donor_fragment: SpeciesGeometryOut;
-  cap: CapOut;
-  acceptor_context: CapOut | null;
-  donor_lobe: LobeOut;
-  acceptor_lobe_placed: LobeOut;
-  acceptor_lobe_own_frame: LobeOut;
-  distance_ang: number;
-  clash_limit_ang: number;
-  S: number;
-  beta: number;
-  clash: boolean;
-  tier: 1 | 2;
-  roll_step: number;
-  roll_deg: number;
-  slots: [number, number];
-  ks3_site: number;
-  G: number;
-  consistent: boolean;
-  checks: Record<string, number | boolean>;
-  cube_urls: Record<string, string>;
-  cubes: Record<string, string> | null;
-  iso_default: number;
-  provenance: Provenance;
 }
 
 export interface CurateIn {
@@ -943,10 +696,6 @@ export interface MechanismPatchIn {
   order_groups?: number[] | null;
 }
 
-export interface ExportIn {
-  statuses?: ("validated" | "corrected")[];
-}
-
 export interface ExportReportOut {
   export_id: string;
   created_at: string;
@@ -1025,6 +774,13 @@ export interface SearchOut {
   truncated: boolean;
   index: IndexStatusOut;
   results: StepSummaryOut[];
+}
+
+export interface DatasetArrowOut {
+  source_kind: string;
+  source_atoms: number[];
+  sink_kind: string;
+  sink_atoms: number[];
 }
 
 export interface StepViewOut {

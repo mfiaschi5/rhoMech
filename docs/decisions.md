@@ -4487,3 +4487,310 @@ view convention, the depth storage, the linking rule and the crossing breaks sti
   46 RESTRAINED_GEOM; 123 failures, 99 of them SPIN_PARITY) under the new method and re-runs
   the samples of their steps. It must not be edited into the checkout while a batch runs
   (records stamped `code_dirty`, refused by `require_clean`).
+## 2026-10-25 — Phase-2 commands in parallel: sidecar, ks-rank, LightGBM; torch out of `arrows.steps`
+
+- **Why.** The phase-2 rebuild left the CPU mostly idle, and the user asked why it was slower
+  than before. Only the sample build used workers.
+  - The sidecar ran as one process per split, about 2 hours each.
+  - ks-rank ran in one process.
+  - LightGBM fitted on its default 2 threads, and it scored val and test one step at a time on
+    one thread (the commands ran with `OMP_NUM_THREADS=1`). For the scaffold geometry-free
+    ranker that was 31 of 49 minutes.
+- **Sidecar.** `ksmech-arrows contacts --workers N` runs chunks of 16 consecutive steps (in
+  step-id order) in spawned processes, as the sample build does.
+  - The parent writes the shards in order, so they are the same for any N: same entries,
+    arrays and recorded inputs. A test checks this.
+  - A cold oriented-kernel cache costs 9.9 s per step in one process (1.2 GB). With 6 workers
+    on a 240-step slice it was 2.9 s per step, at 838 MB per worker before torch left the
+    import (see below). The slice had only 15 tasks, and two workers can compute one block at
+    once. With a warm cache the same slice took 4 s.
+- **ks-rank.** `ksmech-physics ks-rank --workers N`. Each part's step ids, in view order (the
+  views list them sorted, as the store's shards), are cut into chunks of 64 (`physics.parallel`).
+  - Each worker loads its own samples and contact entries, refreshes their validity and
+    computes their components for every distance. Ranking, failure classes and the class table
+    stay in the parent, and the report is identical (a test compares the JSON).
+  - Measured: the scaffold val part in 36 s with 8 workers, against about 123 s in one process.
+- **LightGBM.**
+  - `gbdt --workers N` loads the samples the same way. The training rows are identical,
+    because negatives are drawn per step id; so are the val / test candidate sets. A test
+    checks both feature sets; undefined geometry-free features are NaN on both sides.
+    - Measured: the scaffold geometry-free val read in 17 s with 8 workers, against 50 s.
+  - `--n-jobs` defaults to 14 (was 2), and `LGBMRanker.score_sets` predicts val and test in
+    batches of about a million rows on `--n-jobs` threads.
+    - Measured on 300 scaffold geometry-free val steps: per-step prediction 193 s, batched on
+      one thread 193 s, batched on 12 threads 23 s. Scores identical.
+  - ~~With `deterministic` and `force_row_wise` the trees do not depend on the thread count,
+    so `n_jobs` stays out of the configuration a model records.~~ Wrong on real data; see the
+    correction below.
+  - The pool is closed before fitting starts, so the loading workers and the LightGBM threads
+    never run at the same time.
+- **torch left `arrows.steps`.** `SampleDataset`, `collate_samples`, `make_loader` and the
+  batch tensors moved to `arrows.batches`. Importing `arrows.steps` pulled in torch, about
+  500 MB per worker process for nothing: the physics CLI went from 683 to 205 MB at import.
+  - With 8 workers the largest ks-rank worker went from 1,051 to 570 MB (9.4 GB to 5.1 GB for
+    all processes).
+  - The largest LightGBM loading worker went from 1,208 to 698 MB.
+- **Settings for 16 GB.** `--workers 8` for `contacts`, `ks-rank` and `gbdt`, and
+  `--n-jobs 14`. The default stays 1, as for `samples` and `align`.
+- **A script that spawns workers needs an `if __name__ == "__main__":` guard.** A spawned
+  worker re-imports the main module. An unguarded script started a pool inside every worker,
+  which died during bootstrap and was respawned without end, and the parent waited forever.
+  The console scripts are guarded.
+
+## 2026-10-25 — Correction: LightGBM's trees depend on its thread count; the parallel runs timed
+
+- **What happened.** The scaffold runs were repeated with `--workers 8`, and with `--n-jobs 14`
+  for LightGBM.
+  - ks-rank: report identical; 489 s → 301 s.
+  - LightGBM, contact features: report, trees and learning history identical; 1,718 s → 392 s
+    (load 220 → 126 s, fit 416 → 163 s).
+  - LightGBM, geometry-free: 2,938 s → 574 s (load 331 → 87 s, fit 745 → 296 s), but the trees
+    differ: 1,295 / 1,258 against 1,273 / 1,082. Test top-1/3/5 is 45.3/64.3/75.3% against
+    45.3/64.7/75.6%.
+  - The same run with `--workers 8 --n-jobs 2` reproduces the 2-thread run exactly: results,
+    trees and history.
+- **So.** The parallel loading is exact. LightGBM's `deterministic` and `force_row_wise` make a
+  model reproducible for one thread count only. The 1-against-4-thread toy test, and the
+  156k-row contact set, did not show it; the 521k-row geometry-free set does.
+- **Change.** `n_jobs` is back in the configuration a model records, and the toy test now
+  checks only that batched scoring equals scoring one step per call. `--n-jobs` stays 14 by
+  default: models fitted with different thread counts are told apart by their configuration.
+  The geometry-free scaffold model on disk is the 2-thread one, identical to the morning run.
+- **Still sequential in ks-rank.** After the parallel part, about 2.5 minutes of the 5 run in
+  the parent. Its failure-class step reads each sample's token files again, because the
+  workers, not the parent, warmed the token cache.
+
+## 2026-10-25 — git in provenance and its tests ignores the hook's GIT_* variables
+
+- **Why.** Two `git commit --only` attempts failed with "files were modified by this hook",
+  though every test passed.
+  - For `git commit --only` (and `git commit <paths>`), git builds the commit in a temporary
+    index and exports its absolute path to the hooks as GIT_INDEX_FILE.
+  - `test_code_state_sees_tracked_edits_and_untracked_sources` runs `git init / add / commit`
+    in a scratch repository. It inherited the variable and wrote the scratch repository into
+    that index. A copy of the real index went from 154 files to 1. pre-commit noticed the
+    change and refused the commit; unnoticed, the commit would have held the wrong files.
+  - `provenance.code_state`, pointed at the scratch repository, read the same index.
+  - A plain `git commit` was safe, apparently because the path it exports is relative and
+    resolves inside the scratch repository.
+- **Change.** `provenance.git_env()` is the environment without GIT_* variables. `code_state`
+  and the tests' git helper run git with it. A test sets GIT_INDEX_FILE to a sentinel file and
+  checks that it is left untouched and that `code_state` still reads the scratch repository.
+
+## 2026-10-25 — Review fixes before training: worker exceptions, pair statistics, pair tensors, skip codes
+
+From the code review of the branch (five findings fixed together).
+
+- **Exceptions from spawned workers.** `StaleArtifact(path, changes)` could not be rebuilt in the
+  parent: pickle calls the class with the message alone. A worker that met a stale shard
+  (`ks-rank --workers`, `gbdt --workers`) killed `multiprocessing.Pool`'s result thread, and the
+  parent waited forever (reproduced). `StaleArtifact`, `ArrowApplyError`, `StepRejected`,
+  `QMError` and `MissingTokens` now define `__reduce__` from their own fields. A test pickles
+  each one, and one raises `StaleArtifact` in a spawned worker and catches it in the parent.
+- **Pair statistics over the valid cells.** The fix-item-8 entry (2026-10-22) says the
+  statistics are fitted on the valid cells only. The code fitted the samples just built, whose
+  stage-A blocks define every (occupied, virtual) cell: on the molecule split, 48,802,340
+  entries per feature against 43,950,761 valid cells, the only ones a loaded sample holds.
+  `pair_stats` now masks with `pair_valid` and rounds the values to float16 as the store keeps
+  them. The statistics of the samples just built then equal a refit on the loaded samples
+  exactly (tested).
+- **A provenance header on `pair_feature_stats_<strategy>.json`.** The file was plain text, so
+  the trainer could not refuse a stale one. It is now a stamped JSON (kind `pair_stats`,
+  inputs the training view and the store index, config the features, `cells: valid` and K,
+  eps). `arrows.steps.load_pair_stats` verifies it and refuses a dirty build, through
+  `provenance.verify_clean` (the store's verify helper, now shared, rather than another copy).
+  Existing files (including the retired `pair_feature_stats_random.json`) have no header and
+  are refused until `ksmech-arrows samples` is re-run.
+- **Pair tensors in `collate_samples`.** The loader had none of the pair inputs. They now
+  stay in each sample's (occupied, virtual) layout, padded to the batch's largest counts, with
+  the batch token position of every row and column (`pair_row_pos`, `pair_col_pos`). The model
+  scatters them into its N x N pair track. A dense (B, N, N, F) block would cost N^2 per
+  sample (N up to ~1,000 on the largest PMechDB pools) to store values that exist only on
+  occupied x virtual cells. The values stay at K = eps = 1 and unstandardized: K and eps are
+  learnable, so `to_params` and the training statistics are applied in the model.
+  `pair_contact_sites` is not collated: stage-A samples hold -1 there.
+- **Skip codes for unusable token files.** `TokenCache` kept the reason for a stale token file
+  or a missing Wiberg sidecar in `stale`, which nothing read (and a worker's copy dropped), so
+  such steps were counted as MISSING_TOKENS. The cache now logs each one and gives its code
+  (`missing_reason`: STALE_ARTIFACT, NO_BOND_INDEX). `load_fragments` puts the codes on
+  `MissingTokens`, and the sample build, the edit-label report, the contact sidecar and the
+  alignment pass count the step under `MissingTokens.reason`. When several fragments lack
+  tokens, the step's code is the first of STALE_ARTIFACT, NO_BOND_INDEX, MISSING_TOKENS that
+  any of them has, so a stale file is never hidden behind a missing one. On the current build
+  all 46 MISSING_TOKENS skips are genuinely missing files.
+
+## 2026-10-25 — Cleanup after the review: one pool helper, one verify helper, one candidate rule
+
+No behaviour change: every output is the same, and the samples, sidecars and models on disk
+stay valid.
+
+- **`ksmech.processes`** holds `single_threaded_children`, `chunked` and `in_processes` (a
+  spawned pool, results in task order). Five hand-written pools used to repeat that pattern:
+  the token build, the alignment pass, the sample build, the contact sidecar and
+  `ksmech-physics`. The module imports nothing from ksmech, so every layer can use it; the
+  physics copy could not be reused by `arrows` because `physics` imports `arrows`.
+  - The sample build now receives its chunks in order (`imap`) rather than as they finish. It
+    keeps every sample until the store is written, sorted by step id, so the store is the same.
+  - The serial paths run the same chunks in this process.
+- **`provenance.verify_clean`**: verify the header, refuse a dirty build, or only log the
+  mismatch under `--allow-stale`. It replaces four copies: the sample store, the contact
+  sidecar, the LightGBM ranker and the GBDT.
+- **One candidate rule.** `ReactantTokens.donor_ok` / `acceptor_ok` now read
+  `MoleculeTokens.donor_candidates` / `acceptor_candidates`, the methods that
+  `physics.pairs.valid_pairs` uses. Before, the rule was written twice, and only a test tied the
+  copies together (cf733dc).
+- **Dead code removed:**
+  - `MechanismSample.to_dict` / `from_dict`, from the torch sample files;
+  - `store.stored_bytes`;
+  - `provenance.write_framed` / `read_framed`. Old framed `.pt` files still have their
+    headers read, for `ksmech-data provenance`.
+- **Edit-label gate.** `ksmech-arrows edit-labels` tested for VARIANT_MISMATCH, a code that
+  has not existed since class members failing the key check are dropped and counted
+  (`steps_with_rejected_variants`). The test is gone; the gate is the labeled fraction, as
+  before.
+- `label_report` and `split_report` share `delta_be.class_shape`: the class sizes and the
+  first anchor's kind.
+
+## 2026-10-25 — Stage B leaves main: one training stage on geometry-free pair features (user decision, spec v9)
+
+- **Why.** User decision, after the training discussion. Untrained, the contact terms ranked a
+  step's first arrow worse than the gap factor alone. On the molecule test split, top-1 was
+  about 3% for the frozen head, 14.3% for KS3 + KS2 and 20.4% for G. Stage B also needed
+  physics that was never built (the configurational contact of spec v8.1) and a contact
+  sidecar for every training step.
+- **Where it is.** The local branch `archive/stage-b` at 8811e57 holds:
+  - spec v8.1;
+  - the contact kernels and the legacy oriented kernel;
+  - the sidecar, `ks-rank`, the numpy logistic regression and GBDT, and the frozen head;
+  - their tests.
+  The branch is not pushed.
+- **Model (spec v9).**
+  - The pair track gets the geometry-free pair features only, and all H heads are learned.
+  - Gone: the Klopman-Salem attention bias, the frozen head, tau, kappa, F^atom and eps as a
+    model constant.
+  - K is fixed at 1.75. A learnable K would only rescale one standardized feature, the
+    cross-centre coupling.
+  - The step query drops E_step[t]. On PMechDB, which has no pathways, the stop head is not
+    trained.
+- **Code removed.**
+  - Modules: `physics/contact/` (with `legacy_fixed23`), `contact_kernel`, `contact_table`,
+    `repulsion`, `gto` (with `physics/data/sto_ng.json`), `ranking`, `parallel` and
+    `arrows/contacts`.
+  - Commands: `ksmech-arrows contacts`, `ksmech-orbitals contact-table`,
+    `ksmech-physics ks-rank`, `ksmech-physics baseline` and `gbdt --features contact`.
+  - From `ks_terms`: the KS3 forms. From `pairs`: the legacy pair block and kernels,
+    `ks_energies` and `frozen_head`. From `params`: `tau`, `shell_fock_ev` and the legacy
+    scalings.
+  - The kernel argument of the sample build.
+- **Kept and moved.**
+  - `ao_energies` moved to `ks_terms`. It reads the shell layout from `qm.ao.gfn2_shells`
+    rather than the STO-nG tables. The values are bit-identical on 400 PMechDB token files
+    (elements up to Ti, Zn, Sn, Br and I); no GFN2 element has two shells of one l.
+  - `vdw_sum` moved to `coulomb`.
+  - `first_label`, `label_pairs`, `label_rank` and `summarize_ranks` moved to `baseline`, with
+    the candidate sets. `token_class` moved to `textbook`, and the read chunk to `physics.cli`.
+  - `baseline.FEATURE_NAMES` is the geometry-free list (the old `GEOMFREE_FEATURE_NAMES`).
+- **Commands now.**
+  - `gbdt` is geometry-free only. Its files keep the `_geomfree` tag, so the models on disk
+    stay valid.
+  - `textbook` runs the untrained gap kernel and the two geometry-free LightGBM models of the
+    molecule split. It used to run KS3 + KS2 and the contact GBDTs.
+- **Samples.**
+  - Schema 15 is unchanged, so there is no rebuild. The samples, `pair_feature_stats_*.json`
+    and the geometry-free models on disk stay valid: provenance compares inputs, and the code
+    hash is for tracing only.
+  - `pair_contact_sites` (always -1) and `atom_coulomb` stay in the store. Neither is a model
+    input, and `collate_samples` no longer emits `atom_coulomb`. Both leave at the next schema
+    bump, the resonance augmentation.
+- **Data left on disk, readable only from the archive branch.**
+  - `data/cache/oriented/` (6.1 GB) and `data/cache/contact_table.json`.
+  - The sidecars `samples/contacts_molecule/` and `samples/contacts_scaffold/` (0.7 GB).
+  - The `ks_rank_report_*`, `baseline_*` and `gbdt_lgbm_*_contact*` reports and models.
+  Nothing was deleted.
+- **Other branches.** `claude/workbench` and `claude/serve-ui` import the contact code (KS
+  ranking, physics view, predictors). They must drop it when they merge main.
+- **Open, for the anchor-level references.**
+  - Spec v9 pools the standardized orbital-pair features onto atom pairs as a weighted mean.
+  - G^atom sums over every occupied x virtual pair, the donor's own antibond included, which
+    can inflate it on bonded pairs. Decide whether it should run over `pair_valid` only before
+    the floor is built.
+
+## 2026-10-25 — Serve on spec v9: merge of main, the vendored Gaussian basis, the contact view removed
+
+- **Merge.** `claude/predict` merges main at spec v9 (d566010). Main removed `physics/gto.py`,
+  `physics/ranking.py`, `physics/contact/`, `physics/contact_table.py`, `physics/repulsion.py`
+  and `arrows/contacts.py`; serve imported several of them.
+- **`serve/gto.py`.** The workbench's orbital and density surfaces (`cubes`, `densities`) and
+  the synthetic EHT chemistry (`synthetic`) evaluate AOs and overlaps with the GFN2 Gaussian
+  basis, so the module and its STO-nG table are vendored from 46adf6b into serve, bit-identical
+  below the docstring (`serve/data/sto_ng.json`, same sha256). `tests/test_serve_gto.py` pins
+  stored values (float.hex) and compares the code with the original. `cap_atoms` (the cube
+  grid's cap) is vendored into `cubes` from `physics/contact/legacy_fixed23`.
+- **Removed.** The contact placement replay (`serve/placement.py`, `serve/upstream.py`, the
+  contact routes and cubes, the oriented-block cache and its token-digest bookkeeping in the
+  worker), the site-pair view, and the spec-v3 KS panels (`serve/physics_view.py`,
+  `serve/candidates.py`, `/api/pool/{id}/candidates`, `/physics`, `/site_pairs`). The capabilities
+  `candidates` and `physics` stay listed, off, with the reason; `contact` and `site_pairs` are
+  gone. The `oriented` fingerprint became the `token` fingerprint (tokens, QM and basis code).
+
+## 2026-10-25 — Serve Predict and Correct on the reaction-matrix target (spec v9)
+
+- **Edges are reaction matrices.** A network edge is R on the pool atoms of its source state
+  (`parse_mapped(mapped_smiles)` indices, every H an atom), with its anchor, the arrow reading,
+  the orbital readings of the forming bonds, the product SMILES and sigma keys. B + R is
+  applied with `arrows.apply.apply_edit` and `sanitize_product`; an extra octet check (more than
+  8 valence electrons on H-Ne) catches what RDKit's valence table allows for charged atoms. A
+  product with the parent's pool key is a resonance interconversion (RESONANCE_ONLY_STEP),
+  never an edge. Networks are format v2; spec-v3 networks on disk are refused with a reason.
+- **Pooled gap in serve.** `serve/gatom.py` computes G_atom = sum over the valid (r, s) of
+  (w_i^r w_j^s + w_j^r w_i^s) G(r, s), G in float64 from the full spectra, w the token centre
+  weights; only the pairs `physics.pairs.valid_pairs` allows contribute (the donor's own
+  antibond is excluded, which answers the open question of the stage-B entry for the floor).
+  Move upstream when `model.inputs.pooled_gap` lands. The pool analysis npz now holds the
+  pair block and the weights instead of the KS components.
+- **The floor.** Anchors are atom pairs i < j ranked by |G_atom|: "form" while the order stays
+  at most 3, "break" on a bonded pair (both for a bonded pair below 3). The top `beam` anchors
+  are completed: a forming anchor from its two best channels in each direction through upstream
+  `apply_predicted_arrows` (private `_step` is used only to read `leaving_choices` on the state
+  after the arrow's source and new bond), one candidate per allowed leaving bond; a breaking
+  anchor as the heterolysis towards either atom. Every dropped completion is counted
+  (`COMPLETION_FAILED:<reason>`, `ANCHOR_NOT_COMPLETED`, `APPLY_FAILED:<issue>`) and shows in
+  the node's `apply_failures` and the network's `skipped`.
+- **Scores are not probabilities.** The floor reports |G_atom| (1/eV), the GBDT its lambdarank
+  score; `logp` is null for both and `scores_are_probabilities` is false. The beam and the
+  pathways use a log weight: the log of a child's share of the kept children's scores (floor)
+  or a softmax of the scores (GBDT); a pathway's `probability` is null unless the predictor
+  gives probabilities. Only the network adapter (`NetworkModel.decode -> (R, logp)`) does.
+- **GBDT.** The default file is `<shared>/data/processed/pmechdb/gbdt_lgbm_molecule_geomfree.npz`
+  (`ksmech-physics gbdt`), loaded with `physics.lgbm.load_lgbm` (provenance verified: a stale
+  model is unavailable with its reason). It ranks the valid orbital pairs; the best `beam`
+  are completed at the centres (a, b) with the largest w_a^r w_b^s.
+- **Network.** Available only through a `NetworkModel` adapter, which needs `ksmech.model.net`
+  and a checkpoint `data/models/<source>/<run>/best.pt`. Neither exists on this branch, so it is
+  listed unavailable with the reason; a fake-model test exercises the adapter.
+- **Arrow reading.** `serve/reading.py` decomposes R as a perfect matching of the pair sources
+  (lone-pair losses, breaking bonds) onto the sinks (forming bonds, lone-pair gains). Where
+  several exist, the spec asks for the largest |G_atom| of the forming bonds, but G_atom is
+  symmetric and the same in every reading, so the reading uses the directed part G_dir[a, b]
+  (donor on a, acceptor on b; G_atom = G_dir + G_dir^T) of each forming bond at the end the
+  pair comes from. Ties keep the first matching in sorted order. The orbital reading of a
+  forming bond is the channel with the largest term of G_atom, as the spec says.
+- **Correct.** `POST /api/step/check` validates R with issue codes and atoms and returns the
+  readings when the pool's analysis is ready (a 1 s wait; otherwise `readings_status`
+  "pending"). A user step (`override`) is synchronous and adds an edge of predictor "user"
+  (kind "corrected", weight 0) and a FRONTIER child; expansion of a node is an `expand` job.
+  `predictor: "user"` on `POST /api/predict` builds a root-only network for Correct.
+- **Curation.** StepDocs are format v2: R (`MatrixIO` and `ReactionMatrix.to_list()`), the
+  anchor, the reading (pool atoms, and map-number `dataset_arrows` for Browse), the orbital
+  readings and the sigma keys. A re-check ranks the curated product among the predictor's
+  distinct products by pool key (sorted sigma keys); the Recheck columns keep their names
+  (`first_arrow_rank` is that rank). A user's mechanism is re-checked with the floor and never
+  goes predictor-stale.
+- **Export.** The PMechDB-format export is a download only (`GET /api/curate/export/pmechdb`,
+  `ksmech-serve export --out`): mapped reactions and the reading's arrow code, each record
+  checked by parsing it back with `data.pmechdb.parse_arrow_code` and applying it. The
+  `user_curated` ingest export is gone: curated steps are never training data.
+- **Wiberg sidecars.** The geometry-free pair features need each fragment's Wiberg indices.
+  The serve token loader attaches the layer's sidecar (`data/cache/bond_index` for the shared
+  tokens, `data/serve/bond_index` for serve-built ones), and the synthetic and real
+  featurizers write the sidecar when they build tokens.

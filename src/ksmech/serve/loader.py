@@ -90,10 +90,14 @@ class LayeredTokenLoader:
         method: str,
         maxsize: int = 256,
         roots: Sequence[Path | None] | None = None,
+        bond_dirs: Sequence[Path | None] | None = None,
     ):
         """`roots[i]`: the checkout root the token files of `dirs[i]` were built in (their
-        relative `file:` inputs resolve against it); None = `provenance.REPO_ROOT`."""
+        relative `file:` inputs resolve against it); None = `provenance.REPO_ROOT`.
+        `bond_dirs[i]`: the Wiberg bond-index sidecars of that layer (`qm.bond_index`), attached
+        to the tokens on load as `arrows.reactants.TokenCache` does; None: no sidecars."""
         self.dirs = [Path(d) for d in dirs]
+        self.bond_dirs = list(bond_dirs) if bond_dirs is not None else [None] * len(self.dirs)
         self.roots = list(roots) if roots is not None else [None] * len(self.dirs)
         if len(self.roots) != len(self.dirs):
             raise ValueError("one root per token directory")
@@ -188,12 +192,29 @@ class LayeredTokenLoader:
                 except (StaleArtifact, OSError, ValueError, KeyError) as exc:
                     log.warning("TOKENS_STALE %s: %s failed to load (%s)", key, path, exc)
                     continue
+                self._attach_bond_index(key, path, tokens)
                 if sig is not None:
                     self._memo[key] = (str(path), sig, tokens)
                     if len(self._memo) > self.maxsize:
                         self._memo.popitem(last=False)
                 return tokens
         return None
+
+    def _attach_bond_index(self, key: str, path: Path, tokens: MoleculeTokens) -> None:
+        """The layer's Wiberg sidecar on `tokens.bond_index` (left None when there is none:
+        the pair features then fail with the upstream reason, never silently)."""
+        from ksmech.qm.bond_index import bond_index_path, load_bond_indices
+
+        if tokens.bond_index is not None:
+            return
+        for d, bond_dir in zip(self.dirs, self.bond_dirs, strict=True):
+            if bond_dir is None or Path(path).parent != d:
+                continue
+            side = bond_index_path(Path(bond_dir), key, tokens.conformer_id, tokens.method)
+            if side.is_file():
+                tokens.bond_index = load_bond_indices(side, verify=False)
+            else:
+                log.warning("NO_BOND_INDEX %s: no Wiberg sidecar %s", key, side)
 
     def digest(self, key: str) -> str | None:
         """sha256[:16] of the bytes of the token file `key` loads from; None when missing. The

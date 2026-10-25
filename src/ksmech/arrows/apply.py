@@ -55,6 +55,9 @@ class ArrowApplyError(Exception):
         self.reason = ApplyReason(reason)
         self.detail = detail
 
+    def __reduce__(self):  # picklable across worker processes (`provenance.StaleArtifact`)
+        return type(self), (self.reason, self.detail)
+
 
 @dataclass(frozen=True)
 class Displacement:

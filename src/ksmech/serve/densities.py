@@ -4,7 +4,7 @@ One whole-molecule grid: `cubes.grid_around(all atoms, spacing, padding)` (defau
 3.0 Angstrom). The spacing is explicit, or set by `quality` so that the box holds about
 120k (draft), 350k (normal) or 1.2M (fine) points, rounded up to 0.001 Angstrom;
 `cubes.MAX_POINTS` still applies (CUBE_TOO_LARGE). Values come from
-`A = physics.gto.ao_values(Z, xyz, points)`, chunked through `cubes.on_grid`:
+`A = serve.gto.ao_values(Z, xyz, points)`, chunked through `cubes.on_grid`:
 
 - `orbital`: `A @ c` (bohr^-3/2) for MO / LMO `index` of a set (`orbital_sets`);
 - `orbital_density`: `(A @ c)^2` (bohr^-3);
@@ -145,10 +145,10 @@ def cube_paths(
 ) -> tuple[Path, Path]:
     """(cube, metadata JSON) of one surface."""
     from ksmech.serve.orbital_sets import ORBITAL_SET_VERSION
-    from ksmech.serve.versions import oriented_fingerprint
+    from ksmech.serve.versions import token_fingerprint
 
     parts = ["wb_cube", key, method, qm_digest, req.to_payload(), token_digest]
-    parts += [DENSITY_VERSION, ORBITAL_SET_VERSION, WORKBENCH_VERSION, oriented_fingerprint()]
+    parts += [DENSITY_VERSION, ORBITAL_SET_VERSION, WORKBENCH_VERSION, token_fingerprint()]
     sha = cache_sha(parts)
     return s.workbench_cubes / f"{sha}.cube", s.workbench_cubes / f"{sha}.json"
 
@@ -166,7 +166,7 @@ def esp_at(z_xyz_ang: np.ndarray, charges: np.ndarray, points_ang: np.ndarray) -
 
 
 def _ao(rec: QMRecord, pts: np.ndarray) -> np.ndarray:
-    from ksmech.physics.gto import ao_values
+    from ksmech.serve.gto import ao_values
 
     return ao_values(rec.atomic_numbers, rec.coords_ang, pts)
 

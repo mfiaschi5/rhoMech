@@ -1,18 +1,21 @@
-"""Re-check of curated steps after retraining or a physics change (design 9.4).
+"""Re-check of curated steps after retraining or a physics change (design 9.4, spec v9).
 
 `run_recheck` (the `recheck` job handler, API side) picks the mechanisms (given ids, or all;
 only the stale ones with `stale_only`) and, for each step:
 
 1. runs one `featurize` task per reactant token key the loader lacks, at JOB priority, exactly
    as the chemistry does before an expansion (a failure is recorded with its code);
-2. then runs the worker task `recheck_step` (no QM inside), which rebuilds the step from its
-   atom-level dataset arrows, re-aligns them onto the current tokens, scores the reactant side
-   with the predictor, ranks the first labelled arrow (`label_rank`), replays the labels
-   (`predicted_round_trip_step`) and applies the predictor's top-1 step;
+2. then runs the worker task `recheck_step` (no QM inside): the predictor proposes its
+   candidate reaction matrices for the step's reactant state (`RECHECK_BEAM` anchors or
+   pairs), each is applied, and the distinct products are ranked in the predictor's order;
+   the curated step's rank is the position of its product, compared by the sorted multiset
+   of product sigma keys (the pool key: resonance forms of one product are one product);
 3. writes one `Recheck` row. The mechanism's status is never changed.
 
-The re-check goes through dataset arrows and alignment, so a token renumbering after a rebuild
-cannot corrupt it. Ranks in rows are 1-based (`first_arrow_rank = label_rank + 1`).
+Row fields keep their database names: `first_arrow_rank` is the 1-based rank of the curated
+product among the predictor's distinct products (None when it is not proposed), `n_valid` the
+number of distinct products, `aligned` whether the reactant state could be analyzed,
+`product_match` FOUND / NOT_PROPOSED / UNCHECKED, and `top1_reproduces_product` rank == 1.
 
 `stale_only` also leaves out a stale mechanism whose every step's latest Recheck row succeeded
 (reason None) with the predictor the job would use, at its current version, the current spec
@@ -29,11 +32,10 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 from sqlmodel import col, select
 
 from ksmech.serve import db
-from ksmech.serve.contracts import JobContext, PoolScores, Runtime, ScoringContext
+from ksmech.serve.contracts import JobContext, Runtime
 from ksmech.serve.curation import rechecks_of, staleness, steps_of
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.schemas import RecheckIn, RecheckReportOut, RecheckRowOut
@@ -48,7 +50,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 RECHECK_TIMEOUT_S = 900
-UNCHECKED = "UNCHECKED"  # product_match when the replay could not run
+RECHECK_BEAM = 20  # anchors (floor) or orbital pairs (gbdt) the predictor completes
+UNCHECKED = "UNCHECKED"  # product_match when the re-check could not run
+FOUND, NOT_PROPOSED = "FOUND", "NOT_PROPOSED"
 RECHECKED = "RECHECKED_AT_CURRENT_VERSIONS"  # stale_only: already re-checked, left out
 ROW_FIELDS = tuple(RecheckRowOut.model_fields)
 
@@ -76,98 +80,34 @@ def _blank(predictor: str, rt_ctx: Runtime) -> dict:
     }
 
 
-def _step_and_tokens(rt_ctx: Runtime, doc: dict, step_id: str):
-    """(ElementaryStep, ReactantTokens) of a StepDoc. Raises ServeError with the reason."""
-    from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
-    from ksmech.data.schema import Arrow, Source
-    from ksmech.data.validation import StepRejected, build_step
+def _state(rt_ctx: Runtime, doc: dict):
+    """The step's reactant state: the saved one, else rebuilt from its mapped SMILES."""
+    from ksmech.serve.pools import load_state, save_state, state_from_mapped
 
     try:
-        arrows = [Arrow.from_dict(a) for a in doc.get("dataset_arrows") or []]
-        step = build_step(
-            step_id=step_id,
-            source=Source.USER_CURATED,
-            rxn_smiles=f"{doc['reactants_mapped']}>>{doc['products_mapped']}",
-            arrows=arrows,
-        )
-    except StepRejected as exc:
-        raise ServeError(str(exc.reason), exc.detail) from exc
-    except (ValueError, KeyError, TypeError) as exc:
-        raise ServeError("ARROW_INVALID", f"{type(exc).__name__}: {exc}") from exc
-    try:
-        return step, ReactantTokens.from_smiles(step.reactants_smiles, rt_ctx.loader)
-    except MissingTokens as exc:
-        raise ServeError(Code.MISSING_TOKENS, str(exc)) from exc
-    except CorrespondenceError as exc:
-        raise ServeError(Code.CORRESPONDENCE, str(exc)) from exc
+        return load_state(str(doc["reactant_state_id"]), rt_ctx.settings)
+    except (ServeError, KeyError):
+        state = state_from_mapped(str(doc["reactants_mapped"]))
+        save_state(state, rt_ctx.settings)
+        return state
 
 
-def _pool(predictor, sample, rt, scores: np.ndarray) -> PoolScores:
-    from ksmech.serve.contracts import log_softmax_valid
+def product_ranking(rt_ctx: Runtime, predictor, state, beam: int) -> tuple[list[str], Counter]:
+    """The distinct product pool keys of the predictor's candidates, in its order, and the
+    skip counts."""
+    from ksmech.serve.analysis import pool_work
+    from ksmech.serve.stepapply import apply_matrix
 
-    valid = np.asarray(sample.pair_valid, dtype=bool)
-    t = float(predictor.info().default_temperature)
-    return PoolScores(
-        scores=scores,
-        valid=valid,
-        logp=log_softmax_valid(np.where(valid, scores, -np.inf), valid, t),
-        contact_sites=np.asarray(sample.pair_contact_sites),
-        rows=rt.n_atoms + np.flatnonzero(rt.occupied),
-        cols=rt.n_atoms + np.flatnonzero(~rt.occupied),
-        temperature=t,
-    )
-
-
-def top1_reproduces(predictor, ctx: ScoringContext, scores, product_pool_key: str) -> tuple:
-    """(does the predictor's top-1 step give `product_pool_key`?, detail). The step comes from
-    `predictor.propose` (contact sites for floor and gbdt, rule sites for the stub), applied
-    with upstream `apply_predicted_arrows`; its pool key is `keys.side_keys` of the product."""
-    from ksmech.arrows.apply_predicted import PredictedArrow, apply_predicted_arrows
-    from ksmech.data import chem
-    from ksmech.serve.keys import side_keys
-
-    try:
-        steps = predictor.propose(_pool(predictor, ctx.sample, ctx.rt, scores), ctx, 1)
-    except ValueError as exc:
-        return None, f"no top-1 step: {exc}"
-    if not steps:
-        return None, "no valid candidate"
-    arrows = [
-        PredictedArrow(a.donor, a.donor_site, a.acceptor, a.acceptor_site) for a in steps[0].arrows
-    ]
-    res = apply_predicted_arrows(ctx.rt.mol, arrows, ctx.rt)
-    if not res.ok:
-        return False, f"top-1 step does not apply: {res.reason} {res.detail}".strip()
-    try:
-        got = side_keys(chem.canonical_mapped_smiles(res.mol)).pool_key
-    except ServeError as exc:
-        return False, f"top-1 product has no pool key: {exc.message}"
-    return got == product_pool_key, f"top-1 product {got}"
-
-
-def _evaluate(rt_ctx: Runtime, predictor, step, rt, al, product_pool_key: str) -> dict:
-    """Rank, product replay and top-1 check of an aligned step."""
-    from ksmech.arrows.roundtrip import predicted_round_trip_step
-    from ksmech.arrows.steps import make_sample
-    from ksmech.physics.ranking import first_label, label_pairs, label_rank, pair_components
-
-    kernels = rt_ctx.kernels
-    sample = make_sample(step, rt, al.labels, kernels)
-    comps = pair_components(sample, rt_ctx.loader, kernels.main)
-    ctx = ScoringContext(sample, rt, rt_ctx.loader, comps)
-    scores = np.asarray(predictor.score(ctx), dtype=np.float64)
-    r = label_rank(scores, sample.pair_valid, label_pairs(sample, first_label(sample)))
-    reproduces, detail = top1_reproduces(predictor, ctx, scores, product_pool_key)
-    return {
-        "aligned": True,
-        "first_arrow_rank": None if r is None else r + 1,
-        "n_valid": int(np.count_nonzero(sample.pair_valid)),
-        "top1": r == 0,
-        "top5": r is not None and r < 5,
-        "product_match": str(predicted_round_trip_step(step, rt, al).status),
-        "top1_reproduces_product": reproduces,
-        "detail": detail,
-    }
+    work = pool_work(rt_ctx, state)
+    skips: Counter = Counter()
+    keys: list[str] = []
+    for c in predictor.propose(rt_ctx, work, beam, "all", skips):
+        applied = apply_matrix(state, c.matrix)
+        if not applied.ok:
+            skips[f"APPLY_FAILED:{applied.issues[0].code}"] += 1
+        elif applied.state.pool_key not in keys:
+            keys.append(applied.state.pool_key)
+    return keys, skips
 
 
 def recheck_step(
@@ -181,8 +121,6 @@ def recheck_step(
     """Re-evaluate one curated step on the current tokens (worker; never runs QM: the caller
     featurized first, and missing tokens are the reason MISSING_TOKENS). Returns the
     RecheckRowOut fields except mechanism_id, step_index and created_at, plus `detail`."""
-    from ksmech.arrows.align import align_step
-
     out = _blank(predictor, rt_ctx)
     p = rt_ctx.scorers.get(predictor)
     if p is None:
@@ -190,14 +128,20 @@ def recheck_step(
         return out | {"reason": str(Code.PREDICTOR_UNAVAILABLE), "detail": msg}
     out["predictor_version"] = p.info().version or ""
     try:
-        step, rt = _step_and_tokens(rt_ctx, doc, step_id or f"recheck-{doc.get('edge_id')}")
-        al = align_step(step, rt)
-        if not al.complete:
-            why = ", ".join(sorted({f"{u.reason}@{u.arrow_index}" for u in al.unaligned}))
-            return out | {"reason": str(Code.UNALIGNED), "detail": why}
-        return out | _evaluate(rt_ctx, p, step, rt, al, product_pool_key)
+        keys, skips = product_ranking(rt_ctx, p, _state(rt_ctx, doc), RECHECK_BEAM)
     except ServeError as exc:
         return out | {"reason": str(exc.code), "detail": exc.message}
+    rank = keys.index(product_pool_key) + 1 if product_pool_key in keys else None
+    return out | {
+        "aligned": True,
+        "first_arrow_rank": rank,
+        "n_valid": len(keys),
+        "top1": rank == 1,
+        "top5": rank is not None and rank <= 5,
+        "product_match": FOUND if rank is not None else NOT_PROPOSED,
+        "top1_reproduces_product": rank == 1,
+        "detail": f"skipped {dict(skips)}" if skips else "",
+    }
 
 
 def t_recheck_step(rt: Runtime, payload: dict) -> dict:
@@ -265,7 +209,7 @@ def _not_rechecked(
         latest = {m.id: _latest(rechecks_of(s, m.id)) for m, _ in targets}
     out = []
     for m, steps in targets:
-        predictor = req.predictor or m.predictor
+        predictor = predictor_for(req, m)
         version = _version(api.registry, predictor)
         want = (predictor, version, api.spec_version, api.physics_fp)
         if version is None or not _current(steps, latest[m.id], want):
@@ -318,6 +262,13 @@ def _featurize(ctx: JobContext, api: ApiContext, doc: dict) -> None:
             raise ServeError.from_task(r)
 
 
+def predictor_for(req: RecheckIn, m: db.Mechanism) -> str:
+    """The request's predictor, else the mechanism's (the floor for a user's mechanism)."""
+    from ksmech.serve.contracts import USER_PREDICTOR
+
+    return req.predictor or ("floor" if m.predictor == USER_PREDICTOR else m.predictor)
+
+
 def _version(registry: PredictorRegistry, name: str) -> str | None:
     try:
         return registry.info_of(name).version
@@ -332,9 +283,8 @@ def _recheck_one(ctx: JobContext, api: ApiContext, m: db.Mechanism, step, predic
     version = _version(api.registry, predictor)
     try:
         api.registry.get(predictor)
-        if doc.get("dataset_arrows") is None:
-            detail = str(doc.get("encode_reason") or "the step has no dataset arrows")
-            raise ServeError(Code.ARROW_ENCODING_FAILED, detail)
+        if not doc.get("matrix"):
+            raise ServeError(Code.REQUEST_INVALID, "a spec-v3 curated step (no reaction matrix)")
         _featurize(ctx, api, doc)
     except ServeError as exc:
         return _failed(api, base, exc.code, exc.message, version)
@@ -381,7 +331,7 @@ def run_recheck(
         for step in steps:
             if ctx.cancelled():
                 raise ServeError(Code.CANCELLED, f"re-check cancelled after {len(rows)} steps")
-            row = _recheck_one(ctx, api, m, step, req.predictor or m.predictor)
+            row = _recheck_one(ctx, api, m, step, predictor_for(req, m))
             if row["reason"] is not None:
                 skipped[str(row["reason"])] += 1
                 where = {"mechanism_id": m.id, "step_index": step.step_index}

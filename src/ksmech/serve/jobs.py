@@ -37,7 +37,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ksmech.serve.contracts import JobContext, PredictorRef
+from ksmech.serve.contracts import USER_PREDICTOR, JobContext, PredictorRef
 from ksmech.serve.errors import Code, ServeError, jsonable
 from ksmech.serve.pools import SpeciesInput
 from ksmech.serve.settings import ServeSettings, append_failure, assert_writable
@@ -61,7 +61,8 @@ Handler = Callable[[JobContext, dict], dict | None]
 
 class JobKind(StrEnum):
     PREDICT = "predict"
-    OVERRIDE = "override"
+    OVERRIDE = "override"  # spec-v3 jobs only (a user step is synchronous since spec v9)
+    EXPAND = "expand"
     RECHECK = "recheck"
     EXPORT = "export"
     INDEX = "index"
@@ -647,48 +648,73 @@ def predict_handler(
     chem: Chemistry, ref_of: Callable[[str, float | None], PredictorRef]
 ) -> Handler:
     """The `predict` job: root, `build_network`, `network.json`. `ref_of(name, T)` gives the
-    predictor reference (`PredictorRegistry.ref`)."""
+    predictor reference (`PredictorRegistry.ref`). Predictor "user" builds the root alone (a
+    network the user extends with steps and expansions)."""
 
     def handle(ctx: JobContext, request: dict) -> dict:
-        from ksmech.serve.network import NetHooks, build_network
+        from ksmech.serve.network import NetHooks, Network, build_network
 
         ctx.progress(phase="normalize", message="building the root pool")
         root = chem.root(species_inputs(request))
         ref = ref_of(str(request.get("predictor", "floor")), request.get("temperature"))
         writer = _NetworkWriter(ctx, ctx.job_id)
-        try:
-            net = build_network(chem, root, ref, net_params(request), NetHooks(ctx, writer))
-        except BaseException:
-            writer.flush()  # keep the partial network viewable
-            raise
+        params = net_params(request)
+        if ref.name == USER_PREDICTOR:
+            net = Network.new(root, ref, params, ctx.job_id, getattr(chem, "mode", ""))
+            net.complete = True
+            net.touch()
+        else:
+            try:
+                net = build_network(chem, root, ref, params, NetHooks(ctx, writer))
+            except BaseException:
+                writer.flush()  # keep the partial network viewable
+                raise
         writer.write(net, force=True)
         return {"network_id": ctx.job_id, "revision": net.revision, "complete": net.complete}
 
     return handle
 
 
-def override_handler(chem: Chemistry, runner: JobRunner) -> Handler:
-    """The `override` job: load the network, `apply_override` under the network's lock,
-    write it back. Request: {network_id, parent_job_id, override: OverrideIn dict}."""
+def expand_handler(
+    chem: Chemistry, runner: JobRunner, ref_of: Callable[[str, float | None], PredictorRef]
+) -> Handler:
+    """The `expand` job: load the network, `continue_from` one node under the network's
+    lock, write it back. Request: {network_id, parent_job_id, expand: ExpandIn dict}."""
 
     def handle(ctx: JobContext, request: dict) -> dict:
-        from ksmech.serve.network import NetHooks, apply_override, network_from_dict
+        from dataclasses import replace
 
-        net_id = str(request["network_id"])
+        from ksmech.serve.network import NetHooks, continue_from, network_from_dict, rank_pathways
+
+        net_id, body = str(request["network_id"]), dict(request["expand"])
         with runner.network_lock(net_id):
             data = runner.store.read_network(net_id)
             if data is None:
-                msg = f"network {net_id} has no data yet"
-                raise ServeError(Code.JOB_NOT_DONE, msg, status=409)
+                raise ServeError(Code.JOB_NOT_DONE, f"network {net_id} has no data", status=409)
             net = network_from_dict(data)
+            node_id = str(body["node_id"])
+            if node_id not in net.nodes:
+                raise ServeError(Code.NODE_NOT_FOUND, f"no node {node_id} in {net_id}", status=404)
+            default = "floor" if net.predictor.name == USER_PREDICTOR else net.predictor.name
+            ref = ref_of(str(body.get("predictor") or default), net.predictor.temperature)
+            params = replace(net.params, beam=int(body.get("beam") or net.params.beam))
             writer = _NetworkWriter(ctx, net_id)
-            hooks = NetHooks(ctx, writer)
             try:
-                result = apply_override(chem, net, request["override"], net.params, hooks)
+                steps = int(body.get("steps") or 1)
+                continue_from(chem, net, node_id, steps, params, NetHooks(ctx, writer), ref)
             except BaseException:
-                writer.flush()  # only when the network was mutated (a snapshot was taken)
+                writer.flush()
                 raise
+            net.pathways = rank_pathways(net, net.params.n_pathways)
+            net.touch()
             writer.write(net, force=True)
-        return {**result, "parent_job_id": str(request.get("parent_job_id") or net_id)}
+        return {
+            "network_id": net_id,
+            "network_revision": net.revision,
+            "node_id": node_id,
+            "predictor": ref.name,
+            "n_nodes": len(net.nodes),
+            "n_edges": len(net.edges),
+        }
 
     return handle

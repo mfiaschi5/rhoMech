@@ -1,23 +1,24 @@
 """Version strings and code fingerprints of the serve app.
 
-The spec carries no version string, so `spec_version` is "v8+" + the first 12 hex of
-sha256(docs/ksmech_architecture.tex) plus the artifact versions: "v8+<sha12>;tok9;smp15;ori6;qm1"
-(the constants are read from the upstream sources, so the string follows them). The oriented
-module moved to `physics/contact/legacy_fixed23.py` (`serve.upstream.ORIENTED_SOURCE`).
+The spec carries no version string, so `spec_version` is "v9+" + the first 12 hex of
+sha256(docs/ksmech_architecture.tex) plus the artifact versions: "v9+<sha12>;tok9;smp15;qm1"
+(the constants are read from the upstream sources, so the string follows them).
 
 Two fingerprints (first 12 hex of a sha256 over files hashed by sorted relative path; a missing
 file contributes "<missing>", so a fingerprint can be computed before every module exists):
 
-- `oriented_fingerprint()` namespaces the oriented-block cache. It covers the token, oriented
-  and QM schema versions and the bytes of the upstream sources the blocks depend on, never
-  serve code.
+- `token_fingerprint()` namespaces the caches that depend on the tokens and the Gaussian basis
+  (orbital cubes, workbench orbital sets, densities, properties). It covers the token and QM
+  schema versions and the bytes of the token, QM and basis sources (`serve/gto.py` with its
+  STO-nG table), never other serve code.
 - `physics_fingerprint()` keys analysis files, predictor versions and curated-step staleness:
-  the oriented inputs plus SAMPLE_VERSION, the QM method string, the arrows and remaining
-  orbitals sources and the serve modules that decide scores, validity and products.
+  the token inputs plus the geometry-free pair physics (`physics/*.py`), SAMPLE_VERSION, the QM
+  method string, the arrows sources and the serve modules that decide scores, validity,
+  products and readings.
 
 Upstream constants are read from the source files with `ast` (`source_constant`), not by
-importing them: `arrows/steps.py` and `physics/cli.py` import torch, which the API process
-must not load at import time.
+importing them: `arrows/steps.py` and `physics/cli.py` import heavy modules, which the API
+process must not load at import time.
 """
 
 from __future__ import annotations
@@ -27,15 +28,12 @@ import hashlib
 from functools import cache
 from pathlib import Path
 
-from ksmech.serve.upstream import ORIENTED_SOURCE
-
-SPEC_LABEL = "v8"
+SPEC_LABEL = "v9"
 SRC_ROOT = Path(__file__).resolve().parents[1]  # src/ksmech
 
-ORIENTED_FILES = (
-    "physics/*.py",
-    "physics/contact/*.py",
-    "physics/data/sto_ng.json",
+TOKEN_FILES = (
+    "serve/gto.py",
+    "serve/data/sto_ng.json",
     "orbitals/tokens.py",
     "orbitals/descriptors.py",
     "orbitals/localize.py",
@@ -44,6 +42,7 @@ ORIENTED_FILES = (
     "qm/bond_index.py",
 )
 PHYSICS_EXTRA_FILES = (
+    "physics/*.py",
     "orbitals/classify.py",
     "orbitals/frontier.py",
     "arrows/reactants.py",
@@ -51,18 +50,20 @@ PHYSICS_EXTRA_FILES = (
     "arrows/apply_predicted.py",
     "arrows/apply.py",
     "arrows/align.py",
+    "arrows/delta_be.py",
+    "data/resonance.py",
     "qm/xtb_calc.py",
     "serve/analysis.py",
-    "serve/candidates.py",
+    "serve/gatom.py",
     "serve/predictors.py",
     "serve/expansion.py",
     "serve/stepapply.py",
+    "serve/reading.py",
     "serve/synthetic.py",
 )
 # (constant name in the fingerprint, source file, variable)
-ORIENTED_CONSTANTS = (
+TOKEN_CONSTANTS = (
     ("tokens_schema", "orbitals/tokens.py", "SCHEMA_VERSION"),
-    ("oriented_version", ORIENTED_SOURCE, "ORIENTED_VERSION"),
     ("qm_schema", "qm/records.py", "SCHEMA_VERSION"),
 )
 PHYSICS_CONSTANTS = (("sample_version", "arrows/steps.py", "SAMPLE_VERSION"),)
@@ -96,9 +97,9 @@ def source_constant(rel: str, name: str, src_root: Path = SRC_ROOT):
 def fingerprint_files(kind: str, src_root: Path = SRC_ROOT) -> list[str]:
     """Sorted relative paths a fingerprint covers (glob patterns expanded; a pattern with no
     match is kept as written and hashed as missing)."""
-    if kind not in ("oriented", "physics"):
+    if kind not in ("token", "physics"):
         raise ValueError(f"unknown fingerprint {kind!r}")
-    patterns = ORIENTED_FILES + (PHYSICS_EXTRA_FILES if kind == "physics" else ())
+    patterns = TOKEN_FILES + (PHYSICS_EXTRA_FILES if kind == "physics" else ())
     out: set[str] = set()
     for pattern in patterns:
         if any(c in pattern for c in "*?["):
@@ -110,7 +111,7 @@ def fingerprint_files(kind: str, src_root: Path = SRC_ROOT) -> list[str]:
 
 
 def _constants(kind: str, src_root: Path, qm_method: str | None) -> dict[str, str]:
-    table = ORIENTED_CONSTANTS + (PHYSICS_CONSTANTS if kind == "physics" else ())
+    table = TOKEN_CONSTANTS + (PHYSICS_CONSTANTS if kind == "physics" else ())
     out = {}
     for label, rel, name in table:
         try:
@@ -135,8 +136,8 @@ def compute_fingerprint(kind: str, src_root: Path = SRC_ROOT, qm_method: str | N
 
 
 @cache
-def oriented_fingerprint() -> str:
-    return compute_fingerprint("oriented")
+def token_fingerprint() -> str:
+    return compute_fingerprint("token")
 
 
 @cache
@@ -157,25 +158,22 @@ def spec_sha12(spec_path: Path) -> str | None:
 
 @cache
 def artifact_versions() -> dict[str, int | str]:
-    """Token, sample, oriented and QM schema versions, and the QM method string."""
+    """Token, sample and QM schema versions, and the QM method string."""
     return {
         "tokens": source_constant("orbitals/tokens.py", "SCHEMA_VERSION"),
         "samples": source_constant("arrows/steps.py", "SAMPLE_VERSION"),
-        "oriented": source_constant(ORIENTED_SOURCE, "ORIENTED_VERSION"),
         "qm": source_constant("qm/records.py", "SCHEMA_VERSION"),
         "qm_method": _qm_method(),
     }
 
 
 def spec_version(spec_path: Path) -> str:
-    """ "v8+<sha12>;tok<T>;smp<S>;ori<O>;qm<Q>" ("v8+unknown;..." when the spec is missing)."""
+    """ "v9+<sha12>;tok<T>;smp<S>;qm<Q>" ("v9+unknown;..." when the spec is missing)."""
     v = artifact_versions()
     sha = spec_sha12(spec_path) or "unknown"
-    return f"{SPEC_LABEL}+{sha};tok{v['tokens']};smp{v['samples']};ori{v['oriented']};qm{v['qm']}"
+    return f"{SPEC_LABEL}+{sha};tok{v['tokens']};smp{v['samples']};qm{v['qm']}"
 
 
 def floor_version(fp: str) -> str:
-    """`floor/<UNTRAINED_SCORE>/d<PRIMARY_DISTANCE>/<fp>`, e.g. floor/ks3+ks2/d2.3/<fp>."""
-    score = source_constant("physics/cli.py", "UNTRAINED_SCORE")
-    distance = source_constant("physics/pairs.py", "PRIMARY_DISTANCE")
-    return f"floor/{score}/d{distance}/{fp}"
+    """`floor/g-atom/<fp>`: the pooled-gap floor on the physics fingerprint."""
+    return f"floor/g-atom/{fp}"

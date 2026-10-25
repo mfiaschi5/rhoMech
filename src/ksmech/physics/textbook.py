@@ -28,8 +28,13 @@ from ksmech.data import chem
 from ksmech.data import provenance as prov
 from ksmech.data.provenance import StaleArtifact
 from ksmech.orbitals.build import tokens_path
-from ksmech.orbitals.tokens import build_molecule_tokens, load_tokens, save_tokens
-from ksmech.physics.ranking import token_class
+from ksmech.orbitals.tokens import (
+    MoleculeTokens,
+    OrbitalToken,
+    build_molecule_tokens,
+    load_tokens,
+    save_tokens,
+)
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import cache_path
 from ksmech.qm.xtb_calc import QMConfig
@@ -109,6 +114,12 @@ def ensure_tokens(keys: list[str], tokens_dir: Path, qm: QMConfig | None = None)
     return built
 
 
+def token_class(o: OrbitalToken, t: MoleculeTokens) -> str:
+    """Diagnostic description: classifier type and the elements of the two leading centres."""
+    centres = [a for a in o.descriptors.center_atoms[:2] if a >= 0]
+    return f"{o.type}({'-'.join(t.symbol(int(a)) for a in centres)})"
+
+
 def symmetry_classes(rt: ReactantTokens) -> np.ndarray:
     """(n_atoms,) class id per global atom: same fragment and same canonical rank, no ties
     broken, so symmetry-equivalent atoms share a class."""
@@ -186,16 +197,16 @@ def _atom_label(rt: ReactantTokens, g: int) -> str:
     return f"{symbol}{g}" + (f"(:{mapnum})" if mapnum else "")
 
 
-def case_sample(case: TextbookCase, loader, kernels) -> tuple[MechanismSample, ReactantTokens]:
+def case_sample(case: TextbookCase, loader) -> tuple[MechanismSample, ReactantTokens]:
     rt = ReactantTokens.from_smiles(case.smiles, loader)
-    return reactant_sample(f"textbook:{case.name}", "textbook", rt, kernels), rt
+    return reactant_sample(f"textbook:{case.name}", "textbook", rt), rt
 
 
-def run_suite(scorer, loader: TokenCache, kernels) -> list[CaseResult]:
-    """`scorer(sample, loader) -> (n_occ, n_virt) scores` for every case (`kernels`: the
-    `physics.pairs.PairKernels` the samples' pair features are computed with)."""
+def run_suite(scorer, loader: TokenCache) -> list[CaseResult]:
+    """`scorer(sample, loader) -> (n_occ, n_virt) scores` for every case, on its geometry-free
+    pair features."""
     out = []
     for case in CASES:
-        sample, rt = case_sample(case, loader, kernels)
+        sample, rt = case_sample(case, loader)
         out.append(run_case(case, sample, rt, scorer(sample, loader)))
     return out

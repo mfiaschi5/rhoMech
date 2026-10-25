@@ -2,8 +2,11 @@
 
 A mechanism is written once, from a pathway (or an explicit chain of edges) of a finished
 network, and is self-contained afterwards: every `CuratedStep.arrows_json` holds a StepDoc
-(format `ksmech-serve/step-v1`, built from the `EdgeOut` alone), and the mechanism stores the
-predictor, its version string (`checkpoint_hash`) and the spec version, never rewritten.
+(format `ksmech-serve/step-v2`, built from the `EdgeOut` alone: the reaction matrix R as
+`ReactionMatrix.to_list()` and as `MatrixIO`, its anchor, its arrow reading (pool atoms and,
+as `dataset_arrows`, PMechDB-style map numbers), the orbital readings, the product SMILES and
+sigma keys), and the mechanism stores the predictor, its version string (`checkpoint_hash`)
+and the spec version, never rewritten. A user step (predictor "user") is a corrected step.
 
 Statuses (design 9.3): `predicted` (stored, no verdict), `validated` (every step accepted as
 predicted), `corrected` (accepted with at least one user-corrected step), `rejected` (kept as a
@@ -51,7 +54,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-STEP_FORMAT = "ksmech-serve/step-v1"
+STEP_FORMAT = "ksmech-serve/step-v2"  # v2: reaction matrices (spec v9)
 STATUSES = ("predicted", "validated", "corrected", "rejected")
 TRANSITIONS = frozenset(
     {
@@ -62,21 +65,6 @@ TRANSITIONS = frozenset(
         ("corrected", "rejected"),
         ("rejected", "predicted"),  # reopen
     }
-)
-ARROW_KEYS = (
-    "donor",
-    "donor_site",
-    "acceptor",
-    "acceptor_site",
-    "donor_site_map",
-    "acceptor_site_map",
-    "donor_element",
-    "acceptor_element",
-    "source_kind",
-    "source_partner_map",
-    "sink_partner_map",
-    "donor_centres_map",
-    "acceptor_centres_map",
 )
 PREDICTOR_UNAVAILABLE_REASON = "predictor_unavailable"
 
@@ -96,15 +84,32 @@ def dumps(doc: dict) -> str:
 # ---- StepDoc
 
 
-def _arrow_doc(arrow: BaseModel) -> dict:
-    d = arrow.model_dump(mode="json")
-    return {k: d.get(k) for k in ARROW_KEYS}
+def dataset_arrows(arrows: Sequence[dict], source_mapped: str) -> list[dict]:
+    """The arrow reading as dataset arrows on map numbers (`data.schema.Arrow` fields):
+    lone_pair_to_bond [a] -> atom b, bond_to_bond [a, c] -> bond [a, b], bond_to_lone_pair
+    [a, c] -> atom c."""
+    from ksmech.data import chem
+
+    mol = chem.parse_mapped(source_mapped)
+    m = lambda a: int(mol.GetAtomWithIdx(int(a)).GetAtomMapNum())  # noqa: E731
+    out = []
+    for a in arrows:
+        src, dst = [m(x) for x in a["source"]], [m(x) for x in a["target"]]
+        if a["kind"] == "lone_pair_to_bond":
+            out.append({"source_kind": "lone_pair", "source_atoms": src, "sink_kind": "atom",
+                        "sink_atoms": [dst[1]]})  # fmt: skip
+        else:
+            kind = "bond" if a["kind"] == "bond_to_bond" else "atom"
+            out.append({"source_kind": "bond", "source_atoms": src, "sink_kind": kind,
+                        "sink_atoms": dst})  # fmt: skip
+    return out
 
 
 def step_doc(edge: EdgeOut | dict, *, job_id: str, provenance: Provenance | dict) -> dict:
-    """The StepDoc of one network edge (design 9.2), from the `EdgeOut` alone."""
+    """The StepDoc of one network edge, from the `EdgeOut` alone."""
     e, p = as_model(EdgeOut, edge), as_model(Provenance, provenance)
-    datasets = e.dataset_arrows
+    d = e.model_dump(mode="json")
+    matrix = d["matrix"]
     return {
         "format": STEP_FORMAT,
         "job_id": job_id,
@@ -112,14 +117,19 @@ def step_doc(edge: EdgeOut | dict, *, job_id: str, provenance: Provenance | dict
         "edge_kind": e.kind,
         "reactant_state_id": e.source_state_id,
         "product_state_id": e.product_state_id,
-        "reactants_mapped": e.encoding_base_smiles or e.source_mapped_smiles,
+        "reactants_mapped": e.source_mapped_smiles,
         "products_mapped": e.product_mapped_smiles,
-        "arrows": [_arrow_doc(a) for a in e.arrows],
-        "dataset_arrows": None if datasets is None else [a.model_dump() for a in datasets],
+        "matrix": matrix,
+        "reaction_matrix": [matrix["bonds"], matrix["lone"]],  # ReactionMatrix.to_list()
+        "anchor": d["anchor"],
+        "arrows": d["arrows"],
+        "readings": d["readings"],
+        "dataset_arrows": dataset_arrows(d["arrows"], e.source_mapped_smiles),
         "pmechdb_code": e.pmechdb_code,
-        "encode_reason": e.encode_reason,
+        "product_smiles": list(e.product_smiles),
+        "sigma_keys": list(e.sigma_keys),
         "score": e.score,
-        "probability": e.probability,
+        "logp": e.logp,
         "rank": e.rank,
         "predictor": e.predictor,
         "predictor_version": e.predictor_version,
@@ -129,40 +139,10 @@ def step_doc(edge: EdgeOut | dict, *, job_id: str, provenance: Provenance | dict
     }
 
 
-def original_doc(
-    edge: EdgeOut,
-    *,
-    job_id: str,
-    provenance: Provenance | dict,
-    superseded: EdgeOut | None = None,
-) -> dict | None:
-    """The StepDoc of the prediction a corrected edge replaced (`edge.original`): arrows,
-    score, probability, rank and predictor from the original, `dataset_arrows` null. The
-    product comes from the superseded edge when the network still holds it."""
-    o = edge.original
-    if o is None:
-        return None
-    if superseded is not None and superseded.id == o.edge_id:
-        doc = step_doc(superseded, job_id=job_id, provenance=provenance)
-    else:
-        doc = step_doc(edge, job_id=job_id, provenance=provenance)
-        doc.update(product_state_id=None, products_mapped=None, touched_maps=[])
-        doc["reactants_mapped"] = edge.source_mapped_smiles
-    doc.update(
-        edge_id=o.edge_id,
-        edge_kind="predicted",
-        arrows=[_arrow_doc(a) for a in o.arrows],
-        dataset_arrows=None,
-        pmechdb_code=None,
-        encode_reason=None,
-        score=o.score,
-        probability=o.probability,
-        rank=o.rank,
-        predictor=o.predictor,
-        predictor_version=o.predictor_version,
-        target_pool_key=o.target_pool_key,
-    )
-    return doc
+def original_doc(edge: EdgeOut, **_: Any) -> dict | None:
+    """Spec v9 has no superseded predictions: a user step is added next to the predicted
+    edges, never in place of one, so no curated step stores an original."""
+    return None
 
 
 # ---- chains, statuses, order groups
@@ -334,14 +314,12 @@ def create_mechanism(
 
 def _add_steps(session, m: Mechanism, net: NetworkOut, edges, docs, groups, job_id) -> None:
     pool_of = {n.id: n.pool_key for n in net.nodes}
-    by_id = {e.id: e for e in net.edges}
     for i, (e, doc) in enumerate(zip(edges, docs, strict=True)):
         if e.source not in pool_of:
             raise ServeError(
                 Code.CONSISTENCY_FAILED, f"edge {e.id}: source node {e.source} missing"
             )
-        superseded = by_id.get(e.original.edge_id) if e.original is not None else None
-        orig = original_doc(e, job_id=job_id, provenance=net.provenance, superseded=superseded)
+        orig = original_doc(e)
         step = CuratedStep(
             mechanism_id=m.id,
             step_index=i,
@@ -397,12 +375,16 @@ def staleness(
 ) -> list[str]:
     """The reasons `m` is stale against the current predictor version, spec version and
     physics fingerprint (empty: up to date)."""
+    from ksmech.serve.contracts import USER_REF
+
     reasons = []
     try:
         info = registry.info_of(m.predictor)
     except ServeError:
         info = None
-    if info is None or not info.available or info.version is None:
+    if m.predictor == USER_REF.name:
+        pass  # a user's mechanism has no model version to go stale
+    elif info is None or not info.available or info.version is None:
         reasons.append(PREDICTOR_UNAVAILABLE_REASON)
     elif info.version != m.checkpoint_hash:
         reasons.append(f"predictor_version {m.checkpoint_hash} != {info.version}")

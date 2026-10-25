@@ -41,8 +41,8 @@ def _record(records, key):
 @pytest.mark.parametrize("key", KEYS)
 def test_record_fields_and_electron_count(key, records):
     from ksmech.orbitals.localize import assert_valence_only, valence_electrons
-    from ksmech.physics.gto import overlap_matrix
     from ksmech.qm.fukui import HARTREE_TO_EV
+    from ksmech.serve.gto import overlap_matrix
 
     rec = _record(records, key)
     z = rec.atomic_numbers

@@ -1,166 +1,281 @@
-"""Predictors: score every (occupied, virtual) cell of a pool and propose ranked steps.
+"""Predictors (spec v9): each proposes ranked reaction matrices R for one pool state.
 
-`Predictor.propose(pool, ctx, k)` is the brief's `Predictor.propose(pool)`: at most k ranked
-steps, each a tuple of `ArrowSpec`s with its own sites. The expansion iterates it and never
-builds arrows itself, so a predictor chooses its sites and may return multi-arrow steps.
+`Predictor.propose(rt_ctx, work, beam, scope, skips)` returns `Candidate`s on pool atoms (the
+atom indices of `parse_mapped(state.mapped_smiles)`), best first; the expansion applies them,
+merges them by the product's pool key and keeps the beam (`serve.expansion`). Every candidate a
+predictor drops is counted in `skips` under a reason code.
 
-- `floor`: the untrained physics floor -(KS3 + KS2) on the oriented kernel at d = 2.3 A with the
-  bonded-sites validity filter (`SCORERS[UNTRAINED_SCORE]` over `pair_components`).
-- `gbdt`: the Prompt 5 ranker (`baseline.GBDTRanker` over `candidate_set`), with a feature
-  compatibility check and its file hash as version (adapter A21).
-- `transformer`: registered, always unavailable until a checkpoint and an inference entry point
-  exist.
-- `stub` (tests and e2e diagnostics only): the floor plus rule bonuses, with rule sites.
+- `floor`: the untrained physics floor (spec, "Evaluation protocol"). Candidate anchors are
+  the atom pairs i < j of the pool: "form" when the bond order stays at most 3, "break" when
+  the pair is bonded. They are ranked by |G_atom[i, j]| (`serve.gatom`) and the top `beam`
+  are completed: a forming anchor from its dominant channels (r, s) in each direction (the
+  donor token gives the source of the pair, the acceptor token the leaving bond), applied
+  with upstream `apply_predicted_arrows`, one candidate per leaving choice the mask allows
+  (`leaving_choices`); a breaking anchor as the heterolysis towards either atom. The score is
+  |G_atom| (1/eV), not a probability.
+- `gbdt`: the geometry-free LightGBM lambdarank model of `ksmech-physics gbdt`
+  (`gbdt_lgbm_molecule_geomfree.npz` under the shared processed directory). It ranks the
+  valid orbital pairs; the `beam` best are completed into R the same way, at the sites
+  (a, b) of r and s with the largest w_a^r w_b^s. The score is the model's ranking score.
+- `network`: the spec-v9 model. Available only when `ksmech.model.net` imports and a
+  checkpoint `data/models/<source>/<run>/best.pt` exists, and only through a `NetworkModel`
+  adapter (`decode(sample, rt, beam) -> [NetworkStep]`, R with its log-probability). No
+  adapter ships on this branch: the model code is not committed here.
 
-`info()` is cheap and runs on the API side; `score()` runs in the worker (lazy upstream
-imports: `physics.ranking`, `physics.cli` and `physics.baseline` load torch).
+`info()` is cheap and runs on the API side; `propose()` runs in the worker.
 """
 
 from __future__ import annotations
 
-import hashlib
+import importlib.util
+import logging
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 import numpy as np
 
-from ksmech.serve.contracts import (
-    ArrowSpec,
-    PoolScores,
-    PredictorInfo,
-    PredictorRef,
-    ProposedStep,
-    ScoringContext,
-)
+from ksmech.serve.contracts import USER_PREDICTOR, USER_REF, PredictorInfo, PredictorRef
 from ksmech.serve.errors import Code, ServeError
-from ksmech.serve.versions import file_sha256, floor_version, source_constant
+from ksmech.serve.versions import file_sha256, floor_version
 
 if TYPE_CHECKING:
+    from ksmech.arrows.delta_be import ReactionMatrix
     from ksmech.arrows.reactants import ReactantTokens
+    from ksmech.arrows.steps import MechanismSample
+    from ksmech.serve.analysis import PoolWork
+    from ksmech.serve.contracts import Runtime
     from ksmech.serve.settings import ServeSettings
 
+log = logging.getLogger(__name__)
 
-def _sample_version_text() -> str:
-    """SAMPLE_VERSION of the working tree's arrows/steps.py, read with ast (no torch import)."""
-    try:
-        return str(source_constant("arrows/steps.py", "SAMPLE_VERSION"))
-    except (LookupError, OSError, SyntaxError, ValueError) as exc:
-        return f"unknown ({type(exc).__name__}: {exc})"
-
-
-# measured values only: the GBDT npz meta holds {n_trees, lr, features}, no sample version
-GBDT_SAMPLE_WARNING = (
-    "the GBDT file records no SAMPLE_VERSION; compatibility is checked by feature names and "
-    f"count only (serve builds features with SAMPLE_VERSION {_sample_version_text()})"
-)
-TRANSFORMER_REASON = (
-    "src/ksmech/model has no inference entry point (Prompt 6) and no checkpoint exists under "
-    "data/models/transformer/"
-)
-ORDER = ("floor", "gbdt", "transformer", "stub")
+ORDER = ("floor", "gbdt", "network")
+N_CHANNELS = 2  # channels completed per direction of a forming anchor
+SCORE_NOTE = "scores rank candidates; they are not probabilities"
+NETWORK_MODULE = "ksmech.model.net"
 
 
-def _tau() -> float:
-    from ksmech.physics.params import KSParams
+@dataclass(frozen=True)
+class Candidate:
+    """One proposed step on pool atoms."""
 
-    return float(KSParams().tau)
-
-
-def main_centre_site(rt: ReactantTokens, token_id: int) -> int:
-    """Global atom of an orbital token's main centre (`center_atoms[0]`)."""
-    j = int(token_id) - rt.n_atoms
-    off = int(rt.atom_offsets[int(rt.orbital_fragment[j])])
-    return off + int(rt.orbitals[j].descriptors.center_atoms[0])
-
-
-def ranked_cells(pool: PoolScores, k: int) -> list[tuple[int, int, int]]:
-    """(position, i, j) of the k best valid cells: score desc, ties by (row, col) asc."""
-    flat = np.flatnonzero(np.asarray(pool.valid).ravel())
-    scores = np.asarray(pool.scores, dtype=float).ravel()[flat]
-    order = np.argsort(-scores, kind="stable")[: max(0, int(k))]
-    n_virt = pool.valid.shape[1]
-    return [(pos, int(flat[o] // n_virt), int(flat[o] % n_virt)) for pos, o in enumerate(order)]
+    matrix: ReactionMatrix
+    anchor: tuple[int, int, str]  # (i, j, "form" | "break"), i < j
+    score: float
+    logp: float | None = None
+    tie: float = 0.0  # secondary key within one score (the channel term), larger first
+    channel: dict | None = None  # how the completion was built (diagnostic)
 
 
-def contact_arrow(pool: PoolScores, ctx: ScoringContext, i: int, j: int) -> tuple[ArrowSpec, str]:
-    """The arrow of cell (i, j) at its contact sites; a -1 site falls back to the token's main
-    centre (site source "main_centre")."""
-    donor, acceptor = int(pool.rows[i]), int(pool.cols[j])
-    a, b = (int(x) for x in pool.contact_sites[i, j])
-    source = "contact"
-    if a < 0:
-        a, source = main_centre_site(ctx.rt, donor), "main_centre"
-    if b < 0:
-        b, source = main_centre_site(ctx.rt, acceptor), "main_centre"
-    return ArrowSpec(donor, a, acceptor, b), source
+@dataclass(frozen=True)
+class NetworkStep:
+    """What a `NetworkModel` returns: R on the global atoms of `ReactantTokens`."""
+
+    matrix: ReactionMatrix
+    logp: float
+    anchor: tuple[int, int, str] | None = None
+
+
+class NetworkModel(Protocol):
+    """The adapter the spec-v9 network plugs in through (pool -> ranked (R, logp))."""
+
+    version: str
+
+    def decode(self, sample: MechanismSample, rt: ReactantTokens, beam: int) -> list: ...
 
 
 class Predictor(ABC):
     name: ClassVar[str]
+    kind: ClassVar[str]
 
     @abstractmethod
     def info(self) -> PredictorInfo:
         """API side; cheap."""
 
     @abstractmethod
-    def score(self, ctx: ScoringContext) -> np.ndarray:
-        """Worker side; (n_occ, n_virt) float64, -inf where not valid."""
-
-    def propose(self, pool: PoolScores, ctx: ScoringContext, k: int) -> list[ProposedStep]:
-        """At most k ranked steps: valid cells by score desc, ties by (row, col) asc; one arrow
-        per cell at its contact sites; logp = pool.logp[i, j]; rank = position + 1."""
-        out = []
-        for pos, i, j in ranked_cells(pool, k):
-            arrow, source = contact_arrow(pool, ctx, i, j)
-            out.append(self._step(pool, arrow, source, pos, i, j))
-        return out
-
-    @staticmethod
-    def _step(pool: PoolScores, arrow: ArrowSpec, source: str, pos: int, i: int, j: int):
-        return ProposedStep(
-            (arrow,), (source,), float(pool.scores[i, j]), float(pool.logp[i, j]), pos + 1, (i, j)
-        )
+    def propose(
+        self, rt_ctx: Runtime, work: PoolWork, beam: int, scope: str, skips: Counter
+    ) -> list[Candidate]:
+        """Worker side; candidates best first."""
 
 
-def floor_scores(ctx: ScoringContext) -> np.ndarray:
-    """where(pair_valid, SCORERS[UNTRAINED_SCORE](comps), -inf)."""
-    from ksmech.physics.cli import UNTRAINED_SCORE
-    from ksmech.physics.ranking import SCORERS
+def _info(name, label, kind, available, code, reason, version, sha, unit, warnings, desc, prob):
+    return PredictorInfo(
+        name=name,
+        label=label,
+        kind=kind,
+        available=available,
+        code=code,
+        reason=reason,
+        version=version,
+        checkpoint_hash=sha,
+        score_unit=unit,
+        default_temperature=1.0,
+        warnings=tuple(warnings),
+        description=desc,
+        scores_are_probabilities=prob,
+    )
 
-    raw = SCORERS[UNTRAINED_SCORE](ctx.comps)
-    return np.where(ctx.sample.pair_valid, raw, -np.inf).astype(np.float64)
+
+# ---- completion of an arrow (r, a, s, b) into reaction matrices
+
+
+def _order(mol, i: int, j: int) -> int:
+    from ksmech.arrows.apply import TYPE_TO_ORDER
+
+    bond = mol.GetBondBetweenAtoms(int(i), int(j))
+    return 0 if bond is None else TYPE_TO_ORDER.get(bond.GetBondType(), 1)
+
+
+def leaving_options(rt: ReactantTokens, arrow) -> list[int]:
+    """The leaving bonds the mask allows for one arrow (`apply_predicted.leaving_choices` on
+    the state after the arrow's source and new bond): NONE first when allowed, then the
+    global atom x of every bond b-x. Raises ArrowApplyError when the source has no pair."""
+    from rdkit import Chem
+
+    from ksmech.arrows.align import NONE_LEAVING
+    from ksmech.arrows.apply_predicted import EditState, _step, leaving_choices
+
+    state = EditState(Chem.Mol(rt.mol))
+    _, room = _step(state, rt, arrow, set())
+    cands, none_ok = leaving_choices(state, rt, arrow, room)
+    return ([NONE_LEAVING] if none_ok else []) + [int(c.atom) for c in cands]
+
+
+def complete_arrow(rt: ReactantTokens, arrow, skips: Counter) -> list[tuple[ReactionMatrix, int]]:
+    """(R on pool atoms, leaving atom) of every leaving choice of `arrow` that applies."""
+    from ksmech.arrows.apply import ArrowApplyError
+    from ksmech.arrows.apply_predicted import apply_predicted_arrows
+    from ksmech.arrows.delta_be import matrix_between
+
+    try:
+        options = leaving_options(rt, arrow)
+    except ArrowApplyError as exc:
+        skips[f"COMPLETION_FAILED:{exc.reason}"] += 1
+        return []
+    out = []
+    for x in options:
+        res = apply_predicted_arrows(rt.mol, [replace(arrow, leaving=x)], rt)
+        if not res.ok:
+            skips[f"COMPLETION_FAILED:{res.reason}"] += 1
+            continue
+        out.append((matrix_between(rt.mol, res.mol), x))
+    return out
+
+
+def _arrow_candidates(rt, arrow, anchor, score, term, skips, logp=None) -> list[Candidate]:
+    from ksmech.arrows.align import NONE_LEAVING
+
+    out = []
+    for R, x in complete_arrow(rt, arrow, skips):
+        i, j = anchor[0], anchor[1]
+        if not any(sorted((a, b)) == [i, j] and d > 0 for a, b, d in R.bonds):
+            skips["COMPLETION_WITHOUT_ANCHOR"] += 1
+            continue
+        leaving = None if x == NONE_LEAVING else int(rt.mol_atom[x])
+        channel = {
+            "donor_token": int(arrow.donor),
+            "acceptor_token": int(arrow.acceptor),
+            "donor_site": int(rt.mol_atom[arrow.donor_site]),
+            "acceptor_site": int(rt.mol_atom[arrow.acceptor_site]),
+            "term": float(term),
+            "leaving": leaving,
+        }
+        out.append(Candidate(R, anchor, float(score), logp, abs(float(term)), channel))
+    return out
+
+
+def _heterolysis(i: int, j: int, score: float) -> list[Candidate]:
+    from ksmech.arrows.delta_be import ReactionMatrix
+
+    anchor = (i, j, "break")
+    return [
+        Candidate(ReactionMatrix(((i, j, -1),), ((k, 2),)), anchor, float(score), None, 0.0, None)
+        for k in (j, i)
+    ]
+
+
+def ranked(cands: list[Candidate]) -> list[Candidate]:
+    """Best first (score, then the channel term), duplicates of one R dropped."""
+    seen, out = set(), []
+    order = sorted(cands, key=lambda c: (-c.score, -c.tie, c.anchor, c.matrix.to_list()))
+    for c in order:
+        if c.matrix not in seen:
+            seen.add(c.matrix)
+            out.append(c)
+    return out
+
+
+# ---- floor
+
+
+def floor_anchors(work: PoolWork, scope: str) -> list[tuple[float, int, int, str]]:
+    """(|G_atom|, i, j, sign) of every candidate anchor on pool atoms, best first."""
+    rt, g = work.rt, np.abs(work.pg.g_atom)
+    frag = rt.atom_fragment
+    a, b = np.triu_indices(rt.n_atoms, k=1)
+    keep = g[a, b] > 0
+    if scope == "inter":
+        keep &= frag[a] != frag[b]
+    out = []
+    for ga, gb in zip(a[keep], b[keep], strict=True):
+        i, j = sorted((rt.mol_atom[int(ga)], rt.mol_atom[int(gb)]))
+        order, score = _order(rt.mol, i, j), float(g[ga, gb])
+        if order < 3:
+            out.append((score, i, j, "form"))
+        if order >= 1:
+            out.append((score, i, j, "break"))
+    return sorted(out, key=lambda x: (-x[0], x[3] != "form", x[1], x[2]))
+
+
+def anchor_candidates(work: PoolWork, anchor, score: float, skips: Counter) -> list[Candidate]:
+    """The completions of one anchor (module docstring)."""
+    from ksmech.arrows.apply_predicted import PredictedArrow
+
+    i, j, sign = anchor
+    if sign == "break":
+        return _heterolysis(i, j, score)
+    rt, pg = work.rt, work.pg
+    gi, gj = rt.global_atom[i], rt.global_atom[j]
+    out: list[Candidate] = []
+    for d, acc in ((gi, gj), (gj, gi)):
+        for row, col, term in pg.top_directed(d, acc, N_CHANNELS):
+            arrow = PredictedArrow(int(pg.rows[row]), d, int(pg.cols[col]), acc)
+            out += _arrow_candidates(rt, arrow, anchor, score, term, skips)
+    if not out:
+        skips["ANCHOR_NOT_COMPLETED"] += 1
+    return out
 
 
 class FloorPredictor(Predictor):
     name = "floor"
+    kind = "floor"
 
     def __init__(self, fp: str) -> None:
         self.fp = fp
 
     def info(self) -> PredictorInfo:
-        return PredictorInfo(
-            name=self.name,
-            label="Untrained KS floor",
-            kind="physics_floor",
-            available=True,
-            code=None,
-            reason=None,
-            version=floor_version(self.fp),
-            checkpoint_hash=None,
-            score_unit="eV",
-            default_temperature=_tau(),
-            warnings=(),
-            description=(
-                "-(KS3 + KS2) on the oriented contact kernel at d = 2.3 A with the bonded-sites "
-                "validity filter; untrained physics, no END_MECH head"
-            ),
+        desc = (
+            "untrained physics floor: anchors ranked by the pooled gap factor |G_atom| over the "
+            "valid donor/acceptor pairs, completed from their dominant orbital channels with "
+            "the leaving-bond mask; " + SCORE_NOTE
         )
+        return _info(
+            self.name, "Physics floor (|G_atom|)", self.kind, True, None, None,
+            floor_version(self.fp), None, "1/eV", (SCORE_NOTE,), desc, False,
+        )  # fmt: skip
 
-    def score(self, ctx: ScoringContext) -> np.ndarray:
-        return floor_scores(ctx)
+    def propose(self, rt_ctx, work, beam, scope, skips) -> list[Candidate]:
+        out: list[Candidate] = []
+        for score, i, j, sign in floor_anchors(work, scope)[: max(1, int(beam))]:
+            out += anchor_candidates(work, (i, j, sign), score, skips)
+        return ranked(out)
+
+
+# ---- gbdt
 
 
 @dataclass
@@ -169,7 +284,7 @@ class _GBDTState:
     reason: str | None
     sha: str | None
     model: object | None
-    signature: tuple[int, int] | None = None  # (st_mtime_ns, st_size) before the check
+    signature: tuple[int, int] | None = None
 
 
 def _file_signature(path: Path) -> tuple[int, int] | None:
@@ -180,12 +295,25 @@ def _file_signature(path: Path) -> tuple[int, int] | None:
     return st.st_mtime_ns, st.st_size
 
 
+def pair_sites(rt: ReactantTokens, r: int, s: int) -> tuple[int, int] | None:
+    """The global sites (a, b), a a centre of r and b one of s, a != b, whose bond order can
+    still rise, with the largest w_a^r w_b^s (ties: lowest a, b); None when there is none."""
+    best = None
+    for a, wa in sorted(rt.centres(r).items()):
+        for b, wb in sorted(rt.centres(s).items()):
+            if a == b or _order(rt.mol, rt.mol_atom[a], rt.mol_atom[b]) >= 3:
+                continue
+            if best is None or wa * wb > best[0]:
+                best = (wa * wb, a, b)
+    return None if best is None else (best[1], best[2])
+
+
 class GBDTPredictor(Predictor):
-    """The baseline GBDT ranker; loaded (and checked) on first use, and again whenever the
-    file's mtime or size changed (a retrained or replaced model is followed by every process;
-    an unchanged file is never re-read)."""
+    """The geometry-free LightGBM ranker; loaded (and verified) on first use, again whenever
+    the file's mtime or size changed."""
 
     name = "gbdt"
+    kind = "gbdt"
 
     def __init__(self, path: Path, fp: str) -> None:
         self.path = Path(path)
@@ -195,229 +323,162 @@ class GBDTPredictor(Predictor):
 
     def _load(self) -> _GBDTState:
         with self._lock:
-            sig = _file_signature(self.path)  # before the read: a later rewrite differs
+            sig = _file_signature(self.path)
             if self._state is None or self._state.signature != sig:
                 self._state = self._check()
                 self._state.signature = sig
             return self._state
 
-    def _readable(self) -> str | None:
-        """None when the file is an npz with a JSON `meta` member, else the reason."""
-        import json
-
-        try:
-            with np.load(self.path, allow_pickle=False) as z:
-                json.loads(str(z["meta"]))
-        except Exception as exc:  # noqa: BLE001 - reported as GBDT_LOAD_FAILED
-            return f"{type(exc).__name__}: {exc}"
-        return None
-
     def _check(self) -> _GBDTState:
         if not self.path.is_file():
             return _GBDTState(Code.GBDT_MISSING, f"no GBDT model at {self.path}", None, None)
         sha = file_sha256(self.path)
-        unreadable = self._readable()
-        if unreadable is not None:
-            return _GBDTState(Code.GBDT_LOAD_FAILED, unreadable, sha, None)
         try:
             from ksmech.physics import baseline as bl
-            from ksmech.serve.settings import pin_threads
+            from ksmech.physics import lgbm
 
-            pin_threads()  # baseline imports torch
-            model = bl.load_gbdt(self.path)
-        except (ValueError, KeyError) as exc:
-            return _GBDTState(
-                Code.GBDT_FEATURES_MISMATCH, f"{type(exc).__name__}: {exc}", sha, None
-            )
-        except Exception as exc:  # noqa: BLE001 - reported as unavailable, never raised
+            model = lgbm.load_lgbm(self.path, bl.FEATURE_NAMES)
+        except ValueError as exc:
+            return _GBDTState(Code.GBDT_FEATURES_MISMATCH, f"{exc}", sha, None)
+        except Exception as exc:  # noqa: BLE001 - reported as unavailable (StaleArtifact, ...)
             return _GBDTState(Code.GBDT_LOAD_FAILED, f"{type(exc).__name__}: {exc}", sha, None)
-        n = len(bl.FEATURE_NAMES)
-        bad = [
-            t
-            for t, tree in enumerate(model.trees)
-            if np.size(tree.feature) and tree.feature.max() >= n
-        ]
-        if bad or len(model.edges) != n:
-            reason = f"trees {bad[:5]} split on features >= {n} or {len(model.edges)} edges"
-            return _GBDTState(Code.GBDT_FEATURES_MISMATCH, reason, sha, None)
         return _GBDTState(None, None, sha, model)
 
     def info(self) -> PredictorInfo:
         st = self._load()
-        return PredictorInfo(
-            name=self.name,
-            label="GBDT ranker (baseline)",
-            kind="baseline",
-            available=st.model is not None,
-            code=None if st.code is None else str(st.code),
-            reason=st.reason,
-            version=None if st.sha is None else f"gbdt/{st.sha[:16]}/{self.fp}",
-            checkpoint_hash=st.sha,
-            score_unit="logit",
-            default_temperature=1.0,
-            warnings=(GBDT_SAMPLE_WARNING,),
-            description="gradient-boosted listwise ranker over the 61 candidate features",
+        version = None if st.sha is None else f"gbdt/{st.sha[:16]}/{self.fp}"
+        desc = (
+            "LightGBM lambdarank over the geometry-free pair features of every valid orbital "
+            "pair; the best pairs are completed into reaction matrices; " + SCORE_NOTE
         )
+        return _info(
+            self.name, "GBDT ranker (geometry-free)", self.kind, st.model is not None,
+            None if st.code is None else str(st.code), st.reason, version, st.sha, "rank score",
+            (SCORE_NOTE,), desc, False,
+        )  # fmt: skip
 
-    def score(self, ctx: ScoringContext) -> np.ndarray:
-        st = self._load()
-        if st.model is None:
-            detail = {"code": str(st.code), "reason": st.reason}
-            raise ServeError(Code.PREDICTOR_UNAVAILABLE, str(st.reason), status=409, detail=detail)
+    def _pair_scores(self, rt_ctx, work) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         from ksmech.physics import baseline as bl
 
-        cs = bl.candidate_set(ctx.sample, ctx.loader)
-        out = np.full(ctx.sample.pair_valid.shape, -np.inf)
-        out[cs.rows, cs.cols] = st.model.score(cs.X)
-        return out
+        st = self._load()
+        if st.model is None:
+            raise ServeError(Code.PREDICTOR_UNAVAILABLE, str(st.reason), status=409)
+        cs = bl.candidate_set(work.sample, rt_ctx.loader)
+        return cs.rows, cs.cols, np.asarray(st.model.score(cs.X), dtype=np.float64)
+
+    def propose(self, rt_ctx, work, beam, scope, skips) -> list[Candidate]:
+        from ksmech.arrows.apply_predicted import PredictedArrow
+
+        rows, cols, scores = self._pair_scores(rt_ctx, work)
+        rt, pg = work.rt, work.pg
+        out: list[Candidate] = []
+        taken = 0
+        for k in np.argsort(-scores, kind="stable"):
+            r, s = int(pg.rows[rows[k]]), int(pg.cols[cols[k]])
+            if (
+                scope == "inter"
+                and rt.orbital_fragment[r - rt.n_atoms] == rt.orbital_fragment[s - rt.n_atoms]
+            ):
+                continue
+            sites = pair_sites(rt, r, s)
+            if sites is None:
+                skips["PAIR_WITHOUT_SITES"] += 1
+                continue
+            i, j = sorted((rt.mol_atom[sites[0]], rt.mol_atom[sites[1]]))
+            arrow = PredictedArrow(r, sites[0], s, sites[1])
+            term = float(pg.G[rows[k], cols[k]])
+            out += _arrow_candidates(rt, arrow, (i, j, "form"), scores[k], term, skips)
+            taken += 1
+            if taken >= max(1, int(beam)):
+                break
+        return ranked(out)
 
 
-class TransformerPredictor(Predictor):
-    name = "transformer"
+# ---- network
+
+
+def network_status(settings: ServeSettings) -> tuple[str | None, list[Path]]:
+    """(why the network is unavailable or None, the checkpoints found)."""
+    try:
+        found = importlib.util.find_spec(NETWORK_MODULE) is not None
+    except (ImportError, ValueError):
+        found = False
+    ckpts = sorted(Path(settings.shared_root).glob("data/models/*/*/best.pt"))
+    if not found:
+        return (
+            f"{NETWORK_MODULE} is not importable here: the spec-v9 model code is not "
+            "committed on this branch",
+            ckpts,
+        )
+    if not ckpts:
+        return f"no checkpoint data/models/<source>/<run>/best.pt under {settings.shared_root}", []
+    return (
+        "no NetworkModel adapter is installed for the checkpoint "
+        f"{ckpts[-1].parent.name} (serve.predictors.NetworkModel)",
+        ckpts,
+    )
+
+
+class NetworkPredictor(Predictor):
+    """The spec-v9 network through a `NetworkModel` adapter (`model`); unavailable without one."""
+
+    name = "network"
+    kind = "network"
+
+    def __init__(self, settings: ServeSettings, model: NetworkModel | None = None) -> None:
+        self.settings = settings
+        self.model = model
 
     def info(self) -> PredictorInfo:
-        return PredictorInfo(
-            name=self.name,
-            label="Transformer (Prompt 6)",
-            kind="model",
-            available=False,
-            code=str(Code.TRANSFORMER_NOT_AVAILABLE),
-            reason=TRANSFORMER_REASON,
-            version=None,
-            checkpoint_hash=None,
-            score_unit="logit",
-            default_temperature=1.0,
-            warnings=(),
-            description="KS-biased transformer over orbital tokens; disabled until a checkpoint",
-        )
+        desc = "the spec-v9 transformer: anchor pointer and entry classifiers, joint log P(R)"
+        if self.model is not None:
+            version = f"network/{self.model.version}"
+            return _info(
+                self.name, "Network (spec v9)", self.kind, True, None, None, version, None,
+                "log P", (), desc, True,
+            )  # fmt: skip
+        reason, _ = network_status(self.settings)
+        return _info(
+            self.name, "Network (spec v9)", self.kind, False, str(Code.TRANSFORMER_NOT_AVAILABLE),
+            reason, None, None, "log P", (), desc, True,
+        )  # fmt: skip
 
-    def score(self, ctx: ScoringContext) -> np.ndarray:
-        detail = {"code": str(Code.TRANSFORMER_NOT_AVAILABLE), "reason": TRANSFORMER_REASON}
-        raise ServeError(Code.PREDICTOR_UNAVAILABLE, TRANSFORMER_REASON, status=409, detail=detail)
-
-
-@dataclass(frozen=True)
-class StubRule:
-    """Matches cell (i, j) when the donor has a centre of `donor_site_element`, the acceptor a
-    centre of `acceptor_site_element`, and each set that is not None equals the token's set of
-    centre elements (`descriptors.all_center_atoms`)."""
-
-    donor_centre_elements: frozenset[str] | None
-    donor_site_element: str
-    acceptor_site_element: str
-    acceptor_centre_elements: frozenset[str] | None
-    bonus: float
-
-    def canonical(self) -> tuple:
-        """A hash-seed independent description (frozenset reprs are not)."""
-        d = None if self.donor_centre_elements is None else sorted(self.donor_centre_elements)
-        a = None if self.acceptor_centre_elements is None else sorted(self.acceptor_centre_elements)
-        return (d, self.donor_site_element, self.acceptor_site_element, a, float(self.bonus))
-
-    def matches(self, donor: dict[str, float], acceptor: dict[str, float]) -> bool:
-        """`donor` / `acceptor`: element -> largest centre weight of that element."""
-        ok_sites = self.donor_site_element in donor and self.acceptor_site_element in acceptor
-        ok_d = self.donor_centre_elements is None or set(donor) == self.donor_centre_elements
-        ok_a = (
-            self.acceptor_centre_elements is None or set(acceptor) == self.acceptor_centre_elements
-        )
-        return ok_sites and ok_d and ok_a
+    def propose(self, rt_ctx, work, beam, scope, skips) -> list[Candidate]:
+        if self.model is None:
+            reason, _ = network_status(self.settings)
+            raise ServeError(Code.PREDICTOR_UNAVAILABLE, str(reason), status=409)
+        rt, out = work.rt, []
+        for step in self.model.decode(work.sample, rt, int(beam)):
+            atoms = {a for i, j, _ in step.matrix.bonds for a in (i, j)}
+            if not atoms | {i for i, _ in step.matrix.lone} <= rt.mol_atom.keys():
+                skips["NETWORK_STEP_OUTSIDE_POOL"] += 1
+                continue
+            R = step.matrix.mapped(rt.mol_atom)
+            anchor = step.anchor and tuple(sorted(rt.mol_atom[a] for a in step.anchor[:2]))
+            anchor = (*anchor, step.anchor[2]) if anchor else _first_anchor(R)
+            if anchor is None:
+                skips["NETWORK_STEP_WITHOUT_ANCHOR"] += 1
+                continue
+            out.append(Candidate(R, anchor, float(step.logp), float(step.logp)))
+        return sorted(out, key=lambda c: -c.score)
 
 
-DEFAULT_STUB_RULES = (StubRule(frozenset({"O"}), "O", "C", frozenset({"C", "Cl"}), 50.0),)
-
-
-def _centres_by_element(rt: ReactantTokens, token_id: int) -> dict[str, tuple[float, int]]:
-    """element -> (largest centre weight, its global atom) over the token's centres."""
-    from rdkit import Chem
-
-    pt = Chem.GetPeriodicTable()
-    z = [a.atomic_number for f in rt.fragments for a in f.tokens.atoms]
-    out: dict[str, tuple[float, int]] = {}
-    for atom, w in sorted(rt.centres(token_id).items()):
-        el = pt.GetElementSymbol(int(z[atom]))
-        if el not in out or w > out[el][0]:
-            out[el] = (float(w), int(atom))
-    return out
-
-
-class StubPredictor(Predictor):
-    """The floor plus rule bonuses; a matched cell's arrow takes its sites by rule."""
-
-    name = "stub"
-
-    def __init__(self, fp: str, rules: tuple[StubRule, ...] = DEFAULT_STUB_RULES) -> None:
-        self.fp = fp
-        self.rules = tuple(rules)
-
-    @property
-    def version(self) -> str:
-        digest = hashlib.sha256(repr([r.canonical() for r in self.rules]).encode()).hexdigest()
-        return f"stub/{digest[:12]}/{self.fp}"
-
-    def info(self) -> PredictorInfo:
-        return PredictorInfo(
-            name=self.name,
-            label="Stub (tests)",
-            kind="stub",
-            available=True,
-            code=None,
-            reason=None,
-            version=self.version,
-            checkpoint_hash=None,
-            score_unit="eV",
-            default_temperature=_tau(),
-            warnings=("diagnostic predictor: the floor plus hand-written rule bonuses",),
-            description="the untrained floor plus rule bonuses, with rule sites; tests only",
-        )
-
-    def first_rule(self, rt: ReactantTokens, donor: int, acceptor: int) -> StubRule | None:
-        d = {k: v[0] for k, v in _centres_by_element(rt, donor).items()}
-        a = {k: v[0] for k, v in _centres_by_element(rt, acceptor).items()}
-        return next((r for r in self.rules if r.matches(d, a)), None)
-
-    def bonus(self, ctx: ScoringContext) -> np.ndarray:
-        rows = ctx.rt.n_atoms + np.flatnonzero(ctx.rt.occupied)
-        cols = ctx.rt.n_atoms + np.flatnonzero(~ctx.rt.occupied)
-        out = np.zeros((len(rows), len(cols)))
-        don = [{k: v[0] for k, v in _centres_by_element(ctx.rt, int(r)).items()} for r in rows]
-        acc = [{k: v[0] for k, v in _centres_by_element(ctx.rt, int(c)).items()} for c in cols]
-        for i, d in enumerate(don):
-            for j, a in enumerate(acc):
-                out[i, j] = sum(r.bonus for r in self.rules if r.matches(d, a))
-        return out
-
-    def score(self, ctx: ScoringContext) -> np.ndarray:
-        return np.where(ctx.sample.pair_valid, floor_scores(ctx) + self.bonus(ctx), -np.inf)
-
-    def propose(self, pool: PoolScores, ctx: ScoringContext, k: int) -> list[ProposedStep]:
-        out = []
-        for pos, i, j in ranked_cells(pool, k):
-            donor, acceptor = int(pool.rows[i]), int(pool.cols[j])
-            rule = self.first_rule(ctx.rt, donor, acceptor)
-            if rule is None:
-                arrow, source = contact_arrow(pool, ctx, i, j)
-            else:
-                a = _centres_by_element(ctx.rt, donor)[rule.donor_site_element][1]
-                b = _centres_by_element(ctx.rt, acceptor)[rule.acceptor_site_element][1]
-                arrow, source = ArrowSpec(donor, a, acceptor, b), "rule"
-            out.append(self._step(pool, arrow, source, pos, i, j))
-        return out
+def _first_anchor(R: ReactionMatrix) -> tuple[int, int, str] | None:
+    anchors = R.anchors()
+    return tuple(anchors[0]) if anchors else None
 
 
 class PredictorRegistry:
-    """Every predictor of one process: floor, gbdt, transformer, and the stub when enabled."""
+    """Every predictor of one process: floor, gbdt and network."""
 
-    def __init__(self, settings: ServeSettings, fp: str) -> None:
+    def __init__(self, settings: ServeSettings, fp: str, network: NetworkModel | None = None):
         self.settings = settings
         self.fp = fp
         self._predictors: dict[str, Predictor] = {
             "floor": FloorPredictor(fp),
             "gbdt": GBDTPredictor(settings.gbdt_file, fp),
-            "transformer": TransformerPredictor(),
+            "network": NetworkPredictor(settings, network),
         }
-        if settings.enable_stub_predictor:
-            self._predictors["stub"] = StubPredictor(fp)
 
     def names(self) -> list[str]:
         return [n for n in ORDER if n in self._predictors]
@@ -446,6 +507,8 @@ class PredictorRegistry:
         return p
 
     def ref(self, name: str, temperature: float | None = None) -> PredictorRef:
+        if name == USER_PREDICTOR:
+            return USER_REF
         info = self.get(name).info()
         t = info.default_temperature if temperature is None else float(temperature)
         return PredictorRef(info.name, info.version, info.checkpoint_hash, t)

@@ -20,10 +20,7 @@ from ksmech.serve.jobs import (
     JobStore,
     curated_job_ids,
     new_job_id,
-    override_handler,
-    predict_handler,
 )
-from ksmech.serve.testing import ToyPredictorRef
 from tests.test_serve_fixtures_net import (  # noqa: F401 (fixtures)
     FakeScheduler,
     branching,
@@ -295,36 +292,6 @@ def test_skips_go_to_events_and_failures(env, caplog):
     failures = [json.loads(x) for x in s.failures_log.read_text().splitlines()]
     assert [f["job_id"] for f in failures] == [job.id, job.id]
     assert "APPLY_FAILED:VALENCE" in caplog.text
-
-
-def test_predict_and_override_handlers(env):
-    runner = runner_of(env, inline=True)
-    chem = branching()
-    runner.register("predict", predict_handler(chem, lambda name, t: ToyPredictorRef))
-    runner.register("override", override_handler(chem, runner))
-    request = {"reactants_smiles": ["A"], "beam": 2, "max_steps": 2, "predictor": "stub"}
-    job = runner.submit("predict", request)
-    assert job.status == "done" and job.network_id == job.id
-    net = runner.store.read_network(job.id)
-    assert net["complete"] and job.result_path.endswith("network.json")
-    edge = next(e for e in net["edges"] if e["arrows"][0]["donor"] == 4)  # C -> E
-    arrows = [{"donor": 5, "donor_site": 0, "acceptor": 0, "acceptor_site": 1}]
-    ov = {"edge_id": edge["id"], "arrows": arrows, "continue_steps": 1}
-    req = {"network_id": job.id, "parent_job_id": job.id, "override": ov}
-    o = runner.submit("override", req, parent_job_id=job.id, network_id=job.id, exclusive=True)
-    assert o.status == "done", o.error
-    result = runner.store.read_json(o.id, "result.json")
-    assert result["parent_job_id"] == job.id and result["corrected_edge_id"].startswith("c")
-    after = runner.store.read_network(job.id)
-    assert after["revision"] == result["network_revision"] > net["revision"]
-    old = next(e for e in after["edges"] if e["id"] == edge["id"])
-    assert old["status"] == "superseded" and old["superseded_by"] == result["corrected_edge_id"]
-    bad = dict(req, override=dict(ov, arrows=[dict(arrows[0], donor=2)]))  # B -> E at C
-    o2 = runner.submit("override", bad, parent_job_id=job.id, network_id=job.id)
-    assert o2.status == "failed" and o2.error["code"] == "APPLY_FAILED"
-    assert runner.store.read_network(job.id) == after  # a failed override changes nothing
-    missing = dict(req, network_id="j" + "f" * 16)
-    assert runner.submit("override", missing).error["code"] == "JOB_NOT_DONE"
 
 
 def test_snapshot_throttle(env):

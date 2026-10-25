@@ -4,7 +4,7 @@ arrows code with no SCF code and no xTB.
 
 The basis is tblite's GFN2 valence basis (shell list exported by tblite's parameter table,
 `qm.ao.element_ao_l`; no Hamiltonian is ever built by tblite), the overlap matrix is the STO-nG
-one the oriented kernel uses (`physics.gto.overlap_matrix`), and the Hamiltonian is
+one the oriented kernel uses (`serve.gto.overlap_matrix`), and the Hamiltonian is
 Wolfsberg-Helmholz with valence-state ionization energies shifted by the atomic charges:
 
     h_mu  = h0[Z_A][l_mu] - OMEGA_EV * q_A        (eV)
@@ -164,9 +164,9 @@ def _vbur(z: np.ndarray, xyz: np.ndarray, warnings: list[str]) -> np.ndarray:
 def eht_record(key: str):
     """A complete `QMRecord` for a map-free canonical SMILES, filled like
     `xtb_calc.GFN2Calculator._assemble` (finite-difference Fukui fields NaN)."""
-    from ksmech.physics.gto import overlap_matrix
     from ksmech.qm import fukui
     from ksmech.qm.records import QMRecord
+    from ksmech.serve.gto import overlap_matrix
 
     _, z, xyz, charge, notes = _molecule(key)
     ao_atom, ao_l, h0 = basis(z)

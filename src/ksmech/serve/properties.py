@@ -42,10 +42,10 @@ WIBERG_NONBONDED_MIN = 0.15
 def properties_path(
     s: ServeSettings, key: str, method: str, qm_digest: str, token_digest: str | None
 ) -> Path:
-    from ksmech.serve.versions import oriented_fingerprint
+    from ksmech.serve.versions import token_fingerprint
 
     parts = ["wb_properties", key, method, qm_digest, token_digest, WORKBENCH_VERSION]
-    return s.workbench_properties / f"{cache_sha([*parts, oriented_fingerprint()])}.json"
+    return s.workbench_properties / f"{cache_sha([*parts, token_fingerprint()])}.json"
 
 
 def _finite(x: float) -> float | None:

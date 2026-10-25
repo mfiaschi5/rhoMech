@@ -9,12 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import statistics
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +36,7 @@ from ksmech.orbitals.tokens import (
     save_tokens,
     token_config,
 )
+from ksmech.processes import in_processes
 from ksmech.qm.batch import collect_molecules
 from ksmech.qm.records import (
     DEFAULT_CACHE_DIR,
@@ -55,7 +53,6 @@ DEFAULT_TOKENS_DIR = Path("data/cache/tokens")
 SUMMARY_NAME = "summary.json"
 N_WORST = 20
 _HIST_BIN = 10
-_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 
 
 @dataclass(frozen=True)
@@ -216,29 +213,9 @@ def _worker(args: tuple[str, BuildConfig]) -> BuildRow:
     return process_molecule(*args)
 
 
-@contextmanager
-def single_threaded_children():
-    """Spawned workers start with one BLAS / OpenMP thread each. Without it every worker's
-    numpy fans out over all cores (a 3-worker build ran ~15 busy cores and, next to the QM
-    batch, hard-rebooted the host; see docs/decisions.md)."""
-    saved = {k: os.environ.get(k) for k in _THREAD_VARS}
-    os.environ.update(dict.fromkeys(_THREAD_VARS, "1"))
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
 def run_build(smiles_list: list[str], config: BuildConfig, n_workers: int = 1) -> list[BuildRow]:
     jobs = [(s, config) for s in smiles_list]
-    if n_workers <= 1:
-        return [process_molecule(*j) for j in jobs]
-    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
-        return list(pool.imap(_worker, jobs, chunksize=8))
+    return list(in_processes(_worker, jobs, n_workers, chunksize=8))
 
 
 def _hist(values: list[int], width: int) -> dict[str, int]:

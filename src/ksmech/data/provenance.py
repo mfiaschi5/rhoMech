@@ -4,8 +4,8 @@ and configuration, and the hash of its own content (docs/decisions.md, 2026-10-2
 Every writer calls `stamp()` and stores the result in the artifact's own header:
 - `.npz`: the member `__provenance__`, a JSON string (`np.load` reads one member lazily);
 - `.json`: the top-level key `provenance`;
-- framed binary files (sample files): `MAGIC`, an 8-byte header length, the JSON header, then
-  the payload.
+- framed binary files (the torch sample files written before the npz store; read only, for
+  `describe_chain`): `MAGIC`, an 8-byte header length, the JSON header, then the payload.
 
 Every loader calls `verify()`, which raises `StaleArtifact` (reason STALE_ARTIFACT) naming what
 changed. An input is either `file:<path>`, whose current hash `verify` reads from that file's
@@ -61,10 +61,16 @@ class StaleArtifact(Exception):
         self.changes = list(changes)
         super().__init__(f"{STALE_ARTIFACT}: {path}: " + "; ".join(self.changes))
 
+    def __reduce__(self):
+        """Rebuilt from (path, changes). The default rebuilds from the message alone, which
+        this __init__ rejects: a worker's StaleArtifact then hung `multiprocessing.Pool` in the
+        parent instead of reaching it."""
+        return type(self), (self.path, self.changes)
+
 
 @dataclass(frozen=True)
 class Provenance:
-    kind: str  # qm_record | tokens | contact_block | samples | split | baseline
+    kind: str  # qm_record | tokens | samples | split | pair_stats | baseline_lgbm | ...
     schema_version: int
     code_git_hash: str
     spec_sha256: str
@@ -121,9 +127,20 @@ def array_digest(arrays: Mapping[str, Any]) -> str:
     return h.hexdigest()
 
 
+def git_env() -> dict[str, str]:
+    """The environment without git's own variables. A hook of `git commit --only` (or `git
+    commit <paths>`) exports GIT_INDEX_FILE, the absolute path of the temporary index being
+    committed; a git run inside the hook would read and refresh it as this checkout's index."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git(*args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True, check=True
+        ["git", "-C", str(REPO_ROOT), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env(),
     ).stdout
 
 
@@ -329,6 +346,27 @@ def require_clean(header: Provenance, path: Path | str) -> None:
         )
 
 
+def verify_clean(
+    path: Path | str,
+    kind: str,
+    schema_version: int,
+    config: Mapping[str, Any] | None = None,
+    allow_stale: bool = False,
+) -> Provenance | None:
+    """`verify`, then `require_clean`: training, evaluation and the baselines read only
+    artifacts that match their inputs and were built from committed code. With `allow_stale`
+    (diagnostic CLIs) the mismatch is logged and the header returned anyway."""
+    try:
+        header = verify(path, kind, schema_version, config)
+        require_clean(header, path)
+        return header
+    except StaleArtifact as exc:
+        if not allow_stale:
+            raise
+        log.warning("reading a stale %s (--allow-stale): %s", kind, exc)
+        return read_header(path)
+
+
 # ---- writers
 
 
@@ -354,21 +392,6 @@ def save_npz(
     payload = {**arrays, HEADER_KEY: np.array(prov.to_json())}
     (np.savez_compressed if compressed else np.savez)(buf, **payload)
     return atomic_write(path, buf.getvalue())
-
-
-def write_framed(path: Path | str, payload: bytes, prov: Provenance) -> Path:
-    header = prov.to_json().encode()
-    return atomic_write(path, MAGIC + len(header).to_bytes(8, "little") + header + payload)
-
-
-def read_framed(path: Path | str) -> tuple[Provenance | None, bytes]:
-    """(header, payload). A file without the frame is all payload."""
-    data = Path(path).read_bytes()
-    if not data.startswith(MAGIC):
-        return None, data
-    n = int.from_bytes(data[len(MAGIC) : len(MAGIC) + 8], "little")
-    start = len(MAGIC) + 8
-    return Provenance.from_json(data[start : start + n].decode()), data[start + n :]
 
 
 def write_json(path: Path | str, obj: Mapping[str, Any], prov: Provenance) -> Path:

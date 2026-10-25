@@ -4,7 +4,10 @@ API side, RDKit only, for every saved state with or without tokens. The molblock
 coordinates (`rdDepictor.SetPreferCoordGen(True)`, then `Compute2DCoords`), no atom maps, and
 no H atom except those whose map number is in `keep_maps` (a removed H raises its parent's
 explicit H count, so labels still read CH3). The atom table maps each `depiction_idx` (the
-molblock's atom order) to the map number, element, fragment and, with tokens, the global site.
+molblock's atom order) to its pool atom (`pool_atom`: the atom index of
+`parse_mapped(mapped_smiles)`, the index space of every reaction matrix and arrow reading),
+the pool atoms of the H atoms hidden on it (`hidden_h_atoms`), the map number, element,
+fragment and, with tokens, the global site (the token index space).
 
 With `server_svg`, the same molecule is drawn by `rdMolDraw2D.MolDraw2DSVG` and
 `GetDrawCoords(i)` gives the exact drawing position of every atom (`server_coords`, indexed by
@@ -55,15 +58,20 @@ def _removable_h(atom: Chem.Atom, keep_maps: set[int]) -> int | None:
     return nbrs[0].GetIdx()
 
 
-def _hide_hydrogens(mol: Chem.Mol, keep_maps: set[int]) -> tuple[Chem.Mol, list[int]]:
-    """(the depiction mol, original atom index of each depiction atom). Maps are cleared."""
+def _hide_hydrogens(
+    mol: Chem.Mol, keep_maps: set[int]
+) -> tuple[Chem.Mol, list[int], dict[int, list[int]]]:
+    """(the depiction mol, original atom index of each depiction atom, original indices of
+    the H atoms hidden on each original atom). Maps are cleared."""
     hidden: Counter[int] = Counter()
+    hidden_on: dict[int, list[int]] = {}
     drop = []
     for atom in mol.GetAtoms():
         parent = _removable_h(atom, keep_maps)
         if parent is not None:
             drop.append(atom.GetIdx())
             hidden[parent] += 1
+            hidden_on.setdefault(parent, []).append(atom.GetIdx())
     rw = Chem.RWMol(mol)
     for parent, n in hidden.items():
         p = rw.GetAtomWithIdx(parent)
@@ -77,7 +85,7 @@ def _hide_hydrogens(mol: Chem.Mol, keep_maps: set[int]) -> tuple[Chem.Mol, list[
     with rdBase.BlockLogs():
         dep.UpdatePropertyCache(strict=False)
     dropped = set(drop)
-    return dep, [i for i in range(mol.GetNumAtoms()) if i not in dropped]
+    return dep, [i for i in range(mol.GetNumAtoms()) if i not in dropped], hidden_on
 
 
 def _fragment_of(mol: Chem.Mol) -> dict[int, int]:
@@ -105,7 +113,7 @@ def depiction(
 ) -> dict:
     """`DepictionOut` fields of a mapped, explicit-H mol (`chem.parse_mapped`). `global_of`
     maps the mol's atom indices to global sites (`ReactantTokens.global_atom`)."""
-    dep, origin = _hide_hydrogens(mol, {int(m) for m in keep_maps})
+    dep, origin, hidden_on = _hide_hydrogens(mol, {int(m) for m in keep_maps})
     rdDepictor.SetPreferCoordGen(True)
     rdDepictor.Compute2DCoords(dep)
     frag = _fragment_of(mol)
@@ -115,6 +123,8 @@ def depiction(
         atoms.append(
             {
                 "depiction_idx": k,
+                "pool_atom": int(i),
+                "hidden_h_atoms": sorted(hidden_on.get(i, [])),
                 "global_site": None if global_of is None else global_of.get(i),
                 "map": int(a.GetAtomMapNum()),
                 "element": a.GetSymbol(),

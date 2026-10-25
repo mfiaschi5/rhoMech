@@ -8,27 +8,29 @@ import numpy as np
 import pytest
 import torch
 
+from ksmech.arrows.batches import ANCHOR_SIDE, collate_samples, make_loader
 from ksmech.arrows.cli import main as arrows_main
 from ksmech.arrows.steps import (
-    ANCHOR_SIDE,
     PARTS,
     READING_ALIGNED,
     SAMPLE_VERSION,
     MechanismSample,
     SkipReason,
     build_all_samples,
-    collate_samples,
+    load_pair_stats,
     load_samples,
-    make_loader,
+    pair_stats,
+    pair_stats_path,
     sample_for_step,
     samples_path,
     write_split_file,
 )
 from ksmech.data import chem
 from ksmech.data import provenance as prov
-from ksmech.data.io import steps_path, write_steps
+from ksmech.data.io import read_training_steps, steps_path, write_steps
 from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import Arrow, ElementaryStep
+from ksmech.physics.stage_a import STAGE_A_FEATURES
 
 
 @pytest.fixture
@@ -60,9 +62,9 @@ def missing_iodide(token_loader):
     return lambda key: None if key == "CI" else token_loader(key)
 
 
-def test_sample_holds_tokens_labels_and_product_key(mini_steps, token_loader, pair_kernels):
+def test_sample_holds_tokens_labels_and_product_key(mini_steps, token_loader):
     step = mini_steps["sn2"]
-    s = sample_for_step(step, token_loader, pair_kernels)
+    s = sample_for_step(step, token_loader)
     assert isinstance(s, MechanismSample)
     assert len(s.fragment_keys) == 2 and set(s.atom_fragment) == {0, 1}
     assert s.atom_features.shape[0] == s.n_atoms == len(s.atom_map)
@@ -87,8 +89,8 @@ def _stored(tmp_path, samples: dict, version=SAMPLE_VERSION):
     return store.write_view(tmp_path / "samples_x.json", sorted(samples), {}, index, split, config)
 
 
-def test_samples_round_trip_through_the_store(mini_steps, token_loader, pair_kernels, tmp_path):
-    s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
+def test_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path):
+    s = sample_for_step(mini_steps["e2"], token_loader)
     (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))
     assert back.labels == s.labels and back.product_key == s.product_key
     assert back.edit_label == s.edit_label and back.orbital_reading == s.orbital_reading
@@ -105,7 +107,7 @@ def test_samples_round_trip_through_the_store(mini_steps, token_loader, pair_ker
     assert back.pair_z.dtype == np.float32 and back.atom_coulomb.dtype == np.float32
 
 
-def test_skip_reasons(token_loader, pair_kernels):
+def test_skip_reasons(token_loader):
     lone = ElementaryStep(
         "x",
         "pmechdb",
@@ -115,8 +117,17 @@ def test_skip_reasons(token_loader, pair_kernels):
         "[CH3+:10].[Br-:11]",
         [Arrow("bond", (10, 11), "atom", (11,))],
     )
-    assert sample_for_step(lone, lambda key: None, pair_kernels) == SkipReason.MISSING_TOKENS
-    s = sample_for_step(lone, token_loader, pair_kernels)  # a lone heterolysis is a sample
+    assert sample_for_step(lone, lambda key: None) == SkipReason.MISSING_TOKENS
+
+    class Stale:  # a loader that serves no file and says why (`TokenCache.missing_reason`)
+        def __call__(self, key):
+            return None
+
+        def missing_reason(self, key):
+            return prov.STALE_ARTIFACT
+
+    assert sample_for_step(lone, Stale()) == SkipReason.STALE_ARTIFACT
+    s = sample_for_step(lone, token_loader)  # a lone heterolysis is a sample
     assert isinstance(s, MechanismSample)
     assert s.labels == [] and s.orbital_reading == "HETEROLYSIS_ONLY"
     c, br = (int(np.flatnonzero(s.atom_map == m)[0]) for m in (10, 11))
@@ -125,9 +136,9 @@ def test_skip_reasons(token_loader, pair_kernels):
     assert s.edit_label.anchors == (((min(c, br), max(c, br), "break"),),)
 
 
-def test_a_resonance_step_has_no_sample(mini_steps, token_loader, pair_kernels):
+def test_a_resonance_step_has_no_sample(mini_steps, token_loader):
     """Its edit label is RESONANCE_STEP: it is not part of the training target."""
-    out = sample_for_step(mini_steps["resonance"], token_loader, pair_kernels)
+    out = sample_for_step(mini_steps["resonance"], token_loader)
     assert out == SkipReason.RESONANCE_STEP
 
 
@@ -165,7 +176,7 @@ def test_the_edit_label_takes_the_reactant_to_the_drawn_product(mini_steps, toke
         assert any(_reproduces(s, prod, r) for r in s.edit_label.variants), name
 
 
-def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pair_kernels):
+def test_samples_build_for_every_split_strategy(mini_processed, token_loader):
     report = build_all_samples(
         "pmechdb",
         processed_dir=mini_processed,
@@ -184,7 +195,37 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pa
     assert held_out["n_steps"] == 2 and held_out["skipped"] == {"MISSING_TOKENS": 1}
 
 
-def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
+def test_pair_stats_are_those_of_the_stored_valid_cells(mini_processed, token_loader):
+    """The statistics file equals a refit on the samples as loaded (valid cells, float16
+    values), counts only valid defined entries, and is refused once its view changes."""
+    build_all_samples("pmechdb", ["molecule"], mini_processed, token_loader)
+    path = pair_stats_path("pmechdb", "molecule", mini_processed)
+    view = samples_path("pmechdb", "molecule_train", mini_processed)
+    stats, train = load_pair_stats(path), load_samples(view)
+    ids = {s.step_id for s in train}
+    steps = read_training_steps(steps_path("pmechdb", mini_processed))
+    built = [sample_for_step(s, token_loader) for s in steps if s.step_id in ids]
+    assert stats.names == STAGE_A_FEATURES
+    for refit in (pair_stats(train), pair_stats(built)):  # as loaded, and as just built
+        for a in ("mean", "std", "count"):
+            assert np.array_equal(getattr(stats, a), getattr(refit, a)), a
+    valid = sum((s.pair_defined & s.pair_valid[..., None]).sum((0, 1)) for s in built)
+    assert np.array_equal(stats.count, valid)
+    assert (sum(s.pair_defined.sum((0, 1)) for s in built) > valid).any()  # invalid cells exist
+    header = prov.read_header(path)
+    assert header.kind == "pair_stats" and header.config["cells"] == "valid"
+    from ksmech.arrows import store
+    from ksmech.arrows.steps import splits_path
+
+    ids = json.loads(view.read_text())["ids"][:1]  # the training view is rebuilt, changed
+    split_file = splits_path("pmechdb", "molecule", mini_processed)
+    index = store.store_dir(view.parent) / "index.json"
+    store.write_view(view, ids, {}, index, split_file, prov.read_header(view).config)
+    with pytest.raises(prov.StaleArtifact, match="input changed"):
+        load_pair_stats(path)
+
+
+def test_collate_pads_and_builds_masks(mini_steps, token_loader):
     lone = ElementaryStep(
         "x",
         "pmechdb",
@@ -194,8 +235,8 @@ def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
         "[CH3+:10].[Br-:11]",
         [Arrow("bond", (10, 11), "atom", (11,))],
     )
-    batch = [sample_for_step(mini_steps[k], token_loader, pair_kernels) for k in ("sn2", "e2")]
-    batch.append(sample_for_step(lone, token_loader, pair_kernels))
+    batch = [sample_for_step(mini_steps[k], token_loader) for k in ("sn2", "e2")]
+    batch.append(sample_for_step(lone, token_loader))
     b = collate_samples(batch)
     _check_edit_tensors(b, batch)
     n_atoms = max(s.n_atoms for s in batch)
@@ -219,6 +260,25 @@ def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
             assert b["occupied"][i, donors].all()
         assert b["label_mask"][i].sum() == len(s.labels)
     assert (b["donor_site"][~b["label_mask"]] == -1).all()
+    _check_pair_tensors(b, batch)
+
+
+def _check_pair_tensors(b: dict, batch: list) -> None:
+    """Each sample's pair arrays sit unchanged in the top-left of the padded block, their rows
+    and columns point at its occupied and virtual token positions, and padding is empty."""
+    assert b["pair_features"] == batch[0].pair_features
+    assert "atom_coulomb" not in b  # stored, no model input
+    for i, s in enumerate(batch):
+        r, c = s.pair_valid.shape
+        assert np.array_equal(b["pair_z"][i, :r, :c].numpy(), s.pair_z)
+        assert np.array_equal(b["pair_defined"][i, :r, :c].numpy(), s.pair_defined)
+        assert np.array_equal(b["pair_valid"][i, :r, :c].numpy(), s.pair_valid)
+        assert np.array_equal(b["pair_gap_sign"][i, :r, :c].numpy(), s.pair_gap_sign)
+        assert not b["pair_valid"][i, r:].any() and not b["pair_defined"][i, :, c:].any()
+        rows, cols = b["pair_row_pos"][i], b["pair_col_pos"][i]
+        assert b["occupied"][i, rows[:r]].all() and b["virtual"][i, cols[:c]].all()
+        assert (rows[r:] == -1).all() and (cols[c:] == -1).all()
+        assert int(b["occupied"][i].sum()) == r and int(b["virtual"][i].sum()) == c
 
 
 def _check_edit_tensors(b: dict, batch: list) -> None:
@@ -247,23 +307,13 @@ def _check_edit_tensors(b: dict, batch: list) -> None:
     assert not b["r_anchors"][2, :, :, :, ANCHOR_SIDE["form"]].any()  # a heterolysis breaks
 
 
-def test_loader_and_cli(mini_processed, token_loader, contact_tables, monkeypatch, capsys):
+def test_loader_and_cli(mini_processed, token_loader, monkeypatch, capsys):
     import ksmech.arrows.cli as cli
-    from ksmech.physics.contact_table import save_tables
 
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: missing_iodide(token_loader))
     args = ["--source", "pmechdb", "--processed-dir", str(mini_processed)]
-    table = ["--contact-table", str(save_tables(contact_tables, mini_processed / "contact.json"))]
-    missing = ["--kernel", "table", "--contact-table", str(mini_processed / "none.json")]
-    assert arrows_main(["contacts", *args]) == 2  # no split file yet: run `samples` first
     assert arrows_main(["samples", *args, "--strategy", "random_leaky"]) == 0
-    leaky = ["--split", "random_leaky"]
-    assert arrows_main(["contacts", *args, *leaky, *missing]) == 2  # no table: refused, not guessed
-    assert arrows_main(["contacts", *args, *leaky, "--kernel", "table", *table]) == 0
     assert arrows_main(["samples", *args, "--strategy", "molecule", "scaffold"]) == 0
-    oriented = ["--oriented-cache", str(mini_processed / "oriented")]  # the default kernel
-    assert arrows_main(["contacts", *args, *oriented]) == 0
-    assert (mini_processed / "pmechdb" / "contacts_report_molecule.json").exists()
     assert arrows_main(["roundtrip", *args]) == 0
     assert "100.00%" in capsys.readouterr().out
     loader = make_loader(samples_path("pmechdb", "molecule_train", mini_processed), batch_size=2)
@@ -271,19 +321,20 @@ def test_loader_and_cli(mini_processed, token_loader, contact_tables, monkeypatc
     assert batch["donor_sets"].dtype == torch.bool and len(batch["step_id"]) <= 2
 
 
-def test_sample_stores_the_physics_pair_block(mini_steps, token_loader, pair_kernels):
+def test_sample_stores_the_pair_block(mini_steps, token_loader):
     import numpy as np
 
-    from ksmech.physics.pairs import PAIR_FEATURES, atom_coulomb_matrix, pair_block, valid_pairs
+    from ksmech.physics.pairs import atom_coulomb_matrix, valid_pairs
     from ksmech.physics.params import REDUCED
+    from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 
     step = mini_steps["sn2"]
-    s = sample_for_step(step, token_loader, pair_kernels)
+    s = sample_for_step(step, token_loader)
     n_occ, n_virt = int(s.orbital_occupied.sum()), int((~s.orbital_occupied).sum())
-    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(PAIR_FEATURES))
+    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(STAGE_A_FEATURES))
     assert s.pair_z.dtype == np.float32 and s.pair_valid.shape == (n_occ, n_virt)
     tokens = s.tokens(token_loader)
-    block = pair_block(tokens, pair_kernels, REDUCED)
+    block = stage_a_block(tokens, REDUCED)
     assert np.allclose(s.pair_z, block.z, rtol=1e-6, atol=1e-6)
     assert np.array_equal(s.pair_defined, block.defined)
     assert np.array_equal(s.pair_gap_sign, block.gap_sign)
@@ -296,8 +347,8 @@ def test_sample_stores_the_physics_pair_block(mini_steps, token_loader, pair_ker
     assert np.allclose(s.atom_coulomb, atom_coulomb_matrix(tokens, REDUCED), rtol=1e-6)
 
 
-def test_old_sample_versions_are_refused(mini_steps, token_loader, pair_kernels, tmp_path):
-    s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
+def test_old_sample_versions_are_refused(mini_steps, token_loader, tmp_path):
+    s = sample_for_step(mini_steps["e2"], token_loader)
     view = _stored(tmp_path, {s.step_id: s}, version=SAMPLE_VERSION - 1)
     with pytest.raises(prov.StaleArtifact, match="schema_version"):
         load_samples(view)
@@ -308,7 +359,7 @@ def test_old_sample_versions_are_refused(mini_steps, token_loader, pair_kernels,
 
 
 def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
-    mini_processed, token_loader, monkeypatch, tmp_path
+    mini_processed, token_loader, monkeypatch
 ):
     import ksmech.arrows.cli as cli
     from ksmech.data.io import read_steps
@@ -321,11 +372,6 @@ def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
     parquet = steps_path("pmechdb", mini_processed)
     shard = prov.read_header(next((mini_processed / "pmechdb" / "samples").glob("shard_*.npz")))
     assert prov.file_input_name(parquet) in shard.inputs
-    cache = ["--oriented-cache", str(tmp_path / "oriented")]
-    assert arrows_main(["contacts", *args, *cache]) == 0
-    side = mini_processed / "pmechdb" / "samples" / "contacts_molecule"
-    side_shard = prov.read_header(next(side.glob("shard_*.npz")))
-    assert any("oriented" in name for name in side_shard.inputs)  # the contact blocks it used
     os.utime(parquet)  # a timestamp alone is not a change of content
     assert load_samples(path)
     steps = read_steps(parquet)
@@ -333,23 +379,6 @@ def test_touching_the_ingest_parquet_makes_the_samples_refuse_to_load(
     with pytest.raises(prov.StaleArtifact, match=r"input changed: .*steps\.parquet"):
         load_samples(path)
     assert load_samples(path, allow_stale=True)  # diagnostics may still read it
-
-
-def test_sample_stores_the_contact_sites_and_clash_flags(mini_steps, token_loader, pair_kernels):
-    import numpy as np
-
-    s = sample_for_step(mini_steps["sn2"], token_loader, pair_kernels)
-    n_occ, n_virt = s.pair_valid.shape
-    assert s.pair_contact_sites.shape == (n_occ, n_virt, 2)
-    occ = s.n_atoms + np.flatnonzero(s.orbital_occupied)
-    virt = s.n_atoms + np.flatnonzero(~s.orbital_occupied)
-    centres = {}
-    for j, g, _ in s.incidence:
-        centres.setdefault(s.n_atoms + int(j), set()).add(int(g))
-    for i in range(n_occ):  # the argmax sites are centres of the two tokens
-        for k in range(n_virt):
-            a, b = s.pair_contact_sites[i, k]
-            assert a in centres[occ[i]] and b in centres[virt[k]]
 
 
 def test_the_per_step_split_is_random_leaky_and_never_a_default(mini_processed):
@@ -390,9 +419,7 @@ def _species(step, side: str) -> list[str]:
     return nontrivial_species(getattr(step, side))
 
 
-def test_filtered_label_cells_are_counted_flagged_and_never_the_teacher(
-    mini_steps, token_loader, pair_kernels
-):
+def test_filtered_label_cells_are_counted_flagged_and_never_the_teacher(mini_steps, token_loader):
     from dataclasses import replace
 
     from ksmech.arrows.align import AlignFlag
@@ -400,7 +427,7 @@ def test_filtered_label_cells_are_counted_flagged_and_never_the_teacher(
     from ksmech.arrows.steps import _pair_index, filter_labels
 
     step = mini_steps["e2"]
-    s = sample_for_step(step, token_loader, pair_kernels)
+    s = sample_for_step(step, token_loader)
     rt = ReactantTokens.from_smiles(step.reactants_smiles, token_loader)
     lab = max(s.labels, key=lambda x: len(x.donor_ids) * len(x.acceptor_ids))
     row, col = _pair_index(s)
@@ -422,11 +449,11 @@ def test_filtered_label_cells_are_counted_flagged_and_never_the_teacher(
     assert filter_labels(replace(fresh, label_filter={}), rt) is None
 
 
-def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader, pair_kernels):
+def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader):
     from ksmech.arrows.steps import _pair_index
 
     for step in mini_steps.values():
-        s = sample_for_step(step, token_loader, pair_kernels)
+        s = sample_for_step(step, token_loader)
         if not isinstance(s, MechanismSample):
             continue
         row, col = _pair_index(s)
@@ -437,7 +464,7 @@ def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader, pair
 def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path):
     from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 
-    s = sample_for_step(mini_steps["e2"], token_loader)  # no kernels: stage A
+    s = sample_for_step(mini_steps["e2"], token_loader)
     assert s.pair_features == STAGE_A_FEATURES
     assert s.pair_z.shape[-1] == len(STAGE_A_FEATURES) and (s.pair_contact_sites == -1).all()
     block = stage_a_block(s.tokens(token_loader))

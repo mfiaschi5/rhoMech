@@ -4,7 +4,7 @@
 - The executor has `max_workers` = `workers` clamped to [1, 2], the `spawn` context and the
   initializer `ksmech.qm.batch._init_worker` (the SIGALRM handler of the QM timeout). It is
   created, and its first n submits (warm-up pings) made, inside
-  `ksmech.orbitals.build.single_threaded_children()`, so every worker starts with one BLAS /
+  `ksmech.processes.single_threaded_children()`, so every worker starts with one BLAS /
   OpenMP thread.
 - Queued tasks wait in a (priority, seq) heap: INTERACTIVE before JOB before BACKGROUND, FIFO
   within a priority; at most n tasks are in flight. Tasks with the same key are deduplicated
@@ -365,7 +365,7 @@ class ProcessScheduler:
     def _executor_or_spawn(self) -> ProcessPoolExecutor:
         if self._executor is not None:
             return self._executor
-        from ksmech.orbitals.build import single_threaded_children
+        from ksmech.processes import single_threaded_children
         from ksmech.qm import batch
         from ksmech.serve.tasks import run_task
 

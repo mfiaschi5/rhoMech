@@ -8,7 +8,7 @@ import pytest
 from rdkit import Chem
 
 from ksmech.serve import keys
-from ksmech.serve.contracts import ArrowSpec, Limits, PoolState
+from ksmech.serve.contracts import Limits, PoolState
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.pools import (
     SpeciesInput,
@@ -87,17 +87,17 @@ def test_state_id_sensitive_to_maps():
 
 
 def test_edge_id():
-    arrows = [ArrowSpec(16, 1, 28, 5)]
-    e = keys.edge_id("predicted", "s" + "0" * 20, arrows)
+    matrix = {"bonds": [[1, 5, 1], [5, 6, -1]], "lone": [[1, -2], [6, 2]]}
+    e = keys.edge_id("predicted", "s" + "0" * 20, matrix)
     assert re.match(r"^e[0-9a-f]{16}$", e)
-    as_dict = {"donor": 16, "donor_site": 1, "acceptor": 28, "acceptor_site": 5}
-    assert e == keys.edge_id("predicted", "s" + "0" * 20, [as_dict])
-    c = keys.edge_id("corrected", "s" + "0" * 20, arrows)
+    assert e == keys.edge_id("predicted", "s" + "0" * 20, [matrix["bonds"], matrix["lone"]])
+    c = keys.edge_id("corrected", "s" + "0" * 20, matrix)
     assert c.startswith("c") and c[1:] != e[1:]
-    assert keys.edge_id("predicted", "s" + "1" * 20, arrows) != e
-    assert keys.edge_id("predicted", "s" + "0" * 20, [ArrowSpec(16, 1, 28, 6)]) != e
+    assert keys.edge_id("predicted", "s" + "1" * 20, matrix) != e
+    other = {"bonds": [[1, 5, 1], [5, 7, -1]], "lone": [[1, -2], [7, 2]]}
+    assert keys.edge_id("predicted", "s" + "0" * 20, other) != e
     with pytest.raises(ValueError):
-        keys.edge_id("other", "s" + "0" * 20, arrows)
+        keys.edge_id("other", "s" + "0" * 20, matrix)
 
 
 # ---- root states

@@ -16,10 +16,8 @@ from __future__ import annotations
 import contextlib
 import importlib
 import importlib.util
-import json
 import logging
 import os
-import shutil
 import signal
 import threading
 import time
@@ -34,7 +32,6 @@ from ksmech.serve.settings import THREAD_VARS, TaskEnv, assert_writable
 
 if TYPE_CHECKING:
     from ksmech.arrows.reactants import ReactantTokens
-    from ksmech.physics.pairs import PairKernels
     from ksmech.serve.predictors import Predictor, PredictorRegistry
 
 log = logging.getLogger(__name__)
@@ -44,7 +41,6 @@ MAX_DIAG_SLEEP_S = 600.0
 _RUNTIMES: dict[TaskEnv, WorkerRuntime] = {}
 _RUNTIME_LOCK = threading.Lock()
 _BODIES: dict[str, Callable] = {}
-UPSTREAM_ORIENTED_CACHES = ("_BLOCKS", "_CANDIDATES")  # private dicts of the oriented module
 
 
 def _torch_one_thread() -> int | None:
@@ -56,28 +52,9 @@ def _torch_one_thread() -> int | None:
     return int(torch.get_num_threads())
 
 
-def clear_upstream_oriented_caches() -> list[str]:
-    """Thin adapter: clear the upstream in-memory oriented caches (`_BLOCKS` and `_CANDIDATES`
-    of `physics.contact.legacy_fixed23`, keyed by smiles|conformer|method and not by token
-    content). Returns
-    the names that are missing or not a dict (nothing to clear: the caller must not compute)."""
-    from ksmech.serve.upstream import oriented_module
-
-    _o = oriented_module()
-
-    uncleared = []
-    for name in UPSTREAM_ORIENTED_CACHES:
-        cache = getattr(_o, name, None)
-        if isinstance(cache, dict):
-            cache.clear()
-        else:
-            uncleared.append(name)
-    return uncleared
-
-
 class WorkerRuntime:
     """The worker-side per-process state (`contracts.Runtime`): settings, featurizer, loader,
-    the lazy oriented kernels and scorers, the ReactantTokens and sample LRUs (by state_id,
+    the lazy scorers, the ReactantTokens and sample LRUs (by state_id,
     served only while the state's token digest is the one they were built with)."""
 
     def __init__(self, env: TaskEnv) -> None:
@@ -89,23 +66,9 @@ class WorkerRuntime:
         self.rt_cache: LRU[str, ReactantTokens] = LRU(16)
         self.sample_cache: LRU[str, Any] = LRU(16)
         self._rt_digests: dict[str, str | None] = {}  # state_id -> analysis digest of rt_cache
-        self._seen_digests: dict[str, str] = {}  # token key -> digest this process computed with
-        self._kernels: PairKernels | None = None
         self._registry: PredictorRegistry | None = None
         self._lock = threading.RLock()
         self._events: list[dict] = []
-
-    @property
-    def kernels(self) -> PairKernels:
-        """`oriented_kernels(settings.oriented_dir)` (2.0, 2.3, 3.0 A; `main` is 2.3 A)."""
-        with self._lock:
-            if self._kernels is None:
-                from ksmech.physics.pairs import oriented_kernels
-
-                assert_writable(self.settings.oriented_dir, self.settings)
-                self.settings.oriented_dir.mkdir(parents=True, exist_ok=True)
-                self._kernels = oriented_kernels(self.settings.oriented_dir)
-            return self._kernels
 
     @property
     def scorers(self) -> dict[str, Predictor]:
@@ -139,7 +102,6 @@ class WorkerRuntime:
         if rt is None:
             from ksmech.arrows.reactants import ReactantTokens
 
-            self._check_token_digests(state)
             rt = ReactantTokens.from_smiles(state.mapped_smiles, self.loader)
             with self._lock:
                 self.rt_cache.put(sid, rt)
@@ -157,55 +119,6 @@ class WorkerRuntime:
         with self._lock:
             out, self._events = self._events, []
         return out + self.loader.drain_events()
-
-    def _check_token_digests(self, state: PoolState) -> None:
-        """The oriented caches ignore token content (the files under `oriented_dir` and the
-        upstream in-memory `_BLOCKS` / `_CANDIDATES` are keyed by smiles|conformer|method):
-        record each key's token digest in `<oriented_dir>/token_digests.json` and in this
-        process. A digest that changed against the file wipes that (serve-owned) directory; one
-        that changed against either drops this process's in-memory oriented state
-        (`_drop_oriented_memory`), and the ORIENTED_CACHE_WIPED event asks the scheduler to
-        recycle this worker when idle."""
-        s = self.settings
-        path = s.oriented_dir / "token_digests.json"
-        with self._lock:
-            try:
-                known = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                known = {}
-            now = {k: self.loader.digest(k) for k in set(state.fragment_token_keys)}
-            now = {k: v for k, v in now.items() if v is not None}
-            on_disk = {k for k, v in now.items() if k in known and known[k] != v}
-            in_memory = {k for k, v in now.items() if self._seen_digests.get(k, v) != v}
-            if on_disk:
-                log.warning("token digests changed for %s: wiping %s", on_disk, s.oriented_dir)
-                assert_writable(s.oriented_dir, s)
-                shutil.rmtree(s.oriented_dir, ignore_errors=True)
-                known = {}
-            if on_disk or in_memory:
-                self._drop_oriented_memory(sorted(on_disk | in_memory))
-            self._seen_digests |= now
-            if any(known.get(k) != v for k, v in now.items()):
-                from ksmech.serve.pools import atomic_write_text
-
-                text = json.dumps(known | now, sort_keys=True, indent=1) + "\n"
-                atomic_write_text(path, text, s)
-
-    def _drop_oriented_memory(self, changed: list[str]) -> None:
-        """After a token change: record ORIENTED_CACHE_WIPED, drop the kernels (rebuilt on the
-        fresh directory on next use) and clear the upstream in-memory oriented caches. When
-        they cannot be cleared, the task fails with TOKENS_CHANGED (503, transient), so no
-        number is computed from stale blocks before the scheduler recycles this worker."""
-        from ksmech.serve.analysis import TOKENS_CHANGED
-
-        self.event(Code.ORIENTED_CACHE_WIPED, f"token digests changed: {changed}")
-        self._kernels = None
-        uncleared = clear_upstream_oriented_caches()
-        if uncleared:
-            log.error("TOKENS_CHANGED %s: the oriented module has no dict %s", changed, uncleared)
-            msg = "token files changed under the running worker; retry"
-            detail = {"keys": changed, "uncleared": uncleared}
-            raise ServeError(TOKENS_CHANGED, msg, status=503, detail=detail)
 
 
 def runtime(env: TaskEnv) -> WorkerRuntime:
@@ -264,12 +177,8 @@ TASKS: dict[str, str | Callable[[Any, dict], dict]] = {
     "diag_crash": t_diag_crash,
     "featurize": t_featurize,
     "analyze": "ksmech.serve.analysis:t_analyze",
-    "score": "ksmech.serve.analysis:t_score",
     "expand": "ksmech.serve.expansion:t_expand",
-    "apply": "ksmech.serve.expansion:t_apply",
-    "site_pairs": "ksmech.serve.physics_view:t_site_pairs",
     "orbital_cube": "ksmech.serve.cubes:t_orbital_cube",
-    "contact": "ksmech.serve.placement:t_contact",
     "index_chunk": "ksmech.serve.pmindex:t_index_chunk",
     "recheck_step": "ksmech.serve.recheck:t_recheck_step",
     "wb_orbital_set": "ksmech.serve.orbital_sets:t_wb_orbital_set",

@@ -28,7 +28,6 @@ XTB_TARGETS = (
     ("ksmech.qm.batch", "process_molecule"),
     ("ksmech.qm.ao", "aos_per_element"),
     ("tblite.interface", "Calculator"),
-    ("ksmech.physics.contact", "Calculator"),
     ("ksmech.qm.geometry", "Calculator"),
     ("ksmech.qm.validation", "compute_fixture_records"),
 )
@@ -93,7 +92,7 @@ def ensure_synthetic_root(root: Path) -> bool:
     root = Path(root)
     if (root / ".ready").exists():
         return False
-    settings = load_settings({}, data_root=root, chemistry="synthetic", enable_stub_predictor=True)
+    settings = load_settings({}, data_root=root, chemistry="synthetic")
     with xtb_forbidden():
         featurizer = SyntheticFeaturizer(settings)
         for key in synthetic_keys():
@@ -114,9 +113,7 @@ def synthetic_root(tmp_path_factory) -> Path:
 def synthetic_settings(synthetic_root):
     from ksmech.serve.settings import load_settings
 
-    return load_settings(
-        {}, data_root=synthetic_root, chemistry="synthetic", enable_stub_predictor=True
-    )
+    return load_settings({}, data_root=synthetic_root, chemistry="synthetic")
 
 
 @pytest.fixture(scope="session")
@@ -234,7 +231,6 @@ def test_synthetic_root_holds_every_key(synthetic_settings, synthetic_loader):
     for key in synthetic_keys():
         assert synthetic_loader.has(key), key
     assert synthetic_settings.chemistry == "synthetic"
-    assert synthetic_settings.enable_stub_predictor
 
 
 def test_states_are_saved(synthetic_settings, sn2_state, oh_sn2_state):

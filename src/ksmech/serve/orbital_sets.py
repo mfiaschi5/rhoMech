@@ -100,32 +100,32 @@ def is_model_set(set_: str, start: str | None) -> bool:
 
 def versions() -> dict[str, int | str]:
     from ksmech.serve.densities import DENSITY_VERSION
-    from ksmech.serve.versions import oriented_fingerprint, source_constant
+    from ksmech.serve.versions import source_constant, token_fingerprint
 
     return {
         "workbench": WORKBENCH_VERSION,
         "orbital_set": ORBITAL_SET_VERSION,
         "density": DENSITY_VERSION,
         "tokens_schema": int(source_constant("orbitals/tokens.py", "SCHEMA_VERSION")),
-        "oriented_fingerprint": oriented_fingerprint(),
+        "token_fingerprint": token_fingerprint(),
     }
 
 
 def set_tokens_path(s: ServeSettings, key: str, method: str, qm_digest: str, set_, start) -> Path:
-    from ksmech.serve.versions import oriented_fingerprint
+    from ksmech.serve.versions import token_fingerprint
 
     parts = ["orbital_set", key, method, qm_digest, set_, start, ORBITAL_SET_VERSION]
-    return s.workbench_orbitals / f"{cache_sha([*parts, oriented_fingerprint()])}.npz"
+    return s.workbench_orbitals / f"{cache_sha([*parts, token_fingerprint()])}.npz"
 
 
 def rows_path(
     s: ServeSettings, key: str, method: str, qm_digest: str, set_, start, token_digest
 ) -> Path:
     """The rows JSON of one set; `token_digest` is the model token file's (None otherwise)."""
-    from ksmech.serve.versions import oriented_fingerprint
+    from ksmech.serve.versions import token_fingerprint
 
     parts = ["orbital_rows", key, method, qm_digest, set_, start, token_digest]
-    parts += [ORBITAL_SET_VERSION, WORKBENCH_VERSION, oriented_fingerprint()]
+    parts += [ORBITAL_SET_VERSION, WORKBENCH_VERSION, token_fingerprint()]
     return s.workbench_orbitals / f"{cache_sha(parts)}.json"
 
 

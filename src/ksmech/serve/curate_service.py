@@ -9,7 +9,6 @@ of work per call).
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -30,8 +29,6 @@ from ksmech.serve.curation import (
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.schemas import (
     CurateIn,
-    ExportIn,
-    ExportReportOut,
     JobCreatedOut,
     MechanismOut,
     MechanismPatchIn,
@@ -136,19 +133,17 @@ class CurateService:
             s.flush()
             return self._out(s, m)
 
-    def export(self, body: ExportIn | dict | None = None) -> JobCreatedOut:
-        """POST /curate/export: an `export` job (result ExportReportOut)."""
-        body = as_model(ExportIn, body or {})
-        return JobCreatedOut.model_validate(self.submit("export", body.model_dump(mode="json")))
+    def export_pmechdb(self, statuses: list[str] | None = None) -> tuple[str, dict]:
+        """GET /curate/export/pmechdb: (the PMechDB-format CSV, its report); a download, never
+        training data (`serve.export`)."""
+        from ksmech.serve.export import DEFAULT_STATUSES, pmechdb_export
 
-    def latest_export(self) -> ExportReportOut:
-        """GET /curate/export/latest: the report of the most recent export."""
-        q = select(db.ExportRecord).order_by(col(db.ExportRecord.created_at).desc())
-        with db.session(self.engine) as s:
-            rec = s.exec(q.limit(1)).first()
-        if rec is None:
-            raise ServeError(Code.EXPORT_NOT_FOUND, "no export has run yet", status=404)
-        return ExportReportOut.model_validate(json.loads(rec.report_json))
+        wanted = list(statuses or DEFAULT_STATUSES)
+        bad = [x for x in wanted if x not in ("validated", "corrected", "predicted")]
+        if bad:
+            msg = f"export statuses must be validated, corrected or predicted, got {bad}"
+            raise ServeError(Code.REQUEST_INVALID, msg, status=422)
+        return pmechdb_export(self.engine, wanted)
 
     def recheck(self, body: RecheckIn | dict | None = None) -> JobCreatedOut:
         """POST /curate/recheck: a `recheck` job; an explicit predictor must be available."""
@@ -162,8 +157,10 @@ class CurateService:
         body = as_model(RecheckOneIn, body or {})
         with db.session(self.engine) as s:
             m = self._mechanism(s, mid)
-        self.ctx.registry.get(body.predictor or m.predictor)
+        from ksmech.serve.recheck import predictor_for
+
         request = RecheckIn(mechanism_ids=[int(mid)], predictor=body.predictor, stale_only=False)
+        self.ctx.registry.get(predictor_for(request, m))
         return JobCreatedOut.model_validate(self.submit("recheck", request.model_dump(mode="json")))
 
 

@@ -1,5 +1,5 @@
-"""cubes.py: the grid on the token's cap, the Gaussian cube in bohr, exact LMO values, the
-placed acceptor's back-transform, and the CUBE_TOO_LARGE guard."""
+"""cubes.py: the grid on the token's cap, the Gaussian cube in bohr, exact LMO values and the
+CUBE_TOO_LARGE guard."""
 
 import math
 from pathlib import Path
@@ -7,9 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ksmech.serve import cubes, placement
+from ksmech.serve import cubes
 from ksmech.serve.errors import Code, ServeError
-from ksmech.serve.testing import requires
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     sn2_state,
@@ -69,10 +68,9 @@ def _read_cube(text: str) -> dict:
 
 
 def test_orbital_cube_header_grid_and_values(synthetic_runtime, sn2_state, sn2_rt):  # noqa: F811
-    from ksmech.physics.gto import ao_values
-    from ksmech.serve.upstream import oriented_module
+    from ksmech.serve.gto import ao_values
 
-    cap_atoms = oriented_module().cap_atoms
+    cap_atoms = cubes.cap_atoms
 
     token, f, k = _token_id(sn2_rt, "C[O-]", "occupied", {"O"})
     payload = {"state": sn2_state.to_dict(), "token": token, "spacing": 0.2, "padding": 4.0}
@@ -174,34 +172,6 @@ def test_cube_task_answers_too_large_for_a_subnormal_spacing(synthetic_runtime, 
     with pytest.raises(ServeError) as err:
         cubes.t_orbital_cube(synthetic_runtime, payload)
     assert err.value.code == Code.CUBE_TOO_LARGE and err.value.status == 422
-
-
-@requires("contact")
-def test_placed_acceptor_back_transform(synthetic_runtime, sn2_rt):  # noqa: F811
-    """At 50 random points the back-transformed values equal the rotated coefficients on the
-    placed atoms (1e-10); the cap of sigma*(C-Cl) carries Cl d shells."""
-    from ksmech.physics.gto import ao_values
-
-    cfg = synthetic_runtime.kernels.main.config.oriented
-    _, f, r = _token_id(sn2_rt, "C[O-]", "occupied", {"O"})
-    _, g, s = _token_id(sn2_rt, "CCl", "virtual", {"C", "Cl"})
-    t_F, t_G = sn2_rt.fragments[f].tokens, sn2_rt.fragments[g].tokens
-    assert 2 in set(t_G.ao_l.tolist())  # d functions on Cl
-    rng = np.random.default_rng(7)
-    for b in (int(x) for x in t_G.orbitals[s].descriptors.all_center_atoms):
-        pl = placement.reconstruct_contact(t_F, r, 1, t_G, s, b, cfg)
-        lo, hi = pl.cap_xyz_ang.min(axis=0) - 2.0, pl.cap_xyz_ang.max(axis=0) + 2.0
-        X = lo + rng.random((50, 3)) * (hi - lo)
-        back = cubes.placed_cap_values_at(t_G, s, pl, X)
-        z_cap = np.array([t_G.atoms[int(i)].atomic_number for i in pl.cap_atoms])
-        c_placed = placement.placed_cap_coefficients(t_G, s, pl.rot)
-        direct = ao_values(z_cap, pl.cap_xyz_ang, X) @ c_placed
-        np.testing.assert_allclose(back, direct, rtol=0, atol=1e-10)
-        assert np.abs(direct).max() > 1e-3
-        g_box = cubes.grid_around(pl.cap_xyz_ang, 0.5, 1.0)
-        on_grid = cubes.placed_cap_values(t_G, s, pl, g_box)
-        pts = cubes.grid_points(g_box, 0, g_box.n_points)
-        np.testing.assert_allclose(on_grid, cubes.placed_cap_values_at(t_G, s, pl, pts), atol=1e-14)
 
 
 def test_write_cube_layout():

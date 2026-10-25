@@ -26,7 +26,6 @@ import numpy as np
 if TYPE_CHECKING:
     from ksmech.arrows.reactants import ReactantTokens
     from ksmech.arrows.steps import MechanismSample
-    from ksmech.physics.pairs import PairKernels
     from ksmech.serve.featurize import Featurizer
     from ksmech.serve.loader import LayeredTokenLoader
     from ksmech.serve.predictors import Predictor
@@ -133,25 +132,6 @@ class PoolState(_Jsonable):
 
 
 @dataclass(frozen=True)
-class ArrowSpec(_Jsonable):
-    """= `PredictedArrow` fields: global token ids and global atom ids of the source state."""
-
-    donor: int
-    donor_site: int
-    acceptor: int
-    acceptor_site: int
-
-    @classmethod
-    def from_dict(cls, d: Mapping) -> ArrowSpec:
-        return cls(
-            int(d["donor"]), int(d["donor_site"]), int(d["acceptor"]), int(d["acceptor_site"])
-        )
-
-    def as_list(self) -> list[int]:
-        return [self.donor, self.donor_site, self.acceptor, self.acceptor_site]
-
-
-@dataclass(frozen=True)
 class ExpandRequest(_Jsonable):
     predictor: str
     beam: int
@@ -187,28 +167,22 @@ class Limits(_Jsonable):
 @dataclass
 class ProposedChild(_Jsonable):
     state: PoolState  # product state (its own maps / Lewis form); already saved
-    arrows: list[dict]  # ArrowOut-shaped dicts, each with its "physics" brief
-    encoded: dict | None  # EncodedStep.to_dict()
-    encode_reason: str | None  # ARROW_ENCODING_FAILED detail
-    touched_maps: list[int]  # edit_diff(source, product).touched_maps
-    score: float  # best member's predictor score
-    probability: float  # sum of p over the scanned member proposals; a lower bound
-    logp: float  # log(probability)
-    rank: int  # 1-based rank of the best member among valid proposals
+    step: dict  # edgestep.step_record fields (matrix, anchor, arrows, readings, ...)
+    score: float  # the predictor's score of the representative R
+    logp: float | None  # its log-probability; None unless the predictor gives probabilities
+    weight: float  # log beam weight (expansion docstring)
+    rank: int  # 1-based rank of the representative among the predictor's candidates
     n_alternatives: int
-    alternatives: list[dict]  # <= 5 AlternativeOut dicts
+    alternatives: list[dict]  # <= 5 {matrix, anchor, score, logp, rank} of the same product
 
     @classmethod
     def from_dict(cls, d: dict) -> ProposedChild:
         return cls(
             state=PoolState.from_dict(d["state"]),
-            arrows=list(d["arrows"]),
-            encoded=d.get("encoded"),
-            encode_reason=d.get("encode_reason"),
-            touched_maps=[int(m) for m in d["touched_maps"]],
+            step=dict(d["step"]),
             score=_f(d["score"]),
-            probability=_f(d["probability"]),
-            logp=_logp(d["logp"]),
+            logp=_opt_f(d.get("logp")),
+            weight=_logp(d["weight"]),
             rank=int(d["rank"]),
             n_alternatives=int(d["n_alternatives"]),
             alternatives=list(d["alternatives"]),
@@ -221,13 +195,13 @@ class Expansion(_Jsonable):
     code: str | None  # FEATURIZATION_FAILED | ANALYSIS_FAILED | NO_CANDIDATES | ...
     upstream: str | None  # qm ReasonCode, ApplyReason, ...
     detail: str
-    children: list[ProposedChild]  # <= beam, by probability desc, ties by child pool_key
+    children: list[ProposedChild]  # <= beam, in the predictor's order
     n_valid: int
     n_scanned: int
     scanned_mass: float
     unscanned_mass: float
-    failures: dict[str, int]  # APPLY_FAILED:<ApplyReason>, RESONANCE_ONLY_STEP, ...
-    failed_examples: list[dict]  # <= 10 {rank, arrows, probability, code, detail}
+    failures: dict[str, int]  # APPLY_FAILED:<issue code>, COMPLETION_FAILED:<reason>, ...
+    failed_examples: list[dict]  # <= 10 {rank, matrix, score, code, detail}
     fermi_smeared: bool
     warnings: list[str]
 
@@ -255,31 +229,6 @@ class Expansion(_Jsonable):
         )
 
 
-@dataclass
-class StepOutcome(_Jsonable):
-    """A user-applied step (override)."""
-
-    state: PoolState  # already saved
-    arrows: list[dict]  # ArrowOut dicts with physics briefs, site_source "user"
-    encoded: dict | None
-    encode_reason: str | None
-    touched_maps: list[int]
-    predictor_view: list[dict]  # per user arrow: {score, probability, rank, pair_valid, reason}
-    issues: list[dict]  # warnings from check_arrows (ErrorBody-shaped)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> StepOutcome:
-        return cls(
-            state=PoolState.from_dict(d["state"]),
-            arrows=list(d["arrows"]),
-            encoded=d.get("encoded"),
-            encode_reason=d.get("encode_reason"),
-            touched_maps=[int(m) for m in d["touched_maps"]],
-            predictor_view=list(d["predictor_view"]),
-            issues=list(d["issues"]),
-        )
-
-
 # ---- predictors
 
 
@@ -287,7 +236,7 @@ class StepOutcome(_Jsonable):
 class PredictorInfo(_Jsonable):
     name: str
     label: str
-    kind: str  # "physics_floor" | "baseline" | "model" | "stub"
+    kind: str  # "floor" | "gbdt" | "network"
     available: bool
     code: str | None
     reason: str | None
@@ -297,6 +246,7 @@ class PredictorInfo(_Jsonable):
     default_temperature: float
     warnings: tuple[str, ...]
     description: str
+    scores_are_probabilities: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> PredictorInfo:
@@ -313,6 +263,7 @@ class PredictorInfo(_Jsonable):
             _f(d["default_temperature"]),
             tuple(str(w) for w in d["warnings"]),
             str(d["description"]),
+            bool(d.get("scores_are_probabilities", False)),
         )
 
 
@@ -330,49 +281,8 @@ class PredictorRef(_Jsonable):
         return cls(str(d["name"]), d.get("version"), d.get("checkpoint_hash"), _f(d["temperature"]))
 
 
-@dataclass(frozen=True)
-class ScoringContext:
-    """Built in the worker by `analysis.pool_work`, or by the re-check. Not serialized."""
-
-    sample: MechanismSample
-    rt: ReactantTokens
-    loader: LayeredTokenLoader
-    comps: dict[str, np.ndarray]  # pair_components(...) at the physical KSParams
-
-
-@dataclass(frozen=True)
-class PoolScores:
-    """A predictor's view of one pool, in the pair-block index space. Worker-side only."""
-
-    scores: np.ndarray  # (n_occ, n_virt) float64, -inf where not valid
-    valid: np.ndarray  # (n_occ, n_virt) bool (pair_valid & scope mask)
-    logp: np.ndarray  # log_softmax_valid(scores, valid, temperature)
-    contact_sites: np.ndarray  # (n_occ, n_virt, 2) global atoms
-    rows: np.ndarray  # (n_occ,) global token id of row i = n_atoms + flatnonzero(occupied)[i]
-    cols: np.ndarray  # (n_virt,)
-    temperature: float
-
-
-@dataclass(frozen=True)
-class ProposedStep(_Jsonable):
-    arrows: tuple[ArrowSpec, ...]  # floor / gbdt / stub: exactly one arrow
-    site_sources: tuple[str, ...]  # per arrow: "contact" | "main_centre" | "rule"
-    score: float
-    logp: float
-    rank: int  # 1-based among valid proposals
-    cell: tuple[int, int] | None  # (i, j) of the scored pair; None for multi-arrow steps
-
-    @classmethod
-    def from_dict(cls, d: dict) -> ProposedStep:
-        cell = d.get("cell")
-        return cls(
-            tuple(ArrowSpec.from_dict(a) for a in d["arrows"]),
-            tuple(str(s) for s in d["site_sources"]),
-            _f(d["score"]),
-            _logp(d["logp"]),
-            int(d["rank"]),
-            None if cell is None else (int(cell[0]), int(cell[1])),
-        )
+USER_PREDICTOR = "user"  # the predictor name of user steps and of root-only user networks
+USER_REF = PredictorRef(USER_PREDICTOR, "user/1", None, 1.0)
 
 
 # ---- small shared machinery
@@ -419,68 +329,6 @@ class LRU(Generic[K, V]):
             return key in self._data
 
 
-class ChildScan:
-    """The grouping and stopping rule of a beam expansion (design section 4.3), shared by
-    `expansion.expand_state` and the test chemistry.
-
-    Proposals are added in rank order with their probability p. A proposal that gives a child
-    pool key joins that child's group (the first member is the representative); a failed one
-    is counted under its failure code. Every p is added to `scanned_mass`, failures included:
-    p is the predictor's distribution before application.
-    """
-
-    def __init__(self, beam: int, max_scan: int):
-        if beam < 1 or max_scan < 1:
-            raise ValueError("beam and max_scan must be >= 1")
-        self.beam = int(beam)
-        self.max_scan = int(max_scan)
-        self.mass: dict[str, float] = {}
-        self.n_scanned = 0
-        self.scanned_mass = 0.0
-        self.failures: Counter = Counter()
-
-    def add(self, p: float, child_key: str | None, failure: str | None = None) -> bool:
-        """Record one scanned proposal. Returns True when it is the first member of a new
-        child. Exactly one of `child_key` and `failure` must be given."""
-        if (child_key is None) == (failure is None):
-            raise ValueError("a scanned proposal needs exactly one of child_key and failure")
-        self.n_scanned += 1
-        self.scanned_mass += float(p)
-        if child_key is None:
-            self.failures[str(failure)] += 1
-            return False
-        new = child_key not in self.mass
-        self.mass[child_key] = self.mass.get(child_key, 0.0) + float(p)
-        return new
-
-    @property
-    def unscanned_mass(self) -> float:
-        return 1.0 - self.scanned_mass
-
-    def ranked(self) -> list[str]:
-        """Every child key by mass desc, ties by key asc."""
-        return sorted(self.mass, key=lambda k: (-self.mass[k], k))
-
-    def kept(self) -> list[str]:
-        """At most `beam` child keys by mass desc, ties by key asc."""
-        return self.ranked()[: self.beam]
-
-    def should_stop(self, n_remaining: int) -> str | None:
-        """ "exhausted" (nothing left to scan), "max_scan", "bound" (the kept set is final:
-        U < p_B - p_{B+1} with U the unscanned mass; strict, so a tie keeps scanning) or None."""
-        if n_remaining <= 0:
-            return "exhausted"
-        if self.n_scanned >= self.max_scan:
-            return "max_scan"
-        masses = [self.mass[k] for k in self.ranked()]
-        if len(masses) >= self.beam:
-            p_b = masses[self.beam - 1]
-            p_next = masses[self.beam] if len(masses) > self.beam else 0.0
-            if self.unscanned_mass < p_b - p_next:
-                return "bound"
-        return None
-
-
 def log_softmax_valid(scores: np.ndarray, valid: np.ndarray, temperature: float) -> np.ndarray:
     """log softmax of scores / T over the valid cells, in float64; -inf on invalid cells (and
     everywhere when no cell is valid). T must be > 0. A valid -inf score gets -inf; NaN or +inf
@@ -517,9 +365,6 @@ class Runtime(Protocol):
     scorers: Mapping[str, Predictor]  # available predictors by name (asked on every call)
     rt_cache: LRU[str, ReactantTokens]  # by state_id, 16 entries
     sample_cache: LRU[str, MechanismSample]  # by state_id, 16 entries
-
-    @property
-    def kernels(self) -> PairKernels: ...  # lazy oriented_kernels(settings.oriented_dir)
 
     def reactant_tokens(self, state: PoolState) -> ReactantTokens: ...
 

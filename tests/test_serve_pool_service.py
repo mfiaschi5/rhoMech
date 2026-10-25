@@ -5,14 +5,12 @@ the site-pair block."""
 import json
 from dataclasses import fields
 
-import numpy as np
 import pytest
 
 from ksmech.serve import pool_service as ps
 from ksmech.serve import schemas as S
 from ksmech.serve.capabilities import CAPABILITIES
 from ksmech.serve.errors import Code, ServeError
-from ksmech.serve.testing import requires
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     sn2_state,
@@ -23,7 +21,7 @@ from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
 
 pytestmark = pytest.mark.serve
 
-PHYSICS = CAPABILITIES["physics"][0]
+PHYSICS = CAPABILITIES["predict"][0]  # the pool analysis serves predict and correct
 ANALYZED = "ready" if PHYSICS else "disabled"  # pool status once its tokens exist
 SN2_DONOR, SN2_ACCEPTOR = 16, 28  # n(O) -> sigma*(C-Cl); contact sites (O, C) = (1, 5)
 
@@ -106,31 +104,6 @@ def test_pool_out_missing_then_ready(synthetic_context, synthetic_settings):  # 
     assert before.n_orbitals is not None  # the tokens exist, the analysis does not
     after = ps.create_pool(synthetic_context, _in("CCO", "CN"))
     assert after.state_id == state.state_id and after.analysis == ANALYZED
-
-
-@requires("physics")
-def test_pool_out_failed_sidecar(synthetic_context, synthetic_settings):  # noqa: F811
-    from ksmech.serve.analysis import analysis_digest, clear_failure, write_failure
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
-
-    ctx = synthetic_context
-    state = initial_state(
-        [SpeciesInput("CC(=O)OC", 1), SpeciesInput("CN", 1)], synthetic_settings.limits
-    )
-    save_state(state, synthetic_settings)
-    err = ServeError(Code.ANALYSIS_FAILED, "boom", upstream="TEST")
-    digest = analysis_digest(ctx.loader, state)
-    write_failure(synthetic_settings, state, ctx.physics_fp, err, digest=digest, stage="analyze")
-    try:
-        out = ps.pool_out(ctx, state.state_id)
-        assert out.analysis == "failed"
-        assert out.analysis_error.code == Code.ANALYSIS_FAILED
-        assert out.analysis_error.message == "boom" and out.analysis_error.upstream == "TEST"
-        e = _raises(Code.POOL_NOT_ANALYZED, ps.tokens_out, ctx, state.state_id)
-        assert e.status == 409 and e.detail["code"] == Code.ANALYSIS_FAILED
-    finally:
-        clear_failure(synthetic_settings, state.state_id, ctx.physics_fp)
-    assert ps.pool_out(ctx, state.state_id).analysis == "missing"
 
 
 def test_featurize_failure_without_tokens(synthetic_context, synthetic_settings, monkeypatch):  # noqa: F811
@@ -235,224 +208,4 @@ def _sn2_row(rows):
     ]
 
 
-@requires("candidates")
-def test_candidates_hold_the_sn2_tuple(synthetic_context, sn2_state):  # noqa: F811
-    out = ps.candidates_out(synthetic_context, sn2_state.state_id, predictor="stub", limit=1000)
-    (row,) = _sn2_row(out.candidates)
-    assert row.valid and row.reason is None and row.rank == 1 and row.pair_rank == 1
-    assert row.acceptor_centre_elements == ["C", "Cl"] and row.is_contact_site_pair
-    assert (row.donor_site_element, row.acceptor_site_element) == ("O", "C")
-    assert (row.donor_site_map, row.acceptor_site_map) == (2, 6)
-    assert row.contact_sites == (1, 5) and row.score > 40 and 0 < row.probability <= 1
-    assert row.donor_desc.n_centers == 1 and row.acceptor_desc.overlap_sign == -1
-    assert row.diagnostic == {"donor_class": "lone_pair(O)", "acceptor_class": "sigma_star(C-Cl)"}
-    floor = ps.candidates_out(synthetic_context, sn2_state.state_id, limit=1000)
-    (frow,) = _sn2_row(floor.candidates)
-    assert frow.valid and frow.score != row.score
-    assert out.provenance.predictor == "stub" and floor.provenance.predictor == "floor"
-
-
-@requires("candidates")
-def test_candidates_counts_and_order(synthetic_context, sn2_state):  # noqa: F811
-    out = ps.candidates_out(synthetic_context, sn2_state.state_id, limit=10_000)
-    assert out.n_valid_pairs == 98 and out.total == out.n_tuples == len(out.candidates)
-    assert [r.rank for r in out.candidates] == list(range(1, out.total + 1))
-    ranks = [r.pair_rank for r in out.candidates]
-    assert ranks == sorted(ranks)
-    cells = {(r.row, r.col): r.probability for r in out.candidates}
-    assert len(cells) == 98 and sum(cells.values()) == pytest.approx(1.0, abs=1e-12)
-    for r in out.candidates:
-        assert r.acceptor_centre_elements == sorted(set(r.acceptor_centre_elements))
-    first = {}
-    for r in out.candidates:  # the contact site pair leads its cell
-        first.setdefault((r.row, r.col), r)
-    assert all(r.is_contact_site_pair for r in first.values())
-
-
-@requires("candidates")
-def test_candidates_excluded_on_request(synthetic_context, sn2_state):  # noqa: F811
-    ctx, sid = synthetic_context, sn2_state.state_id
-    valid_only = ps.candidates_out(ctx, sid, limit=10_000)
-    out = ps.candidates_out(ctx, sid, include_excluded=True, limit=10_000)
-    assert out.n_tuples == valid_only.n_tuples
-    assert out.total == out.n_tuples + sum(out.excluded_counts.values())
-    assert out.excluded_counts == valid_only.excluded_counts
-    reasons = {r.reason for r in out.candidates if not r.valid}
-    assert {"ACCEPTOR_D_TYPE", "OWN_ANTIBOND", "SELF_SITE_PAIR"} <= reasons
-    assert all(r.rank is None for r in out.candidates if not r.valid)
-    assert all(r.valid for r in out.candidates[: out.n_tuples])
-
-
-@requires("candidates")
-def test_candidates_paging_donor_and_scope(synthetic_context, sn2_state):  # noqa: F811
-    ctx, sid = synthetic_context, sn2_state.state_id
-    ten = ps.candidates_out(ctx, sid, limit=10).candidates
-    a = ps.candidates_out(ctx, sid, limit=5).candidates
-    b = ps.candidates_out(ctx, sid, offset=5, limit=5).candidates
-    assert [r.model_dump() for r in a + b] == [r.model_dump() for r in ten]
-    rows = ps.candidates_out(ctx, sid, donor=SN2_DONOR, limit=1000).candidates
-    assert rows and {r.donor for r in rows} == {SN2_DONOR}
-    e = _raises(Code.NOT_AN_ORBITAL_TOKEN, ps.candidates_out, ctx, sid, donor=SN2_ACCEPTOR)
-    assert e.status == 422
-    inter = ps.candidates_out(ctx, sid, scope="inter", include_excluded=True, limit=10_000)
-    assert inter.provenance.candidate_scope == "inter"
-    assert all(r.donor_species != r.acceptor_species for r in inter.candidates if r.valid)
-    assert inter.excluded_counts.get("SCOPE_EXCLUDED", 0) > 0
-    _raises(Code.REQUEST_INVALID, ps.candidates_out, ctx, sid, temperature=-1.0)
-
-
-@requires("candidates")
-def test_candidates_gbdt_missing_is_409(synthetic_context, sn2_state):  # noqa: F811
-    e = _raises(
-        Code.PREDICTOR_UNAVAILABLE,
-        ps.candidates_out,
-        synthetic_context,
-        sn2_state.state_id,
-        predictor="gbdt",
-    )
-    assert e.status == 409 and e.detail["code"] == Code.GBDT_MISSING
-    _raises(
-        Code.PREDICTOR_UNKNOWN,
-        ps.candidates_out,
-        synthetic_context,
-        sn2_state.state_id,
-        predictor="nope",
-    )
-
-
-@requires("candidates")
-def test_tuple_rows_matches_candidates(synthetic_context, sn2_state):  # noqa: F811
-    from ksmech.serve.candidates import scope_mask
-
-    ctx = synthetic_context
-    an = ctx.ensure_analysis(sn2_state)
-    rt = ctx.reactant_tokens(sn2_state)
-    valid = np.asarray(an.valid) & scope_mask(rt, "all")
-    rows = ps.tuple_rows(rt, an, an.score_floor, valid, 1.0, None, False)
-    page = ps.candidates_out(ctx, sn2_state.state_id, limit=10_000).candidates
-    assert [S.CandidateOut(**r).model_dump() for r in rows] == [r.model_dump() for r in page]
-
-
 # ---- physics panel and site pairs
-
-
-@requires("physics")
-def test_physics_out_at_contact_sites(synthetic_context, sn2_state):  # noqa: F811
-    out = ps.physics_out(
-        synthetic_context, sn2_state.state_id, donor=SN2_DONOR, acceptor=SN2_ACCEPTOR
-    )
-    assert (out.donor_site, out.acceptor_site) == (1, 5) and out.contact_sites == (1, 5)
-    assert out.requested_sites_are_contact and out.site_pair is None
-    assert out.predictor == "floor" and out.provenance.predictor == "floor"
-    assert out.provenance.temperature == 1.0 and out.contact_distance_ang == 2.3
-    assert out.pair_valid and out.ks2_detail.form == "contact"
-    assert out.dominant_pair.index_source == "qm_occupations"
-    assert out.score == out.floor and out.rank is not None and 0 < out.probability < 1
-    assert out.frozen_head.weight is not None and out.frozen_head.tau == 1.0
-    assert out.ks3 == pytest.approx(out.beta2 * out.G, rel=1e-12)
-
-
-@requires("physics")
-def test_physics_out_at_user_sites(synthetic_context, sn2_state):  # noqa: F811
-    out = ps.physics_out(
-        synthetic_context,
-        sn2_state.state_id,
-        donor=SN2_DONOR,
-        acceptor=SN2_ACCEPTOR,
-        acceptor_site=6,
-        predictor="stub",
-    )
-    assert not out.requested_sites_are_contact and out.acceptor_site == 6
-    sp = out.site_pair
-    assert sp is not None and (sp.donor_site, sp.acceptor_site) == (1, 6) and not sp.is_contact
-    assert sp.ks3_site == pytest.approx(sp.beta**2 * out.G_exact, rel=1e-12)
-    assert (
-        out.ks3
-        == ps.physics_out(
-            synthetic_context, sn2_state.state_id, donor=SN2_DONOR, acceptor=SN2_ACCEPTOR
-        ).ks3
-    )  # the token pair's physics does not depend on the requested sites
-    assert out.predictor == "stub" and out.score > out.floor
-
-
-@requires("physics")
-def test_physics_out_errors(synthetic_context, sn2_state):  # noqa: F811
-    ctx, sid = synthetic_context, sn2_state.state_id
-    e = _raises(
-        Code.SITE_NOT_A_CENTRE,
-        ps.physics_out,
-        ctx,
-        sid,
-        donor=SN2_DONOR,
-        acceptor=SN2_ACCEPTOR,
-        donor_site=0,
-    )
-    assert e.status == 422
-    _raises(Code.NOT_AN_ORBITAL_TOKEN, ps.physics_out, ctx, sid, donor=3, acceptor=SN2_ACCEPTOR)
-    _raises(
-        Code.NOT_AN_ORBITAL_TOKEN, ps.physics_out, ctx, sid, donor=SN2_ACCEPTOR, acceptor=SN2_DONOR
-    )
-
-
-@requires("physics")
-def test_physics_out_of_an_invalid_pair(synthetic_context, sn2_state):  # noqa: F811
-    out = ps.physics_out(synthetic_context, sn2_state.state_id, donor=25, acceptor=SN2_ACCEPTOR)
-    assert not out.pair_valid and out.reason == "OWN_ANTIBOND"
-    assert out.floor_rank is None and out.score is None and out.rank is None
-    assert "pair_invalid:OWN_ANTIBOND" in out.flags and out.frozen_head.weight is None
-
-
-@requires("site_pairs")
-def test_site_pairs_out(synthetic_context, sn2_state):  # noqa: F811
-    out = ps.site_pairs_out(
-        synthetic_context, sn2_state.state_id, donor=SN2_DONOR, acceptor=SN2_ACCEPTOR
-    )
-    assert isinstance(out, S.SitePairsOut) and out.state_id == sn2_state.state_id
-    assert [(x.donor_site, x.acceptor_site, x.is_contact) for x in out.site_pairs] == [
-        (1, 5, True),
-        (1, 6, False),
-    ]
-    assert out.note and out.G < 0
-    _raises(
-        Code.NOT_AN_ORBITAL_TOKEN,
-        ps.site_pairs_out,
-        synthetic_context,
-        sn2_state.state_id,
-        donor=3,
-        acceptor=SN2_ACCEPTOR,
-    )
-
-
-@requires("site_pairs")
-def test_site_pairs_are_cached_next_to_the_analysis(synthetic_context, sn2_state, monkeypatch):  # noqa: F811
-    from ksmech.serve import physics_view as pv
-
-    ctx, sid = synthetic_context, sn2_state.state_id
-    an = ctx.ensure_analysis(sn2_state)
-    one = pv.site_pairs_path(an.path, SN2_DONOR, SN2_ACCEPTOR, 1, 6)
-    every = pv.site_pairs_path(an.path, SN2_DONOR, SN2_ACCEPTOR, None, None)
-    assert one.parent == an.path.parent and one != every
-    assert one.name.startswith("site-pairs-") and len(one.name) == len("site-pairs-.json") + 16
-    for path in (one, every):
-        path.unlink(missing_ok=True)
-    submitted = []
-    real_submit = ctx.scheduler.submit
-
-    def counting_submit(name, payload, **kw):
-        submitted.append(name)
-        return real_submit(name, payload, **kw)
-
-    monkeypatch.setattr(ctx.scheduler, "submit", counting_submit)
-    kw = dict(donor=SN2_DONOR, acceptor=SN2_ACCEPTOR, acceptor_site=6)
-    first = ps.physics_out(ctx, sid, **kw)
-    assert submitted.count("site_pairs") == 1 and one.is_file()
-    again = ps.physics_out(ctx, sid, **kw)
-    assert submitted.count("site_pairs") == 1  # read from site-pairs-*.json: no task
-    assert again.site_pair == first.site_pair and again.site_pair.acceptor_site == 6
-    assert json.loads(one.read_text())["site_pairs"][0] == first.site_pair.model_dump()
-    block = ps.site_pairs_out(ctx, sid, donor=SN2_DONOR, acceptor=SN2_ACCEPTOR)
-    assert submitted.count("site_pairs") == 2 and every.is_file()
-    cached = ps.site_pairs_out(ctx, sid, donor=SN2_DONOR, acceptor=SN2_ACCEPTOR)
-    assert submitted.count("site_pairs") == 2 and cached == block
-    assert block.provenance is not None and block.provenance.predictor == "none"
-    assert block.provenance.spec_version == ctx.spec_version

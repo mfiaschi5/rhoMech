@@ -376,17 +376,35 @@ def cancel_job(svc: Svc, job_id: JobId, force: bool = False) -> S.JobOut:
 
 @router.post(
     "/jobs/{job_id}/override",
-    response_model=S.JobCreatedOut,
-    status_code=202,
+    response_model=S.OverrideResultOut,
     dependencies=[require("correct")],
 )
-def override_job(svc: Svc, job_id: JobId, body: S.OverrideIn) -> S.JobCreatedOut:
+def override_job(svc: Svc, job_id: JobId, body: S.OverrideIn) -> S.OverrideResultOut:
+    """A user step R on one state of the job's network (synchronous); 422 STEP_INVALID with
+    the issues, 202 Pending while the state's analysis is computed."""
     check_id("job_id", job_id)
-    if body.edge_id is not None:
-        check_id("edge_id", body.edge_id)
-    if body.node_id is not None:
-        check_id("node_id", body.node_id)
+    check_id("state_id", body.parent_state_id)
     return svc.jobs.override(job_id, body)
+
+
+@router.post(
+    "/jobs/{job_id}/expand",
+    response_model=S.JobCreatedOut,
+    status_code=202,
+    dependencies=[require("predict")],
+)
+def expand_job(svc: Svc, job_id: JobId, body: S.ExpandIn) -> S.JobCreatedOut:
+    check_id("job_id", job_id)
+    check_id("node_id", body.node_id)
+    return svc.jobs.expand(job_id, body)
+
+
+@router.post("/step/check", response_model=S.StepCheckOut, dependencies=[require("correct")])
+def step_check(svc: Svc, body: S.StepCheckIn) -> S.StepCheckOut:
+    """Live validation of a reaction matrix on a pool state (no job needed)."""
+    from ksmech.serve.steps import step_check as check
+
+    return S.StepCheckOut(**check(svc.ctx, check_id("state_id", body.state_id), body.matrix))
 
 
 @router.get("/jobs/{job_id}/pathways", response_model=list[S.PathwayOut])
@@ -400,7 +418,7 @@ def job_pathways(
     return svc.jobs.pathways(job_id, limit=limit, include_pruned=include_pruned)
 
 
-# ---- pools, tokens, candidates, physics
+# ---- pools and tokens
 
 
 @router.post("/pools", response_model=S.PoolOut)
@@ -418,78 +436,7 @@ def pool_tokens(svc: Svc, state_id: StateId) -> S.TokensOut:
     return pool_service.tokens_out(svc.ctx, check_id("state_id", state_id))
 
 
-@router.get(
-    "/pool/{state_id}/candidates",
-    response_model=S.CandidatesOut,
-    dependencies=[require("candidates")],
-)
-def pool_candidates(
-    svc: Svc,
-    state_id: StateId,
-    predictor: str = "floor",
-    donor: Annotated[int | None, Query(ge=0)] = None,
-    include_excluded: bool = False,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    limit: Annotated[int, Query(ge=0, le=10000)] = 200,
-    temperature: float | None = None,
-    scope: str = "all",
-) -> S.CandidatesOut:
-    return pool_service.candidates_out(
-        svc.ctx,
-        check_id("state_id", state_id),
-        predictor=predictor,
-        donor=donor,
-        include_excluded=include_excluded,
-        offset=offset,
-        limit=limit,
-        temperature=temperature,
-        scope=scope,
-    )
-
-
-@router.get(
-    "/pool/{state_id}/physics",
-    response_model=S.PhysicsOut,
-    dependencies=[require("physics")],
-)
-def pool_physics(
-    svc: Svc,
-    state_id: StateId,
-    donor: Annotated[int, Query(ge=0)],
-    acceptor: Annotated[int, Query(ge=0)],
-    donor_site: Annotated[int | None, Query(ge=0)] = None,
-    acceptor_site: Annotated[int | None, Query(ge=0)] = None,
-    predictor: str = "floor",
-    temperature: float | None = None,
-) -> S.PhysicsOut:
-    return pool_service.physics_out(
-        svc.ctx,
-        check_id("state_id", state_id),
-        donor=donor,
-        acceptor=acceptor,
-        donor_site=donor_site,
-        acceptor_site=acceptor_site,
-        predictor=predictor,
-        temperature=temperature,
-    )
-
-
-@router.get(
-    "/pool/{state_id}/site_pairs",
-    response_model=S.SitePairsOut,
-    dependencies=[require("site_pairs")],
-)
-def pool_site_pairs(
-    svc: Svc,
-    state_id: StateId,
-    donor: Annotated[int, Query(ge=0)],
-    acceptor: Annotated[int, Query(ge=0)],
-) -> S.SitePairsOut:
-    sid = check_id("state_id", state_id)
-    return pool_service.site_pairs_out(svc.ctx, sid, donor=donor, acceptor=acceptor)
-
-
-# ---- geometry, cubes, depiction, contact
+# ---- geometry, cubes, depiction
 
 
 def _keep_maps(raw: str | None) -> set[int]:
@@ -527,46 +474,6 @@ def pool_depiction(
     sid = check_id("state_id", state_id)
     maps = _keep_maps(keep_maps)
     return view3d.depiction_out(svc.ctx, sid, keep_maps=maps, server_svg=server_svg)
-
-
-_CONTACT = "/contact/{state_id}/{donor}/{donor_site}/{acceptor}/{acceptor_site}"
-Site = Annotated[int, Path(ge=0)]
-
-
-@router.get(_CONTACT, response_model=S.ContactOut, dependencies=[require("contact")])
-def contact(
-    svc: Svc,
-    state_id: StateId,
-    donor: Site,
-    donor_site: Site,
-    acceptor: Site,
-    acceptor_site: Site,
-    cubes: str = "urls",
-) -> S.ContactOut:
-    sid = check_id("state_id", state_id)
-    ids = (donor, donor_site, acceptor, acceptor_site)
-    return view3d.contact_out(svc.ctx, sid, *ids, cubes=cubes)
-
-
-@router.get(
-    _CONTACT + "/cube/{which}",
-    response_class=PlainTextResponse,
-    dependencies=[require("contact")],
-)
-def contact_cube(
-    svc: Svc,
-    state_id: StateId,
-    donor: Site,
-    donor_site: Site,
-    acceptor: Site,
-    acceptor_site: Site,
-    which: str,
-) -> PlainTextResponse:
-    sid = check_id("state_id", state_id)
-    check_id("which", which)
-    ids = (donor, donor_site, acceptor, acceptor_site)
-    text = view3d.contact_cube_text(svc.ctx, sid, *ids, which)
-    return _cube(text, f"{sid}-{donor}-{donor_site}-{acceptor}-{acceptor_site}-{which}.cube")
 
 
 # ---- molecule workbench (display only)
@@ -689,19 +596,22 @@ def curate_list(
     )
 
 
-@router.post(
-    "/curate/export",
-    response_model=S.JobCreatedOut,
-    status_code=202,
-    dependencies=[require("export")],
+@router.get(
+    "/curate/export/pmechdb", response_class=PlainTextResponse, dependencies=[require("export")]
 )
-def curate_export(svc: Svc, body: Annotated[S.ExportIn | None, Body()] = None) -> S.JobCreatedOut:
-    return svc.curate.export(body or S.ExportIn())
+def curate_export_pmechdb(
+    svc: Svc, status: Annotated[list[str] | None, Query()] = None
+) -> PlainTextResponse:
+    """The curated steps as PMechDB raw records (a file download, never training data); the
+    report (counts, skipped steps by reason) is in the X-Ksmech-Export-Report header."""
+    import json
 
-
-@router.get("/curate/export/latest", response_model=S.ExportReportOut)
-def curate_export_latest(svc: Svc) -> S.ExportReportOut:
-    return svc.curate.latest_export()
+    text, report = svc.curate.export_pmechdb(status)
+    headers = {
+        "Content-Disposition": 'attachment; filename="ksmech_curated_pmechdb.csv"',
+        "X-Ksmech-Export-Report": json.dumps(report, sort_keys=True),
+    }
+    return PlainTextResponse(text, media_type="text/csv", headers=headers)
 
 
 @router.post(
@@ -801,13 +711,11 @@ def _submitter(runner: JobRunner) -> Callable[[str, dict], dict]:
 
 
 def _register_handlers(runner: JobRunner, engine: Engine, browse, ctx: ApiContext) -> None:
-    """export and recheck on the batch thread, index on the background thread."""
-    from ksmech.serve.export import run_export
+    """recheck on the batch thread, index on the background thread."""
     from ksmech.serve.jobs import JobKind
     from ksmech.serve.pmindex import run_index
     from ksmech.serve.recheck import run_recheck
 
-    runner.register(JobKind.EXPORT, partial(run_export, engine=engine, pairs=browse.pmechdb_pairs))
     runner.register(JobKind.RECHECK, partial(run_recheck, engine=engine, registry=ctx.registry))
     runner.register(JobKind.INDEX, partial(run_index, engine=engine), thread="background")
 

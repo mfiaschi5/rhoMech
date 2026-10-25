@@ -9,7 +9,7 @@ a bromonium C-Br+) has a low index, even where no localized orbital spans the bo
 The indices are kept per molecule in a sidecar next to the QM cache
 (`data/cache/bond_index/<cache key>.npz`: the record's Lewis bonds as (k, 2) record atom
 indices and their WBI), stamped with the QM record as input. They are not part of the token
-files, whose content hash keys the contact-block cache.
+files, so a token file's content hash does not change when they are recomputed.
 """
 
 from __future__ import annotations

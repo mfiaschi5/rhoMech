@@ -8,12 +8,10 @@ import pytest
 
 from ksmech.serve.chemistry import MolecularChemistry
 from ksmech.serve.contracts import (
-    ArrowSpec,
     ExpandRequest,
     Expansion,
     LocalJobContext,
     ProposedChild,
-    StepOutcome,
 )
 from ksmech.serve.errors import ServeError
 from ksmech.serve.featurize import SyntheticFeaturizer
@@ -98,12 +96,10 @@ def product(settings, saved=True):
 
 
 def expansion(child_state) -> dict:
-    child = ProposedChild(child_state, [], None, None, [1, 2], -1.0, 0.5, -0.69, 1, 0, [])
+    child = ProposedChild(
+        child_state, {"matrix": {"bonds": [], "lone": []}}, 0.5, None, -0.69, 1, 0, []
+    )
     return Expansion(True, None, None, "", [child], 3, 2, 0.75, 0.25, {}, [], False, []).to_dict()
-
-
-def outcome(state) -> dict:
-    return StepOutcome(state, [], None, None, [2, 3], [{"pair_valid": True}], []).to_dict()
 
 
 def test_featurize_loop_order_dedup_and_task_options(setup):
@@ -142,9 +138,6 @@ def test_featurize_failure_codes(setup, code):
     ex = chem.expand(sn2(s), REQ, ctx)
     assert not ex.ok and (ex.code, ex.upstream) == (code, "SCF_FAILED")
     assert ex.children == [] and sched.names() == ["featurize"]  # the first failure stops
-    with pytest.raises(ServeError) as e:
-        chem.apply(sn2(s), [ArrowSpec(10, 1, 21, 5)], False, "stub", None, ctx)
-    assert (e.value.code, e.value.status, e.value.upstream) == (code, 422, "SCF_FAILED")
 
 
 @pytest.mark.parametrize("code", ["WORKER_TIMEOUT", "WORKER_CRASH", "ANALYSIS_FAILED"])
@@ -179,47 +172,6 @@ def test_cancelled_before_featurizing(setup):
     ctx.cancel_flag = True
     ex = chem.expand(sn2(s), REQ, ctx)
     assert ex.code == "CANCELLED" and sched.calls == []
-
-
-def test_apply_payload_persistence_and_outcome(setup):
-    chem, sched, ctx, s = setup(cached={"C[O-]", "CCl"})
-    state, child = sn2(s, n_ccl=1), product(s, saved=False)
-    sched.responses = {"apply": [ok(outcome(child)), ok(outcome(child))]}
-    arrows = [ArrowSpec(10, 1, 21, 5)]
-    with pytest.raises(ServeError) as e:
-        chem.apply(state, arrows, True, "floor", 0.5, ctx)
-    assert (e.value.code, e.value.status) == ("CONSISTENCY_FAILED", 500)
-    call = sched.calls[0]
-    assert call["name"] == "apply" and call["timeout_s"] == 900 and call["owner"] == JOB
-    assert call["payload"] == {
-        "state": state.to_dict(),
-        "arrows": [{"donor": 10, "donor_site": 1, "acceptor": 21, "acceptor_site": 5}],
-        "allow_invalid": True,
-        "predictor": "floor",
-        "temperature": 0.5,
-    }
-    save_state(child, s)
-    out = chem.apply(state, arrows, True, "floor", 0.5, ctx)
-    assert out.state == child and out.touched_maps == [2, 3]
-
-
-def test_apply_task_errors_keep_their_status(setup):
-    chem, sched, ctx, s = setup(cached={"C[O-]", "CCl"})
-    shipped = {"error": {"message": "pair excluded", "status": 422, "detail": {"reason": "X"}}}
-    sched.responses = {
-        "apply": [
-            fail("PAIR_EXCLUDED", "pair excluded", result=shipped),
-            fail("APPLY_FAILED", "bad", upstream="VALENCE"),
-            fail("WORKER_TIMEOUT", "killed"),
-        ]
-    }
-    expected = [("PAIR_EXCLUDED", 422, None), ("APPLY_FAILED", 422, "VALENCE")]
-    expected.append(("WORKER_TIMEOUT", 504, None))
-    for code, status, upstream in expected:
-        with pytest.raises(ServeError) as e:
-            chem.apply(sn2(s), [ArrowSpec(10, 1, 21, 5)], False, "stub", None, ctx)
-        assert (e.value.code, e.value.status, e.value.upstream) == (code, status, upstream)
-    assert sched.names() == ["apply"] * 3
 
 
 def test_root_preflight(setup):
