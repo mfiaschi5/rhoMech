@@ -101,6 +101,13 @@ class TrainRows:
         self.y.append(cs.positive[keep].astype(np.int32))
         self.groups.append(len(keep))
 
+    def extend(self, other: TrainRows) -> None:
+        """Append the rows of `other` (a chunk of a parallel read), in its order."""
+        self.X += other.X
+        self.y += other.y
+        self.groups += other.groups
+        self.n_untrainable += other.n_untrainable
+
     def dataset(self) -> lgb.Dataset:
         return lgb.Dataset(
             np.concatenate(self.X), np.concatenate(self.y), group=self.groups, free_raw_data=True
@@ -167,6 +174,28 @@ class LGBMRanker:
             return np.zeros(0)
         return self.booster.predict(np.asarray(X, dtype=np.float32))
 
+    def score_sets(
+        self, Xs: list[np.ndarray], n_jobs: int = 1, batch_rows: int = 1_000_000
+    ) -> list[np.ndarray]:
+        """`score` of every matrix in `Xs`, in batches of about `batch_rows` rows predicted on
+        `n_jobs` threads: one call per batch, not one per step."""
+        out: list[np.ndarray] = []
+        start = 0
+        while start < len(Xs):
+            stop, rows = start, 0
+            while stop < len(Xs) and (stop == start or rows + len(Xs[stop]) <= batch_rows):
+                rows += len(Xs[stop])
+                stop += 1
+            batch = [np.asarray(X, dtype=np.float32) for X in Xs[start:stop]]
+            flat = (
+                self.booster.predict(np.concatenate(batch), num_threads=n_jobs)
+                if rows
+                else np.zeros(0)
+            )
+            out.extend(np.split(flat, np.cumsum([len(X) for X in batch])[:-1]))
+            start = stop
+        return out
+
     @property
     def n_trees(self) -> int:
         return self.booster.num_trees()
@@ -200,9 +229,12 @@ def fit_lgbm(train: TrainRows, val: EvalRows, features: list[str], cfg: LGBMConf
 
 def model_config(features: list[str], cfg: LGBMConfig | None) -> dict:
     """The configuration a model is verified against; without `cfg` only the features (a
-    scorer that just uses the model, whatever it was fitted with)."""
+    scorer that just uses the model, whatever it was fitted with). The thread count is left out:
+    with `deterministic` and `force_row_wise` the trees do not depend on it."""
     out = {"model": "lgbm_lambdarank", "features": list(features)}
-    return out | ({"lgbm": asdict(cfg)} if cfg is not None else {})
+    if cfg is None:
+        return out
+    return out | {"lgbm": {k: v for k, v in asdict(cfg).items() if k != "n_jobs"}}
 
 
 def save_lgbm(

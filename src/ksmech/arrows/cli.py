@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="random_leaky (the per-step split) only when named",
     )
     s.add_argument("--seed", type=int, default=0)
-    for p in (a, s):
+    for p in (a, s, c):
         p.add_argument(
             "--workers", type=int, default=1, help="spawned processes (host total <= 15)"
         )
@@ -190,6 +190,7 @@ def cmd_contacts(args: argparse.Namespace, path: Path, console: Console) -> int:
             TokenCache(args.tokens_dir),
             args.n_train,
             args.seed,
+            n_workers=args.workers,
         )
     except FileNotFoundError as exc:  # no split file (run `samples`) or no contact table
         console.print(f"[red]{exc}[/red]")

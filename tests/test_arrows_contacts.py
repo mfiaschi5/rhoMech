@@ -83,3 +83,41 @@ def test_ranking_refuses_stage_a_samples(mini_steps, token_loader):
 def test_a_missing_sidecar_is_reported(tmp_path):
     with pytest.raises(FileNotFoundError):
         contacts.load_contacts(tmp_path, "molecule")
+
+
+def _sidecar(root):
+    """Index body (its header aside), shard arrays and the inputs each shard header records."""
+    index = json.loads((root / "index.json").read_text())
+    shards = {}
+    for name in sorted(index["shards"]):
+        with np.load(root / name, allow_pickle=False) as z:
+            arrays = {k: z[k] for k in z.files if k != prov.HEADER_KEY}
+        shards[name] = (arrays, prov.read_header(root / name).inputs)
+    return {k: v for k, v in index.items() if k != "provenance"}, shards  # built_at differs
+
+
+def test_the_parallel_sidecar_matches_the_sequential_one(
+    mini_processed,  # noqa: F811
+    mini_token_cache,
+    pair_kernels,
+    monkeypatch,
+):
+    """Two spawned workers on chunks of one step write the shards of one process: the same
+    entries, arrays and recorded inputs (token files and contact blocks), the step without
+    tokens skipped in both."""
+    build_all_samples("pmechdb", ["molecule"], mini_processed, mini_token_cache)
+    view_dir = source_dir("pmechdb", mini_processed)
+    root = contacts.contacts_dir(view_dir, "molecule")
+    args = ("pmechdb", pair_kernels, "molecule", mini_processed, mini_token_cache)
+    one = contacts.build_all_contacts(*args, n_train=10)  # the whole training part
+    sequential = _sidecar(root)
+    monkeypatch.setattr(contacts, "CHUNK", 1)
+    two = contacts.build_all_contacts(*args, n_train=10, n_workers=2)
+    parallel = _sidecar(root)
+    assert one == two and one["n_entries"] >= 2 and one["skipped"]
+    assert sequential[0] == parallel[0]
+    assert sequential[1].keys() == parallel[1].keys()
+    for name, (arrays, inputs) in sequential[1].items():
+        other, other_inputs = parallel[1][name]
+        assert inputs == other_inputs and arrays.keys() == other.keys()
+        assert all(np.array_equal(arrays[k], other[k]) for k in arrays)

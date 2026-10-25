@@ -51,7 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g.add_argument("--hard", type=int, default=20, help="negatives per step: best untrained")
     g.add_argument("--random", type=int, default=30, help="negatives per step: uniform draw")
-    g.add_argument("--n-jobs", type=int, default=2, help="LightGBM threads")
+    g.add_argument(
+        "--n-jobs", type=int, default=14, help="LightGBM threads (the trees do not depend on them)"
+    )
     t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
     t.add_argument("--source", default="pmechdb", help="where the trained GBDT model lives")
     t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -66,6 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    for p in (r, g):
+        p.add_argument(
+            "--workers",
+            type=int,
+            default=1,
+            help="spawned processes loading and scoring the samples (host total <= 15)",
+        )
     r.add_argument("--split", default="molecule", help="split strategy of the sample files")
     r.add_argument("--kernel", choices=KERNELS, default="oriented")
     r.add_argument(
@@ -224,19 +233,72 @@ def clash_summary(samples, comps, ranks) -> dict:
     }
 
 
-def _rank_report(parts: dict, loader, kernel) -> dict:
-    from ksmech.physics.ranking import (
-        ALL_SCORERS,
-        class_table,
-        evaluate,
-        failure_classes,
-        pair_components,
-        refresh_validity,
-    )
+def _scored_part(args, part: str, loader, kernels: dict) -> tuple[list, dict, int, int]:
+    """One part loaded and scored in chunks over `args.workers` spawned processes
+    (`physics.parallel`): (samples, {distance: components}, ids in the view, ids with a
+    contact entry). Raises what the loaders raise."""
+    from ksmech.physics import parallel
+
+    allow_stale = getattr(args, "allow_stale", False)
+    path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+    ids = sample_ids(path, allow_stale)
+    view_dir = source_dir(args.source, args.processed_dir)
+    tasks = [
+        (path, view_dir, args.split, chunk, allow_stale, loader, kernels)
+        for chunk in parallel.chunked(ids)
+    ]
+    samples, comps, n_entry = [], {d: [] for d in kernels}, 0
+    for got, got_comps, n in parallel.in_processes(parallel.scored_chunk, tasks, args.workers):
+        samples += got
+        n_entry += n
+        for d in kernels:
+            comps[d] += got_comps[d]
+    return samples, comps, len(ids), n_entry
+
+
+def _scored_parts(args, console: Console, loader, kernels: dict) -> tuple[dict, dict] | None:
+    """Every part's samples that have a contact entry and an orbital label, their validity
+    refreshed, and their components under each kernel: ({part: samples}, {distance: {part:
+    components}}). With `--workers` > 1 each part is loaded and scored in spawned processes;
+    the result is the same."""
+    from ksmech.physics.ranking import pair_components, refresh_validity
+
+    if getattr(args, "workers", 1) <= 1:
+        parts = _load_parts(args, console)
+        if parts is None:
+            return None
+        parts = {p: [refresh_validity(s, loader) for s in xs] for p, xs in parts.items()}
+        comps = {
+            d: {p: [pair_components(s, loader, k) for s in xs] for p, xs in parts.items()}
+            for d, k in kernels.items()
+        }
+        return parts, comps
+    parts, comps = {}, {d: {} for d in kernels}
+    for part in PARTS:
+        path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+        if not path.exists():
+            console.print(f"[red]{path} missing[/red]; run `ksmech-arrows samples`")
+            return None
+        try:
+            parts[part], by_d, n_ids, n_entry = _scored_part(args, part, loader, kernels)
+        except (FileNotFoundError, StaleArtifact, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]; re-run `ksmech-arrows samples` / `contacts`")
+            return None
+        for d in kernels:
+            comps[d][part] = by_d[d]
+        console.print(
+            f"{args.split}_{part}: {len(parts[part])} samples with contacts, "
+            f"{n_ids - n_entry} without, {n_entry - len(parts[part])} without an orbital label "
+            "(NO_ORBITAL_READING)"
+        )
+    return parts, comps
+
+
+def _rank_report(parts: dict, comps: dict, loader, kernel) -> dict:
+    """The ks-rank report of `parts` with their `comps` ({part: components}) under `kernel`."""
+    from ksmech.physics.ranking import ALL_SCORERS, class_table, evaluate, failure_classes
 
     scorers = ALL_SCORERS
-    parts = {p: [refresh_validity(s, loader) for s in xs] for p, xs in parts.items()}
-    comps = {p: [pair_components(s, loader, kernel) for s in xs] for p, xs in parts.items()}
     subsets = _subsets(parts, comps)
     results = {sub: evaluate(*subsets[sub], scorers) for sub in subsets}
     report = {"scorers": {}, "failure_classes": {}}
@@ -266,16 +328,17 @@ def _rank_report(parts: dict, loader, kernel) -> dict:
 
 
 def cmd_ks_rank(args: argparse.Namespace, console: Console) -> int:
-    parts = _load_parts(args, console)
-    if parts is None:
-        return 2
     loader = TokenCache(args.tokens_dir)
     distances = args.distance if args.kernel == "oriented" else [None]
-    for d in distances:
-        kernel = make_kernel(args, d)
+    kernels = {d: make_kernel(args, d) for d in distances}
+    scored = _scored_parts(args, console, loader, kernels)
+    if scored is None:
+        return 2
+    parts, comps = scored
+    for d, kernel in kernels.items():
         tag = f"{args.split}_{args.kernel}" + ("" if d is None else f"_d{d:g}")
         report = {"split": args.split, "kernel": args.kernel, "distance": d}
-        report |= _rank_report(parts, loader, kernel)
+        report |= _rank_report(parts, comps[d], loader, kernel)
         print_rank_table(report, console, f"first-arrow ranking, untrained KS, {tag}")
         for name in FLOORS:
             print_failures(report["failure_classes"][name], console, name)
@@ -416,16 +479,19 @@ def _untrained(cs, features: str) -> dict[str, np.ndarray]:
     return {"gap_kernel": bl.gap_score(cs, "stage_a")}
 
 
-def _read_part(args, features: str, part: str, loader, visit) -> tuple[int, int, int]:
-    """`visit(sample, candidate_set)` for every sample of one part that has ArrowLabels (the
-    candidate sets rank the first arrow's orbital pairs), one shard at a time (with `contact`,
-    only the samples that have a legacy contact entry, joined with it). Returns (stored
-    samples of the view, samples visited, samples without an orbital label)."""
+def _read_part(
+    args, features: str, part: str, loader, visit, ids: list[str] | None = None
+) -> tuple[int, int, int]:
+    """`visit(sample, candidate_set)` for every sample of one part (only `ids` when given) that
+    has ArrowLabels (the candidate sets rank the first arrow's orbital pairs), one shard at a
+    time (with `contact`, only the samples that have a legacy contact entry, joined with it).
+    Returns (stored samples of the view or of `ids`, samples visited, samples without an
+    orbital label)."""
     from ksmech.arrows.steps import iter_samples
     from ksmech.physics import baseline as bl
 
     path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
-    ids = sample_ids(path)
+    ids = sample_ids(path) if ids is None else ids
     legacy = None
     if features == "contact":
         view_dir = source_dir(args.source, args.processed_dir)
@@ -442,47 +508,101 @@ def _read_part(args, features: str, part: str, loader, visit) -> tuple[int, int,
     return len(ids), n, no_reading
 
 
-def _train_rows(args, features: str, loader, cfg) -> dict:
-    """The sampled training rows of every step and of the steps without a textbook pool."""
+def _new_train() -> dict:
     from ksmech.physics.lgbm import TrainRows
+
+    return {"all": TrainRows(), "held": TrainRows(), "seen": {}}
+
+
+def _train_visit(out: dict, s, cs, features: str, cfg) -> None:
+    """The sampled training rows of every step, and of the steps without a textbook pool."""
     from ksmech.physics.textbook import pools_in
 
-    out = {"all": TrainRows(), "held": TrainRows(), "seen": {}}
-
-    def visit(s, cs):
-        hard = _untrained(cs, features)[HARD_NEGATIVES[features]]
-        out["all"].add(cs, hard, cfg)
-        pools = pools_in(s.fragment_keys)
-        for name in pools:
-            out["seen"][name] = out["seen"].get(name, 0) + 1
-        if not pools:
-            out["held"].add(cs, hard, cfg)
-
-    read = _read_part(args, features, "train", loader, visit)
-    out["n_view"], out["n"], out["n_no_orbital_reading"] = read
-    return out
+    hard = _untrained(cs, features)[HARD_NEGATIVES[features]]
+    out["all"].add(cs, hard, cfg)
+    pools = pools_in(s.fragment_keys)
+    for name in pools:
+        out["seen"][name] = out["seen"].get(name, 0) + 1
+    if not pools:
+        out["held"].add(cs, hard, cfg)
 
 
-def _eval_part(args, features: str, part: str, loader) -> dict:
+def _merge_train(out: dict, part: dict) -> None:
+    out["all"].extend(part["all"])
+    out["held"].extend(part["held"])
+    for name, n in part["seen"].items():
+        out["seen"][name] = out["seen"].get(name, 0) + n
+
+
+def _new_eval() -> dict:
+    return {"sets": [], "untrained": {}, "textbook": []}
+
+
+def _eval_visit(out: dict, s, cs, features: str, cfg) -> None:
     """Every candidate set of a val / test part (X kept as float32), its untrained scores
-    (computed at full precision first) and which samples hold a textbook pool."""
+    (computed at full precision first) and whether the sample holds a textbook pool."""
     from ksmech.physics.textbook import pools_in
 
-    out = {"sets": [], "untrained": {}, "textbook": []}
+    for name, score in _untrained(cs, features).items():
+        out["untrained"].setdefault(name, []).append(score)
+    cs.X = cs.X.astype(np.float32)
+    out["sets"].append(cs)
+    out["textbook"].append(bool(pools_in(s.fragment_keys)))
 
-    def visit(s, cs):
-        for name, score in _untrained(cs, features).items():
-            out["untrained"].setdefault(name, []).append(score)
-        cs.X = cs.X.astype(np.float32)
-        out["sets"].append(cs)
-        out["textbook"].append(bool(pools_in(s.fragment_keys)))
 
-    read = _read_part(args, features, part, loader, visit)
+def _merge_eval(out: dict, part: dict) -> None:
+    out["sets"] += part["sets"]
+    out["textbook"] += part["textbook"]
+    for name, scores in part["untrained"].items():
+        out["untrained"].setdefault(name, []).extend(scores)
+
+
+READERS = {
+    "train": (_new_train, _train_visit, _merge_train),
+    "eval": (_new_eval, _eval_visit, _merge_eval),
+}
+
+
+def _read_chunk(task: tuple) -> tuple[dict, tuple[int, int, int]]:
+    """A worker's share of `_read_kind`: one chunk of step ids, read and reduced."""
+    args, features, part, ids, loader, kind, cfg = task
+    new, visit, _ = READERS[kind]
+    out = new()
+    read = _read_part(
+        args, features, part, loader, lambda s, cs: visit(out, s, cs, features, cfg), ids
+    )
+    return out, read
+
+
+def _read_kind(args, features: str, part: str, loader, kind: str, cfg) -> dict:
+    """`_read_part` reduced by the `kind` reader ("train": sampled rows; "eval": candidate
+    sets), in chunks over `args.workers` spawned processes (`physics.parallel`) when it is
+    above 1: the chunks come back in step order, and negatives are drawn per step id, so the
+    result is the same."""
+    from ksmech.physics import parallel
+
+    new, visit, merge = READERS[kind]
+    out = new()
+    if getattr(args, "workers", 1) <= 1:
+        read = _read_part(
+            args, features, part, loader, lambda s, cs: visit(out, s, cs, features, cfg)
+        )
+    else:
+        path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+        ids = sample_ids(path)
+        tasks = [
+            (args, features, part, chunk, loader, kind, cfg) for chunk in parallel.chunked(ids)
+        ]
+        n = no_reading = 0
+        for got, (_, k, nr) in parallel.in_processes(_read_chunk, tasks, args.workers):
+            merge(out, got)
+            n, no_reading = n + k, no_reading + nr
+        read = (len(ids), n, no_reading)
     out["n_view"], out["n"], out["n_no_orbital_reading"] = read
     return out
 
 
-def _lgbm_results(parts: dict, models: dict) -> dict:
+def _lgbm_results(parts: dict, models: dict, n_jobs: int = 1) -> dict:
     from ksmech.physics import baseline as bl
 
     def summary(sets, scores):
@@ -497,7 +617,9 @@ def _lgbm_results(parts: dict, models: dict) -> dict:
         }
     for name, model in models.items():
         results[name] = {
-            p: summary(parts[p]["sets"], [model.score(cs.X) for cs in parts[p]["sets"]])
+            p: summary(
+                parts[p]["sets"], model.score_sets([cs.X for cs in parts[p]["sets"]], n_jobs)
+            )
             for p in ("val", "test")
         }
     return results
@@ -580,8 +702,10 @@ def _lgbm_report(args, train: dict, parts: dict, fit: dict, results: dict, cfg) 
 
 def _read_all(args, loader, cfg, console: Console) -> tuple[dict, dict] | None:
     try:
-        train = _train_rows(args, args.features, loader, cfg)
-        parts = {p: _eval_part(args, args.features, p, loader) for p in ("val", "test")}
+        train = _read_kind(args, args.features, "train", loader, "train", cfg)
+        parts = {
+            p: _read_kind(args, args.features, p, loader, "eval", cfg) for p in ("val", "test")
+        }
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]; run `ksmech-arrows samples` / `contacts`")
         return None
@@ -614,7 +738,7 @@ def cmd_gbdt(args: argparse.Namespace, console: Console) -> int:
     }
     models = {"LightGBM ranker": fit["models"]["all"]}
     models[f"LightGBM ranker ({HELD_OUT})"] = fit["models"]["held"]
-    results = _lgbm_results(parts, models)
+    results = _lgbm_results(parts, models, args.n_jobs)
     n_test = len(parts["test"]["sets"])
     _baseline_table(results, console, f"first-arrow ranking on {args.split}_test (n {n_test})")
     _save_two(args, fit, cfg, sorted(train["seen"]))

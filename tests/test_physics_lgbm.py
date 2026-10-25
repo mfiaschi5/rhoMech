@@ -126,3 +126,82 @@ def test_gbdt_cli(features, mini_processed, token_loader, pair_kernels, monkeypa
     assert report["peak_rss_mb"] > 0 and report["config"]["lgbm"]["n_hard"] == 20
     held = prov.read_header(out / f"gbdt_lgbm_molecule_{features}_textbook-held-out.npz")
     assert held.kind == "baseline_lgbm" and held.extra["textbook_pools_in_training"] == []
+
+
+def test_the_thread_count_does_not_change_the_model():
+    """`deterministic` and `force_row_wise`: one thread or four give the same trees and scores,
+    so `--n-jobs` only sets the speed and stays out of the model's configuration."""
+    rng = np.random.default_rng(1)
+    train, val = _toy_sets(rng, 80), _toy_sets(rng, 20)
+    names = [f"f{k}" for k in range(61)]
+    models = []
+    for n_jobs in (1, 4):
+        cfg = lgbm.LGBMConfig(max_rounds=60, patience=20, min_data_in_leaf=5, n_jobs=n_jobs)
+        models.append(lgbm.fit_lgbm(_rows(train, cfg), lgbm.EvalRows.of(val), names, cfg))
+    one, four = models
+    assert one.n_trees == four.n_trees >= 1
+    assert all(np.array_equal(one.score(cs.X), four.score(cs.X)) for cs in val)
+    assert "n_jobs" not in lgbm.model_config(names, cfg)["lgbm"]
+    Xs = [cs.X for cs in val] + [np.zeros((0, 61))]  # an empty step too
+    batched = one.score_sets(Xs, n_jobs=4, batch_rows=50)  # several batches
+    assert len(batched) == len(Xs) and batched[-1].shape == (0,)
+    assert all(np.allclose(b, one.score(X)) for b, X in zip(batched[:-1], Xs[:-1], strict=True))
+
+
+@pytest.mark.parametrize("features", ["contact", "geomfree"])
+def test_reading_in_worker_processes_gives_the_same_rows_and_sets(
+    features,
+    mini_processed,  # noqa: F811
+    mini_token_cache,
+    pair_kernels,
+    monkeypatch,
+):
+    """`--workers 2` on chunks of one sample: the training rows (negatives are drawn per step
+    id), the val / test candidate sets and their untrained scores are those of one process,
+    in the same order (undefined geometry-free features are NaN in both)."""
+    import argparse
+
+    import ksmech.physics.cli as cli
+    from ksmech.arrows.contacts import build_all_contacts
+    from ksmech.arrows.steps import build_all_samples
+    from ksmech.physics import parallel
+
+    build_all_samples("pmechdb", ["molecule"], mini_processed, mini_token_cache)
+    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, mini_token_cache)
+    monkeypatch.setattr(parallel, "CHUNK", 1)
+    cfg = lgbm.LGBMConfig()
+    read = {}
+    for workers in (1, 2):
+        args = argparse.Namespace(
+            source="pmechdb", split="molecule", processed_dir=mini_processed, workers=workers
+        )
+        train = cli._read_kind(args, features, "train", mini_token_cache, "train", cfg)
+        evals = {
+            p: cli._read_kind(args, features, p, mini_token_cache, "eval", cfg)
+            for p in ("val", "test")
+        }
+        read[workers] = (train, evals)
+    (t1, e1), (t2, e2) = read[1], read[2]
+    assert t1["n"] >= 1 and (t1["n"], t1["n_view"], t1["seen"]) == (
+        t2["n"],
+        t2["n_view"],
+        t2["seen"],
+    )
+    for key in ("all", "held"):
+        a, b = t1[key], t2[key]
+        assert a.groups == b.groups and a.n_untrainable == b.n_untrainable
+        assert all(
+            np.array_equal(x, y, equal_nan=True) for x, y in zip(a.X + a.y, b.X + b.y, strict=True)
+        )
+    for p in ("val", "test"):
+        assert e1[p]["n"] == e2[p]["n"] and e1[p]["textbook"] == e2[p]["textbook"]
+        assert [cs.step_id for cs in e1[p]["sets"]] == [cs.step_id for cs in e2[p]["sets"]]
+        assert all(
+            np.array_equal(x.X, y.X, equal_nan=True)
+            for x, y in zip(e1[p]["sets"], e2[p]["sets"], strict=True)
+        )
+        for name, scores in e1[p]["untrained"].items():
+            other = e2[p]["untrained"][name]
+            assert all(
+                np.array_equal(x, y, equal_nan=True) for x, y in zip(scores, other, strict=True)
+            )

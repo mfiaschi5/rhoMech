@@ -8,18 +8,16 @@ import numpy as np
 import pytest
 import torch
 
+from ksmech.arrows.batches import ANCHOR_SIDE, collate_samples, make_loader
 from ksmech.arrows.cli import main as arrows_main
 from ksmech.arrows.steps import (
-    ANCHOR_SIDE,
     PARTS,
     READING_ALIGNED,
     SAMPLE_VERSION,
     MechanismSample,
     SkipReason,
     build_all_samples,
-    collate_samples,
     load_samples,
-    make_loader,
     sample_for_step,
     samples_path,
     write_split_file,

@@ -3900,3 +3900,54 @@ is now v7.5, sha256 6c6a023f66dd).
     are the edit-labels report's numbers.
 - **Later (user decision).** Resonance augmentation will precompute a few forms per sample,
   each with its own Lewis structure and label class.
+
+## 2026-10-25 — Phase-2 commands in parallel: sidecar, ks-rank, LightGBM; torch out of `arrows.steps`
+
+- **Why.** The phase-2 rebuild left the CPU mostly idle, and the user asked why it was slower
+  than before. Only the sample build used workers.
+  - The sidecar ran as one process per split, about 2 hours each.
+  - ks-rank ran in one process.
+  - LightGBM fitted on its default 2 threads, and it scored val and test one step at a time on
+    one thread (the commands ran with `OMP_NUM_THREADS=1`). For the scaffold geometry-free
+    ranker that was 31 of 49 minutes.
+- **Sidecar.** `ksmech-arrows contacts --workers N` runs chunks of 16 consecutive steps (in
+  step-id order) in spawned processes, as the sample build does.
+  - The parent writes the shards in order, so they are the same for any N: same entries,
+    arrays and recorded inputs. A test checks this.
+  - A cold oriented-kernel cache costs 9.9 s per step in one process (1.2 GB). With 6 workers
+    on a 240-step slice it was 2.9 s per step, at 838 MB per worker before torch left the
+    import (see below). The slice had only 15 tasks, and two workers can compute one block at
+    once. With a warm cache the same slice took 4 s.
+- **ks-rank.** `ksmech-physics ks-rank --workers N`. Each part's step ids, in view order (the
+  views list them sorted, as the store's shards), are cut into chunks of 64 (`physics.parallel`).
+  - Each worker loads its own samples and contact entries, refreshes their validity and
+    computes their components for every distance. Ranking, failure classes and the class table
+    stay in the parent, and the report is identical (a test compares the JSON).
+  - Measured: the scaffold val part in 36 s with 8 workers, against about 123 s in one process.
+- **LightGBM.**
+  - `gbdt --workers N` loads the samples the same way. The training rows are identical,
+    because negatives are drawn per step id; so are the val / test candidate sets. A test
+    checks both feature sets; undefined geometry-free features are NaN on both sides.
+    - Measured: the scaffold geometry-free val read in 17 s with 8 workers, against 50 s.
+  - `--n-jobs` defaults to 14 (was 2), and `LGBMRanker.score_sets` predicts val and test in
+    batches of about a million rows on `--n-jobs` threads.
+    - Measured on 300 scaffold geometry-free val steps: per-step prediction 193 s, batched on
+      one thread 193 s, batched on 12 threads 23 s. Scores identical.
+  - With `deterministic` and `force_row_wise` the trees do not depend on the thread count: 1
+    and 4 threads give identical trees and scores (tested). So `n_jobs` stays out of the
+    configuration a model records. Existing models are unaffected: their only reader
+    (`textbook --fast`) verifies the features alone.
+  - The pool is closed before fitting starts, so the loading workers and the LightGBM threads
+    never run at the same time.
+- **torch left `arrows.steps`.** `SampleDataset`, `collate_samples`, `make_loader` and the
+  batch tensors moved to `arrows.batches`. Importing `arrows.steps` pulled in torch, about
+  500 MB per worker process for nothing: the physics CLI went from 683 to 205 MB at import.
+  - With 8 workers the largest ks-rank worker went from 1,051 to 570 MB (9.4 GB to 5.1 GB for
+    all processes).
+  - The largest LightGBM loading worker went from 1,208 to 698 MB.
+- **Settings for 16 GB.** `--workers 8` for `contacts`, `ks-rank` and `gbdt`, and
+  `--n-jobs 14`. The default stays 1, as for `samples` and `align`.
+- **A script that spawns workers needs an `if __name__ == "__main__":` guard.** A spawned
+  worker re-imports the main module. An unguarded script started a pool inside every worker,
+  which died during bootstrap and was respawned without end, and the parent waited forever.
+  The console scripts are guarded.

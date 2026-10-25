@@ -169,9 +169,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`), `uv run
   ksmech-arrows contacts --source pmechdb [--split molecule]` (the legacy
   contact sidecar `samples/contacts_<split>/`: the 11 KS pair features with the oriented kernel at
-  2.0, 2.3 and 3.0 Angstrom for val, test and a 3,000-step training subsample; needs `samples`)
+  2.0, 2.3 and 3.0 Angstrom for val, test and a 3,000-step training subsample; needs `samples`;
+  `--workers 8`: spawned processes, under 1 GB each)
 - Physics: `uv run ksmech-physics ks-rank --source pmechdb [--split molecule|scaffold] [--kernel
-  oriented|table|analytic] [--distance 2.0 2.3 ...]` (untrained KS ranking of each step's
+  oriented|table|analytic] [--distance 2.0 2.3 ...] [--workers 8]` (untrained KS ranking of each step's
   first arrow: the floor -(KS3 + KS2) and the frozen head on train + val and test, scorer
   table, failure classes, per-class table, `ks_rank_report_<split>_<kernel>[_d<d>].json`;
   oriented blocks are cached under `data/cache/oriented/`), `uv run ksmech-physics baseline
@@ -180,10 +181,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   run ksmech-physics textbook` (five textbook selectivity cases, expected vs top-3, cases seen in
   a model's training marked; builds missing QM records and tokens; `--fast` for the LightGBM
   models), `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--features
-  contact|geomfree] [--n-jobs 2]` (the fast LightGBM lambdarank reference: all positives + 20
+  contact|geomfree] [--workers 8] [--n-jobs 14]` (the fast LightGBM lambdarank reference: all positives + 20
   hard + 30 random negatives per step, early stopping on val top-5; `contact` on the sidecar
   subsample, `geomfree` on stage-A pair features over all training;
-  `gbdt_lgbm_report_<split>_<features>.json` with times and peak RSS). The oriented kernel is the
+  `gbdt_lgbm_report_<split>_<features>.json` with times and peak RSS; `--workers` load the samples,
+  `--n-jobs` LightGBM threads fit and score, one after the other). The oriented kernel is the
   frozen baseline `physics/contact/legacy_fixed23.py`. `ks-rank` and `baseline` read the samples
   joined with the contact sidecar (train = its subsample). After a token rebuild: `ksmech-arrows
   samples` (stage-A features and `pair_feature_stats_<strategy>.json` from each training part),

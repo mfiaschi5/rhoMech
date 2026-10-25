@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 CONTACTS_VERSION = 1
 SHARD = 256
 TRAIN_SUBSAMPLE = 3000
+CHUNK = 16  # consecutive steps per task of a parallel build
 
 
 def contacts_dir(view_dir: Path, strategy: str) -> Path:
@@ -77,12 +78,51 @@ def _write_shard(path: Path, entries: dict[str, dict], inputs: dict, config: dic
     prov.save_npz(path, arrays, header)
 
 
+def _entries(steps: list, loader, kernels: PairKernels) -> list[tuple[str, dict | str, dict]]:
+    """(step id, legacy arrays or skip reason, the inputs read for it) of each step."""
+    out = []
+    for step in steps:
+        with prov.collecting() as used:
+            entry = legacy_entry(step, loader, kernels)
+        out.append((step.step_id, entry, dict(used)))
+    return out
+
+
+def _entries_task(task: tuple) -> list[tuple[str, dict | str, dict]]:
+    return _entries(*task)
+
+
+def _all_entries(ordered: list, loader, kernels: PairKernels, n_workers: int) -> Iterator:
+    """`_entries` of `ordered`, in order. With `n_workers` > 1, chunks of `CHUNK` consecutive
+    steps run in that many spawned processes (one BLAS thread each), each with its own copy of
+    `loader` (a `TokenCache` copy starts empty) and of `kernels`; contact blocks are written
+    atomically, so two processes computing one block cannot corrupt it."""
+    if n_workers <= 1:
+        for step in ordered:
+            yield from _entries([step], loader, kernels)
+        return
+    from multiprocessing import get_context
+
+    from ksmech.orbitals.build import single_threaded_children
+
+    tasks = [(ordered[k : k + CHUNK], loader, kernels) for k in range(0, len(ordered), CHUNK)]
+    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
+        for part in pool.imap(_entries_task, tasks):
+            yield from part
+
+
 def build_contacts(
-    steps: list, loader, kernels: PairKernels, root: Path, inputs: dict[str, str], config: dict
+    steps: list,
+    loader,
+    kernels: PairKernels,
+    root: Path,
+    inputs: dict[str, str],
+    config: dict,
+    n_workers: int = 1,
 ) -> dict:
     """Write the sidecar of `steps` under `root`; returns counts. `inputs`: the parquet and
     split file the step ids came from; every token file and contact block used is added per
-    shard."""
+    shard. The shards are the same for any `n_workers` (spawned processes)."""
     root.mkdir(parents=True, exist_ok=True)
     for old in root.glob("shard_*.npz"):
         old.unlink()
@@ -90,14 +130,12 @@ def build_contacts(
     skipped: Counter = Counter()
     batch: dict[str, dict] = {}
     ordered = sorted(steps, key=lambda s: s.step_id)
-    for k, step in enumerate(ordered):
-        with prov.collecting() as used:
-            entry = legacy_entry(step, loader, kernels)
+    for k, (step_id, entry, used) in enumerate(_all_entries(ordered, loader, kernels, n_workers)):
         if isinstance(entry, str):
             skipped[entry] += 1
-            log.info("%s: no contact entry (%s)", step.step_id, entry)
+            log.info("%s: no contact entry (%s)", step_id, entry)
         else:
-            batch[step.step_id] = entry | {"_inputs": dict(used)}
+            batch[step_id] = entry | {"_inputs": used}
         if batch and (len(batch) == SHARD or k == len(ordered) - 1):
             name = f"shard_{len(shards):05d}.npz"
             _write_shard(root / name, batch, inputs, config)
@@ -122,10 +160,11 @@ def build_all_contacts(
     loader=None,
     n_train: int = TRAIN_SUBSAMPLE,
     seed: int = 0,
+    n_workers: int = 1,
 ) -> dict:
     """The sidecar of one split strategy: every val and test step and `n_train` training steps
-    (`train_subsample`, recorded in `train_subsample.json`). Needs the split file of
-    `ksmech-arrows samples`."""
+    (`train_subsample`, recorded in `train_subsample.json`), over `n_workers` spawned
+    processes. Needs the split file of `ksmech-arrows samples`."""
     from ksmech.arrows.steps import load_split_file, splits_path
 
     parquet = steps_path(source, processed_dir)
@@ -141,7 +180,9 @@ def build_all_contacts(
     root = contacts_dir(source_dir(source, processed_dir), strategy)
     inputs = {**prov.file_input(parquet), **prov.file_input(split_file)}
     config = {"strategy": strategy, "n_train": n_train, "seed": seed, **kernels.describe()}
-    report = build_contacts(wanted, loader or TokenCache(), kernels, root, inputs, config)
+    report = build_contacts(
+        wanted, loader or TokenCache(), kernels, root, inputs, config, n_workers
+    )
     body = {"ids": sub, "n_train": len(set(train)), "n": n_train, "seed": seed}
     digest = prov.sha256_text(json.dumps(body, sort_keys=True))
     header = prov.stamp(

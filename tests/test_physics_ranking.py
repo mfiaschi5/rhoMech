@@ -218,3 +218,31 @@ def test_physics_loaders_skip_and_count_samples_without_an_orbital_label(
     )
     n_view, n, no_reading = cli._read_part(args, "geomfree", "train", token_loader, lambda *a: 0)
     assert no_reading == 1 and n == n_view - 1
+
+
+def test_ks_rank_in_worker_processes_writes_the_same_report(
+    mini_processed,  # noqa: F811
+    mini_token_cache,
+    pair_kernels,
+    monkeypatch,
+):
+    """`--workers 2` on chunks of one sample: each worker loads its own samples and contact
+    entries and scores them, and the report is the one a single process writes."""
+    import ksmech.physics.cli as cli
+    from ksmech.arrows.contacts import build_all_contacts
+    from ksmech.physics import parallel
+
+    build_all_samples("pmechdb", ["molecule"], mini_processed, mini_token_cache)
+    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, mini_token_cache)
+    monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: mini_token_cache)
+    monkeypatch.setattr(parallel, "CHUNK", 1)
+    base = ["ks-rank", "--source", "pmechdb", "--processed-dir", str(mini_processed)]
+    base += ["--oriented-cache", str(mini_processed / "oriented")]
+    path = mini_processed / "pmechdb" / "ks_rank_report_molecule_oriented_d2.3.json"
+    reports = []
+    for workers in ("1", "2"):
+        assert cli.main([*base, "--workers", workers]) == 0
+        reports.append(json.loads(path.read_text()))
+    one, two = reports
+    assert one["scorers"]["ks3+ks2"]["all"]["n"] >= 2
+    assert one == two
