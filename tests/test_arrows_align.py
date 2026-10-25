@@ -27,7 +27,9 @@ from ksmech.data.pmechdb import parse_arrow_code
 from ksmech.data.provenance import read_header
 from ksmech.data.schema import Source
 from ksmech.data.validation import build_step
+from ksmech.orbitals.tokens import CandidateConfig
 from ksmech.qm.embed import prepare_mol
+from tests.fixtures.molecules import MOLECULES
 
 
 def make_step(rxn_code: str):
@@ -90,6 +92,23 @@ def test_missing_tokens_are_reported_by_key():
     with pytest.raises(MissingTokens) as exc:
         ReactantTokens.from_smiles("[OH-:1].[CH3:2][Cl:3]", lambda key: None)
     assert sorted(exc.value.keys) == ["CCl", "[OH-]"]
+
+
+@pytest.mark.parametrize("allow_d", [False, True])
+def test_candidate_masks_match_the_token_file_candidates(allow_d, token_loader):
+    """`donor_ok` / `acceptor_ok` on the global token index are the per-molecule
+    `donor_candidates` / `acceptor_candidates` (before any donor exclusion): the sample masks and
+    `physics.pairs.valid_pairs` apply one rule. All ten fixture molecules as one side."""
+    config = CandidateConfig(allow_d_acceptors=allow_d)
+    rt = ReactantTokens.from_smiles(".".join(MOLECULES.values()), token_loader, config)
+    assert len(rt.fragments) == len(MOLECULES)
+    donors = {id(o) for f in rt.fragments for o in f.tokens.donor_candidates(config)}
+    acceptors = {id(o) for f in rt.fragments for o in f.tokens.acceptor_candidates(config)}
+    assert rt.donor_ok.tolist() == [id(o) in donors for o in rt.orbitals]
+    assert rt.acceptor_ok.tolist() == [id(o) in acceptors for o in rt.orbitals]
+    assert rt.donor_ok.any() and rt.acceptor_ok.any()
+    assert rt.d_type.any()  # chloromethane's Cl d functions: the d rule is exercised
+    assert bool((rt.acceptor_ok & rt.d_type).any()) == allow_d
 
 
 def test_mini_fixture_aligns_fully(mini_steps, token_loader):
