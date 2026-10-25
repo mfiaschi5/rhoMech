@@ -9,7 +9,9 @@
 //                            ring closures as chemfig hooks (?[a] ... ?[a,<bond>]), double bonds
 //                            offset to the ring side (=^ / =_), wedges and hashes as Cram bonds
 //                            (< > <: >:), heteroatom labels with their H count and charge
-//                            (OH, H_2N, N^{+}), atom sep and widths from the drawing style.
+//                            (OH, H_2N, N^{+}) on the side the drawing's label placement
+//                            chose (labelLayout.ts; a charge off the upper right as
+//                            \charge{<angle>=...}{N}), atom sep and widths from the style.
 //                            Not supported: radicals (dropped, noted in a comment), explicit
 //                            crossing breaks, circled charges and per-element colours.
 // Pure: runs under node --experimental-strip-types.
@@ -17,14 +19,15 @@ import type { SketchAtom, SketchBond, SketchModel } from "./model";
 import type { Vec } from "./geometry";
 import type { DrawingStyle } from "./style";
 import type { ExportLayout } from "./exportImage";
+import type { AtomLabel, ChargeSlot } from "./drawing";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { doubleBondSide } from "./drawing.ts";
+import { buildScene, doubleBondSide } from "./drawing.ts";
 // @ts-ignore TS5097: see above
 import { fallbackHCount } from "./elements.ts";
 // @ts-ignore TS5097: see above
 import { bondOrderSum, neighbors } from "./model.ts";
 // @ts-ignore TS5097: see above
-import { MODEL_BOND } from "./style.ts";
+import { drawMetrics, MODEL_BOND } from "./style.ts";
 
 const cm = (pt: number) => Math.round(((pt / 72) * 2.54) * 100) / 100;
 
@@ -86,13 +89,29 @@ function spanningTree(g: Graph, root: number, seen: Set<number>): Tree {
   return { order, children, closures };
 }
 
-/** The chemfig text of an atom: "" for a bare carbon vertex. */
-function atomText(g: Graph, a: SketchAtom, hCount: number): string {
+/** chemfig angle of each charge slot the label placement may choose (labelLayout.ts). */
+const SLOT_DEG: Record<ChargeSlot, number> = { ur: 45, ul: 135, lr: -45, ll: -135, u: 90, d: -90, r: 0, l: 180 };
+
+/** The chemfig text of an atom: "" for a bare carbon vertex. The H side and the charge slot
+ *  follow the drawing's label placement when given (an H above or below has no chemfig form:
+ *  it goes left or right by the bonds); a charge off the upper right is a \charge. */
+function atomText(g: Graph, a: SketchAtom, hCount: number, placed?: AtomLabel | null): string {
   const nb = g.nbrs(a.id);
   if (a.el === "C" && a.charge === 0 && nb.length > 0 && a.explicitH !== true) return "";
-  const charge = a.charge === 0 ? "" : `^{${Math.abs(a.charge) > 1 ? Math.abs(a.charge) : ""}${a.charge > 0 ? "+" : "-"}}`;
+  const sign = a.charge === 0 ? "" : `${Math.abs(a.charge) > 1 ? Math.abs(a.charge) : ""}${a.charge > 0 ? "+" : "-"}`;
   const h = hCount > 0 ? `H${hCount > 1 ? `_${hCount}` : ""}` : "";
-  const right = nb.reduce((s, id) => s + Math.sign((g.atoms.get(id)?.x ?? a.x) - a.x + 1e-9), 0) <= 0;
+  const byBonds = nb.reduce((s, id) => s + Math.sign((g.atoms.get(id)?.x ?? a.x) - a.x + 1e-9), 0) <= 0;
+  const side = placed?.hSide;
+  const right = side === "right" ? true : side === "left" ? false : byBonds;
+  const slot = placed?.chargeSlot ?? "ur";
+  // \charge sits on the symbol's node: only where the H run is not (else the superscript)
+  const slotSide = slot === "u" || slot === "d" ? null : slot.endsWith("r") ? "right" : "left";
+  const clearOfH = !h || slotSide === null || (slotSide === "right") !== right;
+  if (sign && slot !== "ur" && slot !== "r" && clearOfH) {
+    const el = `\\charge{${SLOT_DEG[slot]}=$\\scriptstyle ${sign}$}{${a.el}}`;
+    return h && !right ? `${h}${el}` : `${el}${h}`;
+  }
+  const charge = sign ? `^{${sign}}` : "";
   const body = h && !right ? `${h}${a.el}` : `${a.el}${h}`;
   return body + charge;
 }
@@ -132,7 +151,7 @@ function bondArg(g: Graph, from: number, to: number): string {
 const hookName = (i: number) => (i < 26 ? String.fromCharCode(97 + i) : `h${i}`);
 
 /** chemfig code of one connected fragment from `root`. */
-function fragment(m: SketchModel, g: Graph, root: number, hOf: (a: SketchAtom) => number, seen: Set<number>): string {
+function fragment(m: SketchModel, g: Graph, root: number, hOf: (a: SketchAtom) => number, seen: Set<number>, labels: ReadonlyMap<number, AtomLabel | null>): string {
   const t = spanningTree(g, root, seen);
   const hooks = new Map<number, string[]>();
   t.closures.forEach(([early, late], i) => {
@@ -144,12 +163,12 @@ function fragment(m: SketchModel, g: Graph, root: number, hOf: (a: SketchAtom) =
   });
   const emit = (u: number): string => {
     const a = g.atoms.get(u);
-    const text = a ? atomText(g, a, hOf(a)) : "";
+    const text = a ? atomText(g, a, hOf(a), labels.get(u)) : "";
     const kids = t.children.get(u) ?? [];
     const branch = (v: number) => `${bondCode(m, g, u, v)}${bondArg(g, u, v)}${emit(v)}`;
     const side = kids.slice(0, -1).map((v) => `(${branch(v)})`).join("");
     const main = kids.length ? branch(kids[kids.length - 1]) : "";
-    const atom = text.length > 1 || text.includes("^") ? `{${text}}` : text;
+    const atom = text.length > 1 || text.includes("^") || text.includes("\\") ? `{${text}}` : text;
     return `${atom}${(hooks.get(u) ?? []).join("")}${side}${main}`;
   };
   return `\\chemfig{${emit(root)}}`;
@@ -170,13 +189,20 @@ export function chemfigOptions(s: DrawingStyle): string {
   ].join(",");
 }
 
+/** The labels as the drawing places them in `style` (H side, charge slot), by atom id. */
+function placedLabels(m: SketchModel, hCounts: ReadonlyMap<number, number> | null, style: DrawingStyle): Map<number, AtomLabel | null> {
+  const scene = buildScene(m, { s: style.bondLengthPt / MODEL_BOND, ox: 0, oy: 0 }, hCounts, { metrics: { ...drawMetrics(style, 1), metricText: true } });
+  return new Map(scene.atoms.map((s) => [s.atom.id, s.label]));
+}
+
 /** chemfig code of the whole sketch in `style` (one \chemfig per fragment). */
 export function toChemfig(m: SketchModel, hCounts: ReadonlyMap<number, number> | null, style: DrawingStyle): string {
   const g = graph(m);
   const hOf = (a: SketchAtom) => hCounts?.get(a.id) ?? fallbackHCount(a.el, a.charge, bondOrderSum(m, a.id), a.radical ?? 0);
   const seen = new Set<number>();
   const frags: string[] = [];
-  for (const a of [...m.atoms].sort((x, y) => x.id - y.id)) if (!seen.has(a.id)) frags.push(fragment(m, g, a.id, hOf, seen));
+  const labels = placedLabels(m, hCounts, style);
+  for (const a of [...m.atoms].sort((x, y) => x.id - y.id)) if (!seen.has(a.id)) frags.push(fragment(m, g, a.id, hOf, seen, labels));
   const sans = style.fontFamily !== "times";
   const radicals = m.atoms.some((a) => (a.radical ?? 0) > 0);
   return [

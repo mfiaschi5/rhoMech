@@ -26,7 +26,12 @@
 //   <g data-testid="sketch-atom-<id>" data-element data-charge data-h data-radical="1|2" (only
 //      with unpaired electrons; drawn as dots circle.sk-radical) data-cip="R|S|r|s|?" (only
 //      while R/S is on) data-selected data-highlighted data-invalid data-hovered>, with
-//      <text data-testid="sketch-cip-atom-<id>">
+//      <text data-testid="sketch-cip-atom-<id>"> and the label <g class="sk-label"
+//      data-hside data-hw data-charge-slot data-label-scale (subscript / charge shrunk)
+//      data-displaced (moved off its atom, with line.sk-leader)> of one <text data-glyph=
+//      "symbol|h|count|charge"> per glyph run at its explicit baseline (labelGlyphs.ts, placed
+//      collision-aware by labelLayout.ts; data-label-issues on the svg counts what still
+//      overlaps)
 //   <g data-testid="sketch-frame" data-atoms="<n>"> with sketch-frame-rotate (circle) and
 //      sketch-frame-corner-<0..3> (top-left, top-right, bottom-right, bottom-left)
 import type { CSSProperties, RefObject } from "react";
@@ -37,7 +42,7 @@ import type { SketchPointer } from "./useSketchPointer";
 import type { SelectionFrame } from "./frame";
 import type { StereoLabels } from "./cip";
 import type { DrawMetrics } from "./style";
-import { buildScene, chargeAnchor, chargeWidth, hLabelWidth, labelHalfWidth, type AtomScene, type BondScene, type LabelStyle, type Mark } from "./drawing";
+import { buildScene, chargeAnchor, hLabelWidth, labelGlyphs, type AtomScene, type BondScene, type Glyph, type LabelStyle, type Mark } from "./drawing";
 import { cssFontFamily } from "./style";
 import { elementClass } from "./elements";
 
@@ -114,28 +119,29 @@ function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; h
   );
 }
 
-const subDigits = (n: number) => (n > 1 ? String(n) : "");
+const fpx = (v: number) => `${Math.round(v * 1000) / 1000}px`;
 
-function ChargeView({ s, M }: { s: AtomScene; M: DrawMetrics }) {
-  const label = s.label;
-  if (!label?.charge) return null;
-  const [cx, cy] = chargeAnchor(label, M);
-  const x = s.at[0] + cx;
-  const y = s.at[1] + cy;
-  if (M.chargePlacement === "circled" && label.charge.length === 1) {
-    const r = chargeWidth(label, M) / 2;
+/** One glyph run of a label at its explicit baseline (labelGlyphs: the export draws the same). */
+function GlyphText({ g, at, M, cy }: { g: Glyph; at: Vec; M: DrawMetrics; cy: number }) {
+  if (g.kind === "charge" && g.circled) {
+    const r = g.w / 2;
     return (
       <g className="sk-charge-circled">
-        <circle className="sk-charge-ring" cx={x + r} cy={y} r={r * 0.95} />
-        <text className="sk-charge" x={x + r} y={y} textAnchor="middle" dominantBaseline="central">
-          {label.charge}
+        <circle className="sk-charge-ring" cx={at[0] + g.x + r} cy={at[1] + cy} r={r * 0.95} />
+        <text className="sk-charge" x={at[0] + g.x + r} y={at[1] + cy} textAnchor="middle" dominantBaseline="central" style={{ fontSize: fpx(g.size) }}>
+          {g.text}
         </text>
       </g>
     );
   }
+  const cls = g.kind === "charge" ? "sk-charge" : g.kind === "count" ? "sk-sub" : undefined;
+  const size = g.kind === "charge" || g.kind === "count" ? { fontSize: fpx(g.size) } : undefined;
+  // the symbol is centred on its box (the browser measures the UI font; the width is exact for
+  // the metric fonts), the other runs start at their x
+  const sym = g.kind === "symbol";
   return (
-    <text className="sk-charge" x={x} y={y} textAnchor="start" dominantBaseline="central">
-      {label.charge}
+    <text className={cls} x={at[0] + g.x + (sym ? g.w / 2 : 0)} y={at[1] + g.y} textAnchor={sym ? "middle" : undefined} style={size} data-glyph={g.kind} data-w={M.metricText ? g.w.toFixed(2) : undefined}>
+      {g.text}
     </text>
   );
 }
@@ -143,24 +149,21 @@ function ChargeView({ s, M }: { s: AtomScene; M: DrawMetrics }) {
 function AtomLabelView({ s, M }: { s: AtomScene; M: DrawMetrics }) {
   const { label, at } = s;
   if (!label) return null;
-  const font = M.font;
-  const half = labelHalfWidth(label.el, M);
-  const hw = hLabelWidth(label.hCount, M);
-  const side = label.hSide;
-  const hx = side === "right" ? at[0] + half : side === "left" ? at[0] - half : at[0];
-  const hy = side === "above" ? at[1] - font * 0.95 : side === "below" ? at[1] + font * 0.95 : at[1];
-  const anchor = side === "right" ? "start" : side === "left" ? "end" : "middle";
+  const glyphs = labelGlyphs(label, M);
+  const cy = label.charge ? chargeAnchor(label, M)[1] : 0;
   return (
-    <g className={`sk-label ${elementClass(label.el)}`}>
-      <text x={at[0]} y={at[1]} textAnchor="middle" dominantBaseline="central">
-        {label.el}
-      </text>
-      {label.hCount > 0 && (
-        <text x={hx} y={hy} textAnchor={anchor} dominantBaseline="central" data-hside={side} data-hw={hw.toFixed(1)}>
-          H<tspan className="sk-sub" dy={font * 0.3}>{subDigits(label.hCount)}</tspan>
-        </text>
-      )}
-      <ChargeView s={s} M={M} />
+    <g
+      className={`sk-label ${elementClass(label.el)}`}
+      data-hside={label.hCount > 0 ? label.hSide : undefined}
+      data-hw={label.hCount > 0 ? hLabelWidth(label.hCount, M, label.scale ?? 1).toFixed(1) : undefined}
+      data-charge-slot={label.charge ? (label.chargeSlot ?? "ur") : undefined}
+      data-label-scale={label.scale ? label.scale : undefined}
+      data-displaced={label.offset ? "true" : undefined}
+    >
+      {s.leader && <line className="sk-leader" x1={s.leader.p[0]} y1={s.leader.p[1]} x2={s.leader.q[0]} y2={s.leader.q[1]} />}
+      {glyphs.map((g, i) => (
+        <GlyphText key={i} g={g} at={at} M={M} cy={cy} />
+      ))}
     </g>
   );
 }
@@ -253,6 +256,7 @@ export function SketchCanvas(props: SketchCanvasProps) {
       data-line-px={M.line.toFixed(3)}
       data-bold-px={M.bold.toFixed(3)}
       data-font-px={M.font.toFixed(3)}
+      data-label-issues={scene.issues.length}
       tabIndex={0}
       onPointerDown={pointer.onPointerDown}
       onPointerMove={pointer.onPointerMove}

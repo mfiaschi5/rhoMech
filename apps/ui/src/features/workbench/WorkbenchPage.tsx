@@ -1,10 +1,10 @@
 // WorkbenchPage (#/workbench): draw a molecule, compute it (POST /molecule: the QM record and
 // tokens, display only), then look at it: the 3D view with surfaces, the orbital sets and their
-// energy levels, and the property tables. The panels (sketch, 3D view, orbitals, surfaces,
-// properties) are placed by the customizable layout (layout/: columns with splitters, a wide
-// row, presets, show / hide / collapse / move, kept in localStorage with the preferences:
-// sketch font and bond width, atom colours, label style, default representation and orbital
-// isovalue, theme). Radicals can be drawn but not computed: Compute is off with the reason
+// energy levels, and the property tables with the point group (viewer/symmetry.ts, drawn in 3D
+// too). The panels (sketch, 3D view, orbitals, surfaces, properties) are placed by the
+// customizable layout (layout/: columns with splitters, a wide row, presets, show / hide /
+// collapse / move, kept in localStorage with the preferences: sketch font and bond width, atom
+// colours, label style, default representation and orbital isovalue, theme). Radicals can be drawn but not computed: Compute is off with the reason
 // while the drawing has unpaired electrons (the server answers RADICAL_NOT_SUPPORTED).
 //
 // Hash params (params.ts): smiles, m, set, start, orb, rep, layers, q. The drawing persists in
@@ -45,6 +45,7 @@ import { PropertyTabs } from "./tables/PropertyTabs";
 import { useMolecule, type ComputeState } from "./useMolecule";
 import { useWorkbenchLayers } from "./useWorkbenchLayers";
 import { ViewerPanel } from "./viewer/ViewerPanel";
+import { setSymmetryView, useSymmetry } from "./viewer/symmetry";
 import { SurfaceControls } from "./viewer/SurfaceControls";
 import { LayoutGrid, type PanelContent } from "./layout/LayoutGrid";
 import { LayoutBar } from "./layout/LayoutMenu";
@@ -291,6 +292,8 @@ function useWorkbenchData({ route, prefs }: Pick<PageState, "route" | "prefs">) 
   const mid = ready ? (state.molecule?.molecule_id ?? null) : null;
   const geometry = useGeometry(mid);
   const properties = useProperties(mid);
+  const symmetry = useSymmetry(mid);
+  useEffect(() => setSymmetryView({ highlight: null }), [mid]);
   const shown = useOrbitalSet(mid, set, start);
   const canonical = useOrbitalSet(mid, CANONICAL, "");
   const [win, setWin] = useState<Window>("frontier");
@@ -309,7 +312,7 @@ function useWorkbenchData({ route, prefs }: Pick<PageState, "route" | "prefs">) 
   };
   const highlight = useMemo(() => sketchHighlight(state, model, linked, sel.atoms), [state, model, linked, sel.atoms]);
   const pick = (i: number) => update({ orb: i });
-  return { set, start, orb, rep, quality, model, setModel, info, state, ready, mid, geometry, properties, shown, canonical, win, setWin, stale, linked, viewer, setViewer, projection, layers, radicals, onCompute, highlight, pick };
+  return { set, start, orb, rep, quality, model, setModel, info, state, ready, mid, geometry, properties, symmetry, shown, canonical, win, setWin, stale, linked, viewer, setViewer, projection, layers, radicals, onCompute, highlight, pick };
 }
 
 type WorkbenchData = ReturnType<typeof useWorkbenchData>;
@@ -337,7 +340,7 @@ function sketchPanel(d: WorkbenchData, prefs: PageState["prefs"], setPrefs: Page
 
 /** The five panels' contents. */
 function workbenchPanels(d: WorkbenchData, { prefs, setPrefs, layout, dispatch }: Omit<PageState, "route">): Record<PanelId, PanelContent> {
-  const { set, start, orb, rep, quality, state, ready, mid, geometry, properties, shown, canonical, win, setWin, viewer, setViewer, layers, info, pick } = d;
+  const { set, start, orb, rep, quality, state, ready, mid, geometry, properties, symmetry, shown, canonical, win, setWin, viewer, setViewer, layers, info, pick } = d;
   return {
     sketch: sketchPanel(d, prefs, setPrefs, layout.heights.sketch),
     viewer: {
@@ -345,14 +348,14 @@ function workbenchPanels(d: WorkbenchData, { prefs, setPrefs, layout, dispatch }
         <>
           <ErrorBanner error={geometry.error} title="Cannot load the geometry" />
           {geometry.loading && <PendingNote label={geometry.pending?.label ?? "loading the geometry"} worker={geometry.pending?.worker} />}
-          <ViewerPanel mid={mid} geometry={geometry.data} properties={properties.data} orbitals={shown.data} selectedOrbital={orb} onPickOrbital={pick} rep={rep} onRep={(r) => update({ rep: r === prefs.rep ? null : r })} quality={quality} onQuality={(q) => update({ q: q === "normal" ? null : q })} onViewer={setViewer} height={layout.heights.viewer} fileStem={`ksmech-${(state.molecule?.key ?? "molecule").replace(/[^A-Za-z0-9]+/g, "_").slice(0, 40)}`} />
+          <ViewerPanel mid={mid} geometry={geometry.data} properties={properties.data} orbitals={shown.data} selectedOrbital={orb} onPickOrbital={pick} rep={rep} onRep={(r) => update({ rep: r === prefs.rep ? null : r })} quality={quality} onQuality={(q) => update({ q: q === "normal" ? null : q })} onViewer={setViewer} height={layout.heights.viewer} symmetry={symmetry.data} fileStem={`ksmech-${(state.molecule?.key ?? "molecule").replace(/[^A-Za-z0-9]+/g, "_").slice(0, 40)}`} />
         </>
       ),
     },
     orbitals: {
       note: mid ? null : "not computed",
       body: mid ? (
-        <OrbitalPanel set={set} start={start} onSet={(s) => update({ set: s === DEFAULT_SET ? null : s, orb: null })} onStart={(s) => update({ start: s === DEFAULT_START ? null : s, orb: null })} shown={shown} canonical={canonical} selected={orb} onPick={pick} onPickCanonical={(i) => update({ set: null, orb: i })} window={win} onWindow={setWin} infoOpen={layout.orbitalInfo} onInfoToggle={() => dispatch({ type: "orbitalInfo" })} height={layout.heights.orbitals} />
+        <OrbitalPanel set={set} start={start} onSet={(s) => update({ set: s === DEFAULT_SET ? null : s, orb: null })} onStart={(s) => update({ start: s === DEFAULT_START ? null : s, orb: null })} shown={shown} canonical={canonical} selected={orb} onPick={pick} onPickCanonical={(i) => update({ set: null, orb: i })} window={win} onWindow={setWin} infoOpen={layout.orbitalInfo} onInfoToggle={() => dispatch({ type: "orbitalInfo" })} height={layout.heights.orbitals} degeneracyEv={prefs.degeneracyEv} onDegeneracy={(v) => setPrefs({ degeneracyEv: v })} />
       ) : (
         placeholder("Compute a molecule to see its orbital sets and energy levels.")
       ),
@@ -366,7 +369,7 @@ function workbenchPanels(d: WorkbenchData, { prefs, setPrefs, layout, dispatch }
       ),
     },
     properties: {
-      body: <PropertyTabs molecule={ready ? state.molecule : null} properties={properties} orbitals={shown} selectedOrbital={orb} onPickOrbital={pick} descriptors={info.descriptors} />,
+      body: <PropertyTabs molecule={ready ? state.molecule : null} properties={properties} orbitals={shown} selectedOrbital={orb} onPickOrbital={pick} descriptors={info.descriptors} symmetry={symmetry} />,
     },
   };
 }

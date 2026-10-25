@@ -7,7 +7,10 @@
 // chemist-style template library); 3D->2D sends mode "match3d" with the computed molecule's id
 // and the 3D viewer's quaternion (ProjectionSource.view(), the page reads it from 3Dmol). The
 // answer is applied by atom and bond index (depiction.applyDepiction) as one undoable commit,
-// unless the drawing changed while it was on its way. When the server cannot be reached (or
+// unless the drawing changed while it was on its way; then, when separate fragments (a salt's
+// ions) come too close in the drawing style, "tidy fragments" (fragments.ts) spreads them apart
+// as a second undoable step (the report says so; the Tidy button runs it alone). When the server
+// cannot be reached (or
 // refuses), Clean falls back to RDKit.js's CoordGen layout in the browser and the report says
 // so; 3D->2D has no fallback.
 import { useLayoutEffect, useRef, useState } from "react";
@@ -36,11 +39,16 @@ export interface LayoutReport {
   fallback: string | null;
   error: string | null;
   forModel: SketchModel;
+  /** The fragments were spread apart after the layout (its own undo step). */
+  tidied?: boolean;
 }
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-export function useLayoutActions(ed: SketchEditor, rdkit: RDKitModule | null, source: ProjectionSource | undefined, depictor: Depictor | undefined, style: CleanStyle) {
+/** The fragment tidy of the drawing style: the model, or a copy with its fragments apart. */
+export type Tidy = (m: SketchModel) => SketchModel;
+
+export function useLayoutActions(ed: SketchEditor, rdkit: RDKitModule | null, source: ProjectionSource | undefined, depictor: Depictor | undefined, style: CleanStyle, tidy?: Tidy) {
   const [report, setReport] = useState<LayoutReport | null>(null);
   const [busy, setBusy] = useState(false);
   const latest = useRef(ed.committed);
@@ -51,10 +59,18 @@ export function useLayoutActions(ed: SketchEditor, rdkit: RDKitModule | null, so
   const canProject = !!source && !!depictor && source.disabledReason === null && n > 0 && !busy;
   const canClean = n > 1 && !busy && (!!depictor || !!rdkit);
 
+  /** Commit a layout, then its fragment tidy as a second step; the model on screen after. */
+  const commitTidied = (next: SketchModel, kind: LayoutReport["kind"]): { model: SketchModel; tidied: boolean } => {
+    ed.commit(next, { external: true });
+    const t = kind === "clean" && tidy ? tidy(next) : next;
+    if (t !== next) ed.commit(t, { external: true });
+    return { model: t, tidied: t !== next };
+  };
+
   const browserClean = (m: SketchModel, why: string) => {
     const next = rdkit ? cleanUpSketch(rdkit, m) : null;
-    if (next) ed.commit(next, { external: true });
-    setReport({ kind: "clean", result: null, fallback: why, error: next ? null : "RDKit.js is not loaded", forModel: next ?? m });
+    const done = next ? commitTidied(next, "clean") : { model: m, tidied: false };
+    setReport({ kind: "clean", result: null, fallback: why, error: next ? null : "RDKit.js is not loaded", forModel: done.model, tidied: done.tidied });
   };
 
   /** Send `m` to the server and apply the answer; false when the drawing moved on meanwhile. */
@@ -63,8 +79,8 @@ export function useLayoutActions(ed: SketchEditor, rdkit: RDKitModule | null, so
     if (latest.current !== m) return false;
     const next = applyDepiction(m, out);
     if (!next) throw new Error("the server's drawing does not fit the sketch");
-    ed.commit(next, { external: true });
-    setReport({ kind, result: out, fallback: null, error: null, forModel: next });
+    const done = commitTidied(next, kind);
+    setReport({ kind, result: out, fallback: null, error: null, forModel: done.model, tidied: done.tidied });
     return true;
   };
 
@@ -98,8 +114,13 @@ export function useLayoutActions(ed: SketchEditor, rdkit: RDKitModule | null, so
   };
 
   const toggleBreaks = () => ed.commit(setBreakCrossings(ed.committed, !ed.committed.breakCrossings));
+  /** The Tidy button: spread touching fragments apart as one undoable step. */
+  const tidyNow = () => {
+    const t = tidy ? tidy(ed.committed) : ed.committed;
+    if (t !== ed.committed) ed.commit(t, { external: true });
+  };
   const shown = report && report.forModel === ed.committed ? report : null;
-  return { canProject, canClean, busy, clean, project, toggleBreaks, report: shown };
+  return { canProject, canClean, busy, clean, project, toggleBreaks, tidy: tidyNow, report: shown };
 }
 
 export type LayoutActions = ReturnType<typeof useLayoutActions>;

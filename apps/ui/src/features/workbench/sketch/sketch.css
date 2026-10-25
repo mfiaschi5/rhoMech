@@ -397,6 +397,13 @@
   font-weight: var(--sk-charge-weight, 600);
 }
 
+/* the leader of a label displaced off its atom (labelLayout.ts) */
+.sk-leader {
+  stroke: var(--sk-stroke);
+  stroke-width: calc(var(--sk-bond-width, 1.5px) * 0.6);
+  stroke-linecap: round;
+}
+
 .sk-charge-ring {
   fill: none;
   stroke: var(--sk-stroke);

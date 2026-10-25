@@ -8,19 +8,25 @@
 // `height` is the view's height in px (the layout's row splitter); the viewer is resized
 // whenever its box changes (splitters, a panel shown again).
 //
+// The point group's elements (axes, mirror discs, inversion centre) and its equivalent-atom
+// class colours are drawn from viewer/symmetry.ts's store (toolbar: symmetry-toggle,
+// symmetry-classes-toggle; the Global tab's element list highlights one).
+//
 // DOM: <div data-testid="wb-viewer-panel">, <div data-testid="wb-viewer"
 // data-state="loading|ready|error|webgl-unavailable" data-rep data-selected-atoms="0,2"
-// data-has-geometry>, measurement rows wb-measure and the toolbar.
+// data-has-geometry data-symmetry-drawn=<elements drawn> data-symmetry-classes>, measurement
+// rows wb-measure and the toolbar.
 import { useEffect, useMemo, useState } from "react";
 import type { GLViewer } from "3dmol";
 import type { CubeQuality } from "../../../api/client";
-import type { MoleculeGeometryOut, MoleculePropertiesOut, OrbitalSetOut } from "../../../api/types.gen";
+import type { MoleculeGeometryOut, MoleculePropertiesOut, OrbitalSetOut, PointGroupOut } from "../../../api/types.gen";
 import { atomPropDefs, findProp, propRange } from "../atomProps";
 import type { Rep } from "../params";
 import { setHover, toggleAtom, useSelection } from "../store";
 import { ColourBar } from "./ColourBar";
 import { MEASURE_ATOMS, measure, measureText, type Measurement, type P3 } from "./measure";
 import { useAtomClicks, useAtomLabels, useBondLabels, useCentroids, useHalos, useMeasurements, useModel, useStyle, type AtomColouring } from "./scene";
+import { classColourFn, drawnElements, useSymmetryElements, useSymmetryView } from "./symmetry";
 import { useGLViewer, type ViewerHandle } from "./useGLViewer";
 import { DEFAULT_VIEW, ViewerToolbar, type ViewOptions } from "./ViewerToolbar";
 
@@ -39,6 +45,8 @@ export interface ViewerPanelProps {
   onViewer?(v: GLViewer | null): void;
   /** Height of the 3D view (px). */
   height?: number;
+  /** The point group (drawn elements, class colours; viewer/symmetry.ts). */
+  symmetry?: PointGroupOut;
 }
 
 /** Resize the viewer to its element whenever the element's box changes. */
@@ -142,7 +150,11 @@ export function ViewerPanel(p: ViewerPanelProps) {
   const colouring = useColouring(p.properties, view.colour);
   const tool = useMeasureTool(p.geometry, view.measure);
   const model = useModel(viewer, p.geometry);
-  useStyle(viewer, model, p.rep, view.showH, colouring);
+  const symView = useSymmetryView();
+  const symmetry = p.symmetry && p.geometry && p.symmetry.molecule_id === p.mid ? p.symmetry : undefined;
+  const classColours = useMemo(() => classColourFn(symmetry, symView.classes), [symmetry, symView.classes]);
+  useStyle(viewer, model, p.rep, view.showH, colouring, classColours);
+  useSymmetryElements(viewer, symmetry, symView);
   useAtomClicks(viewer, model, (i) => (view.measure === "select" ? toggleAtom(i) : tool.pick(i)));
   useAtomLabels(viewer, p.geometry, view.labels, view.showH, p.properties?.atoms, colouring);
   useBondLabels(viewer, p.geometry, p.properties?.bonds, view.wiberg);
@@ -166,13 +178,15 @@ export function ViewerPanel(p: ViewerPanelProps) {
         data-rep={p.rep}
         data-selected-atoms={sel.atoms.join(",")}
         data-has-geometry={p.geometry ? "true" : "false"}
+        data-symmetry-drawn={drawnElements(symmetry, symView).length}
+        data-symmetry-classes={classColours ? "true" : "false"}
         style={p.height ? { height: p.height } : undefined}
         onPointerLeave={() => setHover(null)}
       >
         <div className="wb-canvas" ref={setEl} />
         {!p.geometry && handle.state !== "webgl-unavailable" && <div className="wb-viewer-empty muted">Draw a molecule and press Compute.</div>}
       </div>
-      {colouring && (
+      {colouring && !classColours && (
         <ColourBar role="atoms" label={colouring.def.label} scale={colouring.def.signed ? "rwb" : "seq"} min={colouring.range[0]} max={colouring.range[1]} note={colouring.def.title} />
       )}
       <Measurements m={tool} onClear={tool.clear} />

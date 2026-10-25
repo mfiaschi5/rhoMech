@@ -658,3 +658,180 @@ test.describe("drawing styles", () => {
     await expect(page.getByTestId("sketch")).toHaveAttribute("data-style", "screen");
   });
 });
+
+// The point-group test computes benzene (ethanol under cached chemistry, which computes only the
+// shared cache's molecules) and finds its point group in the Global tab at the default 0.1 Å
+// (benzene's MMFF geometry: D6h with C6, C2′, C2″, σh, σv, σd, S6 and i; ethanol: Cs or C1),
+// then at 0.01 Å; it draws every element in the 3D view, highlights the principal axis from the
+// element list, colours the equivalent-atom classes, and checks that no control of the Global
+// tab sticks out of its panel at 1024 and 1440 px with every layout preset.
+test("point group: the Global tab's group, tolerance, elements in 3D and atom classes", async ({ page, request }) => {
+  test.setTimeout(300_000);
+  const chemistry = await skipWithoutWorkbench(request);
+  const benzene = chemistry !== "cached";
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/#/workbench");
+  await expect(page.locator("body[data-rdkit=ready]")).toBeAttached({ timeout: 90_000 });
+  await importSmiles(page, benzene ? "c1ccccc1" : "CCO");
+  await expect(page.locator(`[data-testid=sketch][data-smiles="${benzene ? "c1ccccc1" : "CCO"}"]`)).toBeVisible();
+  await page.getByTestId("wb-compute").click();
+  await expect(page.locator("[data-testid=wb-status][data-status=ready]")).toBeVisible({ timeout: 180_000 });
+  await page.getByTestId("tab-global").click();
+  const group = page.getByTestId("pointgroup");
+  await expect(group).toHaveAttribute("data-tolerance", "0.1", { timeout: 60_000 });
+  await expect(group).toHaveAttribute("data-point-group", benzene ? "D6h" : /^(Cs|C1)$/);
+  console.log(`[workbench] point group at 0.1 Å: ${await group.getAttribute("data-point-group")}`);
+  const elements = page.getByTestId("symmetry-element");
+  if (benzene) {
+    await expect(group).toHaveAttribute("data-order", "24");
+    await expect(group).toHaveText("D6h");
+    await expect(elements).toHaveCount(16);
+    for (const [label, n] of [["C6", 1], ["C2′", 3], ["C2″", 3], ["σh", 1], ["σv", 3], ["σd", 3], ["S6", 1], ["i", 1]] as const) {
+      await expect(page.locator(`[data-testid=symmetry-element][data-label="${label}"]`)).toHaveCount(n);
+    }
+    await expect(page.getByTestId("symmetry-class")).toHaveCount(2);
+  }
+  const viewer = page.getByTestId("wb-viewer");
+  await expect(viewer).toHaveAttribute("data-symmetry-drawn", "0");
+  await page.getByTestId("symmetry-toggle").check();
+  await expect(page.getByTestId("pointgroup-show")).toBeChecked();
+  await expect(viewer).toHaveAttribute("data-symmetry-drawn", String(await elements.count()));
+  await page.getByTestId("symmetry-toggle").uncheck();
+  if ((await elements.count()) > 0) {
+    const first = elements.first();
+    await first.click();
+    await expect(first).toHaveAttribute("aria-pressed", "true");
+    await expect(viewer).toHaveAttribute("data-symmetry-drawn", "1");
+  }
+  await page.getByTestId("pointgroup-classes").check();
+  await expect(viewer).toHaveAttribute("data-symmetry-classes", "true");
+  await page.getByTestId("symmetry-toggle").check();
+  const box = await viewer.boundingBox();
+  if (box) {
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx + 40, cy + 90, { steps: 8 });
+    await page.mouse.up();
+  }
+  await shot(page, "workbench", "pointgroup-workbench.png");
+  await shot(page, "pointgroup-section", "pointgroup-section.png");
+  await shot(page, "wb-viewer-panel", "pointgroup-3d.png");
+  for (const preset of PRESETS) {
+    await applyPreset(page, preset);
+    for (const width of [1024, 1440]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await expect.poll(() => layoutOverflow(page), { message: `overflow at ${width} px, preset ${preset}` }).toEqual([]);
+    }
+  }
+  await applyPreset(page, "default");
+  await page.getByTestId("pointgroup-tolerance").fill("0.01");
+  await expect(group).toHaveAttribute("data-tolerance", "0.01", { timeout: 60_000 });
+  console.log(`[workbench] point group at 0.01 Å: ${await group.getAttribute("data-point-group")}`);
+  await shot(page, "pointgroup-section", "pointgroup-section-0.01.png");
+});
+
+// Labels and fragments: the Boc-alanine ammonium salt after Clean has its NH4+ spread away from
+// the anion as a second undo step (sketch-depict-report data-tidied), and no label overlap is
+// left (sketch-canvas data-label-issues) in Screen, ACS 1996 or Total synthesis; one undo puts
+// the ion back where Clean left it, which enables the Tidy button, and Tidy separates them again.
+test("labels: the Boc-alanine NH4+ salt after Clean has no label overlaps in any style; Tidy fragments", async ({ page, request }) => {
+  test.setTimeout(180_000);
+  await openWorkbench(page, request);
+  const sketch = page.getByTestId("sketch");
+  await importSmiles(page, "C[C@H](NC(=O)OC(C)(C)C)C(=O)[O-].[NH4+]");
+  await expect(sketch).toHaveAttribute("data-fragments", "2");
+  const smiles = await settledSmiles(page);
+  await page.getByTestId("sketch-clean").click();
+  await expect(sketch).toHaveAttribute("data-busy", "false");
+  const report = page.getByTestId("sketch-depict-report");
+  await expect(report).toHaveAttribute("data-kind", "clean");
+  const tidied = await report.getAttribute("data-tidied");
+  console.log(`[workbench] Clean of the salt: tidied ${tidied}`);
+  await expect(sketch).toHaveAttribute("data-fragments-touch", "false");
+  await expect(page.getByTestId("sketch-tidy")).toBeDisabled();
+  for (const style of ["screen", "acs1996", "total-synthesis"]) {
+    await page.getByTestId("sketch-style").selectOption(style);
+    await page.getByTestId("sketch-fit").click();
+    await expect(page.getByTestId("sketch-canvas")).toHaveAttribute("data-label-issues", "0");
+    await shot(page, "wb-panel-sketch", `labels-bocala-${style}.png`);
+  }
+  if (tidied === "true") {
+    await page.getByTestId("sketch-undo").click();
+    await expect(sketch).toHaveAttribute("data-fragments-touch", "true");
+    await page.getByTestId("sketch-tidy").click();
+    await expect(sketch).toHaveAttribute("data-fragments-touch", "false");
+  }
+  expect(await settledSmiles(page)).toBe(smiles);
+});
+
+// The orbital level diagram: zoom in / out by the buttons and the wheel change the visible energy
+// range (data-lo / data-hi / data-span), fit-all and the frontier window set the window, the
+// degeneracy threshold regroups the levels (data-groups) and is kept after a reload, and a click
+// on a level still selects it (data-selected) after zooming and dragging.
+test("level diagram: zoom, pan, fit, degeneracy threshold, level click", async ({ page, request }) => {
+  test.setTimeout(300_000);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openWorkbench(page, request);
+  await importSmiles(page, "CCO");
+  await expect(page.locator('[data-testid=sketch][data-smiles="CCO"]')).toBeVisible();
+  await page.getByTestId("wb-compute").click();
+  await expect(page.locator("[data-testid=wb-status][data-status=ready]")).toBeVisible({ timeout: 180_000 });
+  const fig = page.getByTestId("level-diagram");
+  await expect(page.locator("[data-testid^=level-][data-frontier=homo]").first()).toBeAttached({ timeout: 120_000 });
+  const span = async () => Number(await fig.getAttribute("data-span"));
+  const range = async () => `${await fig.getAttribute("data-lo")}..${await fig.getAttribute("data-hi")}`;
+  const s0 = await span();
+  await page.getByTestId("level-zoom-in").click();
+  await expect.poll(span).toBeLessThan(s0 * 0.9);
+  const s1 = await span();
+  await page.getByTestId("level-zoom-out").click();
+  await page.getByTestId("level-zoom-out").click();
+  await expect.poll(span).toBeGreaterThan(s1 * 1.2);
+  const svg = page.getByTestId("level-svg");
+  const box = await svg.boundingBox();
+  if (!box) throw new Error("no level svg box");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  const before = await span();
+  await page.mouse.wheel(0, -400);
+  await expect.poll(span).toBeLessThan(before);
+  const r0 = await range();
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 60, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(range).not.toBe(r0);
+  await page.getByTestId("level-fit").click();
+  await expect(fig).toHaveAttribute("data-window", "all");
+  await expect(page.getByTestId("window-select")).toHaveValue("all");
+  await page.getByTestId("level-frontier").click();
+  await expect(fig).toHaveAttribute("data-window", "frontier");
+  await shot(page, "wb-panel-orbitals", "levels-frontier.png");
+
+  const groups = async () => Number(await fig.getAttribute("data-groups"));
+  const input = page.getByTestId("degeneracy-threshold");
+  await expect(input).toHaveValue("0.05");
+  const g005 = await groups();
+  await input.fill("0.5");
+  await expect(fig).toHaveAttribute("data-threshold", "0.5");
+  const g05 = await groups();
+  await input.fill("0.001");
+  await expect(fig).toHaveAttribute("data-threshold", "0.001");
+  const g0001 = await groups();
+  console.log(`[workbench] degenerate groups: 0.001 eV ${g0001}, 0.05 eV ${g005}, 0.5 eV ${g05}`);
+  expect(g05).toBeLessThan(g005);
+  expect(g0001).toBeGreaterThanOrEqual(g005);
+  await input.fill("0.5");
+  await expect(fig).toHaveAttribute("data-threshold", "0.5");
+
+  await page.getByTestId("level-zoom-in").click();
+  const homo = page.locator("[data-testid^=level-][data-frontier=homo]").first();
+  await homo.click();
+  await expect(homo).toHaveAttribute("data-selected", "true");
+  await shot(page, "wb-panel-orbitals", "levels-threshold-0.5.png");
+
+  await page.reload();
+  await expect(page.locator("[data-testid=wb-status][data-status=ready]")).toBeVisible({ timeout: 180_000 });
+  await expect(page.getByTestId("degeneracy-threshold")).toHaveValue("0.5", { timeout: 60_000 });
+  await expect(page.getByTestId("level-diagram")).toHaveAttribute("data-groups", String(g05));
+});

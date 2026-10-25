@@ -7,7 +7,7 @@
 // <div data-testid="sketch-depict-report" data-kind (clean | project) data-method data-template
 // data-stereo (none | kept | mismatch) data-score data-label-overlaps data-close-contacts
 // data-crossings data-view-residual data-fallback (true when the browser laid it out)
-// data-error>; with R/S on, <span data-testid="sketch-cip-list" data-count> ("C3 R · C1=C2 E";
+// data-error data-tidied (fragments spread apart after the layout, a second undo step)>; with R/S on, <span data-testid="sketch-cip-list" data-count> ("C3 R · C1=C2 E";
 // "?" marks a possible stereocentre the drawing leaves undefined); with radicals drawn,
 // <span data-testid="sketch-radical-note" data-electrons>.
 import type { SketchInfo } from "./useSketchInfo";
@@ -17,8 +17,12 @@ import { cipText, type CipItem } from "./cip";
 function describe(r: LayoutReport): string {
   const what = r.kind === "project" ? "3D→2D" : "Clean";
   if (r.error) return `${what} failed: ${r.error}`;
-  if (!r.result) return `${what}: ${r.fallback ?? ""}`;
-  const o = r.result;
+  const tidied = r.tidied ? " · fragments spread apart (undo once to keep them where Clean put them)" : "";
+  if (!r.result) return `${what}: ${r.fallback ?? ""}${tidied}`;
+  return describeResult(r.result, what) + tidied;
+}
+
+function describeResult(o: NonNullable<LayoutReport["result"]>, what: string): string {
   const d = o.defects;
   const how = o.template ? `${o.style} template ${o.template}` : o.method;
   const fit = o.view_residual === null ? "" : ` · view fit ${o.view_residual.toFixed(2)}`;
@@ -48,6 +52,7 @@ function DepictReport({ r }: { r: LayoutReport }) {
       data-view-residual={o?.view_residual ?? ""}
       data-fallback={r.fallback ? "true" : "false"}
       data-error={r.error ?? ""}
+      data-tidied={r.tidied ? "true" : "false"}
     >
       {describe(r)}
     </div>

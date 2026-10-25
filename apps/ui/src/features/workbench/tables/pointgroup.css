@@ -1,0 +1,72 @@
+/* The point group in the Properties Global tab (PointGroupSection.tsx). Everything wraps:
+   no control may stick out of the panel. */
+.wb-pg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.wb-pg-bar,
+.wb-pg-head,
+.wb-pg-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.wb-pg-chips {
+  gap: 4px;
+}
+
+.wb-pg-tol input {
+  width: 5.5em;
+  min-width: 0;
+}
+
+.wb-pg-symbol {
+  font-size: 20px;
+  font-weight: 600;
+  font-family: "Times New Roman", Times, serif;
+  font-style: italic;
+}
+
+.wb-pg-symbol sub {
+  font-style: italic;
+}
+
+.wb-pg-chip {
+  font: inherit;
+  font-size: 12px;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--fg);
+  cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.wb-pg-chip.principal {
+  font-weight: 600;
+}
+
+.wb-pg-chip.active {
+  border-color: var(--wb-gold, #f2c200);
+  background: color-mix(in srgb, var(--wb-gold, #f2c200) 30%, transparent);
+}
+
+.wb-pg-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: baseline;
+}

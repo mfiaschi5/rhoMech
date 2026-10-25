@@ -1278,3 +1278,47 @@ export interface Depict2DOut {
   version: number;
   molecule_id: string | null;
 }
+
+export interface SymmetryElementOut {
+  id: string;
+  kind: "C" | "S" | "sigma" | "i";
+  label: string;
+  order: number | null;
+  vector: [number, number, number] | null;
+  point: [number, number, number];
+  atoms: number[];
+  deviation_ang: number;
+  principal: boolean;
+  n_operations: number;
+}
+
+export interface SymmetryClassOut {
+  element: string;
+  atoms: number[];
+}
+
+export interface PointGroupLooserOut {
+  point_group: string;
+  order: number | null;
+  tolerance: number;
+}
+
+export interface PointGroupOut {
+  molecule_id: string;
+  key: string;
+  tolerance: number;
+  point_group: string;
+  order: number | null;
+  top: "atom" | "linear" | "spherical" | "symmetric" | "asymmetric";
+  moments: [number, number, number];
+  n_atoms: number;
+  centre: [number, number, number];
+  elements: SymmetryElementOut[];
+  classes: SymmetryClassOut[];
+  rms_ang: number;
+  max_deviation_ang: number;
+  symmetrized_xyz: [number, number, number][];
+  looser: PointGroupLooserOut | null;
+  notes: string[];
+  qm_digest: string;
+}

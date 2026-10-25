@@ -33,7 +33,8 @@ def test_ts_models_cover_every_model_of_the_module():
     }
     public = {n for n in defined if not n.startswith("_")}
     assert {m.__name__ for m in schemas.TS_MODELS} == public
-    assert len(public) == 105  # 84: CapabilityOut (spec v8 port); +15: workbench; +6: depict2d
+    assert len(public) == 109  # 84: CapabilityOut (spec v8 port); +15: workbench; +6: depict2d;
+    # +4: point group
 
 
 def test_every_ts_model_is_an_interface():

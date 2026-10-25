@@ -11,17 +11,31 @@ here first, so a cached result never touches the scheduler. The geometry is read
 
 The 2D depiction (`depict2d_out`, RDKit only, in the API process) reads the record geometry
 the same way for a 3D->2D drawing and never featurizes.
+
+The point group (`symmetry_out`, numpy in the API process, `symmetry.py`) reads the record
+geometry like /geometry (featurizing first when the record is missing) and is memoized per
+(molecule, tolerance, QM record digest).
 """
 
 from __future__ import annotations
 
 import json
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from ksmech.serve import densities, depiction2d, geometry, molecule, orbital_sets, properties
+from ksmech.serve import (
+    densities,
+    depiction2d,
+    geometry,
+    molecule,
+    orbital_sets,
+    properties,
+    symmetry,
+)
 from ksmech.serve import schemas as S
 from ksmech.serve.context import ApiContext
 from ksmech.serve.errors import Code, ServeError
@@ -264,3 +278,45 @@ def depict2d_out(ctx: ApiContext, body: S.Depict2DIn) -> S.Depict2DOut:
     ref = _record_xyz(ctx, body.molecule_id, drawn)
     out = depiction2d.match3d(mol, raw, ref, body.view.quaternion, body.style)
     return S.Depict2DOut(**out, molecule_id=body.molecule_id)
+
+
+# ---- point group
+
+SYMMETRY_CACHE_SIZE = 128
+_SYMMETRY: OrderedDict[tuple, dict] = OrderedDict()
+_SYMMETRY_LOCK = threading.Lock()
+
+
+def _symmetry_body(qm_path: Path, tolerance: float) -> dict:
+    with np.load(qm_path, allow_pickle=False) as z:
+        zs = np.asarray(z["atomic_numbers"], dtype=int)
+        xyz = np.asarray(z["coords_ang"], dtype=float).reshape(-1, 3)
+    try:
+        return symmetry.point_group(zs, xyz, tolerance)
+    except symmetry.SymmetryError as exc:
+        detail = {"n_atoms": len(zs), "max_atoms": symmetry.MAX_ATOMS, "tolerance": tolerance}
+        raise ServeError(exc.code, exc.message, detail=detail) from exc
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        raise ServeError(Code.SYMMETRY_FAILED, f"point-group search failed: {exc}") from exc
+
+
+def symmetry_out(ctx: ApiContext, mid: str, tolerance: float | None = None) -> S.PointGroupOut:
+    """GET /molecule/{id}/symmetry?tolerance=: the Schoenflies point group of the record."""
+    tol = symmetry.DEFAULT_TOLERANCE if tolerance is None else float(tolerance)
+    if not symmetry.MIN_TOLERANCE <= tol <= symmetry.MAX_TOLERANCE:
+        msg = f"tolerance {tol} outside {symmetry.MIN_TOLERANCE}..{symmetry.MAX_TOLERANCE} Å"
+        raise ServeError(Code.REQUEST_INVALID, msg, detail={"tolerance": tol})
+    entry, qm_path = _qm(ctx, mid)
+    digest = file_digest(qm_path)
+    memo = (mid, round(tol, 4), digest)
+    with _SYMMETRY_LOCK:
+        body = _SYMMETRY.get(memo)
+        if body is not None:
+            _SYMMETRY.move_to_end(memo)
+    if body is None:
+        body = _symmetry_body(qm_path, tol)
+        with _SYMMETRY_LOCK:
+            _SYMMETRY[memo] = body
+            while len(_SYMMETRY) > SYMMETRY_CACHE_SIZE:
+                _SYMMETRY.popitem(last=False)
+    return S.PointGroupOut(molecule_id=mid, key=entry["key"], qm_digest=digest, **body)

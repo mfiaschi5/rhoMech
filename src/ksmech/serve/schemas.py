@@ -1416,6 +1416,54 @@ class Depict2DOut(_Out):
     molecule_id: str | None
 
 
+class SymmetryElementOut(_Out):
+    """One symmetry element of the point group, in the QM record's frame."""
+
+    id: str  # e0, e1, ... (stable for one response)
+    kind: Literal["C", "S", "sigma", "i"]  # proper axis, improper axis, mirror, inversion
+    label: str  # C3, C2′, C∞, S4, σh, σv, σd, σ, ∞σv, i
+    order: int | None  # n of C_n / S_n; None for a mirror, i and C∞
+    vector: tuple[float, float, float] | None  # unit axis or plane normal; None for i
+    point: tuple[float, float, float]  # the centre of mass, on every element
+    atoms: list[int]  # record atoms on the element within the tolerance
+    deviation_ang: float  # the largest atom residual of its operations
+    principal: bool
+    n_operations: int  # group operations about this element (0: an infinite family)
+
+
+class SymmetryClassOut(_Out):
+    element: str
+    atoms: list[int]  # symmetry-equivalent record atoms (an orbit of the group)
+
+
+class PointGroupLooserOut(_Out):
+    point_group: str
+    order: int | None
+    tolerance: float  # the smallest hint tolerance that gives it
+
+
+class PointGroupOut(_Out):
+    """GET /molecule/{id}/symmetry: the Schoenflies point group of the record geometry."""
+
+    molecule_id: str
+    key: str
+    tolerance: float  # Angstrom: every atom maps within it onto an atom of the same element
+    point_group: str  # Schoenflies symbol: C1, Cs, C2v, D6h, Td, Ih, C∞v, D∞h, ...
+    order: int | None  # None: an infinite group (linear, atom)
+    top: Literal["atom", "linear", "spherical", "symmetric", "asymmetric"]
+    moments: tuple[float, float, float]  # principal moments of inertia, amu Å², ascending
+    n_atoms: int
+    centre: tuple[float, float, float]  # centre of mass, record frame
+    elements: list[SymmetryElementOut]
+    classes: list[SymmetryClassOut]
+    rms_ang: float  # RMS displacement of the symmetrized structure from the record
+    max_deviation_ang: float
+    symmetrized_xyz: list[tuple[float, float, float]]  # record atom order
+    looser: PointGroupLooserOut | None  # a higher group at a looser tolerance, if any
+    notes: list[str]
+    qm_digest: str
+
+
 # ---- the TypeScript mirror
 
 TS_MODELS: list[type[BaseModel]] = [

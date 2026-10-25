@@ -6,14 +6,15 @@
 // the selected-orbital surface layer.
 //
 // Props besides the pickers': infoOpen / onInfoToggle (the layout state keeps it), height (the
-// diagram's height; the list scrolls within it).
+// diagram's height; the list scrolls within it), degeneracyEv / onDegeneracy (the level
+// diagram's degeneracy threshold, kept with the layout preferences).
 //
 // DOM: <div data-testid="wb-orbitals" data-info="open|closed">, set-select, start-select,
 // window-select, <div data-testid="orbital-body">, the diagram (LevelDiagram.tsx), <button
 // data-testid="orbital-info-toggle" aria-expanded>, <div data-testid="orbital-info"> (hidden when
 // folded) with <div data-testid="orbital-list"> of <tr data-testid="orbital-row" data-set
 // data-index data-selected data-frontier>.
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import type { ApiError } from "../../../api/client";
 import type { PendingCached } from "../../../api/hooks";
 import type { OrbitalRowOut, OrbitalSetOut } from "../../../api/types.gen";
@@ -22,7 +23,8 @@ import { fmt, moLabel } from "../../../components/format";
 import { PendingNote } from "../../../components/PendingNote";
 import { CANONICAL, FALLBACK_SETS, FALLBACK_STARTS } from "../params";
 import { LevelDiagram } from "./LevelDiagram";
-import { frontierLabel, type Window } from "./levels";
+import { frontierLabel, sanitizeDegeneracy, type Window } from "./levels";
+import { PREFS_KEY, readJson, writeJson } from "../layout/storage";
 
 export interface OrbitalPanelProps {
   set: string;
@@ -40,6 +42,11 @@ export interface OrbitalPanelProps {
   onInfoToggle(): void;
   /** Diagram height (px); the list scrolls within it. */
   height: number;
+  /** The degeneracy threshold (eV) of the level diagram, persisted by the page with the layout
+   *  preferences (Prefs.degeneracyEv). Without these two the panel keeps it itself and merges it
+   *  into the stored preferences. */
+  degeneracyEv?: number;
+  onDegeneracy?(ev: number): void;
 }
 
 const SET_LABELS: Record<string, string> = { canonical: "canonical MOs", ibo: "IBO", pm_mulliken: "Pipek-Mezey (Mulliken)" };
@@ -167,12 +174,26 @@ function InfoToggle({ open, onToggle }: { open: boolean; onToggle(): void }) {
   );
 }
 
+/** The threshold: the page's (props), else own state read from and merged into the stored
+ *  preferences (the same key and field the page's usePrefs writes). */
+function useDegeneracy(p: OrbitalPanelProps): [number, (ev: number) => void] {
+  const [own, setOwn] = useState<number>(() => sanitizeDegeneracy((readJson(PREFS_KEY) as { degeneracyEv?: unknown } | null)?.degeneracyEv));
+  if (p.degeneracyEv !== undefined && p.onDegeneracy) return [p.degeneracyEv, p.onDegeneracy];
+  const set = (ev: number) => {
+    setOwn(ev);
+    const cur = readJson(PREFS_KEY);
+    writeJson(PREFS_KEY, { ...(cur && typeof cur === "object" ? cur : {}), degeneracyEv: ev });
+  };
+  return [own, set];
+}
+
 export function OrbitalPanel(p: OrbitalPanelProps) {
   const data = p.shown.data;
   const sets = data?.sets ?? p.canonical.data?.sets ?? FALLBACK_SETS;
   const starts = data?.starts ?? p.canonical.data?.starts ?? FALLBACK_STARTS;
   const lmo = p.set !== CANONICAL;
   const open = p.infoOpen;
+  const [degeneracy, setDegeneracy] = useDegeneracy(p);
   return (
     <div className="wb-orbitals" data-testid="wb-orbitals" data-info={open ? "open" : "closed"} style={{ "--wb-orbitals-h": `${p.height}px` } as CSSProperties}>
       <Pickers p={p} sets={sets} starts={starts} />
@@ -180,7 +201,7 @@ export function OrbitalPanel(p: OrbitalPanelProps) {
       <div className={`wb-orbital-body${open ? "" : " folded"}`} data-testid="orbital-body">
         <div className="wb-orbital-diagram">
           {p.canonical.data && (
-            <LevelDiagram canonical={p.canonical.data.orbitals} lmos={lmo ? (data?.set === p.set ? data.orbitals : null) : null} selected={p.selected} window={p.window} onPickCanonical={p.onPickCanonical} onPickLmo={p.onPick} height={p.height} />
+            <LevelDiagram canonical={p.canonical.data.orbitals} lmos={lmo ? (data?.set === p.set ? data.orbitals : null) : null} selected={p.selected} window={p.window} onPickCanonical={p.onPickCanonical} onPickLmo={p.onPick} height={p.height} onWindow={p.onWindow} degeneracyEv={degeneracy} onDegeneracy={setDegeneracy} />
           )}
         </div>
         <InfoToggle open={open} onToggle={p.onInfoToggle} />

@@ -35,9 +35,16 @@ import { along, bondMarkAt, boxExit, freeAngle, markDistance, radicalDots, taken
 // @ts-ignore TS5097: see above
 import { screenMetrics } from "./style.ts";
 // @ts-ignore TS5097: see above
-import { CAP_HEIGHT_EM, textWidthEm } from "./fontMetrics.ts";
+import { CAP_HEIGHT_EM } from "./fontMetrics.ts";
+// @ts-ignore TS5097: see above
+import { FONT_PX, hLabelWidth, labelBox, labelHalfWidth, metricsOf, type FontArg } from "./labelGlyphs.ts";
+// @ts-ignore TS5097: see above
+import { atomInk, endTrim, placeLabels, type LabelIssue, type PlacementBond } from "./labelLayout.ts";
 
-export const FONT_PX = 13;
+export { FONT_PX };
+// @ts-ignore TS5097: see above
+export { chargeAnchor, chargeWidth, hLabelWidth, labelBox, labelGlyphs, labelHalfWidth, type Glyph } from "./labelGlyphs.ts";
+export type { LabelIssue } from "./labelLayout.ts";
 /** Clearance (px) of the Screen style between the front bond's outline and the broken bond. */
 export const BREAK_GAP_PX = 3.2;
 /** The bond length (px) the mark sizes of marks.ts are drawn for (Screen at 100 %). */
@@ -54,6 +61,9 @@ export interface SceneOptions {
   labelStyle?: LabelStyle;
   /** CIP labels to draw (null: none). */
   cip?: StereoLabels | null;
+  /** Collision-aware label placement (labelLayout.ts); false keeps ChemDraw's default
+   *  placement (fragments.ts measures with it). Default true. */
+  placeLabels?: boolean;
 }
 
 /** A small text mark (a CIP label) at a point. */
@@ -62,7 +72,9 @@ export interface Mark {
   at: Vec;
 }
 
-export type ChargeSlot = "ur" | "ul" | "lr" | "ll";
+/** Charge positions: the four corners (ChemDraw's), and above, below, right or left of the
+ *  symbol (the placement's fallbacks in crowded spots). */
+export type ChargeSlot = "ur" | "ul" | "lr" | "ll" | "u" | "d" | "r" | "l";
 export type HSide = "left" | "right" | "above" | "below";
 
 export interface AtomLabel {
@@ -74,6 +86,10 @@ export interface AtomLabel {
   charge: string;
   /** Where the charge sign sits: upper right unless a bond or the H count is there. */
   chargeSlot?: ChargeSlot;
+  /** Subscript and charge size factor set by the placement (labelLayout.ts; 1 when absent). */
+  scale?: number;
+  /** Render-only displacement of the whole label (output units), drawn with a leader. */
+  offset?: Vec;
 }
 
 export interface Seg {
@@ -94,6 +110,8 @@ export interface AtomScene {
   /** Centres of the radical dots; empty without unpaired electrons. */
   dots: Vec[];
   cip?: Mark;
+  /** The leader from the atom point to a displaced label. */
+  leader?: Seg;
 }
 
 export interface BondScene {
@@ -113,11 +131,13 @@ export interface Scene {
   metrics: DrawMetrics;
   /** Radius of a radical dot. */
   dotR: number;
+  /** Label overlaps the placement could not remove (labelLayout.ts). */
+  issues: LabelIssue[];
 }
 
 const H_LEFT_WHEN_ALONE = new Set(["O", "S", "Se", "F", "Cl", "Br", "I"]);
 const DEG = Math.PI / 180;
-const SLOT_ANGLE: Record<ChargeSlot, number> = { ur: -45 * DEG, ul: -135 * DEG, lr: 45 * DEG, ll: 135 * DEG };
+const SLOT_ANGLE: Record<ChargeSlot, number> = { ur: -45 * DEG, ul: -135 * DEG, lr: 45 * DEG, ll: 135 * DEG, u: -90 * DEG, d: 90 * DEG, r: 0, l: 180 * DEG };
 const SLOTS: ChargeSlot[] = ["ur", "ul", "lr", "ll"];
 const H_ANGLE: Record<HSide, number> = { right: 0, left: Math.PI, above: -90 * DEG, below: 90 * DEG };
 
@@ -172,98 +192,6 @@ export function atomLabel(m: SketchModel, atom: SketchAtom, hCount: number, view
   if (!charge) return { el: atom.el, hCount, hSide, charge };
   const taken = hCount > 0 ? [...bonds, H_ANGLE[hSide]] : bonds;
   return { el: atom.el, hCount, hSide, charge, chargeSlot: chargeSlot(taken) };
-}
-
-type FontArg = number | DrawMetrics;
-const metricsOf = (f: FontArg | undefined): DrawMetrics => (typeof f === "object" ? f : screenMetrics(f ?? FONT_PX));
-
-/** Half the width of an element symbol: Helvetica metrics for publication fonts, else the
- *  UI-font estimate (capital ~0.62 em, lowercase ~0.5 em). */
-export function labelHalfWidth(el: string, f: FontArg = FONT_PX): number {
-  const M = metricsOf(f);
-  return M.metricText ? (textWidthEm(el) * M.font) / 2 : ((0.62 + 0.5 * (el.length - 1)) * M.font) / 2;
-}
-
-const hWidth = (M: DrawMetrics) => (M.metricText ? textWidthEm("H") * M.font : M.font * 0.68);
-const digitsWidth = (n: number, M: DrawMetrics) => (n <= 1 ? 0 : M.metricText ? textWidthEm(String(n)) * M.sub : M.font * 0.45);
-
-/** Width of the H part of a label ("H", "H2"...); 0 without H. */
-export function hLabelWidth(hCount: number, f: FontArg = FONT_PX): number {
-  const M = metricsOf(f);
-  return hCount > 0 ? hWidth(M) + digitsWidth(hCount, M) : 0;
-}
-
-/** One glyph run of a label: start x and baseline y about the atom (y down), and its size. */
-export interface Glyph {
-  text: string;
-  x: number;
-  y: number;
-  size: number;
-  kind: "symbol" | "h" | "count" | "charge";
-}
-
-/** Baseline offset that puts the middle of a capital on the atom point. */
-const baseline = (size: number) => (CAP_HEIGHT_EM / 2) * size;
-
-/** Where the charge sign starts (x, about the atom) and its vertical centre (y, down). */
-export function chargeAnchor(label: AtomLabel, f: FontArg = FONT_PX): Vec {
-  const M = metricsOf(f);
-  const half = labelHalfWidth(label.el, M);
-  const hw = hLabelWidth(label.hCount, M);
-  const slot = label.chargeSlot ?? "ur";
-  const y = slot[0] === "u" ? -M.font * 0.55 : M.font * 0.55;
-  if (slot[1] === "r") return [half + (label.hSide === "right" ? hw : 0) + chargeGap(M), y];
-  return [-half - (label.hSide === "left" ? hw : 0) - chargeGap(M) - chargeWidth(label, M), y];
-}
-
-/** Gap between the symbol (or its H) and the charge sign. */
-const chargeGap = (M: DrawMetrics) => (M.metricText ? M.font * 0.04 : 1);
-
-/** Width of the charge mark (text, or the circled sign). */
-export function chargeWidth(label: AtomLabel, f: FontArg = FONT_PX): number {
-  const M = metricsOf(f);
-  if (M.chargePlacement === "circled" && label.charge.length === 1) return M.charge * 1.1;
-  return M.metricText ? textWidthEm(label.charge) * M.charge : label.charge.length * M.charge * 0.62;
-}
-
-/** The glyph runs of a label (symbol, H, H count, charge) about the atom. SketchCanvas and
- *  the export both draw these, so the screen and the files agree. */
-export function labelGlyphs(label: AtomLabel, f: FontArg = FONT_PX): Glyph[] {
-  const M = metricsOf(f);
-  const half = labelHalfWidth(label.el, M);
-  const base = baseline(M.font);
-  const out: Glyph[] = [{ text: label.el, x: -half, y: base, size: M.font, kind: "symbol" }];
-  if (label.hCount > 0) {
-    const hw = hLabelWidth(label.hCount, M);
-    const pos: Record<HSide, Vec> = {
-      right: [half, base],
-      left: [-half - hw, base],
-      above: [-hw / 2, base - M.font * 0.95],
-      below: [-hw / 2, base + M.font * 0.95],
-    };
-    const [x, y] = pos[label.hSide];
-    out.push({ text: "H", x, y, size: M.font, kind: "h" });
-    if (label.hCount > 1) out.push({ text: String(label.hCount), x: x + hWidth(M), y: y + M.font * 0.3, size: M.sub, kind: "count" });
-  }
-  if (label.charge) {
-    const [cx, cy] = chargeAnchor(label, M);
-    out.push({ text: label.charge, x: cx, y: cy + baseline(M.charge), size: M.charge, kind: "charge" });
-  }
-  return out;
-}
-
-/** The box (about the atom, y down) of everything a label draws. */
-export function labelBox(label: AtomLabel, f: FontArg = FONT_PX): { x0: number; x1: number; y0: number; y1: number } {
-  const M = metricsOf(f);
-  const box = { x0: Infinity, x1: -Infinity, y0: -M.font * 0.5, y1: M.font * 0.5 };
-  for (const g of labelGlyphs(label, M)) {
-    const w = g.kind === "charge" ? chargeWidth(label, M) : g.kind === "count" ? digitsWidth(label.hCount, M) : g.kind === "h" ? hWidth(M) : labelHalfWidth(label.el, M) * 2;
-    box.x0 = Math.min(box.x0, g.x);
-    box.x1 = Math.max(box.x1, g.x + w);
-    box.y0 = Math.min(box.y0, g.y - g.size * 0.86);
-    box.y1 = Math.max(box.y1, g.y + g.size * (g.kind === "count" ? 0.2 : 0.14));
-  }
-  return box;
 }
 
 /** How far a bond leaving a labelled atom at screen angle `angle` (radians, y down) stops short
@@ -494,33 +422,66 @@ function atomMarks(m: SketchModel, s: AtomScene, pos: (id: number) => Vec, M: Dr
   return { dots, cip: { text: `(${code})`, at: along(s.at, a, markDistance(box, a, M.font * 0.54, k)) } };
 }
 
+/** Half the lateral extent of what a bond draws (its lines' outer edges, a wedge's wide end):
+ *  the bond-end trims clear the labels across this width. */
+function lateralHalf(b: Pick<SketchBond, "order" | "stereo">, side: -1 | 0 | 1, M: DrawMetrics): number {
+  if (b.order === 3 || (b.order === 2 && side !== 0)) return M.doubleGap + M.line / 2;
+  if (b.order === 2) return M.doubleGap / 2 + M.line / 2;
+  return b.stereo === "wedge" || b.stereo === "hash" ? M.bold / 2 : M.line / 2;
+}
+
+const lateralsOf = (h: number) => [-h, -h / 2, 0, h / 2, h];
+
+/** The labels as ChemDraw would place them, before the collision-aware placement. */
+function defaultAtoms(m: SketchModel, view: View, hCounts: ReadonlyMap<number, number> | null, pos: (id: number) => Vec, rules: LabelRules): AtomScene[] {
+  return m.atoms.map((atom) => {
+    const h = hCounts?.get(atom.id) ?? fallbackHCount(atom.el, atom.charge, bondOrderSum(m, atom.id), atom.radical ?? 0);
+    return { atom, at: pos(atom.id), label: atomLabel(m, atom, h, view, rules), dots: [] };
+  });
+}
+
+/** The bonds as the placement sees them: axes trimmed at the default labels' symbols. */
+function placementBonds(m: SketchModel, pos: (id: number) => Vec, labels: Map<number, AtomLabel | null>, sides: Map<number, -1 | 0 | 1>, M: DrawMetrics): PlacementBond[] {
+  return m.bonds.map((b) => {
+    const [p, q] = [pos(b.a), pos(b.b)];
+    const ang = Math.atan2(q[1] - p[1], q[0] - p[0]);
+    const seg = trimmed(p, q, labelTrim(labels.get(b.a) ?? null, M, ang), labelTrim(labels.get(b.b) ?? null, M, ang + Math.PI));
+    return { a: b.a, b: b.b, p: seg.p, q: seg.q, half: lateralHalf(b, sides.get(b.id) ?? 0, M) };
+  });
+}
+
+const unplaced = (atoms: AtomScene[]) => ({ labels: new Map(atoms.map((s) => [s.atom.id, s.label])), leaders: new Map<number, Seg>(), issues: [] as LabelIssue[] });
+
 /** Everything to draw, in output units. `hCounts` (RDKit's, by atom id) wins over the default
- *  valence fallback. Crossing breaks follow model.breakCrossings. */
+ *  valence fallback. Labels are placed collision-aware (labelLayout.ts) and the bonds stop at
+ *  their ink. Crossing breaks follow model.breakCrossings. */
 export function buildScene(m: SketchModel, view: View, hCounts: ReadonlyMap<number, number> | null, opts: SceneOptions = {}): Scene {
   const M = opts.metrics ?? screenMetrics(opts.fontPx ?? FONT_PX);
   const cip = opts.cip ?? null;
   const rules: LabelRules = { style: opts.labelStyle, carbons: M.labelCarbons, methyls: M.labelMethyls };
   const at = new Map<number, Vec>(m.atoms.map((a) => [a.id, toScreen(view, [a.x, a.y])]));
   const pos = (id: number) => at.get(id) ?? ([0, 0] as Vec);
-  const atoms: AtomScene[] = m.atoms.map((atom) => {
-    const h = hCounts?.get(atom.id) ?? fallbackHCount(atom.el, atom.charge, bondOrderSum(m, atom.id), atom.radical ?? 0);
-    const s: AtomScene = { atom, at: pos(atom.id), label: atomLabel(m, atom, h, view, rules), dots: [] };
+  const sides = new Map(m.bonds.map((b) => [b.id, b.order === 2 ? doubleBondSide(m, b, pos, M.terminalDouble) : (0 as const)]));
+  const initial = defaultAtoms(m, view, hCounts, pos, rules);
+  const placed = opts.placeLabels === false ? unplaced(initial) : placeLabels(initial, placementBonds(m, pos, new Map(initial.map((s) => [s.atom.id, s.label])), sides, M), M);
+  const atoms: AtomScene[] = initial.map((s0) => {
+    const lead = placed.leaders.get(s0.atom.id);
+    const s: AtomScene = { ...s0, label: placed.labels.get(s0.atom.id) ?? s0.label, ...(lead ? { leader: lead } : {}) };
     return { ...s, ...atomMarks(m, s, pos, M, cip) };
   });
-  const labels = new Map(atoms.map((s) => [s.atom.id, s.label]));
+  const ink = new Map(atoms.map((s) => [s.atom.id, atomInk(s, M)]));
   const cuts = m.breakCrossings ? crossingCuts(m, view, pos, M) : new Map<number, Cut[]>();
   const bonds: BondScene[] = m.bonds.map((bond) => {
-    const p = pos(bond.a);
-    const q = pos(bond.b);
-    const side = bond.order === 2 ? doubleBondSide(m, bond, pos, M.terminalDouble) : 0;
-    const ang = Math.atan2(q[1] - p[1], q[0] - p[0]);
-    const tp = labelTrim(labels.get(bond.a) ?? null, M, ang);
-    const tq = labelTrim(labels.get(bond.b) ?? null, M, ang + Math.PI);
+    const [p, q] = [pos(bond.a), pos(bond.b)];
+    const side = sides.get(bond.id) ?? 0;
+    const lat = lateralsOf(lateralHalf(bond, side, M));
+    const tp = endTrim(p, q, ink.get(bond.a) ?? [], lat, M.margin);
+    const tq = endTrim(q, p, ink.get(bond.b) ?? [], lat, M.margin);
     const mine = cuts.get(bond.id) ?? [];
     const shape = breakShape(bondShape(p, q, bond, side, tp, tq, M), bond, trimmed(p, q, tp, tq), mine, M);
     const code = cip?.bonds.get(bond.id);
     const mark = code ? { cip: { text: `(${code})`, at: bondMarkAt(p, q, side, 10 * (M.bond / MARK_BOND_PX)) } } : {};
     return { bond, shape, axis: { p, q }, broken: mine.length, ...mark };
   });
-  return { atoms, bonds, fontPx: M.font, metrics: M, dotR: DOT_R_PX * (M.bond / MARK_BOND_PX) };
+  return { atoms, bonds, fontPx: M.font, metrics: M, dotR: DOT_R_PX * (M.bond / MARK_BOND_PX), issues: placed.issues };
 }

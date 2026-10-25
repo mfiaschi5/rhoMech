@@ -118,7 +118,20 @@ then look at it:
   undefined) and E/Z beside the stereo double bonds, plus a list in the info bar ("C2 S · C3=C4
   E"). They follow every edit; a flip keeps the stereoisomer, so the labels stay.
 - the orbital panel shows the energy-level diagram with the orbital list and set stats beside
-  it; the thin bar between them folds the list away (a narrow panel stacks them).
+  it; the thin bar between them folds the list away (a narrow panel stacks them). The diagram
+  fills its panel; the mouse wheel zooms about the cursor, dragging (or Shift+wheel) pans, a
+  double-click resets, the + / − / all / frontier buttons zoom, fit every level or show the
+  frontier window (+, −, 0 and the arrow keys when it has focus). Degenerate MOs sit side by
+  side with their occupation arrows, the HOMO−1 / HOMO / LUMO / LUMO+1 blocks are labelled
+  with their energies, and the "degenerate ≤" field (0.001–0.5 eV, default 0.05, the server's
+  value; kept with the preferences) regroups the levels and the frontier blocks.
+- atom labels are placed collision-aware in every drawing style, on the canvas and in the
+  SVG / PDF / PNG export and the chemfig hints: the H count and the charge move to a free side,
+  then the subscript and charge shrink, and as a last resort a terminal atom's label moves off
+  with a short leader (what still overlaps is counted in the canvas's data-label-issues).
+  Separate fragments (a salt's ions) that come too close are spread apart after every Clean,
+  as its own undo step, and by the Tidy fragments button (whole fragments move; bonds and
+  stereo never change).
 - a customizable layout: every panel (sketch, 3D view, orbitals, surfaces, properties) has a
   header that collapses it, hides it and moves it left, right, up or down (into a third column
   or the full-width row); drag the splitters between columns and under the sketch, the 3D view,
@@ -144,6 +157,15 @@ then look at it:
   chemfig" (`\usepackage{chemfig}` code that redraws the molecule natively). The thumbnail in
   the canvas corner is a drag handle carrying scheme.png, scheme.pdf and scheme.svg; what each
   target (Word, Overleaf, a file manager) accepts is listed in docs/decisions.md.
+- the point group (`GET /api/molecule/{id}/symmetry?tolerance=`, numpy in the API process): the
+  Global tab shows the Schoenflies symbol and order of the record geometry (C1 ... Ih, C∞v,
+  D∞h), a tolerance in Å (0.01–0.5, default 0.1: every atom must land within it of an atom of
+  the same element), the RMS of the symmetrized structure, a hint when a looser tolerance gives
+  a higher group ("would be Td at 0.30 Å", a click applies it), the symmetry elements (C_n with
+  C2′ / C2″, S_n, σh / σv / σd, i; a click highlights one in 3D) and the equivalent-atom
+  classes (a click selects them). The 3D toolbar's "symmetry" draws every axis (labelled rods),
+  mirror plane (translucent disc) and the inversion centre; "classes" colours the atoms by
+  class. The response also carries the symmetrized coordinates.
 
 Defaults and approximations: the density is valence-only on GFN2's minimal basis (an STO-nG
 fit, so its integral is shown next to N_valence), the ESP is an approximate point-charge

@@ -6,7 +6,8 @@
 // drawing when nothing is selected (transform.ts).
 //
 // DOM: sketch-undo, sketch-redo, sketch-clean, <select data-testid="sketch-clean-style">
-// (textbook | perspective), sketch-project (3D -> 2D; only with a projection source, disabled
+// (textbook | perspective), sketch-tidy (tidy fragments, only with two or more fragments: spread
+// touching fragments apart; disabled when none touch), sketch-project (3D -> 2D; only with a projection source, disabled
 // with the reason as data-reason and as the tooltip of sketch-project-wrap),
 // sketch-break-toggle [data-active aria-pressed], sketch-cip-toggle [data-active aria-pressed]
 // (R/S: CIP labels on the canvas and in the info bar), sketch-rotate-cw, sketch-rotate-ccw,
@@ -114,6 +115,14 @@ function CleanGroup(p: ToolbarProps) {
           </option>
         ))}
       </select>
+      {p.fragments > 1 &&
+        act("sketch-tidy", "Tidy fragments", p.onTidy, {
+          enabled: p.canTidy,
+          title: p.canTidy
+            ? "Tidy fragments: spread separate fragments (ions of a salt, counter-ions) apart so that none touches another; each moves as a whole (stereo and bonds unchanged). Also applied after Clean."
+            : "Tidy fragments: no fragments touch",
+          icon: "tidy",
+        })}
       {p.projection && <ProjectButton {...p.projection} />}
       <button
         type="button"

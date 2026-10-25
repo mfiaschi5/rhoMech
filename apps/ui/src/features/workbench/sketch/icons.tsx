@@ -14,6 +14,7 @@ const PATHS = {
   import: "M9 2 V11 M5.5 7.5 L9 11 L12.5 7.5 M3 12 V15.5 H15 V12",
   export: "M9 11 V2 M5.5 5.5 L9 2 L12.5 5.5 M3 12 V15.5 H15 V12",
   breaks: "M2 9 H16 M9 2 V6 M9 12 V16",
+  tidy: "M1.5 6 H6 V12 H1.5 Z M12 6 H16.5 V12 H12 Z M9 3 V15",
 } as const;
 
 export type IconName = keyof typeof PATHS;

@@ -484,6 +484,11 @@ export const getMoleculeGeometry = (mid: string, o?: RequestOptions) =>
 export const getMoleculeProperties = (mid: string, o?: RequestOptions) =>
   request<T.MoleculePropertiesOut>({ path: molecule(mid, "/properties") }, o);
 
+/** GET /molecule/{id}/symmetry?tolerance=: the Schoenflies point group of the record geometry
+ *  (tolerance in Å, 0.01..0.5, default 0.1 on the server). */
+export const getMoleculeSymmetry = (mid: string, tolerance: number | null, o?: RequestOptions) =>
+  request<T.PointGroupOut>({ path: molecule(mid, "/symmetry"), query: { tolerance } }, o);
+
 export interface OrbitalSetQuery {
   set?: string | null;
   start?: string | null;

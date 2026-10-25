@@ -4321,3 +4321,98 @@ view convention, the depth storage, the linking rule and the crossing breaks sti
     - Overleaf file tree: a drop uploads only if real File items arrive, which the in-browser
       test did not show. The reliable route is the PDF download plus Overleaf's upload, then
       "Copy LaTeX", or "Copy chemfig" with no file at all.
+
+## 2026-10-25 — Workbench point-group calculator
+
+- **What.** `GET /api/molecule/{id}/symmetry?tolerance=` (`PointGroupOut`) gives the
+  Schoenflies point group of the QM record geometry (`serve/symmetry.py`, numpy + scipy's
+  kd-tree and assignment solver, no new dependency; in the API process, memoized per molecule,
+  tolerance and record digest; at most 1000 atoms, LIMIT_EXCEEDED above; a numerical failure is
+  SYMMETRY_FAILED). The Global tab shows the group, its order, the tolerance, the elements and
+  the equivalent-atom classes; the 3D view draws the elements and colours the classes.
+- **Tolerance semantics.** An operation counts when it maps every atom within the tolerance
+  (Å, 0.01–0.5, default 0.1) of a distinct atom of the same element. Each operation is the
+  Kabsch fit (determinant fixed) to the permutation it induces, so a slightly-off candidate
+  axis is corrected before the test; products formed by the closure must pass the same test,
+  so the reported group is consistent at the stated tolerance. The 0.1 default absorbs
+  MMFF/GFN2 noise; a per-coordinate noise of 0.02 Å already pushes a 60-atom C60 below Ih at
+  0.1 Å (pair residuals reach about 0.1 Å), which is the semantics, not a bug.
+- **Algorithm.** Candidates come from the inertia axes, each equivalent-atom set's axes and
+  centroid, atom directions and pair midpoints / differences / plane normals (sets above 16
+  atoms use only pairs with three anchors); C_n (n <= 12), mirrors, S_2n and i are tested with
+  a probe-atom kd-tree prefilter. The group is a greedy closure, best deviation first, from six
+  seeds (the largest wins), keyed by (determinant, permutation), which is unique for any
+  non-linear structure (a planar one has E and σh with the same permutation, told apart by the
+  determinant). Linear structures (every atom within the tolerance of the least-inertia axis)
+  are C∞v / D∞h by an inversion test, outside the closure. The decision tree runs on the
+  closed group (counts of high-order axes, the principal axis, perpendicular C2 axes, σh,
+  vertical mirrors, S_2n) and the order is checked against the name (a note if it differs).
+  Element subscripts follow the conjugacy classes: in Dnh / Cnv with even n the vertical class
+  holding more atoms is σv, the other σd (σv / σv′ for n = 2); perpendicular C2 classes are C2′
+  and C2″; Oh mirrors normal to a C4 are σh.
+- **Symmetrized structure.** The group average of each atom's images, operations refitted to
+  the average three times; its RMS and largest displacement are reported. The hint repeats the
+  search at 0.05, 0.1, 0.15, 0.2, 0.3, 0.4 and 0.5 Å (up to 300 atoms) and reports the highest
+  group and its smallest such tolerance ("would be C2v at 0.15 Å").
+- **Not done.** No icosahedral/cubic subgroup orientation conventions (D2h axes are not named
+  x / y / z); C_n is capped at n = 12 (D∞h / C∞v are handled separately); the Hungarian
+  matching minimizes the summed squared distance, not the largest one, so a borderline case can
+  miss a bijection that a bottleneck matching would find.
+
+## 2026-10-25: Collision-aware atom labels, tidy fragments, zoomable level diagram
+
+- **Label placement is a render pass, not a model edit** (`sketch/labelLayout.ts`, run by
+  `drawing.buildScene`, so the canvas, the SVG / PDF / PNG export and the chemfig hints agree).
+  Each labelled atom starts from ChemDraw's choice; only when its ink collides with another
+  label, a bond or itself are alternatives scored: overlap (ink boxes from Helvetica metrics at
+  the style's size, `sketch/labelGlyphs.ts`) times 10^4 plus a small preference cost, so any
+  overlap-free option beats any preference. Order of resort: H side (right, left, above, below)
+  and charge slot (the four corners, then above / below / right / left), then subscript and
+  charge shrunk to 85 % and 72 % (never under the style editor's 40 % of the font), then a
+  render-only displacement of up to 0.9 font with a leader, for terminal or isolated atoms only
+  (bonds must still meet at a symbol), else the overlap is reported (`Scene.issues`,
+  `data-label-issues`). Clearances: another label at least max(margin, 0.2 font), a charge sign
+  0.3 font (a sign next to a foreign symbol reads as its charge), a bond 0.75 margin.
+- **Bond ends trim against the final ink** with the margin as a round-cornered band around each
+  glyph box, for every line of a multiple bond and both edges of a wedge (laterals of the
+  bond's half-width), instead of one ray exit from a symbol box: no stroke ever enters a label,
+  and diagonal bonds are not over-trimmed by box corners.
+- **The test metric** (`sceneOverlaps`): label-label (two atoms' ink boxes), label-self
+  (non-adjacent runs of one label) and label-bond (a drawn stroke with its width or a wedge
+  outline in an ink box), any positive area / length counts. Checked on Boc-Ala NH4+, alanine
+  zwitterion, glucose (ring and open chain) and sodium tosylate in Screen, ACS 1996 and Total
+  synthesis at three zooms, from RDKit.js layouts and from the server's Clean layouts recorded
+  in the test.
+- **Tidy fragments moves whole fragments in the model** (`sketch/fragments.ts`): a translation
+  per fragment keeps every bond, wedge and depth, hence topology and stereo (the test checks
+  RDKit's canonical isomeric SMILES). Clearance: half a bond length, at least one font size,
+  between the default-placed ink of the fragments (labels as ChemDraw places them, not after
+  the collision pass, which may have moved an H out of the way only because the ion was
+  there). The largest fragment stays; the others are pushed along the nearest-point direction.
+  It is measured in the current style and also in ACS 1996 and Total synthesis, so a salt
+  tidied on screen does not touch in a publication export. Applied after every Clean as its own
+  undo step (one undo keeps Clean's placement) and by the Tidy button, which shows only with
+  two or more fragments (it would otherwise widen every toolbar).
+- **chemfig hints follow the placement**: the H run goes on the drawn side (above / below fall
+  back to the bonds' rule: chemfig has no such form); a charge off the upper right becomes
+  `\charge{<angle>=$\scriptstyle±$}{X}` only where the H run is not, else the usual
+  superscript (a `\charge` on the symbol's node would sit on the H).
+- **Level diagram degeneracy is regrouped client-side** (`orbitals/levels.ts`) with the
+  server's own rules: `degenerate_levels` (a new level when an MO lies more than the threshold
+  above the level's first MO, ascending energy; not chaining) and `frontier_blocks` (HOMO =
+  highest-index MO with occupation >= 0.5, blocks within the threshold of the anchor, HOMO−1 /
+  LUMO+1 the next distinct level). At 0.05 eV both match the server. At large thresholds a
+  frontier block can straddle two drawn groups (the two rules differ); the label then states
+  the block's own size and mean energy. The threshold (0.001–0.5 eV) is `Prefs.degeneracyEv`.
+  WorkbenchPage was not changed in this task: OrbitalPanel takes `degeneracyEv` /
+  `onDegeneracy` props, and without them keeps its own state and merges the field into the
+  stored preferences (the page's `usePrefs` then rewrites its own copy on its next preference
+  change until the page passes `prefs.degeneracyEv` / `setPrefs`).
+- **Zoom model**: the visible range is the window's until the user zooms or pans, and returns
+  to it when the molecule, the orbital set or the window changes. Wheel = zoom about the cursor
+  (a non-passive listener, so the page neither scrolls nor zooms), Shift+wheel and drag = pan,
+  a click after a drag is swallowed so it does not select a level. The span is kept between
+  0.05 eV and 4x the spectrum, the centre inside it. Occupation arrows are drawn as paths
+  (not 8 px glyphs) and dropped where neighbouring levels are closer than 8 px (zoom shows
+  them); frontier labels are spread at least 15 px apart with dashed leaders; below 380 px
+  width the labels drop their energies.

@@ -3,12 +3,14 @@
 // (the export buttons stay together at the end of the last line).
 //
 // DOM: rep-select, h-toggle, label-select, colour-select, wiberg-toggle, centroid-toggle,
-// measure-select, quality-select, export-png, export-xyz, export-mol.
+// symmetry-toggle, symmetry-classes-toggle, measure-select, quality-select, export-png,
+// export-xyz, export-mol.
 import type { CubeQuality } from "../../../api/client";
 import type { AtomPropDef } from "../atomProps";
 import { QUALITIES, REPS, type Rep } from "../params";
 import type { MeasureMode } from "./measure";
 import { LABEL_MODES, type LabelMode } from "./scene";
+import { setSymmetryView, useSymmetryView } from "./symmetry";
 
 export interface ViewOptions {
   showH: boolean;
@@ -94,6 +96,17 @@ function ModeGroup({ v, set, quality, onQuality }: { v: ViewOptions; set: SetVie
   );
 }
 
+/** The point-group overlay (viewer/symmetry.ts): every element, and the class colours. */
+function SymmetryGroup() {
+  const sv = useSymmetryView();
+  return (
+    <div className="wb-tgroup" title="point group: draw the symmetry elements, colour the symmetry-equivalent atoms">
+      <Check testId="symmetry-toggle" label="symmetry" checked={sv.show} onChange={(show) => setSymmetryView({ show })} />
+      <Check testId="symmetry-classes-toggle" label="classes" checked={sv.classes} onChange={(classes) => setSymmetryView({ classes })} />
+    </div>
+  );
+}
+
 const EXPORTS = [
   ["png", "export-png", "PNG", "the 3D view as a PNG image"],
   ["xyz", "export-xyz", "xyz", "the geometry as an xyz file"],
@@ -120,6 +133,7 @@ export function ViewerToolbar(p: ViewerToolbarProps) {
         <Check testId="wiberg-toggle" label="Wiberg" checked={v.wiberg} onChange={(wiberg) => set({ wiberg })} />
         <Check testId="centroid-toggle" label="centroids" checked={v.centroids} onChange={(centroids) => set({ centroids })} />
       </div>
+      <SymmetryGroup />
       <ModeGroup v={v} set={set} quality={p.quality} onQuality={p.onQuality} />
       <span className="wb-spacer" />
       <div className="wb-tgroup wb-export" role="group" aria-label="export">

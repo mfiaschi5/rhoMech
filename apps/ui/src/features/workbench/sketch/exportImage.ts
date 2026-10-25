@@ -66,23 +66,27 @@ function labelPrims(s: AtomScene, M: DrawMetrics): Prim[] {
   if (!label) return [];
   const [x, y] = s.at;
   const colour = labelColour(label.el, M.colour);
-  return labelGlyphs(label, M).flatMap((g): Prim[] => {
-    if (g.kind === "charge") return chargePrims(g.text, x + g.x, y + chargeAnchor(label, M)[1], M, colour);
-    return [{ k: "text", x: x + g.x, y: y + g.y, text: g.text, size: g.size, weight: M.fontWeight, italic: false, colour }];
-  });
+  const leader: Prim[] = s.leader ? [{ k: "line", p: s.leader.p, q: s.leader.q, w: M.line * 0.6, colour: BLACK }] : [];
+  return leader.concat(
+    labelGlyphs(label, M).flatMap((g): Prim[] => {
+      if (g.kind === "charge") return chargePrims(g.text, x + g.x, y + chargeAnchor(label, M)[1], M, colour, g.size);
+      return [{ k: "text", x: x + g.x, y: y + g.y, text: g.text, size: g.size, weight: M.fontWeight, italic: false, colour }];
+    }),
+  );
 }
 
-function chargePrims(charge: string, x: number, cy: number, M: DrawMetrics, colour: string): Prim[] {
+/** The charge sign at its glyph size (`size`: the placement may shrink it). */
+function chargePrims(charge: string, x: number, cy: number, M: DrawMetrics, colour: string, chargeSize = M.charge): Prim[] {
   if (M.chargePlacement === "circled" && charge.length === 1) {
-    const r = M.charge * 0.55;
-    const size = M.charge * 0.95;
+    const r = chargeSize * 0.55;
+    const size = chargeSize * 0.95;
     const w = textWidthEm(charge) * size;
     return [
       { k: "circle", c: [x + r, cy], r, colour, fill: false, w: Math.max(M.line * 0.7, 0.3 * M.perPt) },
       { k: "text", x: x + r - w / 2, y: cy + size * 0.3, text: charge, size, weight: 400, italic: false, colour },
     ];
   }
-  return [{ k: "text", x, y: cy + CENTRAL_BASELINE_EM * M.charge, text: charge, size: M.charge, weight: M.fontWeight, italic: false, colour }];
+  return [{ k: "text", x, y: cy + CENTRAL_BASELINE_EM * chargeSize, text: charge, size: chargeSize, weight: M.fontWeight, italic: false, colour }];
 }
 
 /** Everything a scene draws, as primitives (no UI decoration). */

@@ -30,7 +30,7 @@ export interface AtomColouring {
 
 const xyz = (a: { x: number; y: number; z: number }) => ({ x: a.x, y: a.y, z: a.z });
 
-type ColourFn = ((atom: { index?: number }) => string) | undefined;
+export type ColourFn = ((atom: { index?: number }) => string) | undefined;
 
 function colourFn(c: AtomColouring | null): ColourFn {
   if (!c) return undefined;
@@ -85,13 +85,14 @@ export function useModel(viewer: GLViewer | null, geometry: MoleculeGeometryOut 
   return model;
 }
 
-export function useStyle(viewer: GLViewer | null, model: GLModel | null, rep: Rep, showH: boolean, colouring: AtomColouring | null): void {
+/** The model's style; `override` (the symmetry classes) colours the atoms over `colouring`. */
+export function useStyle(viewer: GLViewer | null, model: GLModel | null, rep: Rep, showH: boolean, colouring: AtomColouring | null, override: ColourFn | null = null): void {
   useEffect(() => {
     if (!viewer || !model) return;
-    model.setStyle({}, repStyle(rep, colourFn(colouring)));
+    model.setStyle({}, repStyle(rep, override ?? colourFn(colouring)));
     if (!showH) model.setStyle({ elem: "H" }, {});
     viewer.render();
-  }, [viewer, model, rep, showH, colouring]);
+  }, [viewer, model, rep, showH, colouring, override]);
 }
 
 /** Click handling on the model's atoms; `onAtom` is read from a ref so it may change freely. */

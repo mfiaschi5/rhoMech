@@ -1,6 +1,7 @@
 // The workbench's user preferences as pure data: sketch label font size, bond line width, atom
 // colouring, label style, the sketch's drawing style (a preset or the custom style, style.ts),
-// the default 3D representation, the default orbital isovalue and the theme override. The font
+// the default 3D representation, the default orbital isovalue, the degeneracy threshold of the
+// orbital level diagram and the theme override. The font
 // size, line width and atom colouring set the Screen drawing style. sanitizePrefs() turns anything read from storage into valid preferences
 // (out-of-range numbers clamped, unknown values back to the default).
 //
@@ -35,6 +36,8 @@ export interface Prefs {
   rep: Rep;
   /** Default isovalue of new orbital (psi) surface layers. */
   orbitalIso: number;
+  /** Degeneracy threshold (eV) of the orbital level diagram's grouping (orbitals/levels.ts). */
+  degeneracyEv: number;
   theme: ThemeChoice;
 }
 
@@ -42,6 +45,7 @@ export const PREF_BOUNDS = {
   fontPx: { min: 9, max: 22, step: 1 },
   bondWidth: { min: 0.6, max: 4, step: 0.1 },
   orbitalIso: { min: 0.005, max: 0.2, step: 0.005 },
+  degeneracyEv: { min: 0.001, max: 0.5, step: 0.001 },
 } as const;
 
 export const DEFAULT_PREFS: Prefs = {
@@ -53,6 +57,7 @@ export const DEFAULT_PREFS: Prefs = {
   customStyle: ACS_1996_STYLE,
   rep: DEFAULT_REP,
   orbitalIso: 0.05,
+  degeneracyEv: 0.05,
   theme: "auto",
 };
 
@@ -77,6 +82,7 @@ export function sanitizePrefs(x: unknown): Prefs {
     customStyle: sanitizeStyle(v.customStyle, DEFAULT_PREFS.customStyle),
     rep: oneOf(v.rep, REPS, DEFAULT_PREFS.rep),
     orbitalIso: num(v.orbitalIso, "orbitalIso"),
+    degeneracyEv: Math.round(num(v.degeneracyEv, "degeneracyEv") * 1000) / 1000,
     theme: oneOf(v.theme, THEMES, DEFAULT_PREFS.theme),
   };
 }

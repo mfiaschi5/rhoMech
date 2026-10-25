@@ -1,5 +1,6 @@
 // PropertyTabs: the computed molecule's properties as sortable tables, under the sketch and the
-// 3D view. Global (energies, frontier levels, conceptual DFT indices, provenance), Atoms (every
+// 3D view. Global (the point group, energies, frontier levels, conceptual DFT indices,
+// provenance), Atoms (every
 // atom property; diagnostics greyed), Bonds (Wiberg indices, lengths), Orbitals (the shown set)
 // and Descriptors (RDKit.js on the sketch). Clicking an atom row selects that record atom (with
 // Shift / Ctrl: adds it): the 3D view draws a halo and the sketch highlights the drawn atom.
@@ -10,13 +11,14 @@
 import { useMemo, useState, type ReactNode } from "react";
 import type { ApiError } from "../../../api/client";
 import type { PendingCached } from "../../../api/hooks";
-import type { AtomPropsOut, BondPropsOut, MoleculeOut, MoleculePropertiesOut, OrbitalRowOut, OrbitalSetOut } from "../../../api/types.gen";
+import type { AtomPropsOut, BondPropsOut, MoleculeOut, MoleculePropertiesOut, OrbitalRowOut, OrbitalSetOut, PointGroupOut } from "../../../api/types.gen";
 import { ErrorBanner } from "../../../components/ErrorBanner";
 import { fmt, fmtSig, moLabel } from "../../../components/format";
 import { PendingNote } from "../../../components/PendingNote";
 import { atomPropDefs } from "../atomProps";
 import { centresText } from "../orbitals/OrbitalPanel";
 import { selectAtoms, setHover, useSelection } from "../store";
+import { PointGroupSection } from "./PointGroupSection";
 import { SortableTable, type Column } from "./SortableTable";
 
 export const TABS = ["global", "atoms", "bonds", "orbitals", "descriptors"] as const;
@@ -29,6 +31,8 @@ export interface PropertyTabsProps {
   selectedOrbital: number | null;
   onPickOrbital(index: number): void;
   descriptors: Record<string, number> | null;
+  /** The point group (Global tab, PointGroupSection); absent: not shown. */
+  symmetry?: PendingCached<PointGroupOut>;
 }
 
 const TAB_LABELS: Record<TabName, string> = { global: "Global", atoms: "Atoms", bonds: "Bonds", orbitals: "Orbitals", descriptors: "RDKit descriptors" };
@@ -223,6 +227,7 @@ export function PropertyTabs(p: PropertyTabsProps) {
       </div>
       <div className="wb-tab-body" data-testid={`wb-tab-${tab}`}>
         {needsMolecule && <p className="muted">Compute the molecule to see its properties.</p>}
+        {!needsMolecule && tab === "global" && p.symmetry && <PointGroupSection res={p.symmetry} />}
         {!needsMolecule && tab === "global" && <Pending res={p.properties} what="properties">{(d) => <GlobalTab molecule={p.molecule} props={d} />}</Pending>}
         {!needsMolecule && tab === "atoms" && <Pending res={p.properties} what="properties">{(d) => <AtomsTab props={d} />}</Pending>}
         {!needsMolecule && tab === "bonds" && <Pending res={p.properties} what="properties">{(d) => <BondsTab props={d} />}</Pending>}

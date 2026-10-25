@@ -33,6 +33,11 @@ export interface ToolbarProps {
   canRedo: boolean;
   onClean(): void;
   canClean: boolean;
+  /** Spread touching fragments apart (fragments.ts); disabled when none touch. */
+  onTidy(): void;
+  canTidy: boolean;
+  /** Connected fragments of the drawing (the Tidy button shows from two). */
+  fragments: number;
   cleanStyle: CleanStyle;
   onCleanStyle(s: CleanStyle): void;
   /** A Clean or 3D->2D is waiting for the server. */

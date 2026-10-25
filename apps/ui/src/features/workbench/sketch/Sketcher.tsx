@@ -27,6 +27,10 @@
 // (ImageExport.tsx) writes SVG / PNG / PDF at the style's true size, copies the image, the SVG,
 // a LaTeX figure or chemfig code; the drag handle in the canvas corner carries the files.
 //
+// Labels are placed collision-aware (labelLayout.ts). Separate fragments (salts, counter-ions)
+// that come too close are spread apart by "tidy fragments" (fragments.ts): after every Clean as
+// its own undoable step, and on the Tidy button.
+//
 // The R/S toggle (kept per tab in sessionStorage) draws RDKit's CIP labels by the stereocentres
 // and double bonds and lists them in the info bar; they follow every edit (wedges, rotations,
 // flips: a flip keeps the stereoisomer, so the labels stay). Radicals (the radical and diradical
@@ -37,7 +41,8 @@
 //      data-radicals (unpaired electrons drawn) data-show-cip
 //      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth
 //      data-busy (a layout is waiting for the server) data-clean-style data-style (the drawing
-//      style id)>
+//      style id) data-fragments (connected fragments) data-fragments-touch (some fragments are
+//      closer than the tidy clearance: the Tidy button is enabled)>
 //   the toolbar (Toolbar.tsx, ActionBar.tsx), <svg data-testid="sketch-canvas">
 //   (SketchCanvas.tsx; with two or more atoms selected, the selection frame with its rotate and
 //   scale handles, frame.ts), the
@@ -82,10 +87,11 @@ import { ExportPanel, ImportPanel, readDroppedText } from "./ImportExport";
 import { InfoBar } from "./InfoBar";
 import { useLayoutActions, type LayoutActions, type ProjectionSource } from "./useLayoutActions";
 import { findCrossings } from "./crossings";
+import { fragments, tidyFragments } from "./fragments";
 import { hasDepth, radicalElectrons } from "./model";
 import { cipItems } from "./cip";
 import type { LabelStyle } from "./drawing";
-import { actualSizeScale, drawMetrics, pxPerPt, resolveStyle, ACS_1996_STYLE, type DrawingStyle, type StyleId } from "./style";
+import { actualSizeScale, drawMetrics, pxPerPt, resolveStyle, ACS_1996_STYLE, TOTAL_SYNTHESIS_STYLE, type DrawingStyle, type StyleId } from "./style";
 import { setChainAngle } from "./geometry";
 import type { StyleControlProps } from "./StyleControls";
 import { DEFAULT_IMAGE_OPTIONS, SCHEME_DRAG_TYPE, DragHandle, ImageExportSection, useSchemeFiles, type ImageOptions, type SchemeFiles } from "./ImageExport";
@@ -310,6 +316,8 @@ function EditorToolbar(p: {
   showCip: boolean;
   onToggleCip(): void;
   styleControls: StyleControlProps;
+  canTidy: boolean;
+  fragments: number;
 }) {
   const { ed, act, layout } = p;
   return (
@@ -324,6 +332,9 @@ function EditorToolbar(p: {
       canRedo={ed.canRedo}
       onClean={() => void layout.clean()}
       canClean={layout.canClean}
+      onTidy={layout.tidy}
+      canTidy={p.canTidy}
+      fragments={p.fragments}
       cleanStyle={p.cleanStyle}
       onCleanStyle={p.onCleanStyle}
       busy={layout.busy}
@@ -437,6 +448,21 @@ function useSketchImage(ed: SketchEditor, info: ReturnType<typeof useSketchInfo>
   return { files, section };
 }
 
+/** The publication presets: the tidy keeps their clearances whatever style is on screen. */
+const PUBLICATION_STYLES = [ACS_1996_STYLE, TOTAL_SYNTHESIS_STYLE];
+
+/** The fragment tidy in the drawing style and the publication presets (fragments.ts), with
+ *  RDKit's H counts (atom ids are kept by Clean, so the counts of the drawing before it still
+ *  apply). */
+function useTidy(ed: SketchEditor, info: ReturnType<typeof useSketchInfo>, style: DrawingStyle, labelStyle: LabelStyle | undefined) {
+  const hCounts = info.valid ? info.hCounts : null;
+  const opts = { style, alsoFor: PUBLICATION_STYLES, labelStyle };
+  const run = (m: SketchModel) => tidyFragments(m, hCounts, opts);
+  const frags = useMemo(() => fragments(ed.committed).length, [ed.committed]);
+  const canTidy = useMemo(() => frags > 1 && tidyFragments(ed.committed, hCounts, { style, alsoFor: PUBLICATION_STYLES, labelStyle }) !== ed.committed, [frags, ed.committed, hCounts, style, labelStyle]);
+  return { run, canTidy, fragments: frags };
+}
+
 export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor, display, onStyle }: SketcherProps) {
   const ed = useSketchEditor(value, onChange);
   const info = useSketchInfo(ed.committed);
@@ -454,7 +480,8 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
   const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly, frame);
   const act = useSketchActions(ed, rdkit, readOnly);
   const [cleanStyle, setCleanStyle] = useCleanStyle();
-  const layout = useLayoutActions(ed, rdkit, projection, depictor, cleanStyle);
+  const tidy = useTidy(ed, info, ds.style, display?.labelStyle);
+  const layout = useLayoutActions(ed, rdkit, projection, depictor, cleanStyle, tidy.run);
   const fresh = !info.stale && ed.model === ed.committed && info.valid;
   const closePanel = () => setPanel(null);
   useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, importText: act.importText, layout, transform: act.transform });
@@ -488,6 +515,8 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
       data-clean-style={cleanStyle}
       data-radicals={radicals}
       data-show-cip={showCip ? "true" : "false"}
+      data-fragments={tidy.fragments}
+      data-fragments-touch={tidy.canTidy ? "true" : "false"}
       onPointerEnter={setInside(true)}
       onPointerLeave={setInside(false)}
     >
@@ -504,6 +533,8 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           onPanel={setPanel}
           showCip={showCip}
           onToggleCip={toggleCip}
+          canTidy={tidy.canTidy}
+          fragments={tidy.fragments}
           styleControls={{ styleId: ds.styleId, style: ds.style, onStyle: ds.onStyle, onActualSize: () => setView(actualSizeView(view, ds.style, width, height)) }}
         />
       )}

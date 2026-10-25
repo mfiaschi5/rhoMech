@@ -600,6 +600,16 @@ def molecule_properties(svc: Svc, molecule_id: MoleculeId) -> S.MoleculeProperti
     return workbench_service.properties_out(svc.ctx, check_id("molecule_id", molecule_id))
 
 
+@router.get("/molecule/{molecule_id}/symmetry", response_model=S.PointGroupOut, dependencies=_WB)
+def molecule_symmetry(
+    svc: Svc,
+    molecule_id: MoleculeId,
+    tolerance: Annotated[float | None, Query(ge=0.01, le=0.5)] = None,
+) -> S.PointGroupOut:
+    mid = check_id("molecule_id", molecule_id)
+    return workbench_service.symmetry_out(svc.ctx, mid, tolerance)
+
+
 @router.get("/molecule/{molecule_id}/orbitals", response_model=S.OrbitalSetOut, dependencies=_WB)
 def molecule_orbitals(
     svc: Svc,
