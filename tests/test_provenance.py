@@ -216,3 +216,38 @@ def test_git_never_touches_an_inherited_index(monkeypatch, tmp_path):
     head, dirty, _ = REAL_CODE_STATE.__wrapped__()
     assert len(head) == 40 and not dirty
     assert commit_index.read_bytes() == b"the index being committed"
+
+
+def _raise_stale(_task) -> None:
+    raise prov.StaleArtifact("shard_00000.npz", ["input changed: tokens.npz"])
+
+
+def test_every_skip_exception_survives_pickling():
+    """Exceptions cross from spawned workers to the parent by pickle; one whose __init__ takes
+    other arguments than its message used to fail there (`StaleArtifact` hung the pool)."""
+    import pickle
+
+    from ksmech.arrows.apply import ApplyReason, ArrowApplyError
+    from ksmech.arrows.reactants import MissingTokens
+    from ksmech.data.validation import RejectReason, StepRejected
+    from ksmech.qm.records import QMError, ReasonCode
+
+    for exc, fields in (
+        (prov.StaleArtifact("a.npz", ["x", "y"]), ("path", "changes")),
+        (ArrowApplyError(ApplyReason.VALENCE, "atom 3"), ("reason", "detail")),
+        (StepRejected(RejectReason.ARROWS_MISMATCH, "bond"), ("reason", "detail")),
+        (QMError(ReasonCode.TIMEOUT, "600 s"), ("reason", "detail")),
+        (MissingTokens(["CC", "O"], {"O": prov.STALE_ARTIFACT}), ("keys", "reasons", "reason")),
+    ):
+        back = pickle.loads(pickle.dumps(exc))
+        assert type(back) is type(exc) and str(back) == str(exc)
+        for f in fields:
+            assert getattr(back, f) == getattr(exc, f), f
+
+
+def test_a_worker_stale_artifact_reaches_the_parent():
+    from multiprocessing import get_context
+
+    with get_context("spawn").Pool(1) as pool, pytest.raises(prov.StaleArtifact) as exc:
+        pool.apply_async(_raise_stale, (0,)).get(timeout=120)
+    assert exc.value.changes == ["input changed: tokens.npz"]

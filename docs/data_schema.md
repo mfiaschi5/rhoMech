@@ -193,19 +193,31 @@ version:
 | `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` |
 
 **`pair_feature_stats_<strategy>.json`** (same directory, one per split strategy, written by
-`ksmech-arrows samples`): `{feature: {mean, std, count}}` over the defined entries of every
-(occupied, virtual) pair of the strategy's training part, at the physical K = 1.75 and eps = 4
-(`arrows.steps.pair_stats`, `physics.pairs.PairStats`). Standardization for the model's learned
-heads (`physics.pairs.standardize`) uses these, never val or test. The frozen KS head is not
-standardized: `physics.pairs.frozen_head` gives -(KS3 + KS2 + KS1) / tau in eV from the
-physical pair features and `pair_gap_sign`.
+`ksmech-arrows samples`): a provenance header (kind `pair_stats`, schema `SAMPLE_VERSION`;
+inputs the training view `samples_<strategy>_train.json` and the store index; config the
+feature names, `cells: valid` and the physical K = 1.75, eps = 4) and `features`:
+`{feature: {mean, std, count}}` over the defined entries of the valid cells (`pair_valid`) of
+the strategy's training part, with the values rounded to float16 as the store keeps them, at
+the physical K and eps (`arrows.steps.pair_stats`, `physics.pairs.PairStats`). A refit on the
+loaded samples gives the same numbers. Read it with `arrows.steps.load_pair_stats`, which
+refuses a stale or dirty file (STALE_ARTIFACT) like the samples. Standardization for the
+model's learned heads (`physics.pairs.standardize`) uses these, never val or test. The frozen KS
+head is not standardized: `physics.pairs.frozen_head` gives -(KS3 + KS2 + KS1) / tau in eV from
+the physical pair features and `pair_gap_sign`.
 
-`ksmech.arrows.steps.collate_samples` pads a batch to `A_max` atoms and `O_max` orbitals,
+`ksmech.arrows.batches.collate_samples` pads a batch to `A_max` atoms and `O_max` orbitals,
 lays tokens out as atoms `[0, A_max)` then orbitals `[A_max, A_max + O_max)`, and returns
 `token_mask`, `is_atom`, `is_orbital`, `occupied`, `virtual`, `donor_mask`, `acceptor_mask`,
 `fragment` (-1 padding), `same_fragment` (B, N, N), `incidence` (B, N, A_max; atom rows
 one-hot), `donor_sets` / `acceptor_sets` (B, K, N multi-hot), `donor_site` / `acceptor_site`
-(B, K; -1 padding) and `label_mask`, plus the padded input arrays.
+(B, K; -1 padding) and `label_mask`, plus the padded input arrays. The pair inputs keep each
+sample's (occupied, virtual) layout, padded to the batch's largest counts (R, C): `pair_z`
+(B, R, C, F; at K = eps = 1, unstandardized), `pair_defined` (B, R, C, F), `pair_valid` and
+`pair_gap_sign` (B, R, C), `pair_row_pos` (B, R) and `pair_col_pos` (B, C), the batch token
+position of each row's occupied and each column's virtual token (-1 padding), for scattering
+into the N x N pair track, `pair_features` (the column names) and `atom_coulomb` (B, A_max,
+A_max; eps = 1). The reactant's Lewis structure and the reaction-matrix targets are the
+`_reactant_tensors` and `_edit_tensors` keys.
 
 ## QM cache: `data/cache/qm/<sha256>.npz`
 

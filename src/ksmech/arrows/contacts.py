@@ -53,8 +53,8 @@ def legacy_entry(step, loader, kernels: PairKernels) -> dict[str, np.ndarray] | 
     """The legacy arrays of one step (valid cells only), or a skip reason."""
     try:
         rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
-    except MissingTokens:
-        return "MISSING_TOKENS"
+    except MissingTokens as exc:
+        return exc.reason
     except CorrespondenceError:
         return "CORRESPONDENCE"
     tok = [f.tokens for f in rt.fragments]

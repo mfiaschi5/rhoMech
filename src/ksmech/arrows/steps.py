@@ -89,13 +89,14 @@ DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
 
 class SkipReason(StrEnum):
     MISSING_TOKENS = "MISSING_TOKENS"  # a reactant fragment has no token file (yet)
+    STALE_ARTIFACT = "STALE_ARTIFACT"  # a fragment's token file or sidecar no longer matches
     CORRESPONDENCE = "CORRESPONDENCE"  # drawn fragment cannot be matched onto its record
     EDIT_FAILED = "EDIT_FAILED"  # the edit-label codes (`delta_be.EditSkip`), passed through
     PRODUCT_MISMATCH = "PRODUCT_MISMATCH"
     RESONANCE_STEP = "RESONANCE_STEP"
     NO_ANCHOR = "NO_ANCHOR"
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
-    NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond has no Wiberg index
+    NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
 
 
@@ -353,8 +354,9 @@ def sample_for_step(
     with prov.collecting() as used:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
-        except MissingTokens:
-            return SkipReason.MISSING_TOKENS
+        except MissingTokens as exc:
+            log.info("%s: %s", step.step_id, exc)
+            return SkipReason(exc.reason)
         except CorrespondenceError:
             return SkipReason.CORRESPONDENCE
         target = edit_target(step, rt)
@@ -551,7 +553,7 @@ def build_all_samples(
             if split.endswith("_train"):
                 train = [samples[i] for i in members if i in samples]
                 stats_path = pair_stats_path(source, split[: -len("_train")], processed_dir)
-                stats_path.write_text(pair_stats(train).to_json() + "\n")
+                write_pair_stats(stats_path, pair_stats(train), view, index)
     return report
 
 
@@ -562,13 +564,52 @@ def pair_stats_path(source: str, name: str, processed_dir: Path = DEFAULT_PROCES
 
 
 def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -> PairStats:
-    """Statistics of the defined pair features of `samples` at the physical K and eps."""
+    """Statistics of the pair features of `samples` at the physical K and eps, over what a
+    loaded sample holds: the defined entries of the valid cells (`pair_valid`; the store keeps
+    no others), with the values rounded to float16 as stored. The statistics of samples just
+    built therefore equal those refitted from the store."""
     params = params or KSParams()
     names = samples[0].pair_features if samples else STAGE_A_FEATURES
     if any(s.pair_features != names for s in samples):
         raise ValueError("pair statistics over samples with different pair features")
-    blocks = ((to_params(s.pair_z, params, names), s.pair_defined) for s in samples)
+    blocks = (
+        (
+            to_params(s.pair_z.astype(np.float16), params, names),
+            s.pair_defined & s.pair_valid[..., None],
+        )
+        for s in samples
+    )
     return fit_pair_stats(blocks, names)
+
+
+def write_pair_stats(path: Path, stats: PairStats, view: Path, index: Path) -> Path:
+    """The statistics with a provenance header: the training view and the store index they were
+    fitted on are its inputs, the physical K and eps and the features its configuration."""
+    params = KSParams()
+    config = {
+        "sample_version": SAMPLE_VERSION,
+        "pair_features": list(stats.names),
+        "cells": "valid",
+        "params": {"K": params.K, "eps": params.eps},
+    }
+    body = {"features": stats.to_dict()}
+    header = prov.stamp(
+        "pair_stats",
+        SAMPLE_VERSION,
+        {**prov.file_input(view), **prov.file_input(index)},
+        config,
+        prov.sha256_text(json.dumps(body, sort_keys=True)),
+    )
+    return prov.write_json(path, body, header)
+
+
+def load_pair_stats(path: Path, allow_stale: bool = False) -> PairStats:
+    """The statistics of `pair_feature_stats_<strategy>.json`, verified like the samples (its
+    training view and the store index unchanged, built from a clean tree); StaleArtifact
+    otherwise, unless `allow_stale` (diagnostics)."""
+    store.verify_clean(Path(path), "pair_stats", SAMPLE_VERSION, allow_stale)
+    d = json.loads(Path(path).read_text())["features"]
+    return PairStats.from_dict(d, tuple(d))
 
 
 def load_samples(

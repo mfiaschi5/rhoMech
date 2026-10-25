@@ -17,16 +17,20 @@ from ksmech.arrows.steps import (
     MechanismSample,
     SkipReason,
     build_all_samples,
+    load_pair_stats,
     load_samples,
+    pair_stats,
+    pair_stats_path,
     sample_for_step,
     samples_path,
     write_split_file,
 )
 from ksmech.data import chem
 from ksmech.data import provenance as prov
-from ksmech.data.io import steps_path, write_steps
+from ksmech.data.io import read_training_steps, steps_path, write_steps
 from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import Arrow, ElementaryStep
+from ksmech.physics.stage_a import STAGE_A_FEATURES
 
 
 @pytest.fixture
@@ -114,6 +118,15 @@ def test_skip_reasons(token_loader, pair_kernels):
         [Arrow("bond", (10, 11), "atom", (11,))],
     )
     assert sample_for_step(lone, lambda key: None, pair_kernels) == SkipReason.MISSING_TOKENS
+
+    class Stale:  # a loader that serves no file and says why (`TokenCache.missing_reason`)
+        def __call__(self, key):
+            return None
+
+        def missing_reason(self, key):
+            return prov.STALE_ARTIFACT
+
+    assert sample_for_step(lone, Stale(), pair_kernels) == SkipReason.STALE_ARTIFACT
     s = sample_for_step(lone, token_loader, pair_kernels)  # a lone heterolysis is a sample
     assert isinstance(s, MechanismSample)
     assert s.labels == [] and s.orbital_reading == "HETEROLYSIS_ONLY"
@@ -182,6 +195,36 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader, pa
     assert held_out["n_steps"] == 2 and held_out["skipped"] == {"MISSING_TOKENS": 1}
 
 
+def test_pair_stats_are_those_of_the_stored_valid_cells(mini_processed, token_loader):
+    """The statistics file equals a refit on the samples as loaded (valid cells, float16
+    values), counts only valid defined entries, and is refused once its view changes."""
+    build_all_samples("pmechdb", ["molecule"], mini_processed, token_loader)
+    path = pair_stats_path("pmechdb", "molecule", mini_processed)
+    view = samples_path("pmechdb", "molecule_train", mini_processed)
+    stats, train = load_pair_stats(path), load_samples(view)
+    ids = {s.step_id for s in train}
+    steps = read_training_steps(steps_path("pmechdb", mini_processed))
+    built = [sample_for_step(s, token_loader) for s in steps if s.step_id in ids]
+    assert stats.names == STAGE_A_FEATURES
+    for refit in (pair_stats(train), pair_stats(built)):  # as loaded, and as just built
+        for a in ("mean", "std", "count"):
+            assert np.array_equal(getattr(stats, a), getattr(refit, a)), a
+    valid = sum((s.pair_defined & s.pair_valid[..., None]).sum((0, 1)) for s in built)
+    assert np.array_equal(stats.count, valid)
+    assert (sum(s.pair_defined.sum((0, 1)) for s in built) > valid).any()  # invalid cells exist
+    header = prov.read_header(path)
+    assert header.kind == "pair_stats" and header.config["cells"] == "valid"
+    from ksmech.arrows import store
+    from ksmech.arrows.steps import splits_path
+
+    ids = json.loads(view.read_text())["ids"][:1]  # the training view is rebuilt, changed
+    split_file = splits_path("pmechdb", "molecule", mini_processed)
+    index = store.store_dir(view.parent) / "index.json"
+    store.write_view(view, ids, {}, index, split_file, prov.read_header(view).config)
+    with pytest.raises(prov.StaleArtifact, match="input changed"):
+        load_pair_stats(path)
+
+
 def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
     lone = ElementaryStep(
         "x",
@@ -217,6 +260,30 @@ def test_collate_pads_and_builds_masks(mini_steps, token_loader, pair_kernels):
             assert b["occupied"][i, donors].all()
         assert b["label_mask"][i].sum() == len(s.labels)
     assert (b["donor_site"][~b["label_mask"]] == -1).all()
+    _check_pair_tensors(b, batch)
+
+
+def _check_pair_tensors(b: dict, batch: list) -> None:
+    """Each sample's pair arrays sit unchanged in the top-left of the padded block, their rows
+    and columns point at its occupied and virtual token positions, and padding is empty."""
+    n_atoms = max(s.n_atoms for s in batch)
+    assert b["pair_features"] == batch[0].pair_features
+    assert b["atom_coulomb"].shape == (len(batch), n_atoms, n_atoms)
+    for i, s in enumerate(batch):
+        r, c = s.pair_valid.shape
+        assert np.array_equal(b["pair_z"][i, :r, :c].numpy(), s.pair_z)
+        assert np.array_equal(b["pair_defined"][i, :r, :c].numpy(), s.pair_defined)
+        assert np.array_equal(b["pair_valid"][i, :r, :c].numpy(), s.pair_valid)
+        assert np.array_equal(b["pair_gap_sign"][i, :r, :c].numpy(), s.pair_gap_sign)
+        assert not b["pair_valid"][i, r:].any() and not b["pair_defined"][i, :, c:].any()
+        rows, cols = b["pair_row_pos"][i], b["pair_col_pos"][i]
+        assert b["occupied"][i, rows[:r]].all() and b["virtual"][i, cols[:c]].all()
+        assert (rows[r:] == -1).all() and (cols[c:] == -1).all()
+        assert int(b["occupied"][i].sum()) == r and int(b["virtual"][i].sum()) == c
+        assert np.array_equal(
+            b["atom_coulomb"][i, : s.n_atoms, : s.n_atoms].numpy(), s.atom_coulomb
+        )
+        assert not b["atom_coulomb"][i, s.n_atoms :].any()
 
 
 def _check_edit_tensors(b: dict, batch: list) -> None:

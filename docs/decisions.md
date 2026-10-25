@@ -3990,3 +3990,45 @@ is now v7.5, sha256 6c6a023f66dd).
 - **Change.** `provenance.git_env()` is the environment without GIT_* variables. `code_state`
   and the tests' git helper run git with it. A test sets GIT_INDEX_FILE to a sentinel file and
   checks that it is left untouched and that `code_state` still reads the scratch repository.
+
+## 2026-10-25 — Review fixes before training: worker exceptions, pair statistics, pair tensors, skip codes
+
+From the code review of the branch (five findings fixed together).
+
+- **Exceptions from spawned workers.** `StaleArtifact(path, changes)` could not be rebuilt in the
+  parent: pickle calls the class with the message alone. A worker that met a stale shard
+  (`ks-rank --workers`, `gbdt --workers`) killed `multiprocessing.Pool`'s result thread, and the
+  parent waited forever (reproduced). `StaleArtifact`, `ArrowApplyError`, `StepRejected`,
+  `QMError` and `MissingTokens` now define `__reduce__` from their own fields. A test pickles
+  each one, and one raises `StaleArtifact` in a spawned worker and catches it in the parent.
+- **Pair statistics over the valid cells.** The fix-item-8 entry (2026-10-22) says the
+  statistics are fitted on the valid cells only. The code fitted the samples just built, whose
+  stage-A blocks define every (occupied, virtual) cell: on the molecule split, 48,802,340
+  entries per feature against 43,950,761 valid cells, the only ones a loaded sample holds.
+  `pair_stats` now masks with `pair_valid` and rounds the values to float16 as the store keeps
+  them. The statistics of the samples just built then equal a refit on the loaded samples
+  exactly (tested).
+- **A provenance header on `pair_feature_stats_<strategy>.json`.** The file was plain text, so
+  the trainer could not refuse a stale one. It is now a stamped JSON (kind `pair_stats`,
+  inputs the training view and the store index, config the features, `cells: valid` and K,
+  eps). `arrows.steps.load_pair_stats` verifies it and refuses a dirty build, through
+  `store.verify_clean` (the store's verify helper, now public, rather than another copy).
+  Existing files (including the retired `pair_feature_stats_random.json`) have no header and
+  are refused until `ksmech-arrows samples` is re-run.
+- **Pair tensors in `collate_samples`.** The loader had none of the pair inputs. They now
+  stay in each sample's (occupied, virtual) layout, padded to the batch's largest counts, with
+  the batch token position of every row and column (`pair_row_pos`, `pair_col_pos`). The model
+  scatters them into its N x N pair track. A dense (B, N, N, F) block would cost N^2 per
+  sample (N up to ~1,000 on the largest PMechDB pools) to store values that exist only on
+  occupied x virtual cells. The values stay at K = eps = 1 and unstandardized: K and eps are
+  learnable, so `to_params` and the training statistics are applied in the model.
+  `pair_contact_sites` is not collated: stage-A samples hold -1 there.
+- **Skip codes for unusable token files.** `TokenCache` kept the reason for a stale token file
+  or a missing Wiberg sidecar in `stale`, which nothing read (and a worker's copy dropped), so
+  such steps were counted as MISSING_TOKENS. The cache now logs each one and gives its code
+  (`missing_reason`: STALE_ARTIFACT, NO_BOND_INDEX). `load_fragments` puts the codes on
+  `MissingTokens`, and the sample build, the edit-label report, the contact sidecar and the
+  alignment pass count the step under `MissingTokens.reason`. When several fragments lack
+  tokens, the step's code is the first of STALE_ARTIFACT, NO_BOND_INDEX, MISSING_TOKENS that
+  any of them has, so a stale file is never hidden behind a missing one. On the current build
+  all 46 MISSING_TOKENS skips are genuinely missing files.

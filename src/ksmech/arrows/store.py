@@ -200,7 +200,7 @@ def write_view(
 
 
 def _load_shard(path: Path, members: list[int], cls, version: int, allow_stale: bool):
-    _verify(path, "sample_shard", version, allow_stale)
+    verify_clean(path, "sample_shard", version, allow_stale)
     with np.load(path, allow_pickle=False) as z:
         metas = json.loads(str(z["meta"]))
         names: dict[str, list[str]] = {}
@@ -214,7 +214,7 @@ def _load_shard(path: Path, members: list[int], cls, version: int, allow_stale: 
     return out
 
 
-def _verify(path: Path, kind: str, version: int, allow_stale: bool) -> prov.Provenance | None:
+def verify_clean(path: Path, kind: str, version: int, allow_stale: bool) -> prov.Provenance | None:
     """The verified header; a sample artifact built from a dirty tree is refused too (it feeds
     training and evaluation). `allow_stale` logs instead (diagnostic CLIs)."""
     import logging
@@ -235,13 +235,13 @@ def _view_members(
 ) -> tuple[list[str], dict[str, list[int]]]:
     """(the view's stored ids, kept to `ids` when given, in view order; shard -> members).
     Verifies the view, its split file and the index."""
-    header = _verify(path, "samples", version, allow_stale)
+    header = verify_clean(path, "samples", version, allow_stale)
     for name in header.inputs if header else ():
         if name.startswith("file:") and prov.input_path(name).name.startswith("splits_"):
-            _verify(prov.input_path(name), "split", version, allow_stale)  # its parquet
+            verify_clean(prov.input_path(name), "split", version, allow_stale)  # its parquet
     view = json.loads(Path(path).read_text())
     index_path = store_dir(Path(path).parent) / "index.json"
-    _verify(index_path, "sample_index", version, allow_stale)
+    verify_clean(index_path, "sample_index", version, allow_stale)
     shards = json.loads(index_path.read_text())["shards"]
     where = {sid: (name, k) for name, ids_ in shards.items() for k, sid in enumerate(ids_)}
     keep = None if ids is None else set(ids)

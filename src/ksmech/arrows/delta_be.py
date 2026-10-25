@@ -245,7 +245,8 @@ def to_global(label: EditLabel, global_atom: dict[int, int]) -> EditLabel | Edit
 
 def step_label(step: ElementaryStep, loader) -> EditLabel | str:
     """The edit label of a step on the global atoms of its reactant tokens, or the reason code
-    it has none (an EditSkip, or MISSING_TOKENS / CORRESPONDENCE from the tokens)."""
+    it has none (an EditSkip, or from the tokens MISSING_TOKENS / STALE_ARTIFACT /
+    NO_BOND_INDEX (`MissingTokens.reason`) or CORRESPONDENCE)."""
     from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
 
     label = edit_label(step)
@@ -253,8 +254,8 @@ def step_label(step: ElementaryStep, loader) -> EditLabel | str:
         return str(label)
     try:
         rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
-    except MissingTokens:
-        return "MISSING_TOKENS"
+    except MissingTokens as exc:
+        return exc.reason
     except CorrespondenceError:
         return "CORRESPONDENCE"
     out = to_global(label, rt.global_atom)

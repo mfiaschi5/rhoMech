@@ -37,6 +37,44 @@ def _pad(arrays: list[np.ndarray], length: int, fill=0) -> torch.Tensor:
     return torch.from_numpy(out)
 
 
+def _pad2(arrays: list[np.ndarray], rows: int, cols: int, fill=0) -> torch.Tensor:
+    """Stack arrays along a new batch axis, padding axes 0 and 1 to (rows, cols) with `fill`."""
+    out = np.full((len(arrays), rows, cols, *arrays[0].shape[2:]), fill, dtype=arrays[0].dtype)
+    for i, a in enumerate(arrays):
+        out[i, : a.shape[0], : a.shape[1]] = a
+    return torch.from_numpy(out)
+
+
+def _pair_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
+    """The pair track's inputs, padded in each sample's (occupied r, virtual s) layout: z_rs at
+    K = eps = 1 in `pair_features` order (unstandardized: K and eps are learnable, so
+    `params.to_params` and the training statistics apply in the model), its defined mask, the
+    validity filter, the sign of G, and the batch token position of every row and column (-1
+    on padding), for scattering into the N x N pair track; plus the atom-atom Coulomb matrix
+    (eps = 1) on the padded atoms."""
+    names = batch[0].pair_features
+    if any(s.pair_features != names for s in batch):
+        raise ValueError("a batch mixes samples with different pair features")
+    occ = [np.flatnonzero(s.orbital_occupied) for s in batch]
+    virt = [np.flatnonzero(~s.orbital_occupied) for s in batch]
+    for s, o, v in zip(batch, occ, virt, strict=True):
+        if s.pair_valid.shape != (len(o), len(v)):
+            raise ValueError(
+                f"{s.step_id}: pair block {s.pair_valid.shape}, tokens {len(o)} x {len(v)}"
+            )
+    rows, cols = max(len(o) for o in occ), max(len(v) for v in virt)
+    return {
+        "pair_features": tuple(names),
+        "pair_z": _pad2([s.pair_z for s in batch], rows, cols),
+        "pair_defined": _pad2([s.pair_defined for s in batch], rows, cols, False),
+        "pair_valid": _pad2([s.pair_valid for s in batch], rows, cols, False),
+        "pair_gap_sign": _pad2([s.pair_gap_sign for s in batch], rows, cols),
+        "pair_row_pos": _pad([n_atoms + o for o in occ], rows, -1),
+        "pair_col_pos": _pad([n_atoms + v for v in virt], cols, -1),
+        "atom_coulomb": _pad2([s.atom_coulomb for s in batch], n_atoms, n_atoms),
+    }
+
+
 def _token_masks(batch: list[MechanismSample], n_atoms: int, n_orb: int) -> dict:
     """Per-token masks in the batch layout: atoms at [0, A), orbitals at [A, A + O)."""
     b, n = len(batch), n_atoms + n_orb
@@ -177,8 +215,10 @@ def _edit_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
 def collate_samples(batch: list[MechanismSample]) -> dict:
     """Pad a batch. Token positions: atoms at [0, A), orbitals at [A, A + O), where A and O
     are the largest atom and orbital counts in the batch; sites index atoms directly. The
-    reaction-matrix targets and the reactant's structure are on the atoms (`_edit_tensors`,
-    `_reactant_tensors`); the ArrowLabel tensors are empty for samples without them."""
+    pair features keep their (occupied, virtual) layout with the token positions of their rows
+    and columns (`_pair_tensors`). The reaction-matrix targets and the reactant's structure
+    are on the atoms (`_edit_tensors`, `_reactant_tensors`); the ArrowLabel tensors are empty
+    for samples without them."""
     n_atoms = max(s.n_atoms for s in batch)
     n_orb = max(s.n_orbitals for s in batch)
     out = {
@@ -196,6 +236,7 @@ def collate_samples(batch: list[MechanismSample]) -> dict:
     }
     out.update(_token_masks(batch, n_atoms, n_orb))
     out.update(_label_tensors(batch, n_atoms, n_orb))
+    out.update(_pair_tensors(batch, n_atoms))
     out.update(_reactant_tensors(batch, n_atoms))
     out.update(_edit_tensors(batch, n_atoms))
     return out

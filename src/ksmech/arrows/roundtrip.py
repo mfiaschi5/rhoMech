@@ -168,8 +168,8 @@ def _align_pass(steps: list[ElementaryStep], loader: TokenLoader, member_check: 
     for step in steps:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
-        except MissingTokens:
-            out.skipped["MISSING_TOKENS"] += 1
+        except MissingTokens as exc:
+            out.skipped[exc.reason] += 1
             continue
         except CorrespondenceError:
             out.skipped["CORRESPONDENCE"] += 1

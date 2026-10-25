@@ -308,24 +308,27 @@ class PairStats:
     count: np.ndarray
     names: tuple[str, ...] = field(default=PAIR_FEATURES)
 
-    def to_json(self) -> str:
-        return json.dumps(
-            {
-                n: {"mean": m, "std": s, "count": int(c)}
-                for n, m, s, c in zip(
-                    self.names, self.mean.tolist(), self.std.tolist(), self.count, strict=True
-                )
-            },
-            indent=1,
-        )
+    def to_dict(self) -> dict[str, dict[str, float]]:
+        return {
+            n: {"mean": m, "std": s, "count": int(c)}
+            for n, m, s, c in zip(
+                self.names, self.mean.tolist(), self.std.tolist(), self.count, strict=True
+            )
+        }
 
     @classmethod
-    def from_json(cls, text: str, names: tuple[str, ...] = PAIR_FEATURES) -> PairStats:
-        d = json.loads(text)
+    def from_dict(cls, d: dict, names: tuple[str, ...] = PAIR_FEATURES) -> PairStats:
         if tuple(d) != tuple(names):
             raise ValueError(f"pair statistics for {tuple(d)}, expected {tuple(names)}")
         values = (np.array([d[n][k] for n in names]) for k in ("mean", "std", "count"))
         return cls(*values, names=tuple(names))
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=1)
+
+    @classmethod
+    def from_json(cls, text: str, names: tuple[str, ...] = PAIR_FEATURES) -> PairStats:
+        return cls.from_dict(json.loads(text), names)
 
 
 def fit_pair_stats(blocks, names: tuple[str, ...] = PAIR_FEATURES) -> PairStats:

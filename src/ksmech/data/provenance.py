@@ -61,6 +61,12 @@ class StaleArtifact(Exception):
         self.changes = list(changes)
         super().__init__(f"{STALE_ARTIFACT}: {path}: " + "; ".join(self.changes))
 
+    def __reduce__(self):
+        """Rebuilt from (path, changes). The default rebuilds from the message alone, which
+        this __init__ rejects: a worker's StaleArtifact then hung `multiprocessing.Pool` in the
+        parent instead of reaching it."""
+        return type(self), (self.path, self.changes)
+
 
 @dataclass(frozen=True)
 class Provenance:
