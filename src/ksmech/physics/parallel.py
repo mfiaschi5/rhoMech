@@ -5,36 +5,18 @@ of its view, and each chunk is a task: the worker loads its own samples and thei
 entries by id, so no sample crosses a process boundary on the way in, and only what the parent
 keeps comes back. `pool.imap` returns the chunks in order, so a parallel run gives the parent
 the same sequence as a single process, and the reports are identical. Workers start with one
-BLAS / OpenMP thread each (`orbitals.build.single_threaded_children`); a `TokenCache` sent to
+BLAS / OpenMP thread each (`ksmech.processes.in_processes`); a `TokenCache` sent to
 a worker starts empty.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
-from multiprocessing import get_context
 from pathlib import Path
 
 from ksmech.arrows import contacts
 from ksmech.arrows.steps import load_samples
-from ksmech.orbitals.build import single_threaded_children
 
 CHUNK = 64  # consecutive samples per task
-
-
-def chunked(ids: list[str], size: int = CHUNK) -> list[list[str]]:
-    return [ids[k : k + size] for k in range(0, len(ids), size)]
-
-
-def in_processes(fn: Callable, tasks: Iterable, n_workers: int) -> Iterator:
-    """`fn` over `tasks` in task order: in this process when `n_workers` <= 1, else in that
-    many spawned processes."""
-    tasks = list(tasks)
-    if n_workers <= 1:
-        yield from map(fn, tasks)
-        return
-    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
-        yield from pool.imap(fn, tasks)
 
 
 def joined_samples(

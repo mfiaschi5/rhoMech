@@ -27,7 +27,6 @@ not trained on and count as misses.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,8 +47,6 @@ from ksmech.physics.ranking import (
     summarize_ranks,
 )
 from ksmech.physics.stage_a import STAGE_A_FEATURES
-
-log = logging.getLogger(__name__)
 
 TOKEN_FEATURES = (
     [f"donor_{n}" for n in feature_names()]
@@ -463,13 +460,8 @@ def save_logistic(model: LogisticRanker, path: Path, inputs: dict[str, str] | No
 def load_gbdt(path: Path, allow_stale: bool = False) -> GBDTRanker:
     """The fitted GBDT, after verifying that its sample files and features are unchanged
     (StaleArtifact otherwise; `allow_stale` only logs it, for diagnostics)."""
-    try:
-        config = {"model": "gbdt", "features": FEATURE_NAMES}
-        prov.require_clean(prov.verify(path, "baseline", BASELINE_VERSION, config), path)
-    except prov.StaleArtifact as exc:
-        if not allow_stale:
-            raise
-        log.warning("using a stale GBDT (--allow-stale): %s", exc)
+    config = {"model": "gbdt", "features": FEATURE_NAMES}
+    prov.verify_clean(path, "baseline", BASELINE_VERSION, config, allow_stale=allow_stale)
     with np.load(Path(path), allow_pickle=False) as z:
         meta = json.loads(str(z["meta"]))
         if meta["features"] != FEATURE_NAMES:

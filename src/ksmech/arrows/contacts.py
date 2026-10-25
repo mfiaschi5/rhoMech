@@ -27,6 +27,7 @@ from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
 from ksmech.physics.pairs import PAIR_FEATURES, PairKernels, pair_block, valid_pairs
 from ksmech.physics.params import REDUCED
+from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
@@ -97,18 +98,9 @@ def _all_entries(ordered: list, loader, kernels: PairKernels, n_workers: int) ->
     steps run in that many spawned processes (one BLAS thread each), each with its own copy of
     `loader` (a `TokenCache` copy starts empty) and of `kernels`; contact blocks are written
     atomically, so two processes computing one block cannot corrupt it."""
-    if n_workers <= 1:
-        for step in ordered:
-            yield from _entries([step], loader, kernels)
-        return
-    from multiprocessing import get_context
-
-    from ksmech.orbitals.build import single_threaded_children
-
-    tasks = [(ordered[k : k + CHUNK], loader, kernels) for k in range(0, len(ordered), CHUNK)]
-    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
-        for part in pool.imap(_entries_task, tasks):
-            yield from part
+    tasks = [(chunk, loader, kernels) for chunk in chunked(ordered, CHUNK)]
+    for part in in_processes(_entries_task, tasks, n_workers):
+        yield from part
 
 
 def build_contacts(
@@ -192,15 +184,6 @@ def build_all_contacts(
     return report | {"strategy": strategy, "n_train_subsample": len(sub), "n_held_out": len(held)}
 
 
-def _check(path: Path, kind: str, allow_stale: bool) -> None:
-    try:
-        prov.require_clean(prov.verify(path, kind, CONTACTS_VERSION), path)
-    except prov.StaleArtifact as exc:
-        if not allow_stale:
-            raise
-        log.warning("stale %s (--allow-stale): %s", kind, exc)
-
-
 def load_contacts(
     view_dir: Path, strategy: str, allow_stale: bool = False, ids: Iterable[str] | None = None
 ) -> dict[str, dict]:
@@ -211,7 +194,9 @@ def load_contacts(
     root = contacts_dir(view_dir, strategy)
     if not (root / "index.json").exists():
         raise FileNotFoundError(f"{root / 'index.json'}: no contact sidecar for {strategy!r}")
-    _check(root / "index.json", "contact_index", allow_stale)
+    prov.verify_clean(
+        root / "index.json", "contact_index", CONTACTS_VERSION, allow_stale=allow_stale
+    )
     shards = json.loads((root / "index.json").read_text())["shards"]
     keep = None if ids is None else set(ids)
     out = {}
@@ -220,7 +205,7 @@ def load_contacts(
         wanted = [sid for sid in members if keep is None or sid in keep]
         if not wanted:
             continue
-        _check(root / name, "contact_shard", allow_stale)
+        prov.verify_clean(root / name, "contact_shard", CONTACTS_VERSION, allow_stale=allow_stale)
         with np.load(root / name, allow_pickle=False) as z:
             for sid in wanted:
                 valid = z[f"{sid}/valid"].astype(bool)

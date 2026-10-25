@@ -263,13 +263,8 @@ def load_lgbm(
 ) -> LGBMRanker:
     """The fitted ranker, after verifying its sample files, features and (given `cfg`) its
     configuration (StaleArtifact otherwise; `allow_stale` only logs it, for diagnostics)."""
-    try:
-        config = model_config(features, cfg)
-        prov.require_clean(prov.verify(path, "baseline_lgbm", LGBM_VERSION, config), path)
-    except prov.StaleArtifact as exc:
-        if not allow_stale:
-            raise
-        log.warning("using a stale LightGBM ranker (--allow-stale): %s", exc)
+    config = model_config(features, cfg)
+    prov.verify_clean(path, "baseline_lgbm", LGBM_VERSION, config, allow_stale=allow_stale)
     with np.load(Path(path), allow_pickle=False) as z:
         meta = json.loads(str(z["meta"]))
         booster = lgb.Booster(model_str=str(z["model"]))

@@ -262,21 +262,27 @@ def step_label(step: ElementaryStep, loader) -> EditLabel | str:
     return str(out) if isinstance(out, EditSkip) else out
 
 
+def class_shape(labels: list[EditLabel]) -> dict:
+    """The class sizes (1, 2, 3, 4+) and the kind of the first anchor of `labels`."""
+    sizes = Counter(min(len(x.variants), 4) for x in labels)
+    return {
+        "class_size": {("4+" if k == 4 else str(k)): v for k, v in sorted(sizes.items())},
+        "anchor_kind": dict(Counter(x.anchors[0][0][2] for x in labels).most_common()),
+    }
+
+
 def label_report(labels: dict[str, EditLabel | str]) -> dict:
     """Coverage and shape of the edit labels of many steps (step id -> label or reason)."""
     ok = [x for x in labels.values() if isinstance(x, EditLabel)]
     skipped = Counter(x for x in labels.values() if isinstance(x, str))
-    sizes = Counter(min(len(x.variants), 4) for x in ok)
-    kinds = Counter(a[0][2] for x in ok for a in x.anchors[:1])
     return {
         "n_steps": len(labels),
         "n_labeled": len(ok),
         "labeled_fraction": len(ok) / len(labels) if labels else 0.0,
         "skipped": dict(skipped.most_common()),
-        "class_size": {("4+" if k == 4 else str(k)): v for k, v in sorted(sizes.items())},
+        **class_shape(ok),
         "data_parsimonious": sum(x.data_parsimonious for x in ok),
         "resonance_truncated": sum(x.truncated for x in ok),
         "steps_with_rejected_variants": sum(x.n_rejected > 0 for x in ok),
-        "anchor_kind": dict(kinds),
         "bond_changes": dict(sorted(Counter(len(x.variants[0].bonds) for x in ok).items())),
     }

@@ -237,6 +237,7 @@ def _scored_part(args, part: str, loader, kernels: dict) -> tuple[list, dict, in
     """One part loaded and scored in chunks over `args.workers` spawned processes
     (`physics.parallel`): (samples, {distance: components}, ids in the view, ids with a
     contact entry). Raises what the loaders raise."""
+    from ksmech import processes
     from ksmech.physics import parallel
 
     allow_stale = getattr(args, "allow_stale", False)
@@ -245,10 +246,10 @@ def _scored_part(args, part: str, loader, kernels: dict) -> tuple[list, dict, in
     view_dir = source_dir(args.source, args.processed_dir)
     tasks = [
         (path, view_dir, args.split, chunk, allow_stale, loader, kernels)
-        for chunk in parallel.chunked(ids)
+        for chunk in processes.chunked(ids, parallel.CHUNK)
     ]
     samples, comps, n_entry = [], {d: [] for d in kernels}, 0
-    for got, got_comps, n in parallel.in_processes(parallel.scored_chunk, tasks, args.workers):
+    for got, got_comps, n in processes.in_processes(parallel.scored_chunk, tasks, args.workers):
         samples += got
         n_entry += n
         for d in kernels:
@@ -579,6 +580,7 @@ def _read_kind(args, features: str, part: str, loader, kind: str, cfg) -> dict:
     sets), in chunks over `args.workers` spawned processes (`physics.parallel`) when it is
     above 1: the chunks come back in step order, and negatives are drawn per step id, so the
     result is the same."""
+    from ksmech import processes
     from ksmech.physics import parallel
 
     new, visit, merge = READERS[kind]
@@ -591,10 +593,11 @@ def _read_kind(args, features: str, part: str, loader, kind: str, cfg) -> dict:
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         ids = sample_ids(path)
         tasks = [
-            (args, features, part, chunk, loader, kind, cfg) for chunk in parallel.chunked(ids)
+            (args, features, part, chunk, loader, kind, cfg)
+            for chunk in processes.chunked(ids, parallel.CHUNK)
         ]
         n = no_reading = 0
-        for got, (_, k, nr) in parallel.in_processes(_read_chunk, tasks, args.workers):
+        for got, (_, k, nr) in processes.in_processes(_read_chunk, tasks, args.workers):
             merge(out, got)
             n, no_reading = n + k, no_reading + nr
         read = (len(ids), n, no_reading)

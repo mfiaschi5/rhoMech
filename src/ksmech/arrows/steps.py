@@ -40,7 +40,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -50,7 +50,7 @@ from rich.console import Console
 from ksmech.arrows import store
 from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
 from ksmech.arrows.apply_predicted import PredictedArrow, leaving_labels, with_leaving
-from ksmech.arrows.delta_be import EditLabel, EditSkip, edit_label, to_global
+from ksmech.arrows.delta_be import EditLabel, EditSkip, class_shape, edit_label, to_global
 from ksmech.arrows.lewis import MissingBondIndex, check_edit, reactant_lewis
 from ksmech.arrows.reactants import (
     CorrespondenceError,
@@ -76,6 +76,7 @@ from ksmech.physics.pairs import (
 )
 from ksmech.physics.params import REDUCED, KSParams, to_params
 from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
@@ -158,31 +159,6 @@ class MechanismSample:
     def tokens(self, loader: TokenLoader) -> list[MoleculeTokens]:
         """The full token objects of every fragment, in fragment order."""
         return [loader(key) for key in self.fragment_keys]
-
-    def to_dict(self) -> dict:
-        import torch
-
-        out = {}
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if isinstance(value, np.ndarray):
-                value = torch.from_numpy(np.ascontiguousarray(value))
-            elif f.name == "labels":
-                value = [lab.to_dict() for lab in value]
-            elif f.name == "edit_label" and value is not None:
-                value = value.to_dict()
-            out[f.name] = value
-        return out
-
-    @classmethod
-    def from_dict(cls, d: dict) -> MechanismSample:
-        import torch
-
-        kw = {k: v.numpy() if isinstance(v, torch.Tensor) else v for k, v in d.items()}
-        kw["labels"] = [ArrowLabel.from_dict(x) for x in d["labels"]]
-        if kw.get("edit_label") is not None:
-            kw["edit_label"] = EditLabel.from_dict(kw["edit_label"])
-        return cls(**kw)
 
 
 def _incidence(rt: ReactantTokens) -> np.ndarray:
@@ -398,23 +374,17 @@ def build_step_samples_parallel(
     kernels: PairKernels | None = None,
     n_workers: int = 1,
 ) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
-    """`build_step_samples` over `n_workers` spawned processes (one BLAS thread each), in
-    chunks of consecutive steps. Each process keeps its own token and block memory; block files
-    are written atomically, so two processes computing one block cannot corrupt it."""
-    if n_workers <= 1:
-        return build_step_samples(steps, loader, kernels)
-    from multiprocessing import get_context
-
-    from ksmech.orbitals.build import single_threaded_children
-
-    tasks = [(steps[k : k + CHUNK], loader, kernels) for k in range(0, len(steps), CHUNK)]
+    """`build_step_samples` in chunks of `CHUNK` consecutive steps, over `n_workers` spawned
+    processes when above 1 (`processes.in_processes`). Each process keeps its own token and
+    block memory; block files are written atomically, so two processes computing one block
+    cannot corrupt it."""
+    tasks = [(chunk, loader, kernels) for chunk in chunked(steps, CHUNK)]
     samples, skipped = {}, {}
-    with single_threaded_children(), get_context("spawn").Pool(n_workers) as pool:
-        for done, (s, k) in enumerate(pool.imap_unordered(_chunk_worker, tasks), 1):
-            samples.update(s)
-            skipped.update(k)
-            if done % 20 == 0 or done == len(tasks):
-                log.info("samples: %d / %d chunks, %d samples", done, len(tasks), len(samples))
+    for done, (s, k) in enumerate(in_processes(_chunk_worker, tasks, n_workers), 1):
+        samples.update(s)
+        skipped.update(k)
+        if done % 20 == 0 or done == len(tasks):
+            log.info("samples: %d / %d chunks, %d samples", done, len(tasks), len(samples))
     return samples, skipped
 
 
@@ -479,16 +449,12 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
     anchor kinds, orbital readings, ArrowLabels and filtered ArrowLabels."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
-    sizes = Counter(min(len(s.edit_label.variants), 4) for s in kept if s.edit_label)
     return {
         "split": split,
         "n_steps": len(ids),
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
-        "class_size": {("4+" if k == 4 else str(k)): v for k, v in sorted(sizes.items())},
-        "anchor_kind": dict(
-            Counter(s.edit_label.anchors[0][0][2] for s in kept if s.edit_label).most_common()
-        ),
+        **class_shape([s.edit_label for s in kept if s.edit_label]),
         "orbital_reading": dict(Counter(s.orbital_reading for s in kept).most_common()),
         "n_labels": sum(len(s.labels) for s in kept),
         "n_labels_filtered": sum(
@@ -607,7 +573,7 @@ def load_pair_stats(path: Path, allow_stale: bool = False) -> PairStats:
     """The statistics of `pair_feature_stats_<strategy>.json`, verified like the samples (its
     training view and the store index unchanged, built from a clean tree); StaleArtifact
     otherwise, unless `allow_stale` (diagnostics)."""
-    store.verify_clean(Path(path), "pair_stats", SAMPLE_VERSION, allow_stale)
+    prov.verify_clean(path, "pair_stats", SAMPLE_VERSION, allow_stale=allow_stale)
     d = json.loads(Path(path).read_text())["features"]
     return PairStats.from_dict(d, tuple(d))
 

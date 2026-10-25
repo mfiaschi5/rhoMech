@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 from rich.console import Console
 
+from ksmech import processes
 from ksmech.orbitals import build, cli
 from ksmech.orbitals.build import BuildConfig, BuildRow, build_dataset, worst_molecules
 from ksmech.orbitals.descriptors import feature_names
@@ -151,13 +152,13 @@ def test_cli_build_without_processed_data(tmp_path):
 
 
 def test_workers_are_spawned_single_threaded(monkeypatch):
-    for var in build._THREAD_VARS:
+    for var in processes.THREAD_VARS:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OMP_NUM_THREADS", "16")
-    with build.single_threaded_children():
+    with processes.single_threaded_children():
         import os
 
-        assert all(os.environ[v] == "1" for v in build._THREAD_VARS)
+        assert all(os.environ[v] == "1" for v in processes.THREAD_VARS)
     import os
 
     assert os.environ["OMP_NUM_THREADS"] == "16" and "OPENBLAS_NUM_THREADS" not in os.environ

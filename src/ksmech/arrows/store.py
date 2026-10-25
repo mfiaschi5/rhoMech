@@ -20,7 +20,6 @@ on log-features spanning ~30 units, below 1e-7 absolute on the tiny ones
 
 from __future__ import annotations
 
-import io
 import json
 from collections.abc import Iterable, Iterator
 from dataclasses import fields
@@ -200,7 +199,7 @@ def write_view(
 
 
 def _load_shard(path: Path, members: list[int], cls, version: int, allow_stale: bool):
-    verify_clean(path, "sample_shard", version, allow_stale)
+    prov.verify_clean(path, "sample_shard", version, allow_stale=allow_stale)
     with np.load(path, allow_pickle=False) as z:
         metas = json.loads(str(z["meta"]))
         names: dict[str, list[str]] = {}
@@ -214,34 +213,19 @@ def _load_shard(path: Path, members: list[int], cls, version: int, allow_stale: 
     return out
 
 
-def verify_clean(path: Path, kind: str, version: int, allow_stale: bool) -> prov.Provenance | None:
-    """The verified header; a sample artifact built from a dirty tree is refused too (it feeds
-    training and evaluation). `allow_stale` logs instead (diagnostic CLIs)."""
-    import logging
-
-    try:
-        header = prov.verify(path, kind, version)
-        prov.require_clean(header, path)
-        return header
-    except prov.StaleArtifact as exc:
-        if not allow_stale:
-            raise
-        logging.getLogger(__name__).warning("reading a stale %s (--allow-stale): %s", kind, exc)
-        return prov.read_header(path)
-
-
 def _view_members(
     path: Path, version: int, allow_stale: bool, ids: Iterable[str] | None
 ) -> tuple[list[str], dict[str, list[int]]]:
     """(the view's stored ids, kept to `ids` when given, in view order; shard -> members).
     Verifies the view, its split file and the index."""
-    header = verify_clean(path, "samples", version, allow_stale)
+    header = prov.verify_clean(path, "samples", version, allow_stale=allow_stale)
     for name in header.inputs if header else ():
         if name.startswith("file:") and prov.input_path(name).name.startswith("splits_"):
-            verify_clean(prov.input_path(name), "split", version, allow_stale)  # its parquet
+            split = prov.input_path(name)  # verified too: its parquet
+            prov.verify_clean(split, "split", version, allow_stale=allow_stale)
     view = json.loads(Path(path).read_text())
     index_path = store_dir(Path(path).parent) / "index.json"
-    verify_clean(index_path, "sample_index", version, allow_stale)
+    prov.verify_clean(index_path, "sample_index", version, allow_stale=allow_stale)
     shards = json.loads(index_path.read_text())["shards"]
     where = {sid: (name, k) for name, ids_ in shards.items() for k, sid in enumerate(ids_)}
     keep = None if ids is None else set(ids)
@@ -290,11 +274,3 @@ def load_view(
     wanted, by_shard = _view_members(path, version, allow_stale, ids)
     loaded = {s.step_id: s for s in _iter_shards(path, by_shard, cls, version, allow_stale)}
     return [loaded[sid] for sid in wanted]
-
-
-def stored_bytes(sample: MechanismSample) -> int:
-    """Compressed size of one sample as stored (for the size report)."""
-    arrays, meta = pack(sample)
-    buf = io.BytesIO()
-    np.savez_compressed(buf, **arrays, meta=np.array(json.dumps(meta)))
-    return buf.tell()

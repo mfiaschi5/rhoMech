@@ -4012,7 +4012,7 @@ From the code review of the branch (five findings fixed together).
   the trainer could not refuse a stale one. It is now a stamped JSON (kind `pair_stats`,
   inputs the training view and the store index, config the features, `cells: valid` and K,
   eps). `arrows.steps.load_pair_stats` verifies it and refuses a dirty build, through
-  `store.verify_clean` (the store's verify helper, now public, rather than another copy).
+  `provenance.verify_clean` (the store's verify helper, now shared, rather than another copy).
   Existing files (including the retired `pair_feature_stats_random.json`) have no header and
   are refused until `ksmech-arrows samples` is re-run.
 - **Pair tensors in `collate_samples`.** The loader had none of the pair inputs. They now
@@ -4032,3 +4032,35 @@ From the code review of the branch (five findings fixed together).
   tokens, the step's code is the first of STALE_ARTIFACT, NO_BOND_INDEX, MISSING_TOKENS that
   any of them has, so a stale file is never hidden behind a missing one. On the current build
   all 46 MISSING_TOKENS skips are genuinely missing files.
+
+## 2026-10-25 — Cleanup after the review: one pool helper, one verify helper, one candidate rule
+
+No behaviour change: every output is the same, and the samples, sidecars and models on disk
+stay valid.
+
+- **`ksmech.processes`** holds `single_threaded_children`, `chunked` and `in_processes` (a
+  spawned pool, results in task order). Five hand-written pools used to repeat that pattern:
+  the token build, the alignment pass, the sample build, the contact sidecar and
+  `ksmech-physics`. The module imports nothing from ksmech, so every layer can use it; the
+  physics copy could not be reused by `arrows` because `physics` imports `arrows`.
+  - The sample build now receives its chunks in order (`imap`) rather than as they finish. It
+    keeps every sample until the store is written, sorted by step id, so the store is the same.
+  - The serial paths run the same chunks in this process.
+- **`provenance.verify_clean`**: verify the header, refuse a dirty build, or only log the
+  mismatch under `--allow-stale`. It replaces four copies: the sample store, the contact
+  sidecar, the LightGBM ranker and the GBDT.
+- **One candidate rule.** `ReactantTokens.donor_ok` / `acceptor_ok` now read
+  `MoleculeTokens.donor_candidates` / `acceptor_candidates`, the methods that
+  `physics.pairs.valid_pairs` uses. Before, the rule was written twice, and only a test tied the
+  copies together (cf733dc).
+- **Dead code removed:**
+  - `MechanismSample.to_dict` / `from_dict`, from the torch sample files;
+  - `store.stored_bytes`;
+  - `provenance.write_framed` / `read_framed`. Old framed `.pt` files still have their
+    headers read, for `ksmech-data provenance`.
+- **Edit-label gate.** `ksmech-arrows edit-labels` tested for VARIANT_MISMATCH, a code that
+  has not existed since class members failing the key check are dropped and counted
+  (`steps_with_rejected_variants`). The test is gone; the gate is the labeled fraction, as
+  before.
+- `label_report` and `split_report` share `delta_be.class_shape`: the class sizes and the
+  first anchor's kind.

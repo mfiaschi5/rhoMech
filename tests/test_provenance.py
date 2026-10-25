@@ -59,9 +59,10 @@ def test_hash_comes_from_the_header_and_bytes_only_without_one(tmp_path):
 
 def test_framed_and_json_headers_round_trip(tmp_path):
     header = prov.stamp("samples", 3, {"a": "1"}, {"k": [1, 2]}, prov.sha256_bytes(b"data"))
-    prov.write_framed(tmp_path / "f.pt", b"data", header)
-    back, payload = prov.read_framed(tmp_path / "f.pt")
-    assert back == header and payload == b"data"
+    text = header.to_json().encode()  # an old framed sample file, as torch-era builds wrote it
+    framed = prov.MAGIC + len(text).to_bytes(8, "little") + text + b"data"
+    (tmp_path / "f.pt").write_bytes(framed)
+    assert prov.read_header(tmp_path / "f.pt") == header
     prov.write_json(tmp_path / "s.json", {"splits": {}}, header)
     assert prov.read_header(tmp_path / "s.json") == header
 

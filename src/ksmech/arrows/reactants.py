@@ -427,23 +427,26 @@ class ReactantTokens:
 
     @cached_property
     def donor_ok(self) -> np.ndarray:
-        """(n_orbitals,) the donor candidate mask: doubly occupied, not fractional."""
-        c, occ = self.candidate, self._occupations
-        frac = np.array([c.is_fractional(x) for x in occ], dtype=bool)
-        return self.occupied & (occ > c.full) & ~frac
+        """(n_orbitals,) the donor candidate mask (`MoleculeTokens.donor_candidates`): doubly
+        occupied, not fractional."""
+        return self._candidates(lambda t: t.donor_candidates(self.candidate))
 
     @cached_property
     def acceptor_ok(self) -> np.ndarray:
-        """(n_orbitals,) the acceptor candidate mask before the donor-partner exclusion:
-        empty, not fractional, not d-type unless `allow_d_acceptors`."""
-        c, occ = self.candidate, self._occupations
-        frac = np.array([c.is_fractional(x) for x in occ], dtype=bool)
-        ok = ~self.occupied & (occ < c.empty) & ~frac
-        return ok if c.allow_d_acceptors else ok & ~self.d_type
+        """(n_orbitals,) the acceptor candidate mask before the donor-partner exclusion
+        (`MoleculeTokens.acceptor_candidates` without a donor): empty, not fractional, not
+        d-type unless `allow_d_acceptors`."""
+        return self._candidates(lambda t: t.acceptor_candidates(self.candidate))
 
-    @cached_property
-    def _occupations(self) -> np.ndarray:
-        return np.array([o.descriptors.occupation for o in self.orbitals], dtype=float)
+    def _candidates(self, pick: Callable[[MoleculeTokens], list[OrbitalToken]]) -> np.ndarray:
+        """(n_orbitals,) True for the tokens `pick` chooses in each fragment's tokens: the
+        candidate rule lives in `MoleculeTokens` only, and `physics.pairs.valid_pairs` reads
+        the same methods."""
+        chosen = [{id(o) for o in pick(f.tokens)} for f in self.fragments]
+        return np.array(
+            [id(o) in chosen[k] for k, f in enumerate(self.fragments) for o in f.tokens.orbitals],
+            dtype=bool,
+        )
 
     @cached_property
     def atom_positions(self) -> np.ndarray:

@@ -209,7 +209,8 @@ EDIT_LABEL_GATE = 0.95  # labeled fraction of the training steps
 
 def cmd_edit_labels(args: argparse.Namespace, path: Path, console: Console) -> int:
     """Label every training step with its reaction matrix (spec v8) on the token atoms; the
-    data gate is the labeled fraction, and no class member may fail to reproduce its step."""
+    data gate is the labeled fraction. Every class member reproduces its step by construction:
+    one that does not is dropped and counted (`steps_with_rejected_variants`)."""
     loader = TokenCache(args.tokens_dir)
     labels = {step.step_id: step_label(step, loader) for step in read_training_steps(path)}
     report = label_report(labels)
@@ -223,8 +224,7 @@ def cmd_edit_labels(args: argparse.Namespace, path: Path, console: Console) -> i
         f"{report['resonance_truncated']}, anchors {report['anchor_kind']}"
     )
     _write(report, args, "edit_labels_report.json", console)
-    ok = report["labeled_fraction"] >= EDIT_LABEL_GATE
-    return 0 if ok and "VARIANT_MISMATCH" not in report["skipped"] else 1
+    return 0 if report["labeled_fraction"] >= EDIT_LABEL_GATE else 1
 
 
 if __name__ == "__main__":
