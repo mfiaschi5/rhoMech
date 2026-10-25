@@ -1,5 +1,5 @@
-"""Spawned worker processes for the builders and scorers (token build, alignment, samples, the
-contact sidecar, `ksmech-physics`): one BLAS / OpenMP thread each, results in task order.
+"""Spawned worker processes for the builders and scorers (token build, alignment, samples,
+`ksmech-physics`): one BLAS / OpenMP thread each, results in task order.
 
 It imports nothing from ksmech, so every layer can use it. A task's arguments and results
 cross the process boundary by pickle: an exception raised in a worker must rebuild from its

@@ -219,7 +219,7 @@ def _leading_pairs(orbitals, sign: float) -> tuple[np.ndarray, np.ndarray]:
     return key, ok
 
 
-BONDED = 1.3  # x covalent-radii sum, as in the QM layer and the contact table
+BONDED = 1.3  # x covalent-radii sum, as in the QM layer
 
 
 def bonded_matrix(t: MoleculeTokens) -> np.ndarray:
@@ -323,7 +323,7 @@ class MoleculeTokens:
     digest: str = field(default="", repr=False, compare=False)  # content sha256 (provenance)
     source_path: str = field(default="", repr=False, compare=False)  # file it was loaded from
     # Lewis bond (i < j) -> Wiberg bond index, from the QM record (`qm.bond_index`): attached at
-    # build or load time, not part of the token file (its hash keys the contact-block cache)
+    # build or load time, not part of the token file (whose content hash stays unchanged)
     bond_index: dict[tuple[int, int], float] | None = field(default=None, repr=False, compare=False)
     bond_index_input: tuple[str, str] = field(default=("", ""), repr=False, compare=False)
 

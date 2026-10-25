@@ -32,7 +32,7 @@ def test_layout_and_always_defined_entries(pair):
     for name in ("g", "log_abs_g", "inter", "bonded", "bond_order", "graph_distance"):
         assert block.defined[..., A[name]].all(), name
     assert np.isfinite(block.z).all() and block.n_non_finite == 0
-    assert (block.sites == -1).all()  # no contact placement in stage A
+    assert (block.sites == -1).all()  # no contact placement (schema 15 only)
     assert (block.z[~block.defined] == 0).all()
 
 

@@ -1,8 +1,9 @@
 # ksmech
 
-Predict organic reaction mechanisms as sequences of elementary steps, where each step is a set of
-arrows from a donor localized orbital to an acceptor localized orbital, scored by a transformer
-whose attention is biased by the Klopman-Salem equation.
+Predict organic reaction mechanisms as sequences of elementary steps, where each step is the
+change it makes to the Lewis structure (a reaction matrix), predicted by a transformer over atom
+and localized-orbital tokens whose pair track carries geometry-free Klopman-Salem quantities (the
+spectral gap factor and the cross-centre coupling).
 
 See [CLAUDE.md](CLAUDE.md) for the design and engineering rules, and
 [docs/decisions.md](docs/decisions.md) for the running decision log.
@@ -42,7 +43,8 @@ bindings are unavailable (not yet implemented; arrives with the QM phase).
 2. **QM featurization**: 3D embedding, xTB/tblite calculations, caching
 3. **Orbital tokens**: localization, atom and orbital token construction
 4. **Arrow alignment**: arrow parsing, arrow-to-orbital alignment, step application
-5. **Physics baseline**: Klopman-Salem terms and pair features, scored without learning
-6. **Model**: transformer with KS attention bias, decoder, losses
+5. **Physics baseline**: geometry-free pair features, the untrained gap-factor ranking and a
+   LightGBM reference
+6. **Model**: transformer with a pair track, edit decoder, losses
 7. **Evaluation**: metrics, benchmarks, reports
 8. **Scale-up**: FlowER-size training, QMugs pretraining

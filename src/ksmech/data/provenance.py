@@ -70,7 +70,7 @@ class StaleArtifact(Exception):
 
 @dataclass(frozen=True)
 class Provenance:
-    kind: str  # qm_record | tokens | contact_block | samples | split | baseline
+    kind: str  # qm_record | tokens | samples | split | pair_stats | baseline_lgbm | ...
     schema_version: int
     code_git_hash: str
     spec_sha256: str

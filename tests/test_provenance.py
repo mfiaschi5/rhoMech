@@ -182,12 +182,12 @@ def test_code_state_sees_tracked_edits_and_untracked_sources(monkeypatch, tmp_pa
 
 
 def test_a_dirty_sample_store_is_refused_unless_allow_stale(
-    mini_steps, token_loader, pair_kernels, monkeypatch, tmp_path
+    mini_steps, token_loader, monkeypatch, tmp_path
 ):
     from ksmech.arrows import store
     from ksmech.arrows.steps import SAMPLE_VERSION, load_samples, sample_for_step, write_split_file
 
-    s = sample_for_step(mini_steps["e2"], token_loader, pair_kernels)
+    s = sample_for_step(mini_steps["e2"], token_loader)
     monkeypatch.setattr(prov, "code_state", lambda: ("a" * 40, True, "d" * 64))
     parquet = tmp_path / "steps.parquet"
     parquet.write_bytes(b"x")

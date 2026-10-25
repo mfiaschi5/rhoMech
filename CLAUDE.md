@@ -6,8 +6,9 @@ ksmech is a deep-learning tool that predicts organic reaction mechanisms as sequ
 elementary steps. Each step is predicted as the change it makes to the Lewis structure: the
 reaction matrix R = Delta(bond-electron matrix), which bonds form and break and where electron
 pairs end up. Molecules are encoded as atom and localized-orbital tokens, and the transformer's
-attention is biased by the Klopman-Salem equation, so the model starts from a physical picture
-of orbital interactions instead of learning it from scratch. Curved arrows are not predicted:
+pair track carries the geometry-free orbital-interaction quantities of the Klopman-Salem picture
+(the spectral gap factor and the cross-centre coupling), so the model starts from a physical
+picture of orbital interactions instead of learning it from scratch. Curved arrows are not predicted:
 they are a reading of R, reconstructed afterwards with the orbital pairs that drive it.
 
 The prediction target is an autoregressive sequence of elementary steps. A step is one reaction
@@ -25,7 +26,7 @@ the labels recomputed.
 
 ## Representation
 
-`docs/ksmech_architecture.tex` (spec v8) is the source of truth for the representation and
+`docs/ksmech_architecture.tex` (spec v9) is the source of truth for the representation and
 the model; this section summarizes it.
 
 Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are
@@ -87,15 +88,21 @@ different energies.
 
 ## Physics
 
-The three Klopman-Salem terms are computed as pair features between orbital tokens:
+The physics enters as geometry-free pair features between an occupied and a virtual orbital
+token (spec, "Geometry-free pair features"):
 
-1. filled-filled (closed-shell) repulsion,
-2. Coulomb interaction between the charges on the two sites,
-3. filled-empty orbital interaction (overlap squared over the energy gap).
+1. the spectral gap factor G and log|G|: the energy denominator of the Klopman-Salem
+   filled-empty term over the canonical spectra, for every pair;
+2. within a molecule, in the reactant pose: the Wolfsberg-Helmholz cross-centre coupling, the
+   centroid distance and the stereoelectronic alignment (lobe-axis and dihedral cosines);
+3. the fragment flag and, on the Lewis structure, the bonded flag, bond order, Wiberg index and
+   graph distance.
 
-These features enter the transformer as per-head additive attention biases. One head is
-hard-wired to the pure KS kernel (no learned parameters) so the ablation "physics only vs.
-learned" is a flag away.
+They initialize the pair track, which every head reads as a learned bias; all heads are
+learned. There is no contact geometry, no Klopman-Salem attention bias and no frozen head. That
+design (configurational contact, the three KS terms at contact, a frozen head 0) is archived
+with its code on the git branch `archive/stage-b` (spec v8.1): untrained, its contact terms
+ranked a step's first arrow worse than G alone.
 
 ## Data sources
 
@@ -140,7 +147,7 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
-  (STALE_ARTIFACT); only `ks-rank` and `textbook` take `--allow-stale`.
+  (STALE_ARTIFACT); only `textbook` takes `--allow-stale`.
 - QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
@@ -151,9 +158,7 @@ Main CLI entry points are added phase by phase and listed here as they land:
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
   without a QM record are skipped and counted, so re-run after the QM batch), `uv run
   ksmech-orbitals show --smiles 'CC(=O)C'` (token table of one cached molecule),
-  `uv run ksmech-orbitals fg-vocab --source pmechdb` (regenerate the functional-group vocabulary),
-  `uv run ksmech-orbitals contact-table --source pmechdb` (the contact overlap table of the KS
-  terms, `data/cache/contact_table.json`, from the token cache; re-run after a token rebuild)
+  `uv run ksmech-orbitals fg-vocab --source pmechdb` (regenerate the functional-group vocabulary)
 - Arrows: `uv run ksmech-arrows roundtrip --source pmechdb` (dataset arrows applied as one
   BE-matrix edit per step vs. the annotated products, `arrows_roundtrip.json`), `uv run
   ksmech-arrows align --source pmechdb` (arrow-to-orbital labels by atom, unaligned groups,
@@ -161,35 +166,23 @@ Main CLI entry points are added phase by phase and listed here as they land:
   ksmech-arrows samples --source
   pmechdb` (the sample store `samples/shard_*.npz` + `index.json`: every training step with
   tokens, its reaction-matrix label class and anchors, the reactant's Lewis structure on the token
-  atoms (bonds, lone pairs, Wiberg indices), the geometry-free stage-A pair features, and the
+  atoms (bonds, lone pairs, Wiberg indices), the geometry-free pair features, and the
   orbital-pair labels where every arrow aligns; one `samples_<strategy>_<part>.json` view per
   split of `molecule`, `scaffold` and
   `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
-  labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`), `uv run
-  ksmech-arrows contacts --source pmechdb [--split molecule]` (the legacy
-  contact sidecar `samples/contacts_<split>/`: the 11 KS pair features with the oriented kernel at
-  2.0, 2.3 and 3.0 Angstrom for val, test and a 3,000-step training subsample; needs `samples`;
-  `--workers 8`: spawned processes, under 1 GB each)
-- Physics: `uv run ksmech-physics ks-rank --source pmechdb [--split molecule|scaffold] [--kernel
-  oriented|table|analytic] [--distance 2.0 2.3 ...] [--workers 8]` (untrained KS ranking of each step's
-  first arrow: the floor -(KS3 + KS2) and the frozen head on train + val and test, scorer
-  table, failure classes, per-class table, `ks_rank_report_<split>_<kernel>[_d<d>].json`;
-  oriented blocks are cached under `data/cache/oriented/`), `uv run ksmech-physics baseline
-  --source pmechdb [--split molecule|scaffold]` (logistic regression + GBDT ranker,
-  `baseline_report_<split>.json`, the models and a GBDT with the textbook pools held out), `uv
-  run ksmech-physics textbook` (five textbook selectivity cases, expected vs top-3, cases seen in
-  a model's training marked; builds missing QM records and tokens; `--fast` for the LightGBM
-  models), `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--features
-  contact|geomfree] [--workers 8] [--n-jobs 14]` (the fast LightGBM lambdarank reference: all positives + 20
-  hard + 30 random negatives per step, early stopping on val top-5; `contact` on the sidecar
-  subsample, `geomfree` on stage-A pair features over all training;
-  `gbdt_lgbm_report_<split>_<features>.json` with times and peak RSS; `--workers` load the samples,
-  `--n-jobs` LightGBM threads fit and score, one after the other). The oriented kernel is the
-  frozen baseline `physics/contact/legacy_fixed23.py`. `ks-rank` and `baseline` read the samples
-  joined with the contact sidecar (train = its subsample). After a token rebuild: `ksmech-arrows
-  samples` (stage-A features and `pair_feature_stats_<strategy>.json` from each training part),
-  then `ksmech-arrows contacts`, then `ksmech-orbitals contact-table` for the table ablation, then
-  `ks-rank`, `baseline`, `textbook`.
+  labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`)
+- Physics: `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--workers 8]
+  [--n-jobs 14]` (the fast LightGBM lambdarank reference on the geometry-free pair features over
+  all training, ranking each step's first arrow: all positives + 20 hard (best by the gap kernel
+  G) + 30 random negatives per step, early stopping on val top-5, the untrained gap kernel as the
+  floor; `gbdt_lgbm_report_<split>_geomfree.json` with times and peak RSS, the models
+  `gbdt_lgbm_<split>_geomfree[_textbook-held-out].npz`; `--workers` load the samples, `--n-jobs`
+  LightGBM threads fit and score, one after the other), `uv run ksmech-physics textbook [--gbdt
+  PATH] [--allow-stale]` (five textbook selectivity cases, expected vs top-3, with the untrained
+  gap kernel and the two geometry-free LightGBM models of the molecule split, cases seen in a
+  model's training marked; builds missing QM records and tokens). After a token rebuild:
+  `ksmech-arrows samples` (geometry-free pair features and `pair_feature_stats_<strategy>.json`
+  from each training part), then `ksmech-physics gbdt`, then `textbook`.
 - Training: _not yet_
 - Evaluation: _not yet_

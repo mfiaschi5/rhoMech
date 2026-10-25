@@ -36,13 +36,6 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     v.add_argument("--min-count", type=int, default=5)
     v.add_argument("--out", type=Path, default=DEFAULT_VOCAB_PATH)
-    c = sub.add_parser("contact-table", help="contact overlap table from the token cache")
-    c.add_argument("--source", required=True, choices=[str(s) for s in Source])
-    c.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
-    c.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
-    c.add_argument("--out", type=Path, default=None, help="default data/cache/contact_table.json")
-    c.add_argument("--min-count", type=int, default=5)
-    c.add_argument("--window", type=float, default=0.3, help="Angstrom around the vdW sum")
     s = sub.add_parser("show", help="print the token table of one cached molecule")
     s.add_argument("--smiles", required=True, help="map-free SMILES (canonicalized here)")
     s.add_argument("--qm-cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
@@ -58,8 +51,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_build(args, console)
     if args.command == "fg-vocab":
         return cmd_fg_vocab(args, console)
-    if args.command == "contact-table":
-        return cmd_contact_table(args, console)
     return cmd_show(args, console)
 
 
@@ -91,28 +82,6 @@ def cmd_fg_vocab(args: argparse.Namespace, console: Console) -> int:
         f"{args.min_count}; wrote {path}"
     )
     return 0
-
-
-def cmd_contact_table(args: argparse.Namespace, console: Console) -> int:
-    from ksmech.orbitals.build import tokens_path
-    from ksmech.physics.contact_table import DEFAULT_TABLE_PATH, save_tables, tables_from_paths
-
-    method = QMConfig().method
-    smiles_list, _ = collect_molecules(args.source, args.processed_dir)
-    paths = [tokens_path(args.tokens_dir, s, 0, method) for s in smiles_list]
-    tables, skipped = tables_from_paths(paths, method, args.min_count, args.window)
-    out = save_tables(tables, args.out or DEFAULT_TABLE_PATH)
-    n_used = tables["occ_virt"].n_molecules
-    console.print(
-        f"contact table from {n_used}/{len(paths)} molecules (skipped: {skipped or 'none'})"
-    )
-    for kind, t in tables.items():
-        n = t.counts["global"].get((), 0)
-        keys = {lv: len(m) for lv, m in t.counts.items()}
-        median = t.medians["global"].get((), float("nan"))
-        console.print(f"  {kind}: {n} samples, keys per level {keys}, global median {median:.4f}")
-    console.print(f"wrote {out}")
-    return 0 if n_used else 1
 
 
 def cmd_show(args: argparse.Namespace, console: Console) -> int:

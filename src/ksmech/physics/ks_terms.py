@@ -1,32 +1,26 @@
-"""Klopman-Salem pair terms between orbital tokens: term 3 (filled-empty) in spectral form.
+"""The geometry-free Klopman-Salem quantities between orbital tokens.
 
-    KS3(r, s) = beta(r, s)^2 * G(r, s)
-    G(r, s)   = sum_k sum_m 2 p_rk p_sm / (E_k - E_m)
+    G(r, s) = sum_k sum_m 2 p_rk p_sm / (E_k - E_m)
 
-`G` is the gap kernel over the *full* spectral decompositions of the two tokens on the
-canonical MOs of their blocks (never the truncated 8-entry model input): canonical energies in
-the denominator. `beta` couples the two localized orbitals:
+`G` is the gap kernel, the energy denominator of the filled-empty term, over the *full*
+spectral decompositions of the two tokens on the canonical MOs of their blocks (never the
+truncated 8-entry model input): canonical energies in the denominator. It needs no geometry,
+so it is defined within one molecule and across two.
 
-- the contact resonance integral (`ksmech.physics.contact_kernel`), used for **every** pair,
-  within one molecule or across two: the two orbitals are evaluated as if brought into
-  contact, which needs no common AO basis. `ks3_contact` is the unified term (eV).
-- `coupling(l_r, B, l_s)` with a matrix `B` in a common AO basis is the converged form. For
-  occupied and virtual LMOs of one converged molecule it is identically zero with the
-  molecule's own `S` or `F` (they are S-orthogonal and F-decoupled).
-- For intramolecular pairs two extra pair features: the centroid distance and the
-  cross-centre coupling `l_r^T B l_s` restricted to the AO blocks between the donor's centres
-  and the acceptor's centres, with the spec's B: the Wolfsberg-Helmholz resonance integral
-  `resonance_integral(S, H_aa, H_bb, K)` on AO pairs of different atoms, 0 within an atom.
-  H is the diagonal of the converged GFN2 Hamiltonian (the Fock matrix the token files store).
-  Unlike S or F the restricted coupling does not vanish between converged occupied and
-  virtual LMOs; it measures how much the two orbitals share atoms and bonds in the computed
-  geometry, not whether they can meet.
+For intramolecular pairs one more quantity: the cross-centre coupling `l_r^T B l_s` restricted
+to the AO blocks between the donor's centres and the acceptor's centres, with B the
+Wolfsberg-Helmholz resonance integral `resonance_integral(S, H_aa, H_bb, K)` on AO pairs of
+different atoms, 0 within an atom. H is the diagonal of the converged GFN2 Hamiltonian (the
+Fock matrix the token files store), averaged per shell (`ao_energies`). The molecule's own S or
+F couple none of its converged occupied and virtual LMOs (they are S-orthogonal and
+F-decoupled); the restricted coupling does not vanish: it measures how much the two orbitals
+share atoms and bonds in the computed geometry, not whether they can meet.
 
 For an occupied r and a virtual s of one molecule every E_k - E_m is negative, so G < 0, and
 the more negative G the stronger the stabilizing interaction. Between two molecules a donor
 level can lie above an acceptor level (an anion and a cation), and those terms are positive.
-Energies are in eV, G in 1/eV. Terms 1 and 2 live in `ksmech.physics.repulsion` and
-`ksmech.physics.coulomb`.
+Energies are in eV, G in 1/eV. The contact resonance integral, the Coulomb and the repulsion
+terms of the archived contact model are on branch `archive/stage-b`.
 """
 
 from __future__ import annotations
@@ -34,9 +28,8 @@ from __future__ import annotations
 import numpy as np
 
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
-from ksmech.physics.contact.legacy_fixed23 import ao_energies
-from ksmech.physics.contact_kernel import ContactKernel
 from ksmech.physics.params import KSParams
+from ksmech.qm.ao import gfn2_shells
 from ksmech.qm.fukui import HARTREE_TO_EV
 
 MIN_GAP_EV = 1e-3  # a canonical pair closer than this is clamped (same-block degeneracies)
@@ -59,11 +52,6 @@ def wolfsberg_helmholz(
     B = resonance_integral(S, h[:, None], h[None, :], K)
     B[ao_atom[:, None] == ao_atom[None, :]] = 0.0
     return B
-
-
-def coupling(l_r: np.ndarray, B: np.ndarray, l_s: np.ndarray) -> float:
-    """l_r^T B l_s in a common AO basis."""
-    return float(l_r @ B @ l_s)
 
 
 def gap_kernel(
@@ -99,19 +87,6 @@ def token_gap_kernel_truncated(r: OrbitalToken, s: OrbitalToken) -> float:
     )
 
 
-def ks3(
-    l_r: np.ndarray,
-    l_s: np.ndarray,
-    B: np.ndarray,
-    energies_r: np.ndarray,
-    weights_r: np.ndarray,
-    energies_s: np.ndarray,
-    weights_s: np.ndarray,
-) -> float:
-    """Converged form of term 3 for one pair: (l_r^T B l_s)^2 * G(r, s)."""
-    return coupling(l_r, B, l_s) ** 2 * gap_kernel(energies_r, weights_r, energies_s, weights_s)
-
-
 def _blocks(tokens: list[OrbitalToken]):
     """(indices, block energies, stacked full weights) per spectral block among `tokens`."""
     groups: dict[bytes, list[int]] = {}
@@ -140,43 +115,28 @@ def gap_kernel_matrix(
     return out
 
 
-def ks3_matrix(rows: list[OrbitalToken], cols: list[OrbitalToken], B: np.ndarray) -> np.ndarray:
-    """Converged term 3 for every pair of tokens of one molecule (`B` in its AO basis)."""
-    L_r = np.column_stack([r.coeff_vector for r in rows])
-    L_s = np.column_stack([s.coeff_vector for s in cols])
-    return (L_r.T @ B @ L_s) ** 2 * gap_kernel_matrix(rows, cols)
-
-
-def ks3_contact(
-    r: OrbitalToken,
-    t_r: MoleculeTokens,
-    s: OrbitalToken,
-    t_s: MoleculeTokens,
-    kernel: ContactKernel,
-    params: KSParams | None = None,
-) -> float:
-    """Unified term 3 (eV): contact resonance integral squared times the gap kernel."""
-    return kernel.beta(r, t_r, s, t_s, params) ** 2 * token_gap_kernel(r, s)
-
-
-def contact_beta_matrix(rows, t_r, cols, t_s, kernel: ContactKernel, params=None) -> np.ndarray:
-    """Contact resonance integral (eV) for every (row, col) token pair."""
-    return kernel.beta_matrix(rows, t_r, cols, t_s, params)
-
-
-def ks3_contact_matrix(rows, t_r, cols, t_s, kernel: ContactKernel, params=None) -> np.ndarray:
-    beta = contact_beta_matrix(rows, t_r, cols, t_s, kernel, params)
-    return beta**2 * gap_kernel_matrix(rows, cols)
-
-
-def centroid_distance(r: OrbitalToken, s: OrbitalToken) -> float:
-    """Intramolecular pair feature: distance between the two orbital centroids (Angstrom)."""
-    return float(np.linalg.norm(r.descriptors.centroid - s.descriptors.centroid))
+def ao_energies(t: MoleculeTokens) -> np.ndarray:
+    """(nao,) the AO energies of the Wolfsberg-Helmholz resonance integral (eV): the molecule's
+    own GFN2 Fock diagonal, averaged over the 2l + 1 components of each shell (tblite's AO
+    order, `qm.ao.gfn2_shells`). GFN2's anisotropic terms split the lab-frame diagonal of a p
+    or d shell (0.06-0.2 eV on C and O p, 0.4 eV on Br d) in a way that depends on the record's
+    orientation; the shell average is rotation-invariant, one valence-state energy per shell."""
+    f = np.diag(t.F) * HARTREE_TO_EV
+    out, k = f.copy(), 0
+    shells = gfn2_shells()
+    for atom in t.atoms:
+        for _, ell, _, _ in shells[int(atom.atomic_number)]:
+            n = 2 * ell + 1
+            out[k : k + n] = f[k : k + n].mean()
+            k += n
+    if k != len(f):
+        raise ValueError(f"{t.smiles}: {k} shell AOs for {len(f)} AOs")
+    return out
 
 
 def wh_matrix(t: MoleculeTokens, params: KSParams | None = None) -> np.ndarray:
     """The molecule's Wolfsberg-Helmholz B (eV), zero within an atom, on the shell-averaged
-    AO energies (rotation-invariant, `oriented.ao_energies`)."""
+    AO energies (rotation-invariant, `ao_energies`)."""
     K = (params or KSParams()).K
     return wolfsberg_helmholz(t.S, t.F, t.ao_atom, K, ao_energies(t))
 
@@ -201,20 +161,3 @@ def cross_center_coupling(
 ) -> float:
     """The intramolecular coupling extra of one pair (B zero within an atom)."""
     return float(cross_center_coupling_matrix([r], [s], ao_atom, B)[0, 0])
-
-
-def intramolecular_pair_features(
-    r: OrbitalToken,
-    s: OrbitalToken,
-    t: MoleculeTokens,
-    kernel: ContactKernel,
-    params: KSParams | None = None,
-) -> dict[str, float]:
-    """The unified term plus the two intramolecular extras for a pair of one molecule."""
-    return dict(
-        gap_kernel=token_gap_kernel(r, s),
-        contact_beta=kernel.beta(r, t, s, t, params, same=True),
-        ks3_contact=kernel.beta(r, t, s, t, params, same=True) ** 2 * token_gap_kernel(r, s),
-        centroid_distance=centroid_distance(r, s),
-        cross_center_coupling=cross_center_coupling(r, s, wh_matrix(t, params), t.ao_atom),
-    )

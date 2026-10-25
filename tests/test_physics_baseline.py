@@ -1,36 +1,65 @@
-"""The trained rankers: candidate features, logistic regression, the numpy GBDT."""
+"""The candidate pairs of the first arrow: their features, labels, untrained score and ranks."""
 
 import numpy as np
 import pytest
 
-from ksmech.arrows.steps import sample_for_step
+from ksmech.arrows.steps import build_all_samples, sample_for_step
 from ksmech.physics import baseline as bl
-from ksmech.physics.pairs import F, frozen_head
-from ksmech.physics.ranking import first_label, label_pairs, physical_pair_z
+from ksmech.physics.stage_a import STAGE_A_FEATURES
 from tests.test_arrows_steps import mini_processed, missing_iodide  # noqa: F401 (fixture)
 
 
 @pytest.fixture(scope="module")
-def sets(mini_steps, token_loader, pair_kernels):
+def sets(mini_steps, token_loader):
     names = ("sn2", "proton_transfer", "carbonyl_addition", "e2")
-    samples = [sample_for_step(mini_steps[k], token_loader, pair_kernels) for k in names]
+    samples = [sample_for_step(mini_steps[k], token_loader) for k in names]
     return samples, [bl.candidate_set(s, token_loader) for s in samples]
 
 
+def test_label_rank_is_pessimistic_and_marginalized():
+    valid = np.ones((2, 3), bool)
+    scores = np.array([[5.0, 1.0, 3.0], [3.0, 0.0, 2.0]])
+    pos = np.zeros((2, 3), bool)
+    pos[0, 2] = pos[1, 1] = True  # two labeled pairs: the better one (3.0) counts
+    assert bl.label_rank(scores, valid, pos) == 2  # 5.0 and the tie at 3.0 rank ahead of it
+    valid[0, 0] = False  # an invalid candidate is not a competitor
+    assert bl.label_rank(scores, valid, pos) == 1
+    valid[0, 2] = valid[1, 1] = False
+    assert bl.label_rank(scores, valid, pos) is None  # every labeled pair filtered out
+
+
+def test_summary_counts_missing_labels_as_misses():
+    out = bl.summarize_ranks([0, 2, 4, None])
+    assert out["top1"] == 0.25 and out["top3"] == 0.5 and out["top5"] == 0.75
+    assert out["n"] == 4 and out["n_no_valid_label"] == 1 and out["median_rank"] == 2
+
+
+def test_label_pairs_follow_the_label(sets):
+    for s in sets[0]:
+        lab = bl.first_label(s)
+        pos = bl.label_pairs(s, lab)
+        occ_ids = s.n_atoms + np.flatnonzero(s.orbital_occupied)
+        virt_ids = s.n_atoms + np.flatnonzero(~s.orbital_occupied)
+        rows, cols = np.nonzero(pos)
+        assert set(occ_ids[rows]) == set(lab.donor_ids)
+        assert set(virt_ids[cols]) == set(lab.acceptor_ids)
+        assert (pos & s.pair_valid).any()  # the mini steps are all scoreable
+
+
 def test_candidate_features(sets):
+    """The geometry-free pair features as stored, NaN where undefined, then the token columns;
+    the untrained score is -G."""
     samples, cs_list = sets
-    assert len(bl.FEATURE_NAMES) == 61
+    n_pair = len(STAGE_A_FEATURES)
+    assert bl.FEATURE_NAMES[:n_pair] == list(STAGE_A_FEATURES) and len(bl.FEATURE_NAMES) == 61
     for s, cs in zip(samples, cs_list, strict=True):
-        assert cs.X.shape == (int(s.pair_valid.sum()), 61) and np.isfinite(cs.X).all()
-        z = physical_pair_z(s)[cs.rows, cs.cols]
-        assert np.allclose(cs.X[:, :11], z)
-        assert np.array_equal(cs.positive, label_pairs(s, first_label(s))[cs.rows, cs.cols])
+        assert cs.X.shape == (int(s.pair_valid.sum()), len(bl.FEATURE_NAMES))
+        undefined = ~s.pair_defined[cs.rows, cs.cols]
+        assert np.array_equal(np.isnan(cs.X[:, :n_pair]), undefined)
+        assert np.isfinite(cs.X[:, n_pair:]).all()
+        assert np.array_equal(cs.positive, bl.label_pairs(s, bl.first_label(s))[cs.rows, cs.cols])
         assert cs.positive.any() and not (cs.positive & cs.ignore).any()
-        ks3 = cs.gap_sign * np.exp(z[:, F["log_abs_ks3"]])
-        scores = bl.untrained_scores(cs)
-        assert np.allclose(scores["ks3+ks2"], -(ks3 + z[:, F["ks2"]]))
-        head = frozen_head(cs.X[:, :11], cs.gap_sign, cs.defined)
-        assert np.allclose(scores["frozen_head"], head)  # logits in eV, no statistics
+        assert np.allclose(bl.gap_score(cs), -s.pair_z[cs.rows, cs.cols, 0])
         assert cs.rank(np.where(cs.positive, 1.0, 0.0)) == 0  # a perfect score ranks first
 
 
@@ -42,119 +71,29 @@ def test_main_centres_are_the_largest_weight(sets):
         assert main[j] == int(rows[np.argmax(rows[:, 2]), 1])
 
 
-def test_logistic_regression_runs_and_scores(sets):
-    _, cs_list = sets
-    model, scan = bl.select_logistic(cs_list, cs_list, grid=(0.1, 1.0))
-    assert set(scan) == {0.1, 1.0} and model.l2 in scan
-    r = bl.evaluate_scores(cs_list, [model.score(cs.X) for cs in cs_list])
-    assert r["n"] == len(cs_list) and all(isinstance(x, int) for x in r["ranks"])
+def test_gbdt_reader_skips_and_counts_samples_without_an_orbital_label(
+    mini_processed,  # noqa: F811
+    token_loader,
+    monkeypatch,
+):
+    """A sample whose arrows have no orbital pair (a lone heterolysis) has no first arrow to
+    rank: the LightGBM reader (`_read_part`) skips it and counts it as NO_ORBITAL_READING."""
+    import argparse
+    import dataclasses
 
-
-def _toy_sets(rng, n_sets=40, n=60):
-    """Candidate sets where the positive is the row with the largest feature 3."""
-    out = []
-    for k in range(n_sets):
-        X = rng.normal(size=(n, 61))
-        pos = np.zeros(n, bool)
-        pos[np.argmax(X[:, 3])] = True
-        valid = np.ones((1, n), bool)
-        out.append(
-            bl.CandidateSet(
-                f"t{k}",
-                X,
-                np.zeros(n, int),
-                np.arange(n),
-                pos,
-                np.zeros(n, bool),
-                -np.ones(n),
-                np.ones((n, 11), bool),
-                valid,
-                pos[None, :].copy(),
-            )
-        )
-    return out
-
-
-def test_tree_finds_the_informative_split():
-    rng = np.random.default_rng(0)
-    X = rng.normal(size=(2000, 5))
-    g = np.where(X[:, 2] > 0.3, -1.0, 1.0)
-    edges = bl.quantile_edges(X, 32)
-    tree = bl.fit_tree(bl.binned(X, edges), g, np.ones(len(X)), bl.TreeConfig(depth=1))
-    assert tree.feature[0] == 2
-    pred = tree.predict(bl.binned(X, edges))
-    assert pred[X[:, 2] > 0.5].min() > 0 > pred[X[:, 2] < 0.1].max()
-
-
-def test_gbdt_learns_a_ranking_and_round_trips(tmp_path):
-    rng = np.random.default_rng(1)
-    train, val = _toy_sets(rng), _toy_sets(rng, 15)
-    cfg = bl.TreeConfig(max_rounds=60, check_every=10, patience=30, subsample=1.0)
-    model = bl.fit_gbdt(train, val, cfg)
-    r = bl.evaluate_scores(val, [model.score(cs.X) for cs in val])
-    assert r["top3"] >= 0.8 and model.history and len(model.trees) >= 10
-    back = bl.load_gbdt(bl.save_gbdt(model, tmp_path / "gbdt.npz"))
-    X = val[0].X
-    assert np.allclose(back.score(X), model.score(X))
-
-
-def test_baseline_cli(mini_processed, token_loader, pair_kernels, monkeypatch):  # noqa: F811
-    import json
-
+    import ksmech.arrows.steps as steps
     import ksmech.physics.cli as cli
-    from ksmech.arrows.contacts import build_all_contacts
-    from ksmech.arrows.steps import build_all_samples
 
     loader = missing_iodide(token_loader)
     build_all_samples("pmechdb", ["molecule"], mini_processed, loader)
-    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, loader)
-    monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
-    quick = bl.TreeConfig(max_rounds=20, check_every=5)
-    monkeypatch.setattr(bl, "TreeConfig", lambda: quick)
-    code = cli.main(["baseline", "--source", "pmechdb", "--processed-dir", str(mini_processed)])
-    out = mini_processed / "pmechdb"
-    report = json.loads((out / "baseline_report_molecule.json").read_text())
-    assert code in (0, 1) and "GBDT ranker" in report["results"]
-    assert "not applicable" in report["loco"] or "found" in report["loco"]
-    assert (out / "baseline_gbdt_molecule.npz").exists() and (
-        out / "baseline_lr_molecule.npz"
-    ).exists()
-    from ksmech.data.provenance import read_header
+    args = argparse.Namespace(source="pmechdb", processed_dir=mini_processed, split="molecule")
 
-    held = read_header(out / "baseline_gbdt_molecule_textbook-held-out.npz")
-    assert held.extra["textbook_pools_in_training"] == []
-    assert "GBDT ranker (textbook-held-out)" in report["results"]
-    seen = read_header(out / "baseline_gbdt_molecule.npz").extra["textbook_pools_in_training"]
-    assert seen == sorted(report["textbook_seen"])
+    def strip_first(samples):
+        return [dataclasses.replace(s, labels=[]) if k == 0 else s for k, s in enumerate(samples)]
 
-
-def test_stage_a_candidate_set(mini_steps, token_loader, sets):
-    """The geometry-free columns: stage-A pair features with NaN where undefined, then the
-    token columns of the legacy set; -G is the same from either pair set."""
-    from ksmech.arrows.steps import sample_for_step as build
-    from ksmech.physics.stage_a import STAGE_A_FEATURES
-
-    names = ("sn2", "proton_transfer", "carbonyl_addition", "e2")
-    assert bl.GEOMFREE_FEATURE_NAMES[: len(STAGE_A_FEATURES)] == list(STAGE_A_FEATURES)
-    assert bl.GEOMFREE_FEATURE_NAMES[11:] == bl.FEATURE_NAMES[11:]
-    for name, legacy in zip(names, sets[1], strict=True):
-        s = build(mini_steps[name], token_loader)
-        cs = bl.candidate_set(s, token_loader, "stage_a")
-        assert cs.X.shape == (int(s.pair_valid.sum()), len(bl.GEOMFREE_FEATURE_NAMES))
-        undefined = ~s.pair_defined[cs.rows, cs.cols]
-        assert np.array_equal(np.isnan(cs.X[:, :11]), undefined)
-        assert np.isfinite(cs.X[:, 11:]).all()
-        assert np.array_equal(cs.positive, label_pairs(s, first_label(s))[cs.rows, cs.cols])
-        assert np.allclose(bl.gap_score(cs, "stage_a"), -s.pair_z[cs.rows, cs.cols, 0])
-        both = {(r, c): k for k, (r, c) in enumerate(zip(cs.rows, cs.cols, strict=True))}
-        common = [
-            (both[(r, c)], k)
-            for k, (r, c) in enumerate(zip(legacy.rows, legacy.cols, strict=True))
-            if (r, c) in both
-        ]
-        a, b = np.array(common).T
-        g_legacy = bl.untrained_scores(legacy)["gap_kernel"][b]
-        assert np.allclose(bl.gap_score(legacy), bl.untrained_scores(legacy)["gap_kernel"])
-        assert np.allclose(bl.gap_score(cs, "stage_a")[a], g_legacy, rtol=1e-3, atol=1e-6)
-    with pytest.raises(ValueError):
-        bl.candidate_set(s, token_loader, "legacy")
+    real_iter = steps.iter_samples
+    monkeypatch.setattr(
+        steps, "iter_samples", lambda *a, **k: iter(strip_first(real_iter(*a, **k)))
+    )
+    n_view, n, no_reading = cli._read_part(args, "train", token_loader, lambda *a: 0)
+    assert no_reading == 1 and n == n_view - 1

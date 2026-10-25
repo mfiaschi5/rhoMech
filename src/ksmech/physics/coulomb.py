@@ -1,18 +1,29 @@
-"""Klopman-Salem term 2: the Coulomb interaction between the charges on two sites.
+"""The Coulomb interaction between the charges on two atoms, for the stored samples'
+atom-atom matrix (`pairs.atom_coulomb_matrix`, `MechanismSample.atom_coulomb`).
 
     KS2(k, l) = q_k q_l / (eps R_kl)        (eV; q Mulliken partial charges, R in Angstrom)
 
-The site of an atom token is the atom; the site of an orbital token is its main centre m(r).
-Within one fragment R is the geometric distance between the sites; between fragments, which
-have not met, it is the van der Waals contact distance R_vdW,k + R_vdW,l. Two tokens on the
-same site have no Coulomb term (undefined, 0).
+Within one fragment R is the geometric distance; between fragments, which have not met, it is
+the van der Waals contact distance R_vdW,k + R_vdW,l. The matrix is no model input: it stays in
+the schema-15 sample store until the next schema bump.
 """
 
 from __future__ import annotations
 
+from functools import cache
+
 import numpy as np
+from rdkit import Chem
 
 from ksmech.physics.params import COULOMB_EV_ANG, KSParams
+
+
+@cache
+def vdw_sum(za: int, zb: int) -> float:
+    """R_vdW,a + R_vdW,b (Angstrom, RDKit's periodic table): the contact distance between
+    fragments."""
+    table = Chem.GetPeriodicTable()
+    return table.GetRvdw(int(za)) + table.GetRvdw(int(zb))
 
 
 def coulomb(q_k: float, q_l: float, r_ang: float, params: KSParams | None = None) -> float:

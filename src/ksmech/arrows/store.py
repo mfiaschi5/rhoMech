@@ -3,16 +3,16 @@
 Layout under `data/processed/<source>/samples/`:
 - `shard_00000.npz` ... : `SHARD_SIZE` samples each, members `<i>/<field>` and a JSON `meta`
   member (ids, labels, keys), with a provenance header whose inputs are the steps parquet and
-  every token file and contact block its samples used;
+  every token file its samples used;
 - `index.json`: step id -> shard, with the shards as provenance inputs.
 A split is `samples_<split>.json` next to the store: its ids and counts, with the index and the
 split file as inputs. Nothing is copied per split.
 
 On disk a sample keeps its pair arrays for the valid cells only (`pair_valid`, ~89% of the
 cells): `pair_z` and `atom_coulomb` as float16, the 0/1 features (`BINARY_FEATURES` among the
-sample's `pair_features`) and `pair_defined` bit-packed, contact sites as int16, the
-symmetric `atom_coulomb` as its upper triangle. In memory every array is dense float32 again,
-invalid cells zero / undefined / -1.
+sample's `pair_features`) and `pair_defined` bit-packed, `pair_contact_sites` (always -1,
+schema 15 only) as int16, the symmetric `atom_coulomb` as its upper triangle. In memory every
+array is dense float32 again, invalid cells zero / undefined / -1.
 float16 keeps 3 significant digits: the largest error measured on the pair features was 5e-3
 on log-features spanning ~30 units, below 1e-7 absolute on the tiny ones
 (docs/decisions.md, fix item 8).

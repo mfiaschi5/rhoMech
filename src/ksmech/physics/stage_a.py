@@ -1,5 +1,6 @@
-"""Stage-A pair features: geometry-free, computed from the tokens alone (spec v7.2, pair
-feature vector, first bullet; docs/decisions.md 2026-10-22).
+"""The pair features: geometry-free, computed from the tokens alone (spec, pair feature vector;
+docs/decisions.md 2026-10-22). The module keeps its stage-A name from when a contact stage B
+existed (now on branch `archive/stage-b`).
 
 For an ordered (occupied r, virtual s) pair of the reactant set:
 - `g`, `log_abs_g`: the spectral gap factor G(r, s) and log|G| (always defined);
@@ -17,7 +18,7 @@ For an ordered (occupied r, virtual s) pair of the reactant set:
 - `dihedral_cos`: when the two orbitals sit on adjacent bonds (a centre of r bonded to a centre
   of s, each with another centre), the cosine of the site-partner-partner-site dihedral (-1 is
   antiperiplanar); undefined otherwise.
-No contact geometry, no Klopman-Salem term: those are stage B (and the legacy contact sidecar).
+No contact geometry and no Klopman-Salem energy: the model has neither.
 """
 
 from __future__ import annotations
@@ -133,9 +134,9 @@ def _intra(t: MoleculeTokens, occ, virt, z: np.ndarray, d: np.ndarray, params) -
 
 
 def stage_a_block(fragments: list[MoleculeTokens], params: KSParams = REDUCED) -> PairBlock:
-    """The stage-A features of every (occupied, virtual) pair of the reactant set, in the
+    """The geometry-free features of every (occupied, virtual) pair of the reactant set, in the
     sample's orbital order, at `params` (samples store them at `REDUCED`; `to_params` scales
-    the cross-centre coupling). `sites` stays -1 (no contact placement in stage A)."""
+    the cross-centre coupling). `sites` stays -1 (schema 15 only)."""
     n_occ = [len(t.occupied()) for t in fragments]
     n_virt = [len(t.virtual()) for t in fragments]
     shape, n_feat = (sum(n_occ), sum(n_virt)), len(STAGE_A_FEATURES)

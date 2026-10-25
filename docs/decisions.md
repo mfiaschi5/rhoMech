@@ -4064,3 +4064,67 @@ stay valid.
   before.
 - `label_report` and `split_report` share `delta_be.class_shape`: the class sizes and the
   first anchor's kind.
+
+## 2026-10-25 — Stage B leaves main: one training stage on geometry-free pair features (user decision, spec v9)
+
+- **Why.** User decision, after the training discussion. Untrained, the contact terms ranked a
+  step's first arrow worse than the gap factor alone. On the molecule test split, top-1 was
+  about 3% for the frozen head, 14.3% for KS3 + KS2 and 20.4% for G. Stage B also needed
+  physics that was never built (the configurational contact of spec v8.1) and a contact
+  sidecar for every training step.
+- **Where it is.** The local branch `archive/stage-b` at 8811e57 holds:
+  - spec v8.1;
+  - the contact kernels and the legacy oriented kernel;
+  - the sidecar, `ks-rank`, the numpy logistic regression and GBDT, and the frozen head;
+  - their tests.
+  The branch is not pushed.
+- **Model (spec v9).**
+  - The pair track gets the geometry-free pair features only, and all H heads are learned.
+  - Gone: the Klopman-Salem attention bias, the frozen head, tau, kappa, F^atom and eps as a
+    model constant.
+  - K is fixed at 1.75. A learnable K would only rescale one standardized feature, the
+    cross-centre coupling.
+  - The step query drops E_step[t]. On PMechDB, which has no pathways, the stop head is not
+    trained.
+- **Code removed.**
+  - Modules: `physics/contact/` (with `legacy_fixed23`), `contact_kernel`, `contact_table`,
+    `repulsion`, `gto` (with `physics/data/sto_ng.json`), `ranking`, `parallel` and
+    `arrows/contacts`.
+  - Commands: `ksmech-arrows contacts`, `ksmech-orbitals contact-table`,
+    `ksmech-physics ks-rank`, `ksmech-physics baseline` and `gbdt --features contact`.
+  - From `ks_terms`: the KS3 forms. From `pairs`: the legacy pair block and kernels,
+    `ks_energies` and `frozen_head`. From `params`: `tau`, `shell_fock_ev` and the legacy
+    scalings.
+  - The kernel argument of the sample build.
+- **Kept and moved.**
+  - `ao_energies` moved to `ks_terms`. It reads the shell layout from `qm.ao.gfn2_shells`
+    rather than the STO-nG tables. The values are bit-identical on 400 PMechDB token files
+    (elements up to Ti, Zn, Sn, Br and I); no GFN2 element has two shells of one l.
+  - `vdw_sum` moved to `coulomb`.
+  - `first_label`, `label_pairs`, `label_rank` and `summarize_ranks` moved to `baseline`, with
+    the candidate sets. `token_class` moved to `textbook`, and the read chunk to `physics.cli`.
+  - `baseline.FEATURE_NAMES` is the geometry-free list (the old `GEOMFREE_FEATURE_NAMES`).
+- **Commands now.**
+  - `gbdt` is geometry-free only. Its files keep the `_geomfree` tag, so the models on disk
+    stay valid.
+  - `textbook` runs the untrained gap kernel and the two geometry-free LightGBM models of the
+    molecule split. It used to run KS3 + KS2 and the contact GBDTs.
+- **Samples.**
+  - Schema 15 is unchanged, so there is no rebuild. The samples, `pair_feature_stats_*.json`
+    and the geometry-free models on disk stay valid: provenance compares inputs, and the code
+    hash is for tracing only.
+  - `pair_contact_sites` (always -1) and `atom_coulomb` stay in the store. Neither is a model
+    input, and `collate_samples` no longer emits `atom_coulomb`. Both leave at the next schema
+    bump, the resonance augmentation.
+- **Data left on disk, readable only from the archive branch.**
+  - `data/cache/oriented/` (6.1 GB) and `data/cache/contact_table.json`.
+  - The sidecars `samples/contacts_molecule/` and `samples/contacts_scaffold/` (0.7 GB).
+  - The `ks_rank_report_*`, `baseline_*` and `gbdt_lgbm_*_contact*` reports and models.
+  Nothing was deleted.
+- **Other branches.** `claude/workbench` and `claude/serve-ui` import the contact code (KS
+  ranking, physics view, predictors). They must drop it when they merge main.
+- **Open, for the anchor-level references.**
+  - Spec v9 pools the standardized orbital-pair features onto atom pairs as a weighted mean.
+  - G^atom sums over every occupied x virtual pair, the donor's own antibond included, which
+    can inflate it on bonded pairs. Decide whether it should run over `pair_valid` only before
+    the floor is built.

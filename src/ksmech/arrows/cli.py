@@ -11,7 +11,6 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from ksmech.arrows.contacts import TRAIN_SUBSAMPLE, build_all_contacts
 from ksmech.arrows.delta_be import label_report, step_label
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.roundtrip import evaluate_alignment, run_round_trip
@@ -20,10 +19,6 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_step
 from ksmech.data.io import steps_path as _steps_path
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
-from ksmech.physics.contact.legacy_fixed23 import DEFAULT_CACHE_DIR as ORIENTED_CACHE_DIR
-from ksmech.physics.contact_kernel import KERNELS, ContactConfig, ContactKernel
-from ksmech.physics.contact_table import DEFAULT_TABLE_PATH, load_tables
-from ksmech.physics.pairs import PairKernels, oriented_kernels, single_kernel
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,21 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     r = sub.add_parser("roundtrip", help="apply dataset arrows, compare with the products")
     a = sub.add_parser("align", help="align arrows to tokens; predicted-arrow round trip")
-    s = sub.add_parser("samples", help="sample store (stage-A pair features) + split views")
-    c = sub.add_parser("contacts", help="legacy contact sidecar: val, test, a train subsample")
+    s = sub.add_parser("samples", help="sample store (geometry-free pair features) + split views")
     e = sub.add_parser("edit-labels", help="reaction-matrix labels (spec v8) and their coverage")
-    for p in (r, a, s, c, e):
+    for p in (r, a, s, e):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     r.add_argument("--include-resonance", action="store_true", help="also resonance steps")
-    for p in (a, s, c, e):
+    for p in (a, s, e):
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
-    c.add_argument("--kernel", choices=KERNELS, default="oriented", help="contact kernel")
-    c.add_argument("--oriented-cache", type=Path, default=ORIENTED_CACHE_DIR)
-    c.add_argument("--contact-table", type=Path, default=DEFAULT_TABLE_PATH)
-    c.add_argument("--split", default="molecule", help="split strategy (its split file)")
-    c.add_argument("--n-train", type=int, default=TRAIN_SUBSAMPLE, help="training subsample")
-    c.add_argument("--seed", type=int, default=0)
     a.add_argument("--no-member-check", action="store_true", help="skip the set-member swap")
     s.add_argument(
         "--strategy",
@@ -55,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="random_leaky (the per-step split) only when named",
     )
     s.add_argument("--seed", type=int, default=0)
-    for p in (a, s, c):
+    for p in (a, s):
         p.add_argument(
             "--workers", type=int, default=1, help="spawned processes (host total <= 15)"
         )
@@ -74,7 +62,6 @@ def main(argv: list[str] | None = None) -> int:
         "roundtrip": cmd_roundtrip,
         "align": cmd_align,
         "samples": cmd_samples,
-        "contacts": cmd_contacts,
         "edit-labels": cmd_edit_labels,
     }
     return commands[args.command](args, path, console)
@@ -141,15 +128,6 @@ def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
     return 0 if ok and report["flag_fraction"]["ALIGN_FALLBACK"] <= 0.10 else 1
 
 
-def samples_kernels(args: argparse.Namespace) -> PairKernels:
-    """The contact kernels of the legacy sidecar: the oriented kernel at every feature
-    distance by default; an ablation kernel (table, analytic) for all."""
-    if args.kernel == "oriented":
-        return oriented_kernels(args.oriented_cache)
-    tables = load_tables(args.contact_table) if args.kernel == "table" else None
-    return single_kernel(ContactKernel(tables, ContactConfig(kernel=args.kernel)))
-
-
 def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
     report = build_all_samples(
         args.source,
@@ -177,31 +155,6 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
         console.print(f"  [yellow]{strategy}: not applicable ({why})[/yellow]")
     _write(report, args, "samples_report.json", console)
     return 0 if report["splits"] else 1
-
-
-def cmd_contacts(args: argparse.Namespace, path: Path, console: Console) -> int:
-    try:
-        kernels = samples_kernels(args)
-        report = build_all_contacts(
-            args.source,
-            kernels,
-            args.split,
-            args.processed_dir,
-            TokenCache(args.tokens_dir),
-            args.n_train,
-            args.seed,
-            n_workers=args.workers,
-        )
-    except FileNotFoundError as exc:  # no split file (run `samples`) or no contact table
-        console.print(f"[red]{exc}[/red]")
-        return 2
-    console.print(
-        f"{args.split}: {report['n_entries']} / {report['n_steps']} steps with contacts "
-        f"({report['n_held_out']} val + test, {report['n_train_subsample']} training), "
-        f"skipped {report['skipped']}"
-    )
-    _write(report, args, f"contacts_report_{args.split}.json", console)
-    return 0 if report["n_entries"] else 1
 
 
 EDIT_LABEL_GATE = 0.95  # labeled fraction of the training steps

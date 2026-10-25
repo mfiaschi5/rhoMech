@@ -4,7 +4,6 @@ import numpy as np
 
 from ksmech.arrows.reactants import ReactantTokens
 from ksmech.physics.baseline import main_centres
-from ksmech.physics.ranking import ALL_SCORERS, pair_components
 from ksmech.physics.textbook import (
     CASES,
     ensure_tokens,
@@ -43,16 +42,15 @@ def _oracle(sample, loader):
     return ((classes[d] == want_d)[:, None] & (classes[a] == want_a)[None, :]).astype(float)
 
 
-def test_suite_runs_and_matches_sites(token_loader, pair_kernels):
-    results = run_suite(_oracle, token_loader, pair_kernels)
+def test_suite_runs_and_matches_sites(token_loader):
+    import ksmech.physics.cli as cli
+
+    results = run_suite(_oracle, token_loader)
     assert len(results) == 5 and all(r.passed and r.expected_rank == 0 for r in results)
     for r in results:
         assert len(r.top) == 3 and r.top[0]["score"] == 1.0
 
-    def untrained(sample, loader):
-        return ALL_SCORERS["ks3+ks2"](pair_components(sample, loader, pair_kernels.main))
-
-    results = run_suite(untrained, token_loader, pair_kernels)
+    results = run_suite(cli._untrained_scorer, token_loader)  # -G
     assert all(r.expected_rank is not None and np.isfinite(r.expected_score) for r in results)
     sn2_vs_e2 = results[1].alternatives[0]
     assert sn2_vs_e2[1] is not None and np.isfinite(sn2_vs_e2[2])
@@ -70,12 +68,10 @@ def test_textbook_cli(token_loader, monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
     monkeypatch.setattr(tb, "ensure_tokens", lambda keys, tokens_dir, qm=None: [])
-    code = cli.main(
-        ["textbook", "--processed-dir", str(tmp_path), "--oriented-cache", str(tmp_path)]
-    )
+    code = cli.main(["textbook", "--processed-dir", str(tmp_path)])
     out = capsys.readouterr().out
-    assert code in (0, 1) and "untrained ks3+ks2" in out and "expected pairs in the top 3" in out
-    assert "run `ksmech-physics baseline`" in out  # no GBDT model in this processed dir
+    assert code in (0, 1) and "untrained gap_kernel" in out and "expected pairs in the top 3" in out
+    assert "run `ksmech-physics gbdt`" in out  # no ranker in this processed dir
 
 
 def test_a_step_holds_a_pool_only_when_every_fragment_is_there():

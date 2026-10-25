@@ -9,9 +9,8 @@ import pytest
 from ksmech.data import provenance as prov
 from ksmech.physics import baseline as bl
 from ksmech.physics import lgbm
-from ksmech.physics.ranking import label_rank, summarize_ranks
+from ksmech.physics.baseline import label_rank, summarize_ranks
 from tests.test_arrows_steps import mini_processed, missing_iodide  # noqa: F401 (fixture)
-from tests.test_physics_baseline import _toy_sets
 
 LGBMConfig = lgbm.LGBMConfig  # the real class, before a test patches the module's
 
@@ -28,11 +27,31 @@ def _set(step_id, n, positive, ignore=()):
         np.arange(n),
         pos,
         ign,
-        np.ones(n),
-        np.ones((n, 3), bool),
         np.ones((1, n), bool),
         pos[None, :].copy(),
     )
+
+
+def _toy_sets(rng, n_sets=40, n=60):
+    """Candidate sets where the positive is the row with the largest feature 3."""
+    out = []
+    for k in range(n_sets):
+        X = rng.normal(size=(n, 61))
+        pos = np.zeros(n, bool)
+        pos[np.argmax(X[:, 3])] = True
+        out.append(
+            bl.CandidateSet(
+                f"t{k}",
+                X,
+                np.zeros(n, int),
+                np.arange(n),
+                pos,
+                np.zeros(n, bool),
+                np.ones((1, n), bool),
+                pos[None, :].copy(),
+            )
+        )
+    return out
 
 
 def test_sample_negatives_keeps_positives_hard_and_random():
@@ -103,28 +122,25 @@ def test_untrainable_steps_are_counted():
     assert rows.n_untrainable == 1 and rows.groups == [10] and rows.n_rows == 10
 
 
-@pytest.mark.parametrize("features", ["contact", "geomfree"])
-def test_gbdt_cli(features, mini_processed, token_loader, pair_kernels, monkeypatch):  # noqa: F811
+def test_gbdt_cli(mini_processed, token_loader, monkeypatch):  # noqa: F811
     import ksmech.physics.cli as cli
-    from ksmech.arrows.contacts import build_all_contacts
     from ksmech.arrows.steps import build_all_samples
 
     loader = missing_iodide(token_loader)
     build_all_samples("pmechdb", ["molecule"], mini_processed, loader)
-    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, loader)
     monkeypatch.setattr(cli, "TokenCache", lambda *a, **k: token_loader)
     quick = {"max_rounds": 20, "patience": 10, "min_data_in_leaf": 1}
     monkeypatch.setattr(lgbm, "LGBMConfig", lambda **k: LGBMConfig(**(quick | k)))
     argv = ["gbdt", "--source", "pmechdb", "--processed-dir", str(mini_processed)]
-    code = cli.main([*argv, "--features", features, "--n-jobs", "1"])
+    code = cli.main([*argv, "--n-jobs", "1"])
     out = mini_processed / "pmechdb"
-    report = json.loads((out / f"gbdt_lgbm_report_molecule_{features}.json").read_text())
+    report = json.loads((out / "gbdt_lgbm_report_molecule_geomfree.json").read_text())
     assert code in (0, 1) and "LightGBM ranker" in report["results"]
-    assert "untrained gap_kernel" in report["results"]
-    assert ("untrained ks3+ks2" in report["results"]) == (features == "contact")
+    assert [n for n in report["results"] if n.startswith("untrained")] == ["untrained gap_kernel"]
+    assert report["features"] == "geomfree"
     assert report["counts"]["train"]["read"] <= report["counts"]["train"]["stored"]
     assert report["peak_rss_mb"] > 0 and report["config"]["lgbm"]["n_hard"] == 20
-    held = prov.read_header(out / f"gbdt_lgbm_molecule_{features}_textbook-held-out.npz")
+    held = prov.read_header(out / "gbdt_lgbm_molecule_geomfree_textbook-held-out.npz")
     assert held.kind == "baseline_lgbm" and held.extra["textbook_pools_in_training"] == []
 
 
@@ -144,38 +160,29 @@ def test_batched_scoring_gives_the_scores_of_one_call_per_step():
     assert all(np.allclose(b, one.score(X)) for b, X in zip(batched[:-1], Xs[:-1], strict=True))
 
 
-@pytest.mark.parametrize("features", ["contact", "geomfree"])
 def test_reading_in_worker_processes_gives_the_same_rows_and_sets(
-    features,
     mini_processed,  # noqa: F811
     mini_token_cache,
-    pair_kernels,
     monkeypatch,
 ):
     """`--workers 2` on chunks of one sample: the training rows (negatives are drawn per step
     id), the val / test candidate sets and their untrained scores are those of one process,
-    in the same order (undefined geometry-free features are NaN in both)."""
+    in the same order (undefined features are NaN in both)."""
     import argparse
 
     import ksmech.physics.cli as cli
-    from ksmech.arrows.contacts import build_all_contacts
     from ksmech.arrows.steps import build_all_samples
-    from ksmech.physics import parallel
 
     build_all_samples("pmechdb", ["molecule"], mini_processed, mini_token_cache)
-    build_all_contacts("pmechdb", pair_kernels, "molecule", mini_processed, mini_token_cache)
-    monkeypatch.setattr(parallel, "CHUNK", 1)
+    monkeypatch.setattr(cli, "CHUNK", 1)
     cfg = lgbm.LGBMConfig()
     read = {}
     for workers in (1, 2):
         args = argparse.Namespace(
             source="pmechdb", split="molecule", processed_dir=mini_processed, workers=workers
         )
-        train = cli._read_kind(args, features, "train", mini_token_cache, "train", cfg)
-        evals = {
-            p: cli._read_kind(args, features, p, mini_token_cache, "eval", cfg)
-            for p in ("val", "test")
-        }
+        train = cli._read_kind(args, "train", mini_token_cache, "train", cfg)
+        evals = {p: cli._read_kind(args, p, mini_token_cache, "eval", cfg) for p in ("val", "test")}
         read[workers] = (train, evals)
     (t1, e1), (t2, e2) = read[1], read[2]
     assert t1["n"] >= 1 and (t1["n"], t1["n_view"], t1["seen"]) == (

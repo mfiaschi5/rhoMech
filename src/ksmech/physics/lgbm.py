@@ -1,14 +1,13 @@
 """The fast GBDT ranker: LightGBM lambdarank over the candidate pairs of each step's first
 arrow (`physics.baseline.CandidateSet`), one query per step.
 
-- Training rows per step: every positive, the `n_hard` non-positive pairs the untrained scorer
-  ranks highest (the floor -(KS3 + KS2) on the legacy contact features, -G on the
-  geometry-free ones) and `n_random` others drawn uniformly, from a generator seeded by
-  (seed, step id), so the draw does not depend on the order steps are read in. The pairs of
-  the step's other arrows are left out (`CandidateSet.ignore`), as in the numpy GBDT.
+- Training rows per step: every positive, the `n_hard` non-positive pairs the untrained score
+  -G ranks highest and `n_random` others drawn uniformly, from a generator seeded by (seed,
+  step id), so the draw does not depend on the order steps are read in. The pairs of the
+  step's other arrows are left out (`CandidateSet.ignore`).
 - Validation and test keep every valid pair. Early stopping reads the validation top-5 with
   the `label_rank` convention (non-labeled pairs scoring at least the best labeled one), top-1
-  breaking ties, as the numpy GBDT does.
+  breaking ties.
 - The model is saved as LightGBM's text model in an npz with a provenance header (kind
   `baseline_lgbm`): the sample files, the features and the configuration.
 """

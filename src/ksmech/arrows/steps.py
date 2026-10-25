@@ -7,17 +7,14 @@ products' sigma key. The target is the reaction matrix (spec v8): the step's edi
 with its anchors on the token atoms (`arrows.delta_be`), with the reactant's Lewis structure on
 the same atoms (bonds, lone pairs, Wiberg indices: `arrows.lewis`). The `ArrowLabel`s, the
 orbital reading of the arrows, are kept where every arrow aligns; `orbital_reading` says
-whether they do. It also stores the pair-track features z_rs of
-every (occupied r, virtual s) pair, computed at K = eps = 1 (`physics.params.REDUCED`;
-`params.to_params` applies other values), their `defined` mask, the sign of G (bookkeeping: the
-logs drop it), the validity filter, and the symmetric atom-atom Coulomb matrix (also at eps =
-1). `pair_features` names the columns: the geometry-free stage-A features
-(`physics.stage_a.STAGE_A_FEATURES`) in the sample store, or the legacy contact features
-(`physics.pairs.PAIR_FEATURES`, with the contact amplitude's argmax sites) when a sample is
-built with contact kernels (textbook cases, tests) or joined with the legacy contact sidecar
-(`arrows.contacts`, for the physics floor and the GBDT). The full
-`MoleculeTokens` (coefficients, S, F) are not copied into every sample: `fragment_keys` names
-the token files, and `MechanismSample.tokens(loader)` reloads them.
+whether they do. It also stores the geometry-free pair-track features z_rs of every (occupied r,
+virtual s) pair (`physics.stage_a.STAGE_A_FEATURES`, named by `pair_features`), computed at
+K = eps = 1 (`physics.params.REDUCED`; `params.to_params` applies other values), their
+`defined` mask, the sign of G (bookkeeping), and the validity filter. Two fields are kept only
+so the schema-15 store stays readable and leave at the next schema bump: `pair_contact_sites`
+(always -1) and the symmetric atom-atom Coulomb matrix `atom_coulomb` (at eps = 1); neither is
+a model input. The full `MoleculeTokens` (coefficients, S, F) are not copied into every sample:
+`fragment_keys` names the token files, and `MechanismSample.tokens(loader)` reloads them.
 
 A step becomes a sample when every reactant fragment has tokens and the step has an edit
 label that is a valid edit of its reactant (`lewis.check_edit`); every other step is skipped with
@@ -65,15 +62,7 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_di
 from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import MoleculeTokens
-from ksmech.physics.pairs import (
-    PAIR_FEATURES,
-    PairKernels,
-    PairStats,
-    atom_coulomb_matrix,
-    fit_pair_stats,
-    pair_block,
-    valid_pairs,
-)
+from ksmech.physics.pairs import PairStats, atom_coulomb_matrix, fit_pair_stats, valid_pairs
 from ksmech.physics.params import REDUCED, KSParams, to_params
 from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 from ksmech.processes import chunked, in_processes
@@ -128,10 +117,9 @@ class MechanismSample:
     pair_defined: np.ndarray  # (n_occ, n_virt, F) bool
     pair_gap_sign: np.ndarray  # (n_occ, n_virt) int8 sign of G (bookkeeping, not a feature)
     pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair
-    pair_contact_sites: np.ndarray  # (n_occ, n_virt, 2) int64 global atoms of the contact
-    #   amplitude's argmax (donor site, acceptor site), oriented kernel; -1 for other kernels
-    #   and for stage-A samples
-    atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric
+    pair_contact_sites: np.ndarray  # (n_occ, n_virt, 2) int64, always -1 (schema 15 only)
+    atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric (schema
+    #   15 only, no model input)
     labels: list[ArrowLabel] = field(default_factory=list)  # empty unless `orbital_reading`
     #   is READING_ALIGNED
     product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
@@ -144,8 +132,8 @@ class MechanismSample:
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
     label_filter: dict[str, int] = field(default_factory=dict)  # labeled (donor, acceptor)
     #   cells that pair_valid rejects, by group (`_filter_group`); never dropped silently
-    inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file and
-    #   contact block this sample was built from (`file:<path>` -> content sha256)
+    inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file this
+    #   sample was built from (`file:<path>` -> content sha256)
     pair_features: tuple[str, ...] = STAGE_A_FEATURES  # the columns of pair_z / pair_defined
 
     @property
@@ -177,27 +165,20 @@ def make_sample(
     step: ElementaryStep,
     rt: ReactantTokens,
     labels: list[ArrowLabel],
-    kernels: PairKernels | None = None,
 ) -> MechanismSample:
     """The sample of a step with these ArrowLabels (the product key and pair features are
     computed here)."""
-    sample = reactant_sample(step.step_id, str(step.source), rt, kernels)
+    sample = reactant_sample(step.step_id, str(step.source), rt)
     sample.labels = labels
     sample.product_key = sigma_key(chem.parse_mapped(step.products_smiles))
     return sample
 
 
-def reactant_sample(
-    step_id: str, source: str, rt: ReactantTokens, kernels: PairKernels | None = None
-) -> MechanismSample:
+def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
-    hand-built reactant sets, e.g. the textbook selectivity checks). Pair features: stage A,
-    or the legacy contact features with `kernels`."""
+    hand-built reactant sets, e.g. the textbook selectivity checks)."""
     tok = [f.tokens for f in rt.fragments]
-    if kernels is None:
-        block, names = stage_a_block(tok, REDUCED), STAGE_A_FEATURES
-    else:
-        block, names = pair_block(tok, kernels, REDUCED), PAIR_FEATURES
+    block = stage_a_block(tok, REDUCED)
     return MechanismSample(
         step_id=step_id,
         source=source,
@@ -223,7 +204,7 @@ def reactant_sample(
         pair_contact_sites=block.sites,
         atom_coulomb=atom_coulomb_matrix(tok, REDUCED).astype(np.float32),
         fermi_smeared=any(t.fermi_smeared for t in tok),
-        pair_features=names,
+        pair_features=STAGE_A_FEATURES,
     )
 
 
@@ -322,9 +303,7 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
         sample.labels, sample.orbital_reading = labels, READING_ALIGNED
 
 
-def sample_for_step(
-    step: ElementaryStep, loader: TokenLoader, kernels: PairKernels | None = None
-) -> MechanismSample | SkipReason:
+def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
     """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
     the edit label, and the ArrowLabels when every arrow aligns (`orbital_reading`)."""
     with prov.collecting() as used:
@@ -339,7 +318,7 @@ def sample_for_step(
         if isinstance(target, SkipReason):
             return target
         alignment = align_step(step, rt)
-        sample = make_sample(step, rt, alignment.labels if alignment.complete else [], kernels)
+        sample = make_sample(step, rt, alignment.labels if alignment.complete else [])
     sample.edit_label, sample.bonds, sample.lone_pairs, sample.wiberg = target
     _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))
@@ -347,12 +326,12 @@ def sample_for_step(
 
 
 def build_step_samples(
-    steps: Iterable[ElementaryStep], loader: TokenLoader, kernels: PairKernels | None = None
+    steps: Iterable[ElementaryStep], loader: TokenLoader
 ) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
     """Samples of every step that has one, and the skip reason of every other step."""
     samples, skipped = {}, {}
     for step in steps:
-        out = sample_for_step(step, loader, kernels)
+        out = sample_for_step(step, loader)
         if isinstance(out, MechanismSample):
             samples[step.step_id] = out
         else:
@@ -364,21 +343,19 @@ CHUNK = 32  # steps per task of the parallel build
 
 
 def _chunk_worker(task: tuple) -> tuple[dict, dict]:
-    steps, loader, kernels = task
-    return build_step_samples(steps, loader, kernels)
+    steps, loader = task
+    return build_step_samples(steps, loader)
 
 
 def build_step_samples_parallel(
     steps: list[ElementaryStep],
     loader: TokenLoader,
-    kernels: PairKernels | None = None,
     n_workers: int = 1,
 ) -> tuple[dict[str, MechanismSample], dict[str, SkipReason]]:
     """`build_step_samples` in chunks of `CHUNK` consecutive steps, over `n_workers` spawned
-    processes when above 1 (`processes.in_processes`). Each process keeps its own token and
-    block memory; block files are written atomically, so two processes computing one block
-    cannot corrupt it."""
-    tasks = [(chunk, loader, kernels) for chunk in chunked(steps, CHUNK)]
+    processes when above 1 (`processes.in_processes`). Each process keeps its own token
+    memory."""
+    tasks = [(chunk, loader) for chunk in chunked(steps, CHUNK)]
     samples, skipped = {}, {}
     for done, (s, k) in enumerate(in_processes(_chunk_worker, tasks, n_workers), 1):
         samples.update(s)
@@ -484,12 +461,11 @@ def build_all_samples(
     n_workers: int = 1,
 ) -> dict:
     """Build every step's sample once into the store, then one split file per strategy and one
-    view per split. A strategy that cannot run on the source is reported, not raised. Pair
-    features: stage A (the legacy contact features go to `arrows.contacts`)."""
+    view per split. A strategy that cannot run on the source is reported, not raised."""
     console = console or Console()
     parquet = steps_path(source, processed_dir)
     steps = read_training_steps(parquet)
-    samples, skipped = build_step_samples_parallel(steps, loader or TokenCache(), None, n_workers)
+    samples, skipped = build_step_samples_parallel(steps, loader or TokenCache(), n_workers)
     out_dir = source_dir(source, processed_dir)
     index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION)
     every = split_report("all", sorted(samples), samples, {})
@@ -582,8 +558,8 @@ def load_samples(
     path: Path, allow_stale: bool = False, ids: Iterable[str] | None = None
 ) -> list[MechanismSample]:
     """The samples of one split view (`samples_<split>.json`), only `ids` when given. The view,
-    the store index and every shard read are verified first (parquet, split file, token files,
-    contact blocks); StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs
+    the store index and every shard read are verified first (parquet, split file, token
+    files); StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs
     only: the mismatch is logged and the store is read anyway."""
     return store.load_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids)
 

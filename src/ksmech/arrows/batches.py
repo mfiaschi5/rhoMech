@@ -2,8 +2,8 @@
 collation (`collate_samples`) and the DataLoader (`make_loader`).
 
 Kept apart from `arrows.steps` so that the processes that only build, read or score samples
-(the sample build, the contact sidecar, `ksmech-physics`) do not import torch (about 500 MB of
-resident memory per process).
+(the sample build, `ksmech-physics`) do not import torch (about 500 MB of resident memory per
+process).
 """
 
 from __future__ import annotations
@@ -47,11 +47,11 @@ def _pad2(arrays: list[np.ndarray], rows: int, cols: int, fill=0) -> torch.Tenso
 
 def _pair_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
     """The pair track's inputs, padded in each sample's (occupied r, virtual s) layout: z_rs at
-    K = eps = 1 in `pair_features` order (unstandardized: K and eps are learnable, so
-    `params.to_params` and the training statistics apply in the model), its defined mask, the
-    validity filter, the sign of G, and the batch token position of every row and column (-1
-    on padding), for scattering into the N x N pair track; plus the atom-atom Coulomb matrix
-    (eps = 1) on the padded atoms."""
+    K = 1 in `pair_features` order (unstandardized: `params.to_params` at the physical K and
+    the training statistics apply in the model), its defined mask, the validity filter, the
+    sign of G, and the batch token position of every row and column (-1 on padding), for
+    scattering into the N x N pair track. The stored atom-atom Coulomb matrix is no model input
+    and is not collated."""
     names = batch[0].pair_features
     if any(s.pair_features != names for s in batch):
         raise ValueError("a batch mixes samples with different pair features")
@@ -71,7 +71,6 @@ def _pair_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
         "pair_gap_sign": _pad2([s.pair_gap_sign for s in batch], rows, cols),
         "pair_row_pos": _pad([n_atoms + o for o in occ], rows, -1),
         "pair_col_pos": _pad([n_atoms + v for v in virt], cols, -1),
-        "atom_coulomb": _pad2([s.atom_coulomb for s in batch], n_atoms, n_atoms),
     }
 
 
