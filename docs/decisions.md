@@ -4160,3 +4160,68 @@ view convention, the depth storage, the linking rule and the crossing breaks sti
   the old CoordGen clean-up, textbook, perspective and match3d from two fixed views of an
   RDKit structure (no xTB) into one PNG + SVG grid per method, sheets of molecules x methods and
   gallery.json. RDKit's drawer renders them, so the sketcher's crossing breaks are not shown.
+
+## 2026-10-25 — Perspective templates redrawn as textbook pictures
+
+- **Why.** The ten templates were orthographic pictures of MMFF minima. By eye the cages looked
+  wrong (camphor and borneol cramped; quinuclidine, adamantane and the decalins odd), and the
+  pictures broke basic drawing rules: bonds drawn 0.4 to 1.4 long, angles up to 180 deg (RDKit
+  prints a stray "C" there), atoms 0.1 bond from bonds they are not on.
+- **Picture and shape are now separate.** `ring_templates.smi` holds a hand-made picture in the
+  textbook style (Clayden, Eliel). `ring_templates.json` adds `fit`: the parent's MMFF structure
+  turned to the orthographic view that best reproduces the picture (`derive_template`). The JSON
+  also lists `front` atoms because a picture alone cannot tell a cage from its depth-reversed
+  twin. `depth` is the z of `fit`, so the crossing breaks and wedges agree with the picture.
+  Matching a molecule uses `fit`. The exocyclic slots are the tetrahedral directions of `fit`,
+  drawn through a per-atom linear map onto the picture. Each slot is turned to stay 38..160 deg
+  from the atom's other bonds, then snapped onto the vertical or a ring-bond direction (within
+  8 deg, 30 deg for the stylised chairs). A slot can also be set by hand (`slot_overrides`: the
+  V of the C7 / N8 substituents).
+- **Rules** (`depiction_metrics.rule_report`, tested on every template and on 13 substituted
+  examples): bonds within 15% of the median, except bonds listed as `foreshortened` (receding,
+  at least 0.55); angles 30..165 deg at atoms with two or three bonds (a four-bond cross is the
+  convention); no atom within 0.4 bond of a bond it is not on; atoms at least 0.6 apart; the
+  stated number of crossings, and no extra crossings from substituents.
+- **Conventions.**
+  - Chair: three bond directions (55, -20, 10 deg), each drawn twice at one length; axial bonds
+    vertical, equatorial bonds parallel to the ring bonds once removed.
+  - trans-Decalin and the steroid A/B/C: the same chair turned 180 deg about each shared bond.
+    The steroid is fused on the steep bond, so it reads as the natural 5alpha series with the
+    angular methyls up. D is a regular pentagon.
+  - cis-Decalin: a chair with the second chair rising through an axial bond.
+  - Norbornane, bicyclo[2.2.2]octane and tropane: seen from the front and above, bridgeheads left
+    and right, the back bridge inside and short, no crossing. The C7 / N8 bridge is a roof over
+    the boat, the barrel or the half-chair.
+  - Adamantane: a chair with three parallel bonds (80 deg) up to the apex, one central crossing.
+  - Cubane: a cabinet cube, two crossings.
+- **Symmetric fits.** A symmetric template fits a molecule equally well in several ways. Among
+  fits within 0.02 bond of the best RMSD, `_crowding` picks the one that puts substituents on
+  clear, drawn, front slots and keeps ring double bonds out of the back. So 1-adamantanol gets
+  its OH on the apex and camphor gets its carbonyl on the front bridge.
+- **Gallery.** It now also draws everything in the sketcher's own style (`app_scene`
+  reimplements sketch/drawing.ts + crossings.ts: bare carbons, broken rear bonds) and adds
+  templates.png / templates.json.
+- **Costs.** beta-D-glucopyranose falls back to the textbook layout: the chair's adjacent
+  equatorial OH labels overlap. The camphor match3d view residual bound went from 0.6 to 0.7
+  because the stylised picture is further from a true view. Twistane was tried and dropped: no
+  candidate view looked like a textbook figure.
+- **match3d-view depth.** That candidate now takes the view's depth scaled like the other
+  candidates (`view_frame`, the median bond), as documented. Its own scaling (mean bond) was 2%
+  off. This showed up once the new norbornane template stopped winning one of the test views.
+
+### 2026-10-25 — Workbench radicals, R/S, side-by-side orbitals, customizable layout
+
+- Radicals are chemistry, not display: the sketch stores 0, 1 or 2 unpaired electrons per atom
+  and writes them as V2000 `M  RAD` (2 doublet, 3 triplet; reads 1 and the old atom-block code
+  4 too), so RDKit's H counts, SMILES and formula follow. Compute is disabled with the reason
+  instead of left to fail, because the featurization is closed-shell (RADICAL_NOT_SUPPORTED).
+  The "." key is free on every layout and collides with no shortcut (tested).
+- CIP labels come from RDKit.js `get_stereo_tags` (new labeler) on the sketch's own molblock,
+  so they read the drawn wedges and 2D double-bond geometry; "?" marks a possible but
+  undefined stereocentre.
+- The layout is a pure reducer over columns (at most 3) plus a full-width row; hidden and
+  collapsed panels stay mounted. Layout and preferences live in localStorage
+  (`ksmech.workbench.layout.v1`, `ksmech.workbench.prefs.v1`) and are sanitized on read. The
+  default preset puts the orbitals full-width so the level diagram and the orbital list sit
+  side by side. Moving a panel to another column remounts it (the sketch keeps its drawing
+  but loses its undo history).

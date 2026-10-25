@@ -481,7 +481,8 @@ def _match3d_layouts(mol, ref, proj, ref_view, style, t0) -> list[Candidate]:
         lay = None
     if lay is not None:
         xy = lay.xy - lay.xy.mean(axis=0)
-        out.append(Candidate("match3d-view", xy, depth=lay.depth, kind="view"))
+        # depth None: match3d gives it the view's depth, scaled like every candidate (view_frame)
+        out.append(Candidate("match3d-view", xy, kind="view"))
     if time.monotonic() - t0 < BUDGET_S:
         out.append(Candidate("match3d-textbook", rdkit_layout(mol)))
     if style == "perspective" and time.monotonic() - t0 < BUDGET_S:

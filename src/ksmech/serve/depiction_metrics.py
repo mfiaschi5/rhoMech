@@ -208,3 +208,96 @@ def defects(mol: Chem.Mol, xy: np.ndarray, kind: str = "flat") -> Defects:
         bond_length_rms=round(rms, 4),
         score=round(score, 3),
     )
+
+
+# ---- drawing rules of the perspective templates (checked by the tests and the gallery)
+
+RULE_LENGTH = 0.15  # every bond within 15% of the median, except bonds drawn short on purpose
+RULE_SHORT_MIN = 0.55  # a deliberately foreshortened bond is still at least this long (x L)
+RULE_ANGLE_MIN = 30.0  # degrees between two bonds at one atom
+RULE_ANGLE_MAX = 165.0  # straighter reads as one line (RDKit even prints a "C" there)
+RULE_CLEARANCE = 0.4  # an atom at least this far (x L) from any bond it is not on
+RULE_SEPARATION = 0.6  # two atoms at least this far apart (x L)
+
+
+@dataclass(frozen=True)
+class RuleReport:
+    length: tuple[float, float]  # min, max of length / median over the regular bonds
+    short: float  # the shortest foreshortened bond / median (1.0 without any)
+    angle: tuple[float, float]  # min, max angle (deg) between two bonds at one atom
+    clearance: float  # min atom-to-bond distance / L (bonds the atom is not on)
+    separation: float  # min atom-atom distance / L
+    crossings: int
+
+    def violations(self) -> list[str]:
+        out = []
+        if self.length[0] < 1 - RULE_LENGTH or self.length[1] > 1 + RULE_LENGTH:
+            out.append(f"bond lengths {self.length[0]:.2f}..{self.length[1]:.2f}")
+        if self.short < RULE_SHORT_MIN:
+            out.append(f"foreshortened bond {self.short:.2f}")
+        if self.angle[0] < RULE_ANGLE_MIN or self.angle[1] > RULE_ANGLE_MAX:
+            out.append(f"angles {self.angle[0]:.0f}..{self.angle[1]:.0f}")
+        if self.clearance < RULE_CLEARANCE:
+            out.append(f"atom-bond clearance {self.clearance:.2f}")
+        if self.separation < RULE_SEPARATION:
+            out.append(f"atom separation {self.separation:.2f}")
+        return out
+
+
+def _angle_range(xy: np.ndarray, nbrs: list[list[int]]) -> tuple[float, float]:
+    """(smallest angle at any atom, straightest angle at an atom with two or three bonds; a
+    four-bond atom drawn as a cross is the convention)."""
+    lo, hi = 180.0, 0.0
+    for k, ns in enumerate(nbrs):
+        us = [(xy[n] - xy[k]) / (np.linalg.norm(xy[n] - xy[k]) or 1.0) for n in ns]
+        for i in range(len(us)):
+            for j in range(i + 1, len(us)):
+                a = float(np.degrees(np.arccos(np.clip(us[i] @ us[j], -1.0, 1.0))))
+                lo = min(lo, a)
+                hi = max(hi, a) if len(us) <= 3 else hi
+    return (lo, hi) if hi > 0 else (lo if lo < 180 else 90.0, 90.0)
+
+
+def rule_report(xy, bonds, short=frozenset()) -> RuleReport:
+    """The template drawing rules on points `xy` (drawing units) joined by `bonds` (index
+    pairs); `short` holds the sorted pairs drawn short on purpose."""
+    xy = np.asarray(xy, dtype=float)[:, :2]
+    bonds = [tuple(int(v) for v in b) for b in bonds]
+    nbrs: list[list[int]] = [[] for _ in xy]
+    for a, b in bonds:
+        nbrs[a].append(b)
+        nbrs[b].append(a)
+    lens = {b: float(np.linalg.norm(xy[b[0]] - xy[b[1]])) for b in bonds}
+    reg = [v for b, v in lens.items() if tuple(sorted(b)) not in short]
+    med = float(np.median(reg)) if reg else L
+    sh = [v / med for b, v in lens.items() if tuple(sorted(b)) in short]
+    clear = min(
+        (
+            _segment_distance(xy[k], xy[a], xy[b])[0]
+            for a, b in bonds
+            for k in range(len(xy))
+            if k not in (a, b)
+        ),
+        default=9 * L,
+    )
+    d = np.linalg.norm(xy[:, None] - xy[None], axis=-1) + np.eye(len(xy)) * 9 * L
+    xs = sum(
+        _cross(xy[a], xy[b], xy[c], xy[e])
+        for i, (a, b) in enumerate(bonds)
+        for c, e in bonds[i + 1 :]
+        if not {a, b} & {c, e}
+    )
+    return RuleReport(
+        length=(round(min(reg) / med, 3), round(max(reg) / med, 3)) if reg else (1.0, 1.0),
+        short=round(min(sh), 3) if sh else 1.0,
+        angle=tuple(round(v, 1) for v in _angle_range(xy, nbrs)),
+        clearance=round(clear / L, 3),
+        separation=round(float(d.min()) / L, 3),
+        crossings=int(xs),
+    )
+
+
+def mol_rule_report(mol: Chem.Mol, xy, short=frozenset()) -> RuleReport:
+    """rule_report of a laid-out molecule (atom order of mol)."""
+    bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()]
+    return rule_report(xy, bonds, short)

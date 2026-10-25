@@ -2,7 +2,9 @@
 template library (serve/depiction_templates.py, serve/data/ring_templates.*): RDKit only, never
 xTB (match3d gets an RDKit structure here, and the synthetic chemistry's record over HTTP).
 
-Checked: every template parses (and RDKit's own loader accepts the file), is a real 3D shape,
+Checked: every template parses (and RDKit's own loader accepts the file), its `fit` is a real
+3D shape seen as the picture, the picture and its slots follow the drawing rules (bond lengths,
+angles, atom-bond clearance, crossings) and so do the substituted examples drawn on it; it
 matches and is used for its examples; the answer keeps the input atom and bond order and the
 stereo; camphor gets RDKit's ring template (textbook) and the norbornane template
 (perspective); match3d follows the view; the error codes."""
@@ -15,9 +17,10 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from ksmech.serve import depiction2d as D
+from ksmech.serve import depiction_metrics as M
 from ksmech.serve import depiction_templates as T
 from ksmech.serve import molecule
-from ksmech.serve.depiction_gallery import principal_frame
+from ksmech.serve.depiction_gallery import principal_frame, slot_angles
 from ksmech.serve.errors import Code, ServeError
 from tests.test_serve_fixtures_api import api_client
 from tests.test_serve_fixtures_wb import (  # noqa: F401 (fixtures)
@@ -54,14 +57,78 @@ def test_library_parses_and_rdkit_accepts_the_file():
     for t in lib:
         assert t.source and t.convention and t.examples, t.name
         assert np.isfinite(t.xyz).all() and t.xyz.shape == (t.size, 3)
+        assert np.isfinite(t.fit).all() and t.fit.shape == (t.size, 3)
 
 
 @pytest.mark.parametrize("t", T.load_library(), ids=lambda t: t.name)
-def test_template_is_a_rotated_3d_structure(t):
-    lengths = [np.linalg.norm(t.xyz[a] - t.xyz[b]) for a, b in t.bonds]
+def test_template_fit_is_a_3d_structure_and_depth_its_z(t):
+    lengths = [np.linalg.norm(t.fit[a] - t.fit[b]) for a, b in t.bonds]
     assert np.std(lengths) / np.mean(lengths) < 0.03, t.name  # one bond length in 3D
+    assert np.allclose(t.xyz[:, 2], t.fit[:, 2], atol=1e-3)  # depth agrees with the picture
+    rms = np.sqrt(
+        ((t.fit[:, :2] - t.fit[:, :2].mean(0) - t.xyz[:, :2] + t.xyz[:, :2].mean(0)) ** 2)
+        .sum(axis=1)
+        .mean()
+    )
+    assert rms < 0.3 * T.BOND, t.name  # the fit is a view of the picture
+
+
+@pytest.mark.parametrize("t", T.load_library(), ids=lambda t: t.name)
+def test_template_picture_follows_the_drawing_rules(t):
+    rep = M.rule_report(t.xyz[:, :2], t.bonds, t.foreshortened)
+    assert rep.violations() == [], (t.name, rep)
+    assert rep.crossings == t.crossings, t.name
     drawn = [np.linalg.norm(t.xyz[a, :2] - t.xyz[b, :2]) for a, b in t.bonds]
-    assert np.median(drawn) == pytest.approx(T.BOND, abs=0.01)
+    assert 0.9 * T.BOND < np.median(drawn) < 1.1 * T.BOND
+    lo, hi = slot_angles(t)  # with a stub on every drawn slot
+    assert lo >= M.RULE_ANGLE_MIN and hi <= M.RULE_ANGLE_MAX, (t.name, lo, hi)
+
+
+def test_chair_slots_are_axial_vertical_and_equatorial_parallel():
+    t = next(t for t in T.load_library() if t.name == "cyclohexane-chair")
+    lines = [T._unit(t.xyz[b, :2] - t.xyz[a, :2]) for a, b in t.bonds]
+    for k in range(t.size):
+        axial, eq = sorted(t.slots[k], key=lambda s: -abs(s.d[1]))
+        assert abs(axial.d[0]) < 1e-9
+        assert max(abs(float(eq.d @ v)) for v in lines) > 1 - 1e-9
+
+
+SUBSTITUTED = {
+    "camphor": CAMPHOR,
+    "borneol": "CC1(C)[C@@H]2CC[C@@]1(C)[C@@H](O)C2",
+    "norcamphor": "O=C1C[C@@H]2CC[C@H]1C2",
+    "memantine": "CC12CC3CC(C)(C1)CC(N)(C3)C2",
+    "1-adamantanol": "OC12CC3CC(CC(C3)C1)C2",
+    "quinuclidine": "C1CN2CCC1CC2",
+    "3-quinuclidinol": "O[C@@H]1C[N@]2CC[C@H]1CC2",
+    "cocaine": "COC(=O)[C@H]1[C@@H](OC(=O)c2ccccc2)C[C@@H]2CC[C@H]1N2C",
+    "tropine": "CN1[C@H]2CC[C@@H]1C[C@@H](O)C2",
+    "cubane acid": "OC(=O)C12C3C4C1C1C2C3C41",
+    "menthol": MENTHOL,
+    "trans-decalin": "[C@@H]12CCCC[C@H]1CCCC2",
+    "cholesterol": (
+        "C[C@H](CCCC(C)C)[C@H]1CC[C@@H]2[C@@]1(CC[C@H]3[C@H]2CC=C4[C@@]3(CC[C@@H](C4)O)C)C"
+    ),
+}
+
+
+@pytest.mark.parametrize("smiles", SUBSTITUTED.values(), ids=SUBSTITUTED.keys())
+def test_substituted_examples_follow_the_drawing_rules(smiles):
+    mol, _ = parsed(smiles)
+    lay = T.perspective_layout(mol, T.conformer3d(mol))
+    assert lay is not None
+    xy, _ = D.normalized(mol, lay.xy)
+    rep = M.mol_rule_report(mol, xy, lay.short)
+    assert rep.violations() == [], rep
+    t = next(t for t in T.load_library() if t.name == lay.template)
+    assert rep.crossings <= t.crossings  # substituents add no crossing
+
+
+def test_symmetric_template_puts_substituents_on_clear_slots():
+    mol, _ = parsed("OC12CC3CC(CC(C3)C1)C2")  # 1-adamantanol: the OH on the apex
+    lay = T.perspective_layout(mol, T.conformer3d(mol))
+    o = next(a.GetIdx() for a in mol.GetAtoms() if a.GetSymbol() == "O")
+    assert lay.xy[o, 1] == pytest.approx(lay.xy[:, 1].max())
 
 
 @pytest.mark.parametrize(
@@ -73,7 +140,7 @@ def test_template_matches_and_is_used_for_its_examples(name, smiles):
     lay = T.perspective_layout(mol, T.conformer3d(mol))
     assert lay is not None and lay.template == name and lay.rmsd < T.FIT_RMSD_MAX
     out = D.clean(mol, raw, "perspective")
-    if out["template"] is None:  # cocaine: the tropane drawing crowds its two esters
+    if out["template"] is None:  # glucose: the chair crowds its OH labels
         assert any("more defects" in n for n in out["notes"]), out["notes"]
     else:
         assert out["template"] == name and out["method"] == f"perspective:{name}"
@@ -195,7 +262,7 @@ def _turn(a: np.ndarray, b: np.ndarray) -> float:
     [
         (MENTHOL, "textbook", 0.45),
         ("CCCCCCO", "textbook", 0.3),
-        (CAMPHOR, "perspective", 0.6),  # a cage: the template only turns in the plane
+        (CAMPHOR, "perspective", 0.7),  # a cage: the stylised template only turns in the plane
     ],
 )
 def test_match3d_follows_the_view(smiles, style, worst):
