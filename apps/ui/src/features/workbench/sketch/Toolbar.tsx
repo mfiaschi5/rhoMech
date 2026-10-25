@@ -9,7 +9,7 @@
 // DOM: <div data-testid="sketch-toolbar">, buttons tool-<name>[data-active] (tool-radical and
 // tool-diradical give an atom one or two unpaired electrons; again: clear), element-<El>
 // [data-active], element-more (opens <div data-testid="periodic-picker"> with periodic-<El>),
-// then <div data-testid="sketch-actions"> (its testids in ActionBar.tsx). There is no "Fix
+// the drawing style (sketch-style, sketch-style-edit: StyleControls.tsx), then <div data-testid="sketch-actions"> (its testids in ActionBar.tsx). There is no "Fix
 // layout": the server's RDKit depiction replaced the home-made relaxation (docs/decisions.md,
 // 2026-10-25).
 import { useEffect, useState, type ReactNode } from "react";
@@ -18,6 +18,7 @@ import type { ToolName } from "./tools";
 import type { CleanStyle } from "./depiction";
 import type { TransformAction } from "./transform";
 import { ActionBar } from "./ActionBar";
+import { StyleControls, type StyleControlProps } from "./StyleControls";
 
 export type SketchPanel = "import" | "export" | null;
 
@@ -50,6 +51,8 @@ export interface ToolbarProps {
   /** The R/S toggle: CIP labels drawn on the canvas and listed in the info bar. */
   showCip: boolean;
   onToggleCip(): void;
+  /** The drawing-style select and editor (StyleControls.tsx). */
+  styleControls: StyleControlProps;
 }
 
 const ICON: Partial<Record<ToolName, ReactNode>> = {
@@ -217,6 +220,9 @@ export function Toolbar(p: ToolbarProps) {
           </div>
         ))}
         <Palette tool={p.tool} element={p.element} onPick={p.onElement} />
+        <div className="sk-group sk-actions sk-style-group">
+          <StyleControls {...p.styleControls} />
+        </div>
       </div>
       <ActionBar {...p} />
     </div>

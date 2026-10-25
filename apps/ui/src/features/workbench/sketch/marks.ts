@@ -64,19 +64,20 @@ export function boxExit(box: Box | null, angle: number): number {
 /** The point at `dist` px from `at` along `angle`. */
 export const along = (at: Vec, angle: number, dist: number): Vec => [at[0] + Math.cos(angle) * dist, at[1] + Math.sin(angle) * dist];
 
-/** How far from the atom centre a mark of half-size `half` px sits along `angle`. */
-export function markDistance(box: Box | null, angle: number, half: number): number {
-  return box ? boxExit(box, angle) + LABEL_GAP_PX + half : VERTEX_GAP_PX + half;
+/** How far from the atom centre a mark of half-size `half` sits along `angle`; `k` scales the
+ *  gaps (drawing styles: the bond length over the Screen bond). */
+export function markDistance(box: Box | null, angle: number, half: number, k = 1): number {
+  return box ? boxExit(box, angle) + LABEL_GAP_PX * k + half : VERTEX_GAP_PX * k + half;
 }
 
 /** The centres of `n` radical dots (1 or 2) at `angle` from the atom: two dots sit side by side,
- *  across the direction. */
-export function radicalDots(at: Vec, box: Box | null, angle: number, n: number): Vec[] {
+ *  across the direction; `k` scales the sizes. */
+export function radicalDots(at: Vec, box: Box | null, angle: number, n: number, k = 1): Vec[] {
   if (n <= 0) return [];
-  const c = along(at, angle, markDistance(box, angle, DOT_R_PX));
+  const c = along(at, angle, markDistance(box, angle, DOT_R_PX * k, k));
   if (n === 1) return [c];
-  const px = -Math.sin(angle) * (DOT_PAIR_PX / 2);
-  const py = Math.cos(angle) * (DOT_PAIR_PX / 2);
+  const px = -Math.sin(angle) * ((DOT_PAIR_PX * k) / 2);
+  const py = Math.cos(angle) * ((DOT_PAIR_PX * k) / 2);
   return [
     [c[0] + px, c[1] + py],
     [c[0] - px, c[1] - py],

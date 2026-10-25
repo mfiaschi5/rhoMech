@@ -4225,3 +4225,99 @@ view convention, the depth storage, the linking rule and the crossing breaks sti
   default preset puts the orbitals full-width so the level diagram and the orbital list sit
   side by side. Moving a panel to another column remounts it (the sketch keeps its drawing
   but loses its undo history).
+
+## 2026-10-25 — Sketcher drawing styles and publication export
+
+- **Style model.** `apps/ui/src/features/workbench/sketch/style.ts`: a `DrawingStyle` holds
+  what a ChemDraw document style controls, in points: fixed bond length, line width, bold
+  (wedge) width, hash spacing and hash tick width, double-bond spacing (% of the fixed bond
+  length) with the inner-line shortening and the terminal C=X rule (ring doubles always go to
+  the ring centre), margin width, label font family / size / weight, subscript and charge size,
+  superscript or circled charges, colour or black and white, crossing gap, wedge shape (classic
+  wedge, or a bold bond with a tapered start), chain angle, labelled carbons and terminal
+  methyls, and whether sizes follow the zoom. The fixed bond length is the length of a standard
+  model bond (`BOND_LENGTH` = 1.5 units, what the tools draw and imports / Clean normalise to).
+  For the publication styles `pxPerPt = zoom * 1.5 / bondLengthPt`, so every size keeps its
+  proportion to the bonds at any zoom and the canvas is the exported picture scaled. Screen
+  keeps fixed pixels (1 pt = 4/3 px) as the sketcher always did (labels stay readable on a big
+  molecule fitted small); the font size, line width and atom-colour preferences set it, and its
+  values reproduce the former constants (13 px labels, 1.5 px lines, 4.5 px double gap, 3.6 px
+  wedge half-width, 3.2 px crossing gap).
+- **Presets and sources.**
+  - ACS Document 1996: bond 14.4 pt (0.508 cm), line 0.6 pt, bold 2.0 pt, margin 1.6 pt, hash
+    spacing 2.5 pt, bond spacing 18 % of length, chain angle 120°, Arial/Helvetica 10 pt, black
+    and white. Source: Revvity Signals (ChemDraw's vendor) support article 4408234173332 ("When
+    I print the structures, the line thickness for chemical bonds has increased ..."), which
+    lists the style sheet; the same numbers in the Middlebury science-writing guide
+    (sites.middlebury.edu/middsciwriting/?p=334) and in journal author guides that quote the ACS
+    settings. Not in the published list, so ours: hash tick width = line width, crossing gap =
+    margin, subscript and charge at 75 %, inner line shortened 12 % at each end.
+  - Total synthesis: no standard exists; the app's own preset for the bold look of synthesis
+    papers and graphical abstracts, said so in the tooltip: bond 15 pt, line 1.1 pt, bold
+    3.2 pt (tapered wedges), hash spacing 2.6 pt with 1.0 pt ticks, spacing 20 %, inner line
+    12 %, margin 2.2 pt, crossing gap 2.2 pt, Arial 11 pt, subscript 75 %, charge 80 %, black
+    and white.
+  - RSC and Wiley are not offered. No publisher page gives the numbers. The only RSC values
+    found are a third-party reading of ChemDraw 22's "RSC (1 Column) Document.cds" (12.2 pt
+    bonds, 0.45 pt lines, 1.6 pt bold, 1.75 pt hash spacing, 1.25 pt margin, 20 %, Helvetica
+    7 pt; github.com/JamesOBrien2/penzene pull 67); nothing for Wiley (Angewandte ships a
+    template file instead). A user with those style sheets can enter them as a Custom style.
+- **Labels.** Label widths come from Helvetica's AFM advance widths (= Arial's;
+  `fontMetrics.ts`) for the publication fonts, so the canvas, the SVG and the PDF place glyphs
+  identically. Bonds stop at the label's ink box (cap height, the H part on its side) plus the
+  margin, along the bond direction (ChemDraw's margin width). The H count goes right or left as
+  before, or above / below when bonds leave on both sides near the horizontal (an NH in a
+  chain). The charge takes the first free slot of upper right, upper left, lower right, lower
+  left (40° from every bond and the H).
+- **Chain angle.** It shapes only new bonds (growth from a one-neighbour atom, the chain tool's
+  zigzag), through one piece of module state in geometry.ts set by the Sketcher; every preset
+  uses 120°, so nothing changes unless a custom style sets another angle.
+- **"Apply bond length".** The ⋯ menu's existing "Reset bond length" already rescales the
+  drawing so its mean bond is the standard bond, which every style draws at its fixed length.
+  The editor adds "Actual size", a view change (zoom so a standard bond is the style's length
+  on a 96 dpi screen) that leaves the model alone. Changing the model's unit to the style's
+  bond length would desynchronise the tools, the server depiction and the molfile scale.
+- **Export sizing.** `exportImage.ts` builds the scene in points (a standard bond = the fixed
+  bond length) and turns it into primitives (lines, filled polygons, circles, text with
+  explicit baselines and start positions: no dominant-baseline, which Word and Inkscape read
+  differently). The box is the ink plus a 2 pt margin. SVG: width / height in pt and the viewBox
+  in pt (1 unit = 1 pt). PNG: the SVG rasterised at `round(pt / 72 * dpi)` px (150 to 1200 dpi)
+  with a pHYs chunk carrying the dpi, so Word and LaTeX place the file at its physical size.
+  PDF (`pdf.ts`, no dependency): one page whose MediaBox is the drawing in pt, round-capped
+  strokes, filled wedges, Bezier circles and text in the base-14 fonts (Helvetica,
+  Helvetica-Bold, Helvetica-Oblique; Times-Roman for the Times family, laid out with Helvetica
+  widths), WinAnsi with the minus as the en dash, nothing embedded, no dates (deterministic).
+  Checked: pdfinfo reports the page size, pdftoppm renders the SVG and PDF identically, and
+  pdflatex includes the PDF through graphicx.
+- **LaTeX.** "Copy LaTeX" gives a figure that includes scheme.pdf at its width in cm. "Copy
+  chemfig" writes chemfig code. Each bond gets its absolute angle from the 2D coordinates, plus
+  a length factor beyond 5 %. Branches go in parentheses and ring closures are hooks (`?[a]` ...
+  `?[a,{=^}]`). Ring doubles are offset to the ring side (`=^` / `=_`), wedges and hashes are
+  Cram bonds (`<`, `>`, `<:`, `>:`) and labels carry their H and charge (`{H_3N^{+}}`). atom
+  sep, widths and the font size come from the style. Compiled with chemfig 1.82 from CTAN and
+  pdflatex on camphor, carvone, zwitterionic alanine, the Boc-alanine ammonium salt, cholesterol
+  and benzene; the pictures match the sketch. Not supported: radical dots (dropped, with a
+  comment), crossing breaks, circled charges, element colours.
+- **Drag and copy: verified vs expected.** The files are rendered in the background, debounced,
+  so dragstart and the copy buttons attach them synchronously.
+  - Verified in Chromium (Chrome under Playwright):
+    - A dragstart on the handle fills the DataTransfer with scheme.png, scheme.pdf and
+      scheme.svg as File items, text/html (an `<img>` PNG data URL at the physical size) and
+      DownloadURL (`image/png:scheme.png:blob:...`). The e2e test checks this on a synthetic
+      DragEvent.
+    - In a real drag to a drop zone in the page (Playwright's drag interception), the zone saw
+      text/html, text/plain ("scheme.svg", Chromium's) and our marker type, but no Files and no
+      DownloadURL.
+    - "Copy image" writes image/png plus image/svg+xml (`ClipboardItem.supports` is true in
+      this Chrome). A paste into a contenteditable on another page receives an image.png File
+      and inserts the image. Chromium re-encodes the pasted PNG, though, and the dpi chunk is
+      lost, so a pasted PNG is sized by its pixels (96 dpi) unless the target takes the SVG.
+  - Expected only (no Word, Overleaf or desktop here):
+    - Word desktop and Word Online: paste of the PNG works (a plain clipboard image); Microsoft
+      365 may take the SVG at its true size. Otherwise set the size from the cm shown in the
+      panel.
+    - Word, a drop: works if Chrome hands the File items or the HTML image to the OS drag.
+    - Desktop or file manager, a drop: DownloadURL saves scheme.png (Chrome only).
+    - Overleaf file tree: a drop uploads only if real File items arrive, which the in-browser
+      test did not show. The reliable route is the PDF download plus Overleaf's upload, then
+      "Copy LaTeX", or "Copy chemfig" with no file at all.

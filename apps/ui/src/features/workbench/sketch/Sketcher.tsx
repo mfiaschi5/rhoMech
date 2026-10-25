@@ -16,7 +16,16 @@
 //                                kept per tab in sessionStorage); without it, or when the server
 //                                fails, Clean is RDKit.js's CoordGen layout with a notice
 //   display        SketchDisplay optional; label font size, bond line width, atom colouring
-//                                and label style (the page's preferences)
+//                                and label style (the page's preferences), the drawing style
+//                                (styleId, customStyle; style.ts)
+//   onStyle(id, custom)          optional; a style picked or edited in the toolbar (the page
+//                                persists it); without it the Sketcher keeps the style itself
+//
+// Drawing styles (style.ts, StyleControls.tsx): Screen, ACS Document 1996, Total synthesis or
+// a custom style, render-only (the model, its coordinates, stereo and history never change);
+// the zoom maps points to pixels for the publication styles. The export panel's image section
+// (ImageExport.tsx) writes SVG / PNG / PDF at the style's true size, copies the image, the SVG,
+// a LaTeX figure or chemfig code; the drag handle in the canvas corner carries the files.
 //
 // The R/S toggle (kept per tab in sessionStorage) draws RDKit's CIP labels by the stereocentres
 // and double bonds and lists them in the info bar; they follow every edit (wedges, rotations,
@@ -27,7 +36,8 @@
 //      data-valid data-atoms data-bonds data-tool data-status (useSketchInfo status)
 //      data-radicals (unpaired electrons drawn) data-show-cip
 //      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth
-//      data-busy (a layout is waiting for the server) data-clean-style>
+//      data-busy (a layout is waiting for the server) data-clean-style data-style (the drawing
+//      style id)>
 //   the toolbar (Toolbar.tsx, ActionBar.tsx), <svg data-testid="sketch-canvas">
 //   (SketchCanvas.tsx; with two or more atoms selected, the selection frame with its rotate and
 //   scale handles, frame.ts), the
@@ -55,7 +65,7 @@
 //   <Sketcher value={m} onChange={setM} highlightAtoms={[1]} height={400} />
 //   e2e: click tool-bond, click the canvas, click sketch-atom-2, hover the third atom, press
 //   "o"; expect sketch[data-smiles="CCO"].
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from "react";
 import { useRDKit, type RDKitModule } from "../../../chem/rdkit";
 import { setElement, type SketchModel } from "./model";
 import { fitView, type Vec, type View } from "./geometry";
@@ -75,6 +85,10 @@ import { findCrossings } from "./crossings";
 import { hasDepth, radicalElectrons } from "./model";
 import { cipItems } from "./cip";
 import type { LabelStyle } from "./drawing";
+import { actualSizeScale, drawMetrics, pxPerPt, resolveStyle, ACS_1996_STYLE, type DrawingStyle, type StyleId } from "./style";
+import { setChainAngle } from "./geometry";
+import type { StyleControlProps } from "./StyleControls";
+import { DEFAULT_IMAGE_OPTIONS, SCHEME_DRAG_TYPE, DragHandle, ImageExportSection, useSchemeFiles, type ImageOptions, type SchemeFiles } from "./ImageExport";
 import { restoreCleanStyle, saveCleanStyle, type CleanStyle, type Depictor } from "./depiction";
 import "./sketch.css";
 
@@ -87,6 +101,7 @@ export interface SketcherProps {
   projection?: ProjectionSource;
   depictor?: Depictor;
   display?: SketchDisplay;
+  onStyle?(id: StyleId, custom: DrawingStyle): void;
 }
 
 /** How the sketch draws (the page's preferences); every field optional. */
@@ -96,6 +111,9 @@ export interface SketchDisplay {
   /** Element colours on the labels (default on). */
   colourAtoms?: boolean;
   labelStyle?: LabelStyle;
+  /** The drawing style (default Screen) and the custom style. */
+  styleId?: StyleId;
+  customStyle?: DrawingStyle;
 }
 
 /** Pixels per model unit at 100 %: a 1.5 bond is 37.5 px. */
@@ -262,7 +280,7 @@ function useSketchActions(ed: SketchEditor, rdkit: RDKitModule | null, readOnly:
     if (ed.selection.atoms.size) ed.commit(setElement(ed.committed, ed.selection.atoms, el));
   };
   const onDrop = async (e: DragEvent<HTMLDivElement>) => {
-    if (readOnly) return;
+    if (readOnly || e.dataTransfer.types.includes(SCHEME_DRAG_TYPE)) return;
     e.preventDefault();
     const text = await readDroppedText(e);
     const err = text ? importText(text) : null;
@@ -291,6 +309,7 @@ function EditorToolbar(p: {
   onPanel(p: SketchPanel): void;
   showCip: boolean;
   onToggleCip(): void;
+  styleControls: StyleControlProps;
 }) {
   const { ed, act, layout } = p;
   return (
@@ -319,11 +338,12 @@ function EditorToolbar(p: {
       hasSelection={ed.selection.atoms.size + ed.selection.bonds.size > 0}
       showCip={p.showCip}
       onToggleCip={p.onToggleCip}
+      styleControls={p.styleControls}
     />
   );
 }
 
-function ExportFor({ rdkit, model, onClose }: { rdkit: RDKitModule | null; model: SketchModel; onClose(): void }) {
+function ExportFor({ rdkit, model, onClose, image }: { rdkit: RDKitModule | null; model: SketchModel; onClose(): void; image: ReactNode }) {
   const out = useMemo(
     () => ({
       smiles: exportSketch(rdkit, model, "smiles"),
@@ -332,7 +352,11 @@ function ExportFor({ rdkit, model, onClose }: { rdkit: RDKitModule | null; model
     }),
     [rdkit, model],
   );
-  return <ExportPanel {...out} onClose={onClose} />;
+  return (
+    <ExportPanel {...out} onClose={onClose}>
+      {image}
+    </ExportPanel>
+  );
 }
 
 const CIP_KEY = "ksmech.sketch.showCip";
@@ -358,8 +382,40 @@ function useShowCip(): [boolean, () => void] {
   return [on, toggle];
 }
 
-function displayStyle(d: SketchDisplay | undefined): CSSProperties | undefined {
-  return d?.bondWidth ? ({ "--sk-bond-width": String(d.bondWidth) } as CSSProperties) : undefined;
+interface StyleState {
+  styleId: StyleId;
+  style: DrawingStyle;
+  custom: DrawingStyle;
+  onStyle(id: StyleId, custom?: DrawingStyle): void;
+}
+
+/** The drawing style: the page's (display + onStyle) or the Sketcher's own state. The chain
+ *  angle of the style shapes new bonds (geometry.setChainAngle). */
+function useDrawingStyle(display: SketchDisplay | undefined, onStyleProp: SketcherProps["onStyle"]): StyleState {
+  const [own, setOwn] = useState<{ id: StyleId; custom: DrawingStyle }>({ id: "screen", custom: ACS_1996_STYLE });
+  const controlled = !!onStyleProp;
+  const styleId = (controlled ? display?.styleId : own.id) ?? "screen";
+  const custom = (controlled ? display?.customStyle : own.custom) ?? ACS_1996_STYLE;
+  const style = useMemo(
+    () => resolveStyle(styleId, custom, { fontPx: display?.fontPx, bondWidth: display?.bondWidth, colourAtoms: display?.colourAtoms }),
+    [styleId, custom, display?.fontPx, display?.bondWidth, display?.colourAtoms],
+  );
+  useEffect(() => setChainAngle(style.chainAngleDeg), [style.chainAngleDeg]);
+  const onStyle = (id: StyleId, next?: DrawingStyle) => {
+    const c = next ?? custom;
+    if (onStyleProp) onStyleProp(id, c);
+    else setOwn({ id, custom: c });
+  };
+  return { styleId, style, custom, onStyle };
+}
+
+/** "Actual size": the zoom at which a standard bond is the style's length on screen, about the
+ *  canvas centre. */
+function actualSizeView(view: View, style: DrawingStyle, width: number, height: number): View {
+  const s = actualSizeScale(style);
+  const cx = (width / 2 - view.ox) / view.s;
+  const cy = (view.oy - height / 2) / view.s;
+  return { s, ox: width / 2 - s * cx, oy: height / 2 + s * cy };
 }
 
 function useCleanStyle(): [CleanStyle, (s: CleanStyle) => void] {
@@ -371,14 +427,28 @@ function useCleanStyle(): [CleanStyle, (s: CleanStyle) => void] {
   return [style, set];
 }
 
-export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor, display }: SketcherProps) {
+/** The image files of the drawing in its style (pre-rendered for drag and copy) and the
+ *  export panel's image section. */
+function useSketchImage(ed: SketchEditor, info: ReturnType<typeof useSketchInfo>, style: DrawingStyle, labelStyle: LabelStyle | undefined, enabled: boolean) {
+  const [options, setOptions] = useState<ImageOptions>(DEFAULT_IMAGE_OPTIONS);
+  const hCounts = !info.stale && info.valid ? info.hCounts : null;
+  const files: SchemeFiles | null = useSchemeFiles({ model: ed.committed, hCounts, style, labelStyle, stereo: info.valid ? info.stereo : null, options, enabled });
+  const section = <ImageExportSection files={files} options={options} onOptions={setOptions} />;
+  return { files, section };
+}
+
+export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor, display, onStyle }: SketcherProps) {
   const ed = useSketchEditor(value, onChange);
   const info = useSketchInfo(ed.committed);
   const { rdkit } = useRDKit();
   const rootRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const { view, setView, fit } = useView(ed, useWidth(stageRef), height);
+  const width = useWidth(stageRef);
+  const { view, setView, fit } = useView(ed, width, height);
+  const ds = useDrawingStyle(display, onStyle);
+  const metrics = useMemo(() => drawMetrics(ds.style, pxPerPt(ds.style, view.s)), [ds.style, view.s]);
+  const image = useSketchImage(ed, info, ds.style, display?.labelStyle, !readOnly);
   const [panel, setPanel] = useState<SketchPanel>(null);
   const frame = useMemo(() => selectionFrame(ed.model, [...selectionAtoms(ed.committed, ed.selection)], view), [ed.model, ed.committed, ed.selection, view]);
   const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly, frame);
@@ -401,9 +471,9 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
   return (
     <div
       ref={rootRef}
-      className={`sketch${display?.colourAtoms === false ? " sk-mono" : ""}`}
-      style={displayStyle(display)}
+      className={`sketch${ds.style.colour ? "" : " sk-mono"}`}
       data-testid="sketch"
+      data-style={ds.styleId}
       data-smiles={info.smiles}
       data-valid={info.valid}
       data-atoms={ed.committed.atoms.length}
@@ -434,6 +504,7 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           onPanel={setPanel}
           showCip={showCip}
           onToggleCip={toggleCip}
+          styleControls={{ styleId: ds.styleId, style: ds.style, onStyle: ds.onStyle, onActualSize: () => setView(actualSizeView(view, ds.style, width, height)) }}
         />
       )}
       <div className="sk-stage" ref={stageRef} onDragOver={(e) => e.preventDefault()} onDrop={act.onDrop}>
@@ -452,10 +523,12 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           svgRef={svgRef}
           readOnly={readOnly}
           cip={cip}
-          display={display}
+          display={{ labelStyle: display?.labelStyle, metrics }}
+          styleId={ds.styleId}
         />
+        {!readOnly && ed.committed.atoms.length > 0 && <DragHandle files={image.files} />}
         {panel === "import" && <ImportPanel onImport={act.importText} onClose={closePanel} />}
-        {panel === "export" && <ExportFor rdkit={rdkit} model={ed.committed} onClose={closePanel} />}
+        {panel === "export" && <ExportFor rdkit={rdkit} model={ed.committed} onClose={closePanel} image={image.section} />}
       </div>
       <InfoBar info={info} report={layout.report} cip={cipList} radicals={radicals} />
     </div>

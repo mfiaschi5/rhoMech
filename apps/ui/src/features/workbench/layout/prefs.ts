@@ -1,14 +1,18 @@
 // The workbench's user preferences as pure data: sketch label font size, bond line width, atom
-// colouring, label style, the default 3D representation, the default orbital isovalue and the
-// theme override. sanitizePrefs() turns anything read from storage into valid preferences
+// colouring, label style, the sketch's drawing style (a preset or the custom style, style.ts),
+// the default 3D representation, the default orbital isovalue and the theme override. The font
+// size, line width and atom colouring set the Screen drawing style. sanitizePrefs() turns anything read from storage into valid preferences
 // (out-of-range numbers clamped, unknown values back to the default).
 //
 // Theme: "auto" follows prefers-color-scheme (no data-theme on <html>); "light" / "dark" set
 // <html data-theme>, which styles.css already honours over the media query.
 import type { LabelStyle } from "../sketch/drawing";
 import type { Rep } from "../params";
+import type { DrawingStyle, StyleId } from "../sketch/style";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
 import { DEFAULT_REP, REPS } from "../params.ts";
+// @ts-ignore TS5097: see above
+import { ACS_1996_STYLE, sanitizeStyle, STYLE_IDS } from "../sketch/style.ts";
 
 export const THEMES = ["auto", "light", "dark"] as const;
 export type ThemeChoice = (typeof THEMES)[number];
@@ -24,6 +28,10 @@ export interface Prefs {
   bondWidth: number;
   colourAtoms: boolean;
   labelStyle: LabelStyle;
+  /** The sketch's drawing style. */
+  drawingStyle: StyleId;
+  /** The custom drawing style (the style editor's), kept while another style is chosen. */
+  customStyle: DrawingStyle;
   rep: Rep;
   /** Default isovalue of new orbital (psi) surface layers. */
   orbitalIso: number;
@@ -41,6 +49,8 @@ export const DEFAULT_PREFS: Prefs = {
   bondWidth: 1.5,
   colourAtoms: true,
   labelStyle: "skeletal",
+  drawingStyle: "screen",
+  customStyle: ACS_1996_STYLE,
   rep: DEFAULT_REP,
   orbitalIso: 0.05,
   theme: "auto",
@@ -63,6 +73,8 @@ export function sanitizePrefs(x: unknown): Prefs {
     bondWidth: Math.round(num(v.bondWidth, "bondWidth") * 10) / 10,
     colourAtoms: typeof v.colourAtoms === "boolean" ? v.colourAtoms : DEFAULT_PREFS.colourAtoms,
     labelStyle: oneOf(v.labelStyle, LABEL_STYLE_CHOICES, DEFAULT_PREFS.labelStyle),
+    drawingStyle: oneOf(v.drawingStyle, STYLE_IDS, DEFAULT_PREFS.drawingStyle),
+    customStyle: sanitizeStyle(v.customStyle, DEFAULT_PREFS.customStyle),
     rep: oneOf(v.rep, REPS, DEFAULT_PREFS.rep),
     orbitalIso: num(v.orbitalIso, "orbitalIso"),
     theme: oneOf(v.theme, THEMES, DEFAULT_PREFS.theme),

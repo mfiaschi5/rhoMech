@@ -1,6 +1,7 @@
 // The workbench sketcher: public surface. See Sketcher.tsx for props, DOM and keys.
 export { Sketcher, DEFAULT_SCALE, type SketcherProps, type SketchDisplay } from "./Sketcher";
 export { LABEL_STYLES, FONT_PX, type LabelStyle } from "./drawing";
+export { PRESETS, STYLE_IDS, STYLE_TITLES, resolveStyle, sanitizeStyle, type DrawingStyle, type StyleId } from "./style";
 export { radicalElectrons } from "./model";
 export { useSketchInfo, SKETCH_INFO_DELAY_MS, type SketchInfo, type SketchInfoStatus } from "./useSketchInfo";
 export { toMolblock, fromMolblock, MolfileError } from "./molfile";

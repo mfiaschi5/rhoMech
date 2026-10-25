@@ -1,5 +1,6 @@
 // Plane geometry of the sketcher: vectors, growth angles, regular polygons, zigzag chains and
-// hit tests. Pure functions without imports, so they run under node --experimental-strip-types.
+// hit tests. Pure functions without imports, so they run under node --experimental-strip-types;
+// the one piece of state is the chain angle of the drawing style (setChainAngle).
 // Angles are radians, counter-clockwise, in the model frame (y up).
 
 export type Vec = readonly [number, number];
@@ -36,6 +37,17 @@ export function snapAngle(t: number, step = 30 * DEG): number {
   return Math.round(t / step) * step;
 }
 
+/** The chain angle (radians) new bonds and chains are drawn with: the drawing style's chain
+ *  angle (120 degrees in every preset). Module state set by the Sketcher (setChainAngle) when
+ *  the style changes; it only shapes bonds drawn afterwards, never an existing drawing. */
+let chainAngle = 120 * DEG;
+
+export function setChainAngle(deg: number): void {
+  chainAngle = Math.min(150, Math.max(90, Number.isFinite(deg) ? deg : 120)) * DEG;
+}
+
+export const getChainAngle = (): number => chainAngle;
+
 /** The first bond of an isolated atom points up-right at 30 degrees (zigzag-ready). */
 export const FIRST_BOND_ANGLE = 30 * DEG;
 
@@ -65,7 +77,7 @@ export function growthAngle(centre: Vec, nbrs: readonly Vec[], others: readonly 
   if (nbrs.length === 0) return FIRST_BOND_ANGLE;
   if (nbrs.length > 1) return largestGapDirection(centre, nbrs);
   const t = angleOf(sub(nbrs[0], centre));
-  const cands = [t - 120 * DEG, t + 120 * DEG].map(normAngle);
+  const cands = [t - chainAngle, t + chainAngle].map(normAngle);
   const room = (a: number) => {
     const end = add(centre, fromAngle(a, length));
     return others.reduce((m, q) => Math.min(m, dist(end, q)), Infinity);
@@ -112,16 +124,18 @@ export function sideOf(p: Vec, q: Vec, x: Vec): 1 | -1 | 0 {
 }
 
 /** Zigzag chain points from `start` towards `target` (the drag), the drag direction snapped to
- *  30 degrees; bonds of length `bond` at +-30 degrees about it. Excludes `start`. `flip` mirrors
+ *  30 degrees; bonds of length `bond` at +-(180 - chain angle) / 2 about it (30 degrees for
+ *  the usual 120). Excludes `start`. `flip` mirrors
  *  the zigzag. */
 export function chainPoints(start: Vec, target: Vec, bond: number, flip = false): Vec[] {
   const d = sub(target, start);
-  const along = bond * Math.cos(30 * DEG);
+  const tilt = (Math.PI - chainAngle) / 2;
+  const along = bond * Math.cos(tilt);
   const n = Math.max(1, Math.round(len(d) / along));
   const phi = snapAngle(angleOf(d));
   const u = fromAngle(phi);
   const v: Vec = [-u[1], u[0]];
-  const h = (flip ? -1 : 1) * bond * Math.sin(30 * DEG);
+  const h = (flip ? -1 : 1) * bond * Math.sin(tilt);
   return Array.from({ length: n }, (_, i) => add(add(start, scale(u, (i + 1) * along)), scale(v, (i + 1) % 2 ? h : 0)));
 }
 

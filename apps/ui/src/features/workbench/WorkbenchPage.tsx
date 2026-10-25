@@ -39,7 +39,7 @@ import { OrbitalPanel } from "./orbitals/OrbitalPanel";
 import type { Window } from "./orbitals/levels";
 import { CANONICAL, DEFAULT_SET, DEFAULT_START, isMoleculeId, isOrbitalKind, parseIndex, parseLayers, parseQuality, parseRep, formatLayers, type LayerSpec } from "./params";
 import { restoreComputed, restoreSketch, saveComputed, saveSketch, sketchChanged, sketchTopology } from "./session";
-import { emptySketch, exportSketch, fromMolblock, importSketch, molblockSmiles, radicalElectrons, Sketcher, toMolblock, useSketchInfo, type Depictor, type ProjectionSource, type SketchModel } from "./sketch";
+import { emptySketch, exportSketch, fromMolblock, importSketch, molblockSmiles, radicalElectrons, Sketcher, toMolblock, useSketchInfo, type Depictor, type ProjectionSource, type SketchModel, type DrawingStyle, type StyleId } from "./sketch";
 import { clearSelection, useSelection } from "./store";
 import { PropertyTabs } from "./tables/PropertyTabs";
 import { useMolecule, type ComputeState } from "./useMolecule";
@@ -268,6 +268,7 @@ const depictor: Depictor = (req, signal) => depict2d(req, { signal });
 interface PageState {
   route: Route;
   prefs: PrefsState["prefs"];
+  setPrefs: PrefsState["setPrefs"];
   layout: LayoutState;
   dispatch: Dispatch<LayoutAction>;
 }
@@ -313,13 +314,21 @@ function useWorkbenchData({ route, prefs }: Pick<PageState, "route" | "prefs">) 
 
 type WorkbenchData = ReturnType<typeof useWorkbenchData>;
 
-function sketchPanel(d: WorkbenchData, prefs: PageState["prefs"], height: number): PanelContent {
-  const display = { fontPx: prefs.fontPx, bondWidth: prefs.bondWidth, colourAtoms: prefs.colourAtoms, labelStyle: prefs.labelStyle };
+function sketchPanel(d: WorkbenchData, prefs: PageState["prefs"], setPrefs: PageState["setPrefs"], height: number): PanelContent {
+  const display = {
+    fontPx: prefs.fontPx,
+    bondWidth: prefs.bondWidth,
+    colourAtoms: prefs.colourAtoms,
+    labelStyle: prefs.labelStyle,
+    styleId: prefs.drawingStyle,
+    customStyle: prefs.customStyle,
+  };
+  const onStyle = (drawingStyle: StyleId, customStyle: DrawingStyle) => setPrefs({ drawingStyle, customStyle });
   const { model, setModel, highlight, projection, state, info, radicals, stale, onCompute } = d;
   return {
     body: (
       <>
-        <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={height} projection={projection.source} depictor={depictor} display={display} />
+        <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={height} projection={projection.source} depictor={depictor} display={display} onStyle={onStyle} />
         <ComputeBar state={state} blocker={computeBlocker(info.valid, info.stale, radicals)} radicals={radicals} stale={stale} onCompute={onCompute} />
       </>
     ),
@@ -327,10 +336,10 @@ function sketchPanel(d: WorkbenchData, prefs: PageState["prefs"], height: number
 }
 
 /** The five panels' contents. */
-function workbenchPanels(d: WorkbenchData, { prefs, layout, dispatch }: Omit<PageState, "route">): Record<PanelId, PanelContent> {
+function workbenchPanels(d: WorkbenchData, { prefs, setPrefs, layout, dispatch }: Omit<PageState, "route">): Record<PanelId, PanelContent> {
   const { set, start, orb, rep, quality, state, ready, mid, geometry, properties, shown, canonical, win, setWin, viewer, setViewer, layers, info, pick } = d;
   return {
-    sketch: sketchPanel(d, prefs, layout.heights.sketch),
+    sketch: sketchPanel(d, prefs, setPrefs, layout.heights.sketch),
     viewer: {
       body: (
         <>
@@ -379,7 +388,7 @@ function Workbench({ route }: { route: Route }) {
   const prefsState = usePrefs();
   const { prefs } = prefsState;
   const wb = useWorkbenchData({ route, prefs });
-  const panels = workbenchPanels(wb, { prefs, layout, dispatch });
+  const panels = workbenchPanels(wb, { prefs, setPrefs: prefsState.setPrefs, layout, dispatch });
   return (
     <div
       className="workbench"

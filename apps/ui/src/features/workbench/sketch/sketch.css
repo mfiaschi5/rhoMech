@@ -131,7 +131,8 @@
   flex-direction: column;
 }
 
-.sk-menu.sk-menu-left {
+.sk-menu.sk-menu-left,
+.sk-style-editor.sk-menu-left {
   right: auto;
   left: 0;
 }
@@ -330,10 +331,16 @@
   stroke-linecap: round;
 }
 
+/* hash ticks: the style's tick width, square ends (ChemDraw) */
+.sk-stroke.sk-hash {
+  stroke-width: var(--sk-hash-width, 1.5px);
+  stroke-linecap: butt;
+}
+
 .sk-wedge {
   fill: var(--sk-stroke);
   stroke: var(--sk-stroke);
-  stroke-width: 0.6;
+  stroke-width: var(--sk-wedge-stroke, 0.6px);
   stroke-linejoin: round;
 }
 
@@ -373,19 +380,27 @@
   stroke-width: 1.2;
 }
 
+/* label sizes and font come from the drawing style (SketchCanvas sets the variables) */
 .sk-label text {
-  font-family: var(--font);
+  font-family: var(--sk-font-family, var(--font));
   font-size: var(--sk-font, 13px);
+  font-weight: var(--sk-font-weight, 400);
   fill: var(--sk-stroke);
 }
 
 .sk-label .sk-sub {
-  font-size: calc(var(--sk-font, 13px) * 0.73);
+  font-size: var(--sk-sub-font, calc(var(--sk-font, 13px) * 0.73));
 }
 
 .sk-label .sk-charge {
-  font-size: calc(var(--sk-font, 13px) * 0.77);
-  font-weight: 600;
+  font-size: var(--sk-charge-font, calc(var(--sk-font, 13px) * 0.77));
+  font-weight: var(--sk-charge-weight, 600);
+}
+
+.sk-charge-ring {
+  fill: none;
+  stroke: var(--sk-stroke);
+  stroke-width: calc(var(--sk-bond-width, 1.5px) * 0.7);
 }
 
 /* radical dots and CIP labels (marks.ts) */
@@ -395,7 +410,7 @@
 }
 
 .sk-cip {
-  font-family: var(--font);
+  font-family: var(--sk-font-family, var(--font));
   font-size: calc(var(--sk-font, 13px) * 0.75);
   font-style: italic;
   fill: var(--cycle);
@@ -533,4 +548,135 @@
 
 .sk-frame-handle:hover {
   fill: var(--accent);
+}
+
+/* drawing styles (StyleControls.tsx): the select and the editor popover */
+.sk-style-anchor {
+  gap: 3px;
+  align-items: center;
+}
+
+.sk-style-anchor .sk-style {
+  max-width: 12.5em;
+}
+
+.sk-style-editor {
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  width: min(330px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  overflow: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.sk-style-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.sk-style-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sk-style-row {
+  display: grid;
+  grid-template-columns: 1fr auto 4.5em;
+  gap: 6px;
+  align-items: center;
+}
+
+.sk-style-row > span {
+  color: var(--muted);
+}
+
+.sk-style-row .wb-num-input {
+  width: 5.5em;
+}
+
+.sk-style-row select {
+  font: inherit;
+  font-size: 12px;
+  max-width: 11em;
+  grid-column: 2 / 4;
+}
+
+.sk-style-row input[type="checkbox"] {
+  grid-column: 2;
+  justify-self: start;
+}
+
+.sk-style-note {
+  margin: 2px 0 0;
+  font-size: 11px;
+}
+
+/* image export (ImageExport.tsx) */
+.sk-panel {
+  max-height: calc(100% - 16px);
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.sk-image-export {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sk-image-options,
+.sk-image-buttons {
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+}
+
+.sk-image-buttons {
+  gap: 4px;
+}
+
+.sk-copy-status {
+  min-height: 1em;
+  font-size: 11px;
+}
+
+/* the drag handle: a thumbnail of the exported image in the canvas corner */
+.sk-drag {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 44px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--muted);
+  cursor: grab;
+  opacity: 0.85;
+  overflow: hidden;
+}
+
+.sk-drag:hover {
+  opacity: 1;
+  border-color: var(--accent);
+}
+
+.sk-drag img {
+  max-width: 40px;
+  max-height: 30px;
+  pointer-events: none;
 }

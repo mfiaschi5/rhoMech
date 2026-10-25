@@ -127,6 +127,23 @@ then look at it:
   font size, bond line width, atom colours, label style (skeletal, all atoms, no implicit H),
   the default 3D representation, the default orbital isovalue and the theme (auto, light,
   dark). Layout and preferences are kept per browser (localStorage).
+- drawing styles and publication export in the sketcher: a style select in the toolbar (also in
+  Layout → Preferences) offers Screen (the app's look), ACS Document 1996 (ChemDraw's style
+  sheet: 14.4 pt = 0.508 cm bonds, 0.6 pt lines, 2.0 pt wedges, 2.5 pt hash spacing, 18 %
+  double-bond spacing, 1.6 pt margins, Arial 10 pt, black and white), Total synthesis (the
+  app's own bold preset, not an official standard: 15 pt bonds, 1.1 pt lines, 3.2 pt tapered
+  wedges, 20 % spacing, Arial 11 pt) and Custom; the ✎ editor has every field (bond length,
+  line / bold / hash widths, hash and double-bond spacing, inner-line shortening, terminal C=X
+  rule, margin, label font, size, weight, subscript and charge size, superscript or circled
+  charges, colour, crossing gap, wedge shape, chain angle, labelled carbons or methyls) and
+  "Actual size". Styles are render-only (the drawing, its stereo and its undo history never
+  change). The Export panel's image section writes the drawing in the style at its true size:
+  SVG (pt), PNG at 150 to 1200 dpi with the resolution in the file, a vector PDF (Helvetica, no
+  embedded fonts), optional transparent background and R/S labels; "Copy image" (PNG + SVG),
+  "Copy SVG", "Copy LaTeX" (a figure including scheme.pdf at its physical width) and "Copy
+  chemfig" (`\usepackage{chemfig}` code that redraws the molecule natively). The thumbnail in
+  the canvas corner is a drag handle carrying scheme.png, scheme.pdf and scheme.svg; what each
+  target (Word, Overleaf, a file manager) accepts is listed in docs/decisions.md.
 
 Defaults and approximations: the density is valence-only on GFN2's minimal basis (an STO-nG
 fit, so its integral is shown next to N_valence), the ESP is an approximate point-charge

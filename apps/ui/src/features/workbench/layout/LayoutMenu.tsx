@@ -7,13 +7,15 @@
 // DOM: <div data-testid="wb-layout-bar" data-preset>, wb-layout-button [aria-expanded], <div
 // data-testid="wb-layout-menu"> with layout-preset-<name> [aria-pressed], layout-reset,
 // layout-show-<panel> (checkbox), pref-font, pref-bond-width, pref-colour-atoms, pref-label-style,
-// pref-rep, pref-iso, pref-theme, prefs-reset; outside the menu, layout-restore-<panel> per
+// pref-drawing-style (the sketch's drawing style, also in the sketch toolbar), pref-rep,
+// pref-iso, pref-theme, prefs-reset; outside the menu, layout-restore-<panel> per
 // hidden panel.
 import { useEffect, useRef, useState, type Dispatch, type ReactNode } from "react";
 import { REPS, type Rep } from "../params";
 import { PANELS, PANEL_TITLES, PRESETS, PRESET_TITLES, type LayoutAction, type LayoutState } from "./layoutState";
 import { LABEL_STYLE_CHOICES, LABEL_STYLE_TITLES, PREF_BOUNDS, THEMES, type Prefs, type ThemeChoice } from "./prefs";
 import type { LabelStyle } from "../sketch/drawing";
+import { STYLE_IDS, STYLE_TIPS, STYLE_TITLES, type StyleId } from "../sketch/style";
 
 export interface LayoutBarProps {
   layout: LayoutState;
@@ -70,6 +72,15 @@ function PrefsSection({ prefs, setPrefs, resetPrefs }: Pick<LayoutBarProps, "pre
           {LABEL_STYLE_CHOICES.map((s) => (
             <option key={s} value={s}>
               {LABEL_STYLE_TITLES[s]}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="drawing style" title="the sketch's drawing style (the sketch toolbar has the same select and the style editor); font size, line width and atom colours above set the Screen style">
+        <select data-testid="pref-drawing-style" value={prefs.drawingStyle} onChange={(e) => setPrefs({ drawingStyle: e.target.value as StyleId })}>
+          {STYLE_IDS.map((s) => (
+            <option key={s} value={s} title={STYLE_TIPS[s]}>
+              {STYLE_TITLES[s]}
             </option>
           ))}
         </select>

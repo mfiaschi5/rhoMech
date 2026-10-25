@@ -163,7 +163,7 @@ export function ActionBar(p: ToolbarProps) {
         {act("sketch-fit", "Fit", p.onFit, { title: "Fit the drawing in view", icon: "fit" })}
         {act("sketch-clear", "Clear", p.onClear, { title: "Clear the drawing", icon: "clear" })}
         {act("sketch-import", "Import", () => p.onPanel(p.panel === "import" ? null : "import"), { title: "Import: paste SMILES or a molfile, or drop a .mol/.sdf file", icon: "import" })}
-        {act("sketch-export", "Export", () => p.onPanel(p.panel === "export" ? null : "export"), { title: "Export: SMILES, InChI, molfile", icon: "export" })}
+        {act("sketch-export", "Export", () => p.onPanel(p.panel === "export" ? null : "export"), { title: "Export: image (SVG, PNG, PDF at true size; copy for Word, LaTeX, chemfig), SMILES, InChI, molfile", icon: "export" })}
       </div>
     </div>
   );

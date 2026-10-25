@@ -14,9 +14,12 @@
 //   pointer              the useSketchPointer handlers
 //   svgRef
 //   cip                  CIP labels to draw (the R/S toggle; null: none)
-//   display              label font size and label style (the page's sketch preferences)
+//   display              label font size and label style (the page's sketch preferences) and
+//                        the drawing style's metrics in screen px (style.ts; Screen without)
+//   styleId              the drawing style's id, as data-style
 //
-// DOM: <svg data-testid="sketch-canvas"> with
+// DOM: <svg data-testid="sketch-canvas" data-style data-px-per-pt data-bond-px (a standard
+//      bond) data-line-px data-bold-px data-font-px> with
 //   <g data-testid="sketch-bond-<id>" data-order="1|2|3" data-stereo data-selected data-hovered
 //      data-broken="<n>" (only on a bond drawn broken behind n crossings) data-cip="E|Z" (only
 //      while R/S is on and RDKit labels it)>, with <text data-testid="sketch-cip-bond-<id>">
@@ -33,8 +36,9 @@ import type { Hit, Selection } from "./tools";
 import type { SketchPointer } from "./useSketchPointer";
 import type { SelectionFrame } from "./frame";
 import type { StereoLabels } from "./cip";
-import { buildScene, hLabelWidth, labelHalfWidth, type AtomScene, type BondScene, type LabelStyle, type Mark } from "./drawing";
-import { DOT_R_PX } from "./marks";
+import type { DrawMetrics } from "./style";
+import { buildScene, chargeAnchor, chargeWidth, hLabelWidth, labelHalfWidth, type AtomScene, type BondScene, type LabelStyle, type Mark } from "./drawing";
+import { cssFontFamily } from "./style";
 import { elementClass } from "./elements";
 
 export interface SketchCanvasProps {
@@ -52,7 +56,8 @@ export interface SketchCanvasProps {
   svgRef: RefObject<SVGSVGElement | null>;
   readOnly: boolean;
   cip?: StereoLabels | null;
-  display?: { fontPx?: number; labelStyle?: LabelStyle };
+  display?: { fontPx?: number; labelStyle?: LabelStyle; metrics?: DrawMetrics };
+  styleId?: string;
 }
 
 /** A band of half-width w around p-q (a bond's hit target; a line has a zero-area bbox when
@@ -100,7 +105,7 @@ function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; h
         <line className={selected ? "sk-halo sk-selected" : "sk-halo"} x1={axis.p[0]} y1={axis.p[1]} x2={axis.q[0]} y2={axis.q[1]} />
       )}
       {shape.lines.map((l, i) => (
-        <line key={i} className="sk-stroke" x1={l.p[0]} y1={l.p[1]} x2={l.q[0]} y2={l.q[1]} />
+        <line key={i} className={bond.stereo === "hash" && bond.order === 1 ? "sk-stroke sk-hash" : "sk-stroke"} x1={l.p[0]} y1={l.p[1]} x2={l.q[0]} y2={l.q[1]} />
       ))}
       {shape.wedges?.map((w, i) => <polygon key={`w${i}`} className="sk-wedge" points={pts(w)} />)}
       <polygon className="sk-hit" points={pts(hitBand(axis.p, axis.q, 5))} />
@@ -111,35 +116,57 @@ function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; h
 
 const subDigits = (n: number) => (n > 1 ? String(n) : "");
 
-function AtomLabelView({ s, font }: { s: AtomScene; font: number }) {
+function ChargeView({ s, M }: { s: AtomScene; M: DrawMetrics }) {
+  const label = s.label;
+  if (!label?.charge) return null;
+  const [cx, cy] = chargeAnchor(label, M);
+  const x = s.at[0] + cx;
+  const y = s.at[1] + cy;
+  if (M.chargePlacement === "circled" && label.charge.length === 1) {
+    const r = chargeWidth(label, M) / 2;
+    return (
+      <g className="sk-charge-circled">
+        <circle className="sk-charge-ring" cx={x + r} cy={y} r={r * 0.95} />
+        <text className="sk-charge" x={x + r} y={y} textAnchor="middle" dominantBaseline="central">
+          {label.charge}
+        </text>
+      </g>
+    );
+  }
+  return (
+    <text className="sk-charge" x={x} y={y} textAnchor="start" dominantBaseline="central">
+      {label.charge}
+    </text>
+  );
+}
+
+function AtomLabelView({ s, M }: { s: AtomScene; M: DrawMetrics }) {
   const { label, at } = s;
   if (!label) return null;
-  const half = labelHalfWidth(label.el, font);
-  const hText = label.hCount > 0 ? "H" : "";
-  const hWidth = hLabelWidth(label.hCount, font);
-  const right = label.hSide === "right";
-  const chargeX = at[0] + half + (right ? hWidth : 0) + 1;
+  const font = M.font;
+  const half = labelHalfWidth(label.el, M);
+  const hw = hLabelWidth(label.hCount, M);
+  const side = label.hSide;
+  const hx = side === "right" ? at[0] + half : side === "left" ? at[0] - half : at[0];
+  const hy = side === "above" ? at[1] - font * 0.95 : side === "below" ? at[1] + font * 0.95 : at[1];
+  const anchor = side === "right" ? "start" : side === "left" ? "end" : "middle";
   return (
     <g className={`sk-label ${elementClass(label.el)}`}>
       <text x={at[0]} y={at[1]} textAnchor="middle" dominantBaseline="central">
         {label.el}
       </text>
-      {hText && (
-        <text x={right ? at[0] + half : at[0] - half} y={at[1]} textAnchor={right ? "start" : "end"} dominantBaseline="central">
+      {label.hCount > 0 && (
+        <text x={hx} y={hy} textAnchor={anchor} dominantBaseline="central" data-hside={side} data-hw={hw.toFixed(1)}>
           H<tspan className="sk-sub" dy={font * 0.3}>{subDigits(label.hCount)}</tspan>
         </text>
       )}
-      {label.charge && (
-        <text className="sk-charge" x={chargeX} y={at[1] - font * 0.55} textAnchor="start" dominantBaseline="central">
-          {label.charge}
-        </text>
-      )}
+      <ChargeView s={s} M={M} />
     </g>
   );
 }
 
-function AtomView(props: { s: AtomScene; font: number; selected: boolean; hovered: boolean; highlighted: boolean; invalid: boolean }) {
-  const { s, font, selected, hovered, highlighted, invalid } = props;
+function AtomView(props: { s: AtomScene; M: DrawMetrics; dotR: number; selected: boolean; hovered: boolean; highlighted: boolean; invalid: boolean }) {
+  const { s, M, dotR, selected, hovered, highlighted, invalid } = props;
   const { atom, at, label } = s;
   const cls = ["sk-atom", invalid ? "sk-invalid" : "", highlighted ? "sk-highlighted" : ""].join(" ").trim();
   return (
@@ -159,14 +186,31 @@ function AtomView(props: { s: AtomScene; font: number; selected: boolean; hovere
       {highlighted && <circle className="sk-highlight" cx={at[0]} cy={at[1]} r={12} />}
       {invalid && <circle className="sk-invalid-ring" cx={at[0]} cy={at[1]} r={10} />}
       {(selected || hovered) && <circle className={selected ? "sk-dot sk-selected" : "sk-dot"} cx={at[0]} cy={at[1]} r={8} />}
-      <AtomLabelView s={s} font={font} />
+      <AtomLabelView s={s} M={M} />
       {s.dots.map((d, i) => (
-        <circle key={`r${i}`} className="sk-radical" cx={d[0]} cy={d[1]} r={DOT_R_PX} />
+        <circle key={`r${i}`} className="sk-radical" cx={d[0]} cy={d[1]} r={dotR} />
       ))}
       {s.cip && <CipMark m={s.cip} testId={`sketch-cip-atom-${atom.id}`} />}
       <circle className="sk-hit" cx={at[0]} cy={at[1]} r={9} />
     </g>
   );
+}
+
+/** The style's sizes as CSS variables of the canvas (sketch.css reads them). */
+const px = (v: number) => `${Math.round(v * 1000) / 1000}px`;
+
+function canvasVars(M: DrawMetrics): CSSProperties {
+  return {
+    "--sk-font": px(M.font),
+    "--sk-sub-font": px(M.sub),
+    "--sk-charge-font": px(M.charge),
+    "--sk-font-family": cssFontFamily(M.fontFamily, true),
+    "--sk-font-weight": String(M.fontWeight),
+    "--sk-bond-width": px(M.line),
+    "--sk-hash-width": px(M.hashWidth),
+    "--sk-wedge-stroke": M.fixedScreen ? "0.6px" : "0px",
+    "--sk-charge-weight": M.fixedScreen ? "600" : String(M.fontWeight),
+  } as CSSProperties;
 }
 
 const CORNER_CURSORS = ["nwse-resize", "nesw-resize", "nwse-resize", "nesw-resize"];
@@ -193,7 +237,7 @@ function FrameView({ f }: { f: SelectionFrame }) {
 export function SketchCanvas(props: SketchCanvasProps) {
   const { model, view, hCounts, hover, selection, highlight, invalid, rubber, frame, height, pointer, svgRef, readOnly } = props;
   const scene = buildScene(model, view, hCounts, { ...props.display, cip: props.cip ?? null });
-  const font = scene.fontPx;
+  const M = scene.metrics;
   const isHover = (kind: "atom" | "bond", id: number) => hover?.kind === kind && hover.id === id;
   return (
     <svg
@@ -202,7 +246,13 @@ export function SketchCanvas(props: SketchCanvasProps) {
       className={`sketch-svg${readOnly ? " read-only" : ""}`}
       width="100%"
       height={height}
-      style={{ "--sk-font": `${font}px` } as CSSProperties}
+      style={canvasVars(M)}
+      data-style={props.styleId ?? "screen"}
+      data-px-per-pt={M.perPt.toFixed(4)}
+      data-bond-px={M.bond.toFixed(3)}
+      data-line-px={M.line.toFixed(3)}
+      data-bold-px={M.bold.toFixed(3)}
+      data-font-px={M.font.toFixed(3)}
       tabIndex={0}
       onPointerDown={pointer.onPointerDown}
       onPointerMove={pointer.onPointerMove}
@@ -220,7 +270,8 @@ export function SketchCanvas(props: SketchCanvasProps) {
           <AtomView
             key={s.atom.id}
             s={s}
-            font={font}
+            M={M}
+            dotR={scene.dotR}
             selected={selection.atoms.has(s.atom.id)}
             hovered={isHover("atom", s.atom.id)}
             highlighted={highlight.has(s.atom.id)}

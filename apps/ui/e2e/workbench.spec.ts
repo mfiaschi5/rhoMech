@@ -25,7 +25,13 @@
 // and finds all of it again, then resets. The transform test imports
 // L-alanine and flips it (the wedge becomes a hash, the SMILES is unchanged), turns it with the
 // selection frame's rotate handle (one undo step), rotates by the R key and scales from the "⋯"
-// menu, the canonical isomeric SMILES unchanged throughout.
+// menu, the canonical isomeric SMILES unchanged throughout. The drawing-style test picks ACS
+// Document 1996 (data-style, the px-per-pt mapping, the drawn line width and bond length), exports
+// SVG / PNG / PDF and checks their true size (pt, the PNG's pixels and pHYs dpi, the PDF
+// MediaBox), copies the image (clipboard holds image/png), the LaTeX figure, chemfig and the SVG,
+// checks the drag handle's dragstart files (PNG, PDF), switches to Total synthesis (bolder
+// strokes), edits a field (custom style, kept after a reload); the SMILES, the atom positions and
+// the undo state never change.
 // Skipped, with the server's reason, while the workbench capability is off.
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -510,4 +516,145 @@ test("layout: orbital info beside the diagram folds; presets, splitters, panels 
   await expect(page.getByTestId("wb-layout-bar")).toHaveAttribute("data-preset", "default");
   await expect(page.getByTestId("wb-panel-surfaces")).toBeVisible();
   await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
+});
+
+const CARVONE = "CC1=CC[C@@H](CC1=O)C(=C)C";
+
+/** A number attribute of a locator. */
+async function numAttr(l: Locator, name: string): Promise<number> {
+  return Number((await l.getAttribute(name)) ?? "NaN");
+}
+
+/** The median length of the drawn single bonds between two bare carbons (screen px). */
+async function medianBondPx(page: Page): Promise<number> {
+  const lens = await page.locator("[data-testid^=sketch-bond-][data-order='1'][data-stereo=none] line.sk-stroke").evaluateAll((els) =>
+    els.map((e) => Math.hypot(Number(e.getAttribute("x2")) - Number(e.getAttribute("x1")), Number(e.getAttribute("y2")) - Number(e.getAttribute("y1")))),
+  );
+  lens.sort((a, b) => a - b);
+  return lens[Math.floor(lens.length / 2)];
+}
+
+/** A file the page downloads when `testId` is clicked, as text or bytes. */
+async function downloaded(page: Page, testId: string): Promise<Buffer> {
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId(testId).click()]);
+  const path = await dl.path();
+  const { readFileSync } = await import("node:fs");
+  return readFileSync(path);
+}
+
+test.describe("drawing styles", () => {
+  test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
+  test("ACS 1996 and Total synthesis: render-only, true-size SVG/PNG/PDF, drag files, copy image and LaTeX", async ({ page, request }) => {
+    test.setTimeout(180_000);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await openWorkbench(page, request);
+    await importSmiles(page, CARVONE);
+    const sketch = page.getByTestId("sketch");
+    const canvas = page.getByTestId("sketch-canvas");
+    const smiles = await settledSmiles(page);
+    const positions = await atomPositions(page);
+    await expect(sketch).toHaveAttribute("data-style", "screen");
+    const undoEnabled = await page.getByTestId("sketch-undo").isEnabled();
+
+    // ACS Document 1996: 14.4 pt bonds, 0.6 pt lines, mapped to px through the zoom
+    await page.getByTestId("sketch-style").selectOption("acs1996");
+    await expect(sketch).toHaveAttribute("data-style", "acs1996");
+    await expect(canvas).toHaveAttribute("data-style", "acs1996");
+    const k = await numAttr(canvas, "data-px-per-pt");
+    const bondPx = await numAttr(canvas, "data-bond-px");
+    expect(14.4 * k).toBeCloseTo(bondPx, 2);
+    expect(await numAttr(canvas, "data-line-px")).toBeCloseTo(0.6 * k, 2);
+    expect(await numAttr(canvas, "data-bold-px")).toBeCloseTo(2.0 * k, 2);
+    expect(await numAttr(canvas, "data-font-px")).toBeCloseTo(10 * k, 2);
+    const strokeAcs = await page.locator("line.sk-stroke").first().evaluate((e) => parseFloat(getComputedStyle(e).strokeWidth));
+    expect(strokeAcs).toBeCloseTo(0.6 * k, 1);
+    expect(Math.abs((await medianBondPx(page)) / bondPx - 1)).toBeLessThan(0.05);
+    await expect(sketch).toHaveClass(/sk-mono/);
+    await shot(page, "sketch", "style-acs1996.png");
+
+    // the export: SVG at true size (pt), PNG with its dpi, PDF page of the same size
+    await page.getByTestId("sketch-export").click();
+    const section = page.getByTestId("sketch-image-export");
+    await expect(section).toHaveAttribute("data-line-pt", "0.6"); // the files re-rendered in ACS 1996
+    await expect(section).toHaveAttribute("data-bond-pt", "14.4");
+    const wPt = await numAttr(section, "data-width-pt");
+    const hPt = await numAttr(section, "data-height-pt");
+    const svg = (await downloaded(page, "sketch-export-svg")).toString("utf8");
+    const size = /<svg[^>]* width="([\d.]+)pt" height="([\d.]+)pt" viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg);
+    expect(size).not.toBeNull();
+    expect(Number(size?.[1])).toBeCloseTo(wPt, 1);
+    expect(Number(size?.[2])).toBeCloseTo(hPt, 1);
+    expect(svg).toContain('stroke-width="0.6"');
+    const svgLens = [...svg.matchAll(/<line x1="([-\d.]+)" y1="([-\d.]+)" x2="([-\d.]+)" y2="([-\d.]+)"/g)].map((m) => Math.hypot(+m[3] - +m[1], +m[4] - +m[2])).sort((a, b) => a - b);
+    expect(svgLens.some((l) => Math.abs(l - 14.4) < 0.75)).toBe(true);
+    expect(svg).not.toContain("sk-halo");
+    const png = await downloaded(page, "sketch-export-png");
+    expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
+    expect(png.readUInt32BE(16)).toBe(Math.round((wPt / 72) * 300));
+    const phys = png.indexOf("pHYs");
+    expect(png.readUInt32BE(phys + 4)).toBe(Math.round(300 / 0.0254));
+    const pdf = (await downloaded(page, "sketch-export-pdf")).toString("latin1");
+    expect(pdf.startsWith("%PDF-1.4")).toBe(true);
+    const box = /\/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/.exec(pdf);
+    expect(Number(box?.[1])).toBeCloseTo(wPt, 1);
+    expect(Number(box?.[2])).toBeCloseTo(hPt, 1);
+
+    // copy: the image (PNG, SVG where supported), the LaTeX figure, chemfig
+    await page.getByTestId("sketch-copy-image").click();
+    await expect(page.getByTestId("sketch-copy-status")).toHaveText(/copied image\/png/);
+    const types = await page.evaluate(async () => (await navigator.clipboard.read()).flatMap((i) => [...i.types]));
+    expect(types).toContain("image/png");
+    console.log(`[workbench] copy image wrote ${types.join(", ")}`);
+    await page.getByTestId("sketch-copy-latex").click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toMatch(/\\includegraphics\[width=[\d.]+cm\]\{scheme\.pdf\}/);
+    await page.getByTestId("sketch-copy-chemfig").click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toMatch(/\\chemfig\{.*\?\[a.*\}/);
+    await page.getByTestId("sketch-copy-svg").click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toMatch(/^<svg /);
+    await page.getByTestId("sketch-export").click();
+
+    // the drag handle's dragstart carries the files (the DataTransfer as the page fills it)
+    await expect(page.getByTestId("sketch-drag")).toHaveAttribute("data-ready", "true");
+    await expect(page.getByTestId("sketch-drag")).toHaveAttribute("data-line-pt", "0.6");
+    const drag = await page.getByTestId("sketch-drag").evaluate((el) => {
+      const dt = new DataTransfer();
+      el.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      return { types: [...dt.types], files: [...dt.files].map((f) => `${f.name} ${f.type} ${f.size}`), html: dt.getData("text/html"), url: dt.getData("DownloadURL") };
+    });
+    console.log(`[workbench] dragstart: ${drag.types.join(", ")}; ${drag.files.join("; ")}`);
+    expect(drag.files.some((f) => f.startsWith("scheme.png image/png"))).toBe(true);
+    expect(drag.files.some((f) => f.startsWith("scheme.pdf application/pdf"))).toBe(true);
+    expect(drag.html).toMatch(/^<img src="data:image\/png;base64,/);
+    expect(drag.url).toMatch(/^image\/png:scheme\.png:blob:/);
+
+    // Total synthesis: bolder strokes and wedges
+    await page.getByTestId("sketch-style").selectOption("total-synthesis");
+    await expect(canvas).toHaveAttribute("data-style", "total-synthesis");
+    const k2 = await numAttr(canvas, "data-px-per-pt");
+    expect(await numAttr(canvas, "data-line-px")).toBeCloseTo(1.1 * k2, 2);
+    const strokeTs = await page.locator("line.sk-stroke").first().evaluate((e) => parseFloat(getComputedStyle(e).strokeWidth));
+    expect(strokeTs).toBeGreaterThan(strokeAcs * 1.6);
+    expect(await numAttr(canvas, "data-bold-px")).toBeGreaterThan(2.0 * k * 1.4);
+    await shot(page, "sketch", "style-total-synthesis.png");
+
+    // render-only: the same molecule, coordinates and history; the choice persists
+    expect(await sketch.getAttribute("data-smiles")).toBe(smiles);
+    expect(await atomPositions(page)).toBe(positions);
+    expect(await page.getByTestId("sketch-undo").isEnabled()).toBe(undoEnabled);
+
+    // the editor: a field edit makes a custom style
+    await page.getByTestId("sketch-style-edit").click();
+    await expect(page.getByTestId("sketch-style-editor")).toBeVisible();
+    await page.getByTestId("style-field-lineWidthPt").fill("2");
+    await expect(sketch).toHaveAttribute("data-style", "custom");
+    expect(await numAttr(canvas, "data-line-px")).toBeCloseTo(2 * (await numAttr(canvas, "data-px-per-pt")), 2);
+    await page.keyboard.press("Escape");
+    expect(await atomPositions(page)).toBe(positions);
+    await page.reload();
+    await expect(page.locator("body[data-rdkit=ready]")).toBeAttached({ timeout: 90_000 });
+    await expect(page.getByTestId("sketch")).toHaveAttribute("data-style", "custom");
+    await page.getByTestId("sketch-style").selectOption("screen");
+    await expect(page.getByTestId("sketch")).toHaveAttribute("data-style", "screen");
+  });
 });

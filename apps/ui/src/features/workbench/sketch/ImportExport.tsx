@@ -5,10 +5,11 @@
 // DOM: <div data-testid="sketch-import-panel"> with sketch-import-text, sketch-import-load,
 // sketch-import-error.
 //
-// ExportPanel props: smiles, molfile, inchi (strings; "" = unavailable), onClose.
+// ExportPanel props: smiles, molfile, inchi (strings; "" = unavailable), onClose, children (the
+// image export section, ImageExport.tsx, shown first).
 // DOM: <div data-testid="sketch-export-panel"> with sketch-export-smiles, -molfile, -inchi
 // (read-only textareas), copy buttons and sketch-export-download (the .mol file).
-import { useState, type DragEvent } from "react";
+import { useState, type DragEvent, type ReactNode } from "react";
 
 export async function readDroppedText(e: DragEvent): Promise<string | null> {
   const file = e.dataTransfer.files?.[0];
@@ -90,7 +91,7 @@ function Field({ id, label, value, rows }: { id: string; label: string; value: s
   );
 }
 
-export function ExportPanel(p: { smiles: string; molfile: string; inchi: string; onClose(): void }) {
+export function ExportPanel(p: { smiles: string; molfile: string; inchi: string; onClose(): void; children?: ReactNode }) {
   const href = `data:chemical/x-mdl-molfile;charset=utf-8,${encodeURIComponent(p.molfile)}`;
   return (
     <div className="sk-popover sk-panel" data-testid="sketch-export-panel">
@@ -103,6 +104,7 @@ export function ExportPanel(p: { smiles: string; molfile: string; inchi: string;
           Close
         </button>
       </div>
+      {p.children}
       <Field id="sketch-export-smiles" label="SMILES" value={p.smiles} rows={2} />
       <Field id="sketch-export-inchi" label="InChI" value={p.inchi} rows={2} />
       <Field id="sketch-export-molfile" label="Molfile (V2000)" value={p.molfile} rows={8} />
