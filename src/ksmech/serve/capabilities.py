@@ -27,15 +27,9 @@ _V3_PANEL = (
     "geometry-free physics of a step (the pooled gap factor of each forming bond, its dominant "
     "orbital pair and canonical MO pair) is on every edge and in POST /api/step/check"
 )
-_PORTING = "being ported to the spec-v9 reaction-matrix target"  # until the port lands
 _DISABLED: dict[str, str] = {
-    "predict": _PORTING,
-    "correct": _PORTING,
     "candidates": _V3_PANEL,
     "physics": _V3_PANEL,
-    "curate_edit": _PORTING,
-    "curate_recheck": _PORTING,
-    "export": _PORTING,
 }
 ORDER = (
     "predict",

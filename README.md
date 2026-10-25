@@ -51,20 +51,42 @@ bindings are unavailable (not yet implemented; arrives with the QM phase).
 
 ## Web app (ksmech-serve)
 
-A local web application to predict mechanisms as reaction networks, inspect the orbital
-physics of every arrow (KS1, KS2, KS3, G, beta^2, the dominant canonical MO pair, the oriented
-contact in 3D), correct steps, curate and export validated mechanisms, and browse PMechDB and
-curated steps. Backend in `src/ksmech/serve/` (FastAPI, SQLite), frontend in `apps/ui/` (Vite,
-React, RDKit.js, 3Dmol.js, cytoscape).
+A local web application to predict mechanisms as reaction networks of elementary steps, read
+each step as curved arrows and the orbital pairs that drive it, correct steps, curate and
+export validated mechanisms, and browse PMechDB and curated steps. Backend in
+`src/ksmech/serve/` (FastAPI, SQLite), frontend in `apps/ui/` (Vite, React, RDKit.js, 3Dmol.js,
+cytoscape).
 
-**Spec v8 port (Phase 0).** The app was written for the orbital-pair arrow target; spec v8
-predicts each step as a reaction matrix R = Delta(BE). Until the prediction side is ported, the
-features that rank or apply orbital-pair arrows are switched off (`src/ksmech/serve/capabilities.py`,
-listed with their reasons in `/api/meta` as `capabilities`; their routes answer 503
-`FEATURE_DISABLED` and the UI greys their pages): predict, correct/override, candidates, physics,
-site pairs, the oriented contact view, curate create/edit, re-check and export. Health, meta,
-normalize, pools, tokens, geometry, LMO orbital cubes, depiction, browse and read-only curate
-keep working.
+**Spec v9 (Predict and Correct).** Every step is a reaction matrix R = Delta(BE) on the pool
+atoms (every H an atom), anchored on a forming bond. A step is applied as B + R with RDKit's
+valence checks, the new pool is keyed by the sorted multiset of its sigma keys, equal pool keys
+merge, and the network grows by beam search (beam 5, 8 steps by default) with cycles closed.
+Each edge carries R, its anchor, its arrow reading (the decomposition of R into electron-pair
+moves, chosen by the directed pooled gap factor where several exist), the orbital reading of
+each forming bond (the channel (r, s) with the largest term of G_atom and the dominant
+canonical MO pair (k, m) with its energies) and the product SMILES and sigma keys. Predictors
+(`GET /api/predictors`):
+
+- `floor`: the untrained physics floor. Anchors are atom pairs ranked by |G_atom|, the pooled gap
+  factor over the valid donor/acceptor orbital pairs; the best are completed from their dominant
+  channels with upstream `apply_predicted_arrows` (one candidate per allowed leaving bond). Its
+  score is |G_atom| (1/eV), not a probability.
+- `gbdt`: the geometry-free LightGBM ranker of `ksmech-physics gbdt`
+  (`gbdt_lgbm_molecule_geomfree.npz` under the shared processed directory), ranking orbital
+  pairs that are completed the same way; a ranking score.
+- `network`: the spec-v9 model, through an adapter; unavailable until `ksmech.model.net` and a
+  checkpoint `data/models/<source>/<run>/best.pt` exist (the reason is in the listing).
+
+Correct: `POST /api/step/check {state_id, matrix}` validates an edited R live (issue codes with
+the atoms involved, the product, the arrows and readings); `POST /api/jobs/{id}/override
+{parent_state_id, matrix}` adds a user step (predictor "user") and its child node, and `POST
+/api/jobs/{id}/expand {node_id}` expands a node. `POST /api/predict` with `predictor: "user"`
+starts a network from the reactants alone. Curated mechanisms store R and the reading of every
+step; the re-check ranks the curated product among a predictor's products (sigma keys);
+`GET /api/curate/export/pmechdb` downloads the curated steps as PMechDB raw records (mapped
+reaction SMILES and the arrow code of the reading), a file, never training data. The spec-v3
+panels (`candidates`, `physics`) stay off; the contact view was removed with the contact
+model. The contract the UI is built against is `docs/serve_v9_contract.md`.
 
 **Workbench** (`#/workbench`, the default page; capability `workbench`). Draw a molecule in the
 ChemDraw-like sketcher (bond, chain, ring, charge and eraser tools, ChemDraw keys on the hovered
@@ -190,8 +212,9 @@ uv run ksmech-serve --port 8000 --chemistry synthetic  # banner: synthetic chemi
 ```
 
 Other commands: `uv run ksmech-serve recheck [--stale-only] [--predictor P] [--mechanism ID
-...]` and `uv run ksmech-serve export` (both disabled under spec v8: exit 2 with the reason; offline, refused with exit 2 while a server runs on the
-same data root: use the web UI or `POST /api/curate/...` then), `uv run ksmech-serve schema-ts`
+...]` (offline, refused with exit 2 while a server runs on the same data root: use the web UI
+or `POST /api/curate/recheck` then), `uv run ksmech-serve export --out FILE [--status ...]`
+(the PMechDB-format file of the curated steps), `uv run ksmech-serve schema-ts`
 (regenerates `apps/ui/src/api/types.gen.ts` from the pydantic models), `uv run ksmech-serve
 probe-cache --smiles S ...` (exit 0 when every species loads from the shared token cache). The
 API is under `/api` (OpenAPI page at `/api/docs`); `/api/health` and `/api/meta` report the
@@ -210,40 +233,38 @@ worker, the chemistry, the spec version and the physics fingerprint.
 | Variable | Default | Meaning |
 |---|---|---|
 | `KSMECH_DATA_ROOT` | the current directory | root of `data/` (serve writes only `data/serve/` and `data/curation/`) |
-| `KSMECH_SHARED_CACHE_ROOT` | `KSMECH_DATA_ROOT` | read-only shared `data/cache/qm` and `data/cache/tokens` |
+| `KSMECH_SHARED_CACHE_ROOT` | `KSMECH_DATA_ROOT` | read-only shared `data/cache/qm`, `data/cache/tokens`, `data/cache/bond_index`, the GBDT model and `data/models/` |
 | `KSMECH_SERVE_CHEMISTRY` | `real` | `real`, `cached` or `synthetic` |
 | `KSMECH_SERVE_WORKERS` | 1 | compute worker processes, clamped to [1, 2] |
-| `KSMECH_SERVE_GBDT` | `data/processed/pmechdb/baseline_gbdt_random.npz` | the GBDT ranker of the `gbdt` predictor |
-| `KSMECH_SERVE_STUB_PREDICTOR` | 0 | 1 adds the diagnostic `stub` predictor (floor plus rule bonuses) |
+| `KSMECH_SERVE_GBDT` | `<shared>/data/processed/pmechdb/gbdt_lgbm_molecule_geomfree.npz` | the LightGBM ranker of the `gbdt` predictor |
 | `KSMECH_SERVE_AUTO_INDEX` | 0 | 1 (or `--index-on-start`) builds the PMechDB browse index at startup |
 | `KSMECH_SERVE_DIST` | `apps/ui/dist` | the built frontend |
 
 **Data locations.**
 
-- `data/serve/`: `qm/` and `tokens/` (species computed by the server), `oriented/<fingerprint>/`
-  (oriented-block cache), `pools/<state_id>/` (pool states and their analyses), `cubes/`,
-  `contact/`, `jobs/<job_id>/` (job, network, events), `index/` (PMechDB browse index),
+- `data/serve/`: `qm/`, `tokens/` and `bond_index/` (species computed by the server and their
+  Wiberg sidecars), `pools/<state_id>/` (pool states and their pooled-gap analyses), `cubes/`,
+  `jobs/<job_id>/` (job, network, events), `index/` (PMechDB browse index),
   `logs/failures.jsonl` (every reason-coded skip), `run/` (server lock, task pid files).
-- `data/curation/curation.sqlite`: curated mechanisms, steps, re-checks and the export ledger.
-- `data/curation/export_raw/steps.parquet` and `data/processed/user_curated/` (`steps.parquet`,
-  `rejections.csv`, `ingest_report.json`, `pmechdb_arrow_codes.csv`, `export_report.json`):
-  the export. Curated steps are pinned to the training split.
+- `data/curation/curation.sqlite`: curated mechanisms, steps and re-checks. The export is a
+  download (`GET /api/curate/export/pmechdb`, `ksmech-serve export --out FILE`); nothing is
+  written to `data/processed` and curated steps are never training data.
 - The shared `data/cache/` and `data/processed/pmechdb/` are only read, never written.
 
-**Host safety.** All heavy compute (xTB, localization, oriented blocks, cube grids) runs in one
+**Host safety.** All heavy compute (xTB, localization, pair analyses, cube grids) runs in one
 spawned compute worker with one BLAS / OpenMP / torch thread. Do not raise
 `KSMECH_SERVE_WORKERS` while a QM batch runs, and keep heavy processes at most 4 host-wide. The
 PMechDB browse index (about 10 minutes on the worker) is built only on request: the "Build
-PMechDB index" button (`POST /api/browse/index`), `--index-on-start`, or an export.
+PMechDB index" button (`POST /api/browse/index`) or `--index-on-start`.
 
 **Security.** There is no authentication. By default the server binds only to 127.0.0.1 and is
 reached through the SSH tunnel above. `uv run ksmech-serve --port 8000 --host 0.0.0.0` (or one
 of the machine's addresses) opens it to the local network at `http://<server-ip>:8000`: anyone
-on that network can then run predictions, edit the curation database and start exports. The
+on that network can then run predictions, edit the curation database and download exports. The
 Host allow-list and the same-origin guard then also accept the machine's addresses and host
 names; any other name is refused.
 
-**Tests.** The serve tests (`tests/test_serve_*.py`) use synthetic or stub chemistry and never
+**Tests.** The serve tests (`tests/test_serve_*.py`) use synthetic or toy chemistry and never
 run xTB; on a loaded host run them one file at a time with `OMP_NUM_THREADS=1`. The Playwright smoke test uses the system Chrome or Chromium (Playwright browsers are
 never downloaded): `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`, or `npm --prefix
 apps/ui run e2e`.
