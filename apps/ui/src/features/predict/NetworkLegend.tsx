@@ -17,7 +17,7 @@
 // Root edges are the edge items whose data-source equals the root node's id. Cycles are listed
 // after the edges (data-testid="network-cycle-{id}"); they are not edges.
 import type { EdgeOut, NetworkOut, NodeOut, PathwayOut } from "../../api/types.gen";
-import { fmtProb, shortId } from "./format";
+import { fmtProb, shortId } from "../../components/format";
 import { edgeArrowsText, speciesLabel } from "./network";
 
 export interface NetworkLegendProps {

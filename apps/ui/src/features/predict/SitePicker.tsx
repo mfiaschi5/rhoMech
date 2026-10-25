@@ -10,7 +10,7 @@
 // DOM: <div data-testid="site-picker"> > button[data-testid=site-option-donor-{site}] and
 // button[data-testid=site-option-acceptor-{site}] (site = global atom index), aria-pressed.
 import type { CentreOut } from "../../api/types.gen";
-import { fmt } from "./format";
+import { fmt } from "../../components/format";
 import type { BuilderArrow } from "./OverrideBuilder";
 import { SITE_NOTE } from "./PhysicsPanel";
 

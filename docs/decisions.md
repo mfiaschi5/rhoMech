@@ -3970,3 +3970,31 @@ is now v7.5, sha256 6c6a023f66dd).
   work; the model set is then built by the workbench) or failed. New codes: INVALID_MOLFILE,
   MULTIPLE_FRAGMENTS, ORBITAL_OUT_OF_RANGE, NO_FRONTIER, LOCALIZATION_FAILED (422),
   MOLECULE_NOT_FOUND (404), MOLECULE_NOT_READY (409) and the report code MAPPING_FAILED.
+
+## 2026-10-25 — Molecule workbench (serve), frontend
+
+- **Page.** `apps/ui/src/features/workbench/` registers `#/workbench`, first in the nav and the
+  default page while predict is off. Features never import each other, so the 3Dmol helpers
+  moved to `src/chem/threed.ts` (the contact scene stays in predict as `contactScene.ts`), the
+  generic hooks (`usePendingCached`, `useDebounced`, `useLatest`) to `src/api/hooks.ts` and the
+  number formatting to `src/components/format.ts`.
+- **Linking the sketch.** Only the POST answer carries the sketch mapping, so the page keeps it
+  with the drawing that was posted. A selection highlights the drawn atom through
+  `record_parent_sketch` (an implicit H highlights its heavy atom) only while the sketch's
+  chemistry signature (elements, charges, bonds by atom position, orders, wedges; not the 2D
+  positions) equals the posted one; otherwise a note says the sketch changed. The posted
+  molblock and its id are kept in sessionStorage, so reloading `#/workbench?m=<id>` posts it
+  again (cheap, cached) and gets the mapping back; a bare id from another tab loads without it.
+- **Surface layers.** The hash keeps only what decides a fetch (`kind:set:start:index`); the look
+  (isovalue, opacity, mesh, colours, ESP range) is client state per spec. Parsed cubes sit in a
+  VolumeData LRU of 8; each layer's request has its own AbortController. The selected orbital is
+  a layer that follows the list and the diagram, and "pin" copies it into the hash. Changing
+  the orbital set clears the selected orbital, since an index means another orbital in another
+  set; computing another molecule drops the pinned orbital layers.
+- **ESP colouring.** `addIsosurface(density, {voldata: esp, volscheme: Gradient.RWB(-r, r)})`
+  (fallback: a VDW surface coloured by the same volume). The default r is the 95th percentile
+  of |ESP| at grid points near the density isovalue (both cubes share one grid per quality),
+  and the colour bar reproduces 3Dmol's RWB formula, so it matches the surface.
+- **e2e chemistry.** `e2e/serve.mjs` adds ethanol (the workbench test's molecule) to the
+  `probe-cache` species: cached chemistry never computes a new molecule, so the run falls back
+  to synthetic unless ethanol is cached too.

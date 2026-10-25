@@ -9,9 +9,9 @@
 import { useSyncExternalStore, type ComponentType } from "react";
 import type { Route } from "./router";
 
-export type PageId = "predict" | "correct" | "curate" | "browse";
+export type PageId = "workbench" | "predict" | "correct" | "curate" | "browse";
 
-export const PAGE_IDS: readonly PageId[] = ["predict", "correct", "curate", "browse"];
+export const PAGE_IDS: readonly PageId[] = ["workbench", "predict", "correct", "curate", "browse"];
 
 export interface PageProps {
   route: Route;

@@ -1,0 +1,348 @@
+/* Molecule workbench: layout, 3D view, surfaces, level diagram, tables. Theme tokens of
+   styles.css only; the 3D canvas stays white in dark mode (3Dmol paints on white). */
+
+.workbench {
+  --wb-selected: color-mix(in srgb, #f2c200 28%, transparent);
+  --wb-hover: color-mix(in srgb, var(--accent) 10%, transparent);
+  --wb-occ: var(--donor);
+  --wb-virt: var(--acceptor);
+  --wb-gold: #d8a800;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.wb-grid {
+  display: grid;
+  grid-template-columns: minmax(340px, 5fr) minmax(380px, 7fr);
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .wb-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.wb-left,
+.wb-right {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+.wb-left .panel + .panel,
+.wb-right .panel + .panel {
+  margin-top: 0;
+}
+
+.wb-small {
+  font-size: 12px;
+}
+
+.wb-spacer {
+  flex: 1;
+}
+
+.wb-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.wb-num-input {
+  width: 6.5em;
+  padding: 2px 4px;
+}
+
+/* ---- compute bar */
+
+.wb-compute-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.wb-compute-bar .row {
+  align-items: center;
+}
+
+.wb-status[data-status="ready"] {
+  color: var(--ok);
+}
+
+.wb-status[data-status="failed"],
+.wb-status[data-status="error"] {
+  color: var(--error);
+}
+
+/* ---- 3D view */
+
+.wb-toolbar {
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.wb-toolbar select {
+  padding: 3px 6px;
+  font-size: 13px;
+}
+
+.wb-viewer {
+  position: relative;
+  width: 100%;
+  height: 460px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.wb-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.wb-viewer[data-state="webgl-unavailable"],
+.wb-viewer[data-state="error"] {
+  height: 60px;
+  background: var(--panel-2);
+}
+
+.wb-viewer-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: #5d6878;
+}
+
+.wb-measures {
+  margin-top: 6px;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- colour bar */
+
+.wb-colour-bar {
+  margin-top: 8px;
+  max-width: 360px;
+  font-size: 12px;
+}
+
+.wb-colour-bar-ramp {
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.wb-colour-bar-ticks {
+  display: flex;
+  justify-content: space-between;
+}
+
+/* ---- surfaces */
+
+.wb-surfaces {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-surfaces h4 {
+  margin: 0;
+}
+
+.wb-layer {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wb-layer[data-state="error"] {
+  border-color: var(--error);
+}
+
+.wb-layer[data-state="ready"] {
+  border-left: 3px solid var(--ok);
+}
+
+.wb-layer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.wb-layer-look {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.wb-layer-look input[type="range"] {
+  width: 110px;
+}
+
+.wb-layer-look input[type="color"] {
+  width: 28px;
+  height: 22px;
+  padding: 0 2px;
+}
+
+.wb-add-layer {
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- orbitals */
+
+.wb-orbital-pickers {
+  align-items: center;
+  gap: 8px;
+}
+
+.wb-levels {
+  margin: 8px 0;
+}
+
+.wb-levels svg {
+  max-width: 420px;
+  display: block;
+}
+
+.wb-axis line {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+
+.wb-axis text,
+.wb-axis-title {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+.wb-level {
+  cursor: pointer;
+}
+
+.wb-level line {
+  stroke-width: 2.4;
+}
+
+.wb-level.occ line {
+  stroke: var(--wb-occ);
+}
+
+.wb-level.virt line {
+  stroke: var(--wb-virt);
+}
+
+.wb-level:hover line {
+  stroke-width: 4;
+}
+
+.wb-level.selected line {
+  stroke: var(--wb-gold);
+  stroke-width: 4;
+}
+
+.wb-level .wb-hit {
+  fill: transparent;
+}
+
+.wb-occ {
+  fill: var(--fg);
+  font-size: 8px;
+  pointer-events: none;
+}
+
+.wb-weight {
+  fill: var(--cycle);
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.wb-frontier {
+  fill: var(--fg);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.wb-orbital-list {
+  max-height: 260px;
+  overflow: auto;
+}
+
+/* ---- tables */
+
+.wb-tab-bar {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.wb-tab {
+  font: inherit;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: none;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  cursor: pointer;
+}
+
+.wb-tab.active {
+  color: var(--fg);
+  border-color: var(--border);
+  background: var(--panel-2);
+}
+
+.wb-table-wrap {
+  max-height: 380px;
+  overflow: auto;
+}
+
+.wb-sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.workbench tr.wb-click {
+  cursor: pointer;
+}
+
+.workbench tr.wb-click:hover {
+  background: var(--wb-hover);
+}
+
+.workbench tr.selected,
+.workbench tr.selected:hover {
+  background: var(--wb-selected);
+}
+
+.wb-kv {
+  grid-template-columns: max-content max-content;
+}
+
+.wb-kv dd {
+  text-align: left;
+}

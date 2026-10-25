@@ -27,8 +27,8 @@ import cytoscape from "cytoscape";
 import { useEffect, useMemo, useRef } from "react";
 import type { NetworkOut, PathwayOut } from "../../api/types.gen";
 import { smilesToSvg, svgDataUri, useRDKit, type RDKitModule } from "../../chem/rdkit";
-import { fmtProb } from "./format";
-import { useLatest } from "./hooks";
+import { fmtProb } from "../../components/format";
+import { useLatest } from "../../api/hooks";
 import { speciesLabel, virtualEdgeId } from "./network";
 
 export interface NetworkViewProps {

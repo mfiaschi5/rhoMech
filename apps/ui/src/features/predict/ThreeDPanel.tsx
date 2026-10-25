@@ -18,9 +18,10 @@ import type { ContactOut } from "../../api/types.gen";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
 import { ProvenanceBadge } from "../../components/ProvenanceBadge";
-import { exact, fmt, fmtSig } from "./format";
-import { usePendingCached, type PendingInfo } from "./hooks";
-import { addSurfaces, drawContact, ISO_MAX, ISO_MIN, ISO_STEP, parseCube, probeWebGL, removeShapes, SURFACE_COLORS, threeDmol, type ThreeDState } from "./threed";
+import { exact, fmt, fmtSig } from "../../components/format";
+import { usePendingCached, type PendingInfo } from "../../api/hooks";
+import { drawContact } from "./contactScene";
+import { addSurfaces, ISO_MAX, ISO_MIN, ISO_STEP, parseCube, probeWebGL, removeShapes, SURFACE_COLORS, threeDmol, type ThreeDState } from "../../chem/threed";
 
 export interface ThreeDPanelProps {
   target: ContactRef;

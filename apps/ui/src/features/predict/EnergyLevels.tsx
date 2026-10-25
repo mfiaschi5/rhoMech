@@ -12,7 +12,7 @@
 // data-dominant.
 import { useId } from "react";
 import type { DominantPairOut, EnergyLevelsOut, LevelOut } from "../../api/types.gen";
-import { exact, fmt, moLabel, niceTicks, tickText } from "./format";
+import { exact, fmt, moLabel, niceTicks, tickText } from "../../components/format";
 
 export interface EnergyLevelsProps {
   levels: EnergyLevelsOut;

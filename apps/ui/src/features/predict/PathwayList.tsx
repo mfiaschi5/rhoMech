@@ -11,7 +11,7 @@
 // each with <a data-testid="curate-pathway-link" href="#/curate/<jobId>?pathway=<pid>">.
 import type { NetworkOut, PathwayOut } from "../../api/types.gen";
 import { curateHash } from "../../router";
-import { fmt, fmtProb } from "./format";
+import { fmt, fmtProb } from "../../components/format";
 
 export interface PathwayListProps {
   jobId: string;

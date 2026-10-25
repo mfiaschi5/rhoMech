@@ -13,7 +13,7 @@ import { isTerminal } from "../../api/poll";
 import type { ErrorBody, JobOut } from "../../api/types.gen";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
-import { fmtSeconds, shortId } from "./format";
+import { fmtSeconds, shortId } from "../../components/format";
 
 export interface JobProgressProps {
   job: JobOut | null;

@@ -23,8 +23,8 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
 import { ProvenanceBadge } from "../../components/ProvenanceBadge";
 import { EnergyLevels } from "./EnergyLevels";
-import { exact, fmt, fmtProb, fmtSig, moLabel } from "./format";
-import { usePendingCached } from "./hooks";
+import { exact, fmt, fmtProb, fmtSig, moLabel } from "../../components/format";
+import { usePendingCached } from "../../api/hooks";
 import { KsBarChart } from "./KsBarChart";
 
 export interface PhysicsTarget {

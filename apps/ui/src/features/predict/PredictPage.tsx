@@ -16,7 +16,7 @@ import type { PageProps } from "../../registry";
 import { useCapability } from "../../state/store";
 import { predictPrefillHash, type Route } from "../../router";
 import { EdgePanel } from "./EdgePanel";
-import { fmtProb, shortId } from "./format";
+import { fmtProb, shortId } from "../../components/format";
 import { bodyError, JobProgress } from "./JobProgress";
 import { currentPathway, cycleEdgeIds, networkOf, overrideOutcome, speciesLabel } from "./network";
 import { NetworkLegend } from "./NetworkLegend";

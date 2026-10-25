@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, isAbort, normalize, toApiError } from "../../api/client";
 import type { NormalizeOut, SpeciesPreflightOut } from "../../api/types.gen";
-import { useDebounced } from "./hooks";
+import { useDebounced } from "../../api/hooks";
 import { NumberField } from "./NumberField";
 import { SmilesInput } from "./SmilesInput";
 

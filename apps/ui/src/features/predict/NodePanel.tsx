@@ -21,7 +21,7 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { correctHash } from "../../router";
 import { CandidatePreview } from "./CandidatePreview";
 import { CandidateTable } from "./CandidateTable";
-import { fmt, shortId } from "./format";
+import { fmt, shortId } from "../../components/format";
 import { bodyError } from "./JobProgress";
 import { speciesLabel } from "./network";
 import { candParam, type JobSelection, type SelectionUpdate } from "./selection";

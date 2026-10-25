@@ -14,7 +14,7 @@
 // DOM: <div data-testid="pathway-strip" data-pathway> > strip-step-{i}[data-edge] (each holding a
 // mol-depiction with its arrow-overlay groups), then strip-final.
 import type { EdgeOut, NetworkOut, PathwayOut } from "../../api/types.gen";
-import { fmtProb, shortId } from "./format";
+import { fmtProb, shortId } from "../../components/format";
 import { edgeArrowsText, speciesLabel } from "./network";
 import { StateDepiction } from "./StateDepiction";
 

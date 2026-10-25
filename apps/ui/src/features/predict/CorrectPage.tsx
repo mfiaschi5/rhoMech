@@ -23,7 +23,7 @@ import type { PageProps } from "../../registry";
 import { useCapability } from "../../state/store";
 import { formatRoute, jobHash, navigate } from "../../router";
 import { CandidateTable } from "./CandidateTable";
-import { fmtProb, fmtSig, shortId } from "./format";
+import { fmtProb, fmtSig, shortId } from "../../components/format";
 import { bodyError, JobProgress } from "./JobProgress";
 import { arrowText, edgeArrowsText, networkOf, overrideOutcome, speciesLabel } from "./network";
 import { builderArrowFrom, DEFAULT_OPTIONS, OverrideBuilder, toArrowIn, type BuilderArrow, type OverrideOptions } from "./OverrideBuilder";

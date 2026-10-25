@@ -64,6 +64,37 @@ site pairs, the oriented contact view, curate create/edit, re-check and export. 
 normalize, pools, tokens, geometry, LMO orbital cubes, depiction, browse and read-only curate
 keep working.
 
+**Workbench** (`#/workbench`, the default page; capability `workbench`). Draw a molecule in the
+ChemDraw-like sketcher (bond, chain, ring, charge and eraser tools, ChemDraw keys on the hovered
+atom, SMILES / molfile / InChI import and export) or open `#/workbench?smiles=...`, press
+Compute (`POST /api/molecule`: the QM record and tokens, display only, never the pair analysis),
+then look at it:
+
+- a 3D view (3Dmol.js) of the record geometry: ball and stick, sticks, spacefill, wireframe or
+  lines, hydrogens on or off, labels (element, index, Mulliken charge or any atom property),
+  atoms coloured by any property with a colour bar, Wiberg bond labels, orbital centroids,
+  click-to-measure distances, angles and dihedrals, and PNG / xyz / molfile export;
+- surface layers, several at once, each with its own isovalue, opacity, solid or mesh and
+  colours (client-side; only kind, set, index or grid quality refetch), with the grid integral
+  shown and a cube download: an orbital psi or |psi|^2, the total valence density, the
+  frozen-orbital Fukui f+ / f- and the dual descriptor, and the ESP painted on the density;
+- the orbital sets: canonical MOs, IBO and Pipek-Mezey (Mulliken), each LMO set from a Cholesky
+  or a canonical start (ibo/cholesky is the model's own token set); an energy-level diagram
+  (degenerate levels side by side, occupations, HOMO / LUMO; for an LMO, its spectral weights
+  on the canonical levels) and the orbital list;
+- sortable tables: global (energy, HOMO, LUMO, gap, mu, eta, omega, provenance), atoms (Mulliken,
+  finite-difference and frozen-orbital Fukui, dual, frontier weights, %Vbur, Wiberg valence,
+  chirality; hybridization, aromaticity and functional group greyed as diagnostics, never model
+  input), bonds (Wiberg index, length) and the RDKit.js descriptors of the sketch. Clicking an
+  atom row selects it in 3D and highlights the drawn atom in the sketch, while the sketch is
+  unchanged since the compute.
+
+Defaults and approximations: the density is valence-only on GFN2's minimal basis (an STO-nG
+fit, so its integral is shown next to N_valence), the ESP is an approximate point-charge
+potential from the Mulliken charges, and there is no Foster-Boys localization (tblite exposes no
+dipole integrals). Selection state is in the hash (`m`, `set`, `start`, `orb`, `rep`, `layers`,
+`q`); the drawing persists per tab in sessionStorage.
+
 ```bash
 uv sync
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix apps/ui ci && npm --prefix apps/ui run build

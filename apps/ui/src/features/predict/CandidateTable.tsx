@@ -22,8 +22,9 @@ import type { CandidateOut, CandidatesOut, OrbitalTokenOut } from "../../api/typ
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
 import { ProvenanceBadge } from "../../components/ProvenanceBadge";
-import { centreText, descText, exact, fmt, fmtProb, fmtSig } from "./format";
-import { usePendingCached, usePoolTokens } from "./hooks";
+import { centreText, descText, exact, fmt, fmtProb, fmtSig } from "../../components/format";
+import { usePendingCached } from "../../api/hooks";
+import { usePoolTokens } from "./hooks";
 
 export const CANDIDATE_PAGE = 200;
 

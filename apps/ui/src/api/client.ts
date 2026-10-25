@@ -98,8 +98,14 @@ export interface ApiRequest {
   path: string;
   query?: Query;
   body?: unknown;
-  /** "json" (default) or "text" (cube files). */
-  as?: "json" | "text";
+  /** "json" (default), "text" (cube files) or "textWithHeaders" (a TextWithHeaders). */
+  as?: "json" | "text" | "textWithHeaders";
+}
+
+/** A text body with the response headers (the workbench cube carries its metadata there). */
+export interface TextWithHeaders {
+  text: string;
+  headers: Headers;
 }
 
 function isPendingOut(body: unknown): body is T.PendingOut {
@@ -156,9 +162,10 @@ async function fetchOnce(req: ApiRequest, signal?: AbortSignal): Promise<Respons
   }
 }
 
-async function readBody<R>(res: Response, as: "json" | "text"): Promise<R> {
+async function readBody<R>(res: Response, as: "json" | "text" | "textWithHeaders"): Promise<R> {
   if (res.status === 204) return undefined as R;
   if (as === "text") return (await res.text()) as R;
+  if (as === "textWithHeaders") return { text: await res.text(), headers: res.headers } as R;
   const text = await res.text();
   return (text ? JSON.parse(text) : null) as R;
 }
@@ -451,3 +458,94 @@ export const searchSteps = (s: SearchQuery, o?: RequestOptions) =>
 /** GET /browse/step/{ref}; ref is "pmechdb:<step_id>" or "curated:<mid>:<step_index>". */
 export const getBrowseStep = (ref: string, o?: RequestOptions) =>
   request<T.StepViewOut>({ path: `/browse/step/${encodeURIComponent(ref)}` }, o);
+
+// ---- molecule workbench (capability "workbench"; display only)
+
+const molecule = (mid: string, rest = "") => `/molecule/${encodeURIComponent(mid)}${rest}`;
+
+/** POST /molecule: register a drawn molecule (molblock) or a SMILES and featurize it. Answers
+ *  within the server's interactive wait with status ready, or running (poll getMolecule). Only
+ *  this answer carries the sketch mapping. */
+export const createMolecule = (body: T.MoleculeIn, o?: RequestOptions) =>
+  request<T.MoleculeOut>({ method: "POST", path: "/molecule", body }, o);
+
+/** GET /molecule/{id}: the status (never computes; mapping is always null here). */
+export const getMolecule = (mid: string, o?: RequestOptions) => request<T.MoleculeOut>({ path: molecule(mid) }, o);
+
+export const getMoleculeGeometry = (mid: string, o?: RequestOptions) =>
+  request<T.MoleculeGeometryOut>({ path: molecule(mid, "/geometry") }, o);
+
+export const getMoleculeProperties = (mid: string, o?: RequestOptions) =>
+  request<T.MoleculePropertiesOut>({ path: molecule(mid, "/properties") }, o);
+
+export interface OrbitalSetQuery {
+  set?: string | null;
+  start?: string | null;
+}
+
+export const getOrbitalSet = (mid: string, q: OrbitalSetQuery = {}, o?: RequestOptions) =>
+  request<T.OrbitalSetOut>({ path: molecule(mid, "/orbitals"), query: { set: q.set, start: q.start } }, o);
+
+export type CubeKind = "orbital" | "orbital_density" | "density" | "fukui_minus" | "fukui_plus" | "dual" | "esp";
+export type CubeQuality = "draft" | "normal" | "fine";
+
+export interface MoleculeCubeQuery {
+  kind: CubeKind;
+  set?: string | null;
+  start?: string | null;
+  index?: number | null;
+  quality?: CubeQuality | null;
+}
+
+/** The metadata of a workbench cube (X-Cube-* headers); null where the header says "none". */
+export interface CubeMeta {
+  kind: string;
+  units: string;
+  integral: number | null;
+  expected: number | null;
+  spacing: number | null;
+}
+
+function headerNumber(h: Headers, name: string): number | null {
+  const v = h.get(name);
+  if (v === null || v === "none" || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function cubeMeta(h: Headers): CubeMeta {
+  return {
+    kind: h.get("X-Cube-Kind") ?? "",
+    units: h.get("X-Cube-Units") ?? "",
+    integral: headerNumber(h, "X-Cube-Integral"),
+    expected: headerNumber(h, "X-Cube-Expected"),
+    spacing: headerNumber(h, "X-Cube-Spacing"),
+  };
+}
+
+function cubeQuery(q: MoleculeCubeQuery, download = false): Query {
+  const orbital = q.kind === "orbital" || q.kind === "orbital_density";
+  return {
+    kind: q.kind,
+    set: orbital ? q.set : undefined,
+    start: orbital ? q.start : undefined,
+    index: orbital ? q.index : undefined,
+    quality: q.quality,
+    download: download ? true : undefined,
+  };
+}
+
+/** GET /molecule/{id}/cube: the cube text and its X-Cube-* metadata (pending while computed). */
+export async function getMoleculeCube(
+  mid: string,
+  q: MoleculeCubeQuery,
+  o?: RequestOptions,
+): Promise<{ text: string; headers: Headers; meta: CubeMeta }> {
+  const res = await request<TextWithHeaders>({ path: molecule(mid, "/cube"), query: cubeQuery(q), as: "textWithHeaders" }, o);
+  return { ...res, meta: cubeMeta(res.headers) };
+}
+
+/** The URL of a workbench cube (download: as an attachment), for links. */
+export function moleculeCubeUrl(mid: string, q: MoleculeCubeQuery, download = true): string {
+  return apiUrl(molecule(mid, "/cube"), cubeQuery(q, download));
+}

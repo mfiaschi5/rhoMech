@@ -11,7 +11,7 @@ import type { AtomTokenOut, OrbitalTokenOut } from "../../api/types.gen";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
 import { DIAGNOSTIC_TITLE } from "./CandidateTable";
-import { centreText, fmt } from "./format";
+import { centreText, fmt } from "../../components/format";
 import { usePoolTokens } from "./hooks";
 
 export interface TokenTableProps {

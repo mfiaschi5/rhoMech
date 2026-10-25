@@ -8,6 +8,7 @@ import { useHashRoute, type Route } from "./router";
 import { appErrorStore, capabilityOf, clearError, loadMeta, metaStore, useStore } from "./state/store";
 
 const NAV_LABELS: Record<PageId, string> = {
+  workbench: "Workbench",
   predict: "Predict",
   correct: "Correct",
   curate: "Curate",
@@ -16,6 +17,7 @@ const NAV_LABELS: Record<PageId, string> = {
 
 /** The capability a whole page needs (/api/meta.capabilities); off: greyed with the reason. */
 const PAGE_CAPABILITY: Partial<Record<PageId, string>> = {
+  workbench: "workbench",
   predict: "predict",
   correct: "correct",
 };

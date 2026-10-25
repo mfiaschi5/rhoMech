@@ -859,7 +859,8 @@ def fresh_settings(serve_settings, synthetic_settings, sn2_state):  # noqa: F811
 
     s = serve_settings(chemistry="synthetic", enable_stub_predictor=True)
     for name in ("tokens", "qm", "oriented"):
-        shutil.copytree(synthetic_settings.serve / name, s.serve / name)
+        if (synthetic_settings.serve / name).is_dir():  # no oriented blocks without physics
+            shutil.copytree(synthetic_settings.serve / name, s.serve / name)
     save_state(sn2_state, s)
     return s
 

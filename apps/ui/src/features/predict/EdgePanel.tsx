@@ -14,7 +14,7 @@
 // DOM: edge-panel[data-edge][data-kind][data-status], edge-correct-link, edge-arrow-{i}.
 import type { ArrowOut, EdgeOut, NetworkOut } from "../../api/types.gen";
 import { correctHash } from "../../router";
-import { fmt, fmtProb, fmtSig, moLabel, shortId } from "./format";
+import { fmt, fmtProb, fmtSig, moLabel, shortId } from "../../components/format";
 import { arrowText, edgeArrowsText, speciesLabel } from "./network";
 import { CLEAR_TARGET, type JobSelection, type SelectionUpdate } from "./selection";
 import { StateDepiction } from "./StateDepiction";

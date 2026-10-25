@@ -7,7 +7,7 @@
 //   onChange  (smiles) => void
 //   width, height  number           depiction size (default 200 x 130)
 import { SmilesDepiction } from "../../components/SmilesDepiction";
-import { useDebounced } from "./hooks";
+import { useDebounced } from "../../api/hooks";
 
 export interface SmilesInputProps {
   index: number;

@@ -5,13 +5,15 @@
 //   #/correct/<jobId>/edge/<edgeId>             #/correct/<jobId>/node/<nodeId>
 //   #/curate   #/curate/<jobId>?pathway=<pid>   #/curate/m/<mechId>
 //   #/browse?q=&mode=&side=&src=&st=            #/browse/step/<ref>
+//   #/workbench?smiles=&m=&set=&start=&orb=&rep=&layers=&q=
 import { useMemo, useSyncExternalStore } from "react";
 
-// "browse" while /api/meta reports the predict capability off (spec v8 port); was "predict"
-export const DEFAULT_PAGE = "browse";
+// The molecule workbench while /api/meta reports the predict capability off (spec v8 port);
+// was "predict", then "browse"
+export const DEFAULT_PAGE = "workbench";
 
 export interface Route {
-  /** First path segment ("predict", "correct", "curate", "browse"); DEFAULT_PAGE when empty. */
+  /** First path segment ("workbench", "predict", "correct", "curate", "browse"); DEFAULT_PAGE when empty. */
   page: string;
   /** The remaining path segments, URI-decoded. */
   parts: string[];

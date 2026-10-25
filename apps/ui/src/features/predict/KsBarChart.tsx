@@ -12,7 +12,7 @@
 // each bar <g data-bar data-value>.
 import { useState } from "react";
 import type { PhysicsOut } from "../../api/types.gen";
-import { exact, fmtSig, niceTicks, tickText } from "./format";
+import { exact, fmtSig, niceTicks, tickText } from "../../components/format";
 
 export interface KsBarChartProps {
   physics: PhysicsOut;

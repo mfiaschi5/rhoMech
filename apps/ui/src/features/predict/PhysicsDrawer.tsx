@@ -10,7 +10,7 @@
 //
 // Renders nothing when no arrow is selected. DOM: <aside data-testid="physics-drawer">.
 import type { NetworkOut } from "../../api/types.gen";
-import { shortId } from "./format";
+import { shortId } from "../../components/format";
 import { arrowOrdinal, arrowText } from "./network";
 import { PhysicsPanel, type PhysicsTarget } from "./PhysicsPanel";
 import type { JobSelection, SelectionUpdate } from "./selection";

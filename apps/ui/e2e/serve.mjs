@@ -7,9 +7,11 @@
 //    package-lock.json), logging the file that triggered it; exit non-zero when the build fails.
 //    KSMECH_E2E_REUSE_DIST=1 skips the staleness check (quick reruns) but never a missing dist/.
 // 3. Choose the chemistry: KSMECH_E2E_CHEMISTRY, default "auto". "auto" runs
-//    `ksmech-serve probe-cache --smiles "C[O-]" --smiles CCl` against the repo's shared token
-//    cache: exit 0 -> "cached" (both reactants have real GFN2 tokens that load), anything
-//    else -> "synthetic". "real" is accepted only when set explicitly (user acceptance runs).
+//    `ksmech-serve probe-cache --smiles "C[O-]" --smiles CCl --smiles CCO` against the repo's
+//    shared token cache: exit 0 -> "cached" (both smoke reactants and the workbench test's
+//    ethanol have real GFN2 tokens that load; cached mode never computes a new molecule),
+//    anything else -> "synthetic". "real" is accepted only when set explicitly (user
+//    acceptance runs).
 // 4. Write <dataRoot>/chemistry.txt and print "e2e chemistry: <c>".
 // 5. Spawn `uv run --no-sync --project ../.. ksmech-serve --port 8765 --chemistry <c>` with one
 //    compute worker, no auto index, no stub predictor and one BLAS/OpenMP thread; forward
@@ -26,6 +28,8 @@ const repoRoot = resolve(uiDir, "..", "..");
 const dataRoot = join(uiDir, ".e2e-data");
 const PORT = "8765";
 const CHEMISTRIES = ["auto", "cached", "synthetic", "real"];
+// The smoke test's reactants and the workbench test's ethanol (e2e/workbench.spec.ts).
+const PROBE_SMILES = ["C[O-]", "CCl", "CCO"];
 // What `npm run build` (tsc --noEmit && vite build, after scripts/vendor.mjs) reads besides node_modules.
 const BUILD_INPUTS = ["src", "scripts", "index.html", "vite.config.ts", "tsconfig.json", "package.json", "package-lock.json"];
 
@@ -112,7 +116,7 @@ function chooseChemistry() {
     process.exit(2);
   }
   if (asked !== "auto") return asked;
-  const probe = spawnSync("uv", uv(["probe-cache", "--smiles", "C[O-]", "--smiles", "CCl"]), {
+  const probe = spawnSync("uv", uv(["probe-cache", ...PROBE_SMILES.flatMap((smi) => ["--smiles", smi])]), {
     cwd: uiDir,
     env: serveEnv,
     encoding: "utf8",

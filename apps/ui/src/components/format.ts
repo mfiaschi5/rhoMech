@@ -1,9 +1,9 @@
-// Number and label formatting for the Predict and Correct pages.
+// Number and label formatting shared by the pages (Predict, Correct, Workbench).
 //
 // Values that carry a data-testid (physics-ks3, floor-rank, ...) are written with an ASCII
 // "-" so a test can parse them with Number(); typographic minus signs appear only in prose
 // labels (HOMO−1, "−P +S").
-import type { CentreOut, OrbitalDescBrief } from "../../api/types.gen";
+import type { CentreOut, OrbitalDescBrief } from "../api/types.gen";
 
 /** A fixed-decimal number, or "–" for null / NaN / inf. */
 export function fmt(value: number | null | undefined, digits = 3): string {
