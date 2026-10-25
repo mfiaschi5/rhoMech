@@ -3933,10 +3933,9 @@ is now v7.5, sha256 6c6a023f66dd).
     batches of about a million rows on `--n-jobs` threads.
     - Measured on 300 scaffold geometry-free val steps: per-step prediction 193 s, batched on
       one thread 193 s, batched on 12 threads 23 s. Scores identical.
-  - With `deterministic` and `force_row_wise` the trees do not depend on the thread count: 1
-    and 4 threads give identical trees and scores (tested). So `n_jobs` stays out of the
-    configuration a model records. Existing models are unaffected: their only reader
-    (`textbook --fast`) verifies the features alone.
+  - ~~With `deterministic` and `force_row_wise` the trees do not depend on the thread count,
+    so `n_jobs` stays out of the configuration a model records.~~ Wrong on real data; see the
+    correction below.
   - The pool is closed before fitting starts, so the loading workers and the LightGBM threads
     never run at the same time.
 - **torch left `arrows.steps`.** `SampleDataset`, `collate_samples`, `make_loader` and the
@@ -3951,3 +3950,26 @@ is now v7.5, sha256 6c6a023f66dd).
   worker re-imports the main module. An unguarded script started a pool inside every worker,
   which died during bootstrap and was respawned without end, and the parent waited forever.
   The console scripts are guarded.
+
+## 2026-10-25 — Correction: LightGBM's trees depend on its thread count; the parallel runs timed
+
+- **What happened.** The scaffold runs were repeated with `--workers 8`, and with `--n-jobs 14`
+  for LightGBM.
+  - ks-rank: report identical; 489 s → 301 s.
+  - LightGBM, contact features: report, trees and learning history identical; 1,718 s → 392 s
+    (load 220 → 126 s, fit 416 → 163 s).
+  - LightGBM, geometry-free: 2,938 s → 574 s (load 331 → 87 s, fit 745 → 296 s), but the trees
+    differ: 1,295 / 1,258 against 1,273 / 1,082. Test top-1/3/5 is 45.3/64.3/75.3% against
+    45.3/64.7/75.6%.
+  - The same run with `--workers 8 --n-jobs 2` reproduces the 2-thread run exactly: results,
+    trees and history.
+- **So.** The parallel loading is exact. LightGBM's `deterministic` and `force_row_wise` make a
+  model reproducible for one thread count only. The 1-against-4-thread toy test, and the
+  156k-row contact set, did not show it; the 521k-row geometry-free set does.
+- **Change.** `n_jobs` is back in the configuration a model records, and the toy test now
+  checks only that batched scoring equals scoring one step per call. `--n-jobs` stays 14 by
+  default: models fitted with different thread counts are told apart by their configuration.
+  The geometry-free scaffold model on disk is the 2-thread one, identical to the morning run.
+- **Still sequential in ks-rank.** After the parallel part, about 2.5 minutes of the 5 run in
+  the parent. Its failure-class step reads each sample's token files again, because the
+  workers, not the parent, warmed the token cache.

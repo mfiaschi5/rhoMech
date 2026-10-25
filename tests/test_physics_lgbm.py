@@ -128,20 +128,16 @@ def test_gbdt_cli(features, mini_processed, token_loader, pair_kernels, monkeypa
     assert held.kind == "baseline_lgbm" and held.extra["textbook_pools_in_training"] == []
 
 
-def test_the_thread_count_does_not_change_the_model():
-    """`deterministic` and `force_row_wise`: one thread or four give the same trees and scores,
-    so `--n-jobs` only sets the speed and stays out of the model's configuration."""
+def test_batched_scoring_gives_the_scores_of_one_call_per_step():
+    """`score_sets` predicts several steps per call on `n_jobs` threads; the scores are those
+    of one call per step. The thread count of the fit is part of the model's configuration:
+    LightGBM's trees are reproducible for one thread count, not across them."""
     rng = np.random.default_rng(1)
     train, val = _toy_sets(rng, 80), _toy_sets(rng, 20)
     names = [f"f{k}" for k in range(61)]
-    models = []
-    for n_jobs in (1, 4):
-        cfg = lgbm.LGBMConfig(max_rounds=60, patience=20, min_data_in_leaf=5, n_jobs=n_jobs)
-        models.append(lgbm.fit_lgbm(_rows(train, cfg), lgbm.EvalRows.of(val), names, cfg))
-    one, four = models
-    assert one.n_trees == four.n_trees >= 1
-    assert all(np.array_equal(one.score(cs.X), four.score(cs.X)) for cs in val)
-    assert "n_jobs" not in lgbm.model_config(names, cfg)["lgbm"]
+    cfg = lgbm.LGBMConfig(max_rounds=60, patience=20, min_data_in_leaf=5, n_jobs=2)
+    one = lgbm.fit_lgbm(_rows(train, cfg), lgbm.EvalRows.of(val), names, cfg)
+    assert one.n_trees >= 1 and lgbm.model_config(names, cfg)["lgbm"]["n_jobs"] == 2
     Xs = [cs.X for cs in val] + [np.zeros((0, 61))]  # an empty step too
     batched = one.score_sets(Xs, n_jobs=4, batch_rows=50)  # several batches
     assert len(batched) == len(Xs) and batched[-1].shape == (0,)

@@ -229,12 +229,11 @@ def fit_lgbm(train: TrainRows, val: EvalRows, features: list[str], cfg: LGBMConf
 
 def model_config(features: list[str], cfg: LGBMConfig | None) -> dict:
     """The configuration a model is verified against; without `cfg` only the features (a
-    scorer that just uses the model, whatever it was fitted with). The thread count is left out:
-    with `deterministic` and `force_row_wise` the trees do not depend on it."""
+    scorer that just uses the model, whatever it was fitted with). The thread count is part of
+    it: `deterministic` and `force_row_wise` fix the trees for one thread count, not across
+    them (the scaffold geometry-free ranker grew 1,273 trees on 2 threads, 1,295 on 14)."""
     out = {"model": "lgbm_lambdarank", "features": list(features)}
-    if cfg is None:
-        return out
-    return out | {"lgbm": {k: v for k, v in asdict(cfg).items() if k != "n_jobs"}}
+    return out | ({"lgbm": asdict(cfg)} if cfg is not None else {})
 
 
 def save_lgbm(
