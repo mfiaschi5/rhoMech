@@ -1,0 +1,358 @@
+/* Sketcher (workbench phase 4): toolbar, SVG canvas, popovers, info bar. Uses the theme tokens
+   of styles.css; element colours are local tokens with a dark-mode set. */
+
+.sketch {
+  --sk-stroke: var(--fg);
+  --sk-canvas: var(--panel);
+  --sk-hover: color-mix(in srgb, var(--accent) 22%, transparent);
+  --sk-select: color-mix(in srgb, var(--accent) 38%, transparent);
+  --sk-highlight: color-mix(in srgb, var(--cycle) 35%, transparent);
+  --sk-N: #2850d8;
+  --sk-O: #d0261c;
+  --sk-S: #a08000;
+  --sk-P: #d06a00;
+  --sk-hal: #1f8a3c;
+  --sk-Br: #9a2a2a;
+  --sk-I: #7a1f9a;
+  --sk-B: #c06a6a;
+  --sk-Si: #8a6a30;
+  --sk-other: #6a4fa0;
+
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .sketch {
+    --sk-N: #7c9cff;
+    --sk-O: #ff6a5e;
+    --sk-S: #e0c040;
+    --sk-P: #ff9a40;
+    --sk-hal: #5cd07a;
+    --sk-Br: #e07a6a;
+    --sk-I: #c07ae0;
+    --sk-B: #f0a0a0;
+    --sk-Si: #d0b070;
+    --sk-other: #b49cf0;
+  }
+}
+
+:root[data-theme="dark"] .sketch {
+  --sk-N: #7c9cff;
+  --sk-O: #ff6a5e;
+  --sk-S: #e0c040;
+  --sk-P: #ff9a40;
+  --sk-hal: #5cd07a;
+  --sk-Br: #e07a6a;
+  --sk-I: #c07ae0;
+  --sk-B: #f0a0a0;
+  --sk-Si: #d0b070;
+  --sk-other: #b49cf0;
+}
+
+/* toolbar */
+.sk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.sk-group {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.sk-actions {
+  gap: 4px;
+  border: none;
+  background: none;
+}
+
+.sk-tool,
+.sk-el {
+  font: inherit;
+  font-size: 13px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.sk-tool:hover,
+.sk-el:hover {
+  border-color: var(--border);
+  background: var(--panel);
+}
+
+.sk-tool.active,
+.sk-el.active {
+  border-color: var(--accent);
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.sk-tool svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+
+.sk-tool svg .fill {
+  fill: currentColor;
+}
+
+.sk-el {
+  font-weight: 600;
+}
+
+.sk-picker-anchor {
+  position: relative;
+}
+
+/* popovers */
+.sk-popover {
+  position: absolute;
+  z-index: 20;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 18%);
+}
+
+.sk-periodic {
+  top: calc(100% + 4px);
+  left: 0;
+  display: grid;
+  grid-template-columns: repeat(18, 24px);
+  gap: 2px;
+  padding: 6px;
+}
+
+.sk-pt {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.sk-pt:hover,
+.sk-pt.active {
+  border-color: var(--accent);
+}
+
+.sk-panel {
+  top: 8px;
+  right: 8px;
+  width: min(440px, calc(100% - 16px));
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sk-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--mono);
+  font-size: 12px;
+  resize: vertical;
+}
+
+.sk-panel-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.sk-panel-head .muted {
+  flex: 1;
+  font-size: 12px;
+}
+
+.sk-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.sk-field-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--muted);
+}
+
+/* canvas */
+.sk-stage {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--sk-canvas);
+  overflow: hidden;
+}
+
+.sketch-svg {
+  display: block;
+  touch-action: none;
+  user-select: none;
+  cursor: crosshair;
+  outline: none;
+}
+
+.sketch[data-tool="select"] .sketch-svg {
+  cursor: default;
+}
+
+.sketch-svg.read-only {
+  cursor: default;
+}
+
+/* the canvas takes focus on press (keys go to it); the stage border shows it */
+.sk-stage:focus-within {
+  border-color: var(--focus);
+}
+
+.sk-stroke {
+  stroke: var(--sk-stroke);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.sk-wedge {
+  fill: var(--sk-stroke);
+  stroke: var(--sk-stroke);
+  stroke-width: 0.6;
+  stroke-linejoin: round;
+}
+
+.sk-hit {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+}
+
+.sk-halo {
+  stroke: var(--sk-hover);
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+
+.sk-halo.sk-selected {
+  stroke: var(--sk-select);
+}
+
+.sk-dot {
+  fill: var(--sk-hover);
+}
+
+.sk-dot.sk-selected {
+  fill: var(--sk-select);
+}
+
+.sk-highlight {
+  fill: var(--sk-highlight);
+  stroke: var(--cycle);
+  stroke-width: 1.5;
+}
+
+.sk-invalid-ring {
+  fill: color-mix(in srgb, var(--error) 14%, transparent);
+  stroke: var(--error);
+  stroke-width: 1.2;
+}
+
+.sk-label text {
+  font-family: var(--font);
+  font-size: 13px;
+  fill: var(--sk-stroke);
+}
+
+.sk-label .sk-sub {
+  font-size: 9.5px;
+}
+
+.sk-label .sk-charge {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.sk-label.el-N text { fill: var(--sk-N); }
+.sk-label.el-O text { fill: var(--sk-O); }
+.sk-label.el-S text { fill: var(--sk-S); }
+.sk-label.el-P text { fill: var(--sk-P); }
+.sk-label.el-F text,
+.sk-label.el-Cl text { fill: var(--sk-hal); }
+.sk-label.el-Br text { fill: var(--sk-Br); }
+.sk-label.el-I text { fill: var(--sk-I); }
+.sk-label.el-B text { fill: var(--sk-B); }
+.sk-label.el-Si text { fill: var(--sk-Si); }
+.sk-label.el-other text { fill: var(--sk-other); }
+
+.sk-el.el-N, .sk-pt.el-N { color: var(--sk-N); }
+.sk-el.el-O, .sk-pt.el-O { color: var(--sk-O); }
+.sk-el.el-S, .sk-pt.el-S { color: var(--sk-S); }
+.sk-el.el-P, .sk-pt.el-P { color: var(--sk-P); }
+.sk-el.el-F, .sk-pt.el-F,
+.sk-el.el-Cl, .sk-pt.el-Cl { color: var(--sk-hal); }
+.sk-el.el-Br, .sk-pt.el-Br { color: var(--sk-Br); }
+.sk-el.el-I, .sk-pt.el-I { color: var(--sk-I); }
+.sk-pt.el-other { color: var(--sk-other); }
+
+/* invalid valence: the atom and its label in the error colour */
+.sk-atom.sk-invalid .sk-label text {
+  fill: var(--error);
+}
+
+.sk-rubber {
+  fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+/* info bar */
+.sk-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: baseline;
+  min-height: 20px;
+  font-size: 12px;
+}
+
+.sk-info.stale {
+  opacity: 0.6;
+}
+
+.sk-smiles {
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.sk-desc {
+  white-space: nowrap;
+}
+
+.sk-error {
+  color: var(--error);
+}

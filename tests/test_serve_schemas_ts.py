@@ -33,7 +33,7 @@ def test_ts_models_cover_every_model_of_the_module():
     }
     public = {n for n in defined if not n.startswith("_")}
     assert {m.__name__ for m in schemas.TS_MODELS} == public
-    assert len(public) == 84  # 84: CapabilityOut (spec v8 port)
+    assert len(public) == 99  # 84: CapabilityOut (spec v8 port); +15: the molecule workbench
 
 
 def test_every_ts_model_is_an_interface():
@@ -196,6 +196,7 @@ def test_input_models_are_the_request_bodies():
         "ExportIn",
         "RecheckIn",
         "RecheckOneIn",
+        "MoleculeIn",
     }
 
 

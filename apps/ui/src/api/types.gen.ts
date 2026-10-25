@@ -1035,3 +1035,187 @@ export interface StepViewOut {
   mechanism: MechanismSummaryOut | null;
   recheck: RecheckRowOut | null;
 }
+
+export interface MoleculeIn {
+  molblock?: string | null;
+  smiles?: string | null;
+  retry?: boolean;
+}
+
+export interface SketchMappingOut {
+  n_sketch_atoms: number;
+  n_record_atoms: number;
+  sketch_to_record: number[];
+  record_to_sketch: (number | null)[];
+  record_parent_sketch: (number | null)[];
+  chirality_matched: boolean;
+}
+
+export interface MoleculeOut {
+  molecule_id: string;
+  key: string;
+  status: "missing" | "running" | "ready" | "qm_only" | "failed";
+  error: ErrorBody | null;
+  n_atoms: number | null;
+  charge: number | null;
+  multiplicity: number | null;
+  chemistry: string;
+  method: string;
+  qm_ready: boolean;
+  tokens_ready: boolean;
+  mapping: SketchMappingOut | null;
+  mapping_error: string | null;
+  warnings: string[];
+}
+
+export interface WorkbenchProvenanceOut {
+  chemistry: string;
+  method: string;
+  key: string;
+  qm_digest: string;
+  token_digest: string | null;
+  versions: Record<string, number | string>;
+  notes: string[];
+}
+
+export interface MoleculeGeometryOut {
+  molecule_id: string;
+  key: string;
+  charge: number;
+  multiplicity: number;
+  atoms: AtomXYZOut[];
+  bonds: [number, number, number][];
+  xyz: string;
+  molblock: string;
+  frame_note: string;
+}
+
+export interface GlobalPropsOut {
+  energy_ha: number;
+  energy_ev: number;
+  homo_ev: number | null;
+  lumo_ev: number | null;
+  gap_ev: number | null;
+  mu_ev: number | null;
+  eta_ev: number | null;
+  omega_ev: number | null;
+  charge: number;
+  multiplicity: number;
+  n_atoms: number;
+  n_ao: number;
+  n_mo: number;
+  n_occupied: number;
+  n_valence_electrons: number;
+  fermi_smeared: boolean;
+  pm_converged: boolean | null;
+  pm_sweeps_occ: number | null;
+  pm_sweeps_virt: number | null;
+  warnings: string[];
+}
+
+export interface AtomDiagnosticOut {
+  diagnostic: true;
+  hybridization: string;
+  aromatic: boolean;
+  fg_label: string;
+}
+
+export interface AtomPropsOut {
+  index: number;
+  element: string;
+  Z: number;
+  formal_charge: number;
+  mulliken_charge: number;
+  f_plus_fd: number | null;
+  f_minus_fd: number | null;
+  f_zero_fd: number | null;
+  dual_fd: number | null;
+  f_plus_fmo: number | null;
+  f_minus_fmo: number | null;
+  fmo_weights: (number | null)[];
+  vbur: number | null;
+  chirality: number;
+  wiberg_valence: number;
+  diagnostic: AtomDiagnosticOut;
+}
+
+export interface BondPropsOut {
+  i: number;
+  j: number;
+  bonded: boolean;
+  order: number | null;
+  wiberg: number;
+  length_ang: number;
+}
+
+export interface MoleculePropertiesOut {
+  molecule_id: string;
+  key: string;
+  global_props: GlobalPropsOut;
+  atoms: AtomPropsOut[];
+  bonds: BondPropsOut[];
+  fmo_levels: string[];
+  wiberg_threshold: number;
+  geometry: MoleculeGeometryOut;
+  provenance: WorkbenchProvenanceOut;
+}
+
+export interface OrbitalCentreOut {
+  atom: number;
+  element: string;
+  weight: number;
+}
+
+export interface OrbitalRowDiagnosticOut {
+  diagnostic: true;
+  type: string;
+  parents: string;
+  s_share: number | null;
+  p_share: number | null;
+  d_share: number | null;
+  classifier_overlap_population: number | null;
+  metal_bound: boolean;
+}
+
+export interface OrbitalRowOut {
+  index: number;
+  kind: "occupied" | "virtual";
+  occupation: number;
+  energy_ev: number;
+  label: string | null;
+  frontier: string | null;
+  level: number | null;
+  centres: OrbitalCentreOut[];
+  centroid: number[] | null;
+  model_input: OrbitalModelInputOut | null;
+  spectral: [number, number, number][] | null;
+  retained_fraction: number | null;
+  diagnostic: OrbitalRowDiagnosticOut | null;
+}
+
+export interface OrbitalSetStatsOut {
+  n_occupied: number;
+  n_virtual: number;
+  converged: boolean | null;
+  sweeps_occ: number | null;
+  sweeps_virt: number | null;
+  orthonormality_error: number;
+  occupied_projector_error: number;
+}
+
+export interface OrbitalSetOut {
+  molecule_id: string;
+  key: string;
+  set: string;
+  start: string | null;
+  is_model_set: boolean;
+  source: "canonical" | "token_file" | "workbench";
+  homo_index: number | null;
+  orbitals: OrbitalRowOut[];
+  stats: OrbitalSetStatsOut;
+  sets: string[];
+  starts: string[];
+  model_set: [string, string];
+  notes: string[];
+  provenance: WorkbenchProvenanceOut;
+}

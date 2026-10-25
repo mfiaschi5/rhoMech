@@ -110,12 +110,16 @@ def grid_points(g: Grid, start: int, stop: int) -> np.ndarray:
     return g.origin_ang[None, :] + g.spacing_ang * np.column_stack([ix, iy, iz])
 
 
-def _on_grid(g: Grid, evaluate: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
+def on_grid(g: Grid, evaluate: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
+    """`evaluate(points)` on every grid point, in chunks of `CHUNK_POINTS` (flat cube order)."""
     out = np.empty(g.n_points)
     for start in range(0, g.n_points, CHUNK_POINTS):
         stop = min(g.n_points, start + CHUNK_POINTS)
         out[start:stop] = evaluate(grid_points(g, start, stop))
     return out
+
+
+_on_grid = on_grid  # the name before the workbench made it public
 
 
 def fragment_arrays(t: MoleculeTokens) -> tuple[np.ndarray, np.ndarray]:
@@ -134,7 +138,7 @@ def lmo_values_at(t: MoleculeTokens, k: int, points_ang: np.ndarray) -> np.ndarr
 
 def lmo_values(t: MoleculeTokens, k: int, g: Grid) -> np.ndarray:
     """`lmo_values_at` on every grid point, in chunks of `CHUNK_POINTS`."""
-    return _on_grid(g, lambda pts: lmo_values_at(t, k, pts))
+    return on_grid(g, lambda pts: lmo_values_at(t, k, pts))
 
 
 def cap_coefficients(t: MoleculeTokens, k: int, atoms: Sequence[int]) -> np.ndarray:
@@ -159,7 +163,7 @@ def placed_cap_values_at(t_G: MoleculeTokens, s: int, pl: Placement, points_ang)
 
 def placed_cap_values(t_G: MoleculeTokens, s: int, pl: Placement, g: Grid) -> np.ndarray:
     """`placed_cap_values_at` on every grid point, in chunks of `CHUNK_POINTS`."""
-    return _on_grid(g, lambda pts: placed_cap_values_at(t_G, s, pl, pts))
+    return on_grid(g, lambda pts: placed_cap_values_at(t_G, s, pl, pts))
 
 
 def _one_line(text: str) -> str:

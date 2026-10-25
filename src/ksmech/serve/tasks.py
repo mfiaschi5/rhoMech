@@ -272,6 +272,9 @@ TASKS: dict[str, str | Callable[[Any, dict], dict]] = {
     "contact": "ksmech.serve.placement:t_contact",
     "index_chunk": "ksmech.serve.pmindex:t_index_chunk",
     "recheck_step": "ksmech.serve.recheck:t_recheck_step",
+    "wb_orbital_set": "ksmech.serve.orbital_sets:t_wb_orbital_set",
+    "wb_cube": "ksmech.serve.densities:t_wb_cube",
+    "wb_properties": "ksmech.serve.properties:t_wb_properties",
 }
 
 

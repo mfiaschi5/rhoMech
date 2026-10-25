@@ -107,6 +107,27 @@ class ServeSettings:
         return self.serve / "cubes"
 
     @property
+    def workbench(self) -> Path:
+        """The molecule workbench (display only): registry, orbital sets, cubes, properties."""
+        return self.serve / "workbench"
+
+    @property
+    def workbench_molecules(self) -> Path:
+        return self.workbench / "molecules"
+
+    @property
+    def workbench_orbitals(self) -> Path:
+        return self.workbench / "orbitals"
+
+    @property
+    def workbench_cubes(self) -> Path:
+        return self.workbench / "cubes"
+
+    @property
+    def workbench_properties(self) -> Path:
+        return self.workbench / "properties"
+
+    @property
     def jobs(self) -> Path:
         return self.serve / "jobs"
 

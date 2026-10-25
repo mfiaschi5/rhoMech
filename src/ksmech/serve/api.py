@@ -46,7 +46,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import ksmech
-from ksmech.serve import pool_service, static, view3d
+from ksmech.serve import molecule, pool_service, static, view3d, workbench_service
 from ksmech.serve import schemas as S
 from ksmech.serve.capabilities import require
 from ksmech.serve.errors import Code, Pending, ServeError, jsonable
@@ -90,6 +90,7 @@ ID_RULES: dict[str, tuple[re.Pattern[str], Code]] = {
         Code.STEP_NOT_FOUND,
     ),
     "which": (re.compile(r"donor|acceptor"), Code.POOL_NOT_FOUND),
+    "molecule_id": (re.compile(r"m[0-9a-f]{20}"), Code.MOLECULE_NOT_FOUND),
 }
 
 
@@ -129,6 +130,7 @@ StateId = Annotated[str, Path(description="state id (s + 20 hex)")]
 JobId = Annotated[str, Path(description="job id (j + 16 hex)")]
 TokenId = Annotated[int, Path(ge=0)]
 Mid = Annotated[int, Path(ge=0)]
+MoleculeId = Annotated[str, Path(description="molecule id (m + 20 hex)")]
 
 
 def _blank(value: str | None) -> str | None:
@@ -565,6 +567,77 @@ def contact_cube(
     ids = (donor, donor_site, acceptor, acceptor_site)
     text = view3d.contact_cube_text(svc.ctx, sid, *ids, which)
     return _cube(text, f"{sid}-{donor}-{donor_site}-{acceptor}-{acceptor_site}-{which}.cube")
+
+
+# ---- molecule workbench (display only)
+
+_WB = [require("workbench")]
+
+
+@router.post("/molecule", response_model=S.MoleculeOut, dependencies=_WB)
+def create_molecule(svc: Svc, body: S.MoleculeIn) -> S.MoleculeOut:
+    return molecule.create_molecule(svc.ctx, body)
+
+
+@router.get("/molecule/{molecule_id}", response_model=S.MoleculeOut, dependencies=_WB)
+def get_molecule(svc: Svc, molecule_id: MoleculeId) -> S.MoleculeOut:
+    return molecule.molecule_out(svc.ctx, check_id("molecule_id", molecule_id))
+
+
+@router.get(
+    "/molecule/{molecule_id}/geometry", response_model=S.MoleculeGeometryOut, dependencies=_WB
+)
+def molecule_geometry(svc: Svc, molecule_id: MoleculeId) -> S.MoleculeGeometryOut:
+    return workbench_service.geometry_out(svc.ctx, check_id("molecule_id", molecule_id))
+
+
+@router.get(
+    "/molecule/{molecule_id}/properties",
+    response_model=S.MoleculePropertiesOut,
+    dependencies=_WB,
+)
+def molecule_properties(svc: Svc, molecule_id: MoleculeId) -> S.MoleculePropertiesOut:
+    return workbench_service.properties_out(svc.ctx, check_id("molecule_id", molecule_id))
+
+
+@router.get("/molecule/{molecule_id}/orbitals", response_model=S.OrbitalSetOut, dependencies=_WB)
+def molecule_orbitals(
+    svc: Svc,
+    molecule_id: MoleculeId,
+    set_: Annotated[str | None, Query(alias="set")] = None,
+    start: str | None = None,
+) -> S.OrbitalSetOut:
+    mid = check_id("molecule_id", molecule_id)
+    return workbench_service.orbitals_out(svc.ctx, mid, _blank(set_), _blank(start))
+
+
+@router.get("/molecule/{molecule_id}/cube", response_class=PlainTextResponse, dependencies=_WB)
+def molecule_cube(
+    svc: Svc,
+    molecule_id: MoleculeId,
+    kind: str,
+    set_: Annotated[str | None, Query(alias="set")] = None,
+    start: str | None = None,
+    index: Annotated[int | None, Query(ge=0)] = None,
+    quality: str | None = None,
+    spacing: float | None = None,
+    padding: float | None = None,
+    download: bool = False,
+) -> PlainTextResponse:
+    mid = check_id("molecule_id", molecule_id)
+    cube = workbench_service.cube_out(
+        svc.ctx,
+        mid,
+        kind,
+        set_=_blank(set_),
+        start=_blank(start),
+        index=index,
+        quality=_blank(quality),
+        spacing=spacing,
+        padding=padding,
+    )
+    headers = workbench_service.cube_headers(cube, download)
+    return PlainTextResponse(cube.text, headers=headers)
 
 
 # ---- curation (static routes before /curate/{mid})

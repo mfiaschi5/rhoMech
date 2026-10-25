@@ -158,6 +158,9 @@ def test_task_registry_is_fixed():
         "contact",
         "index_chunk",
         "recheck_step",
+        "wb_orbital_set",
+        "wb_cube",
+        "wb_properties",
     }
     lazy = {k: v for k, v in tasks.TASKS.items() if isinstance(v, str)}
     assert lazy["expand"] == "ksmech.serve.expansion:t_expand"

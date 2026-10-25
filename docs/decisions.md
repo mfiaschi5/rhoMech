@@ -3900,3 +3900,73 @@ is now v7.5, sha256 6c6a023f66dd).
     are the edit-labels report's numbers.
 - **Later (user decision).** Resonance augmentation will precompute a few forms per sample,
   each with its own Lewis structure and label class.
+
+## 2026-10-25 — Molecule workbench (serve), backend
+
+- **What.** `ksmech-serve` gains a display-only molecule workbench: draw (or paste) one
+  molecule, featurize it, and look at its geometry, properties, orbital sets and volumetric
+  surfaces. Routes under `/api/molecule`; capability `workbench`, always on.
+- **Adapters, all in `src/ksmech/serve` (upstream is consumed, never modified).**
+
+  | Module | Side | Upstream it reads |
+  |---|---|---|
+  | `molecule.py` | API | `data.chem.unmapped_canonical`, `qm.embed.prepare_mol`, `featurizer.preflight` |
+  | `orbital_sets.py` (`wb_orbital_set`) | worker | `orbitals.localize` (METHODS, STARTS, PMConfig, mulliken_populations), `orbitals.tokens.build_molecule_tokens` / `save_tokens` / `load_tokens`, `orbitals.frontier.frontier_blocks` |
+  | `densities.py` (`wb_cube`) | worker | `physics.gto.ao_values`, `serve.cubes` (grid, `on_grid`, `write_cube`) |
+  | `properties.py` (`wb_properties`) | worker | `orbitals.tokens.atom_tokens`, `qm.bond_index.wiberg_matrix`, `localize.is_fermi_smeared` |
+  | `workbench_service.py` | API | only the files the worker wrote, and `np.load` of the QM record for the geometry |
+  | `token_rows.py` | both | the orbital-row serialization moved out of `pool_service` |
+
+- **Version constants.** `WORKBENCH_VERSION`, `ORBITAL_SET_VERSION` and `DENSITY_VERSION`, all
+  1. They key the workbench caches together with the QM record's content sha (sha256 of the
+  file bytes) and the oriented fingerprint (token schema, localize.py, descriptors.py,
+  tokens.py, physics/*.py). None of them enters the physics fingerprint: the workbench decides
+  no score, validity or product.
+- **Identity.** A drawing's key is `unmapped_canonical(mol)`, the QM / token cache key, so a
+  drawn molecule shares its record and tokens with the pools. The id is
+  `"m" + sha256("molecule-v1|" + key)[:20]`, so the same molecule drawn twice (or typed as a
+  SMILES) is one molecule. The registry entry keeps the last featurize failure; a POST does
+  not run a recorded failure again unless `retry` is set (no silent loops, no silent skips).
+- **Sketch mapping by substructure match.** `prepare_mol(key).GetSubstructMatch(AddHs(drawn))`,
+  with chirality first and without it as a fallback (`chirality_matched` says which). The
+  drawing has the same graph as its own canonical key, so the match is an isomorphism; for a
+  symmetric molecule any of the equivalent matches is equally correct. An H the drawing left
+  implicit maps to its drawn heavy atom (`record_parent_sketch`). The mapping is returned with
+  the POST only: the drawing is the client's, and a GET cannot know it.
+- **Orbital sets.** `canonical` plus `localize.METHODS` (`ibo`, `pm_mulliken`) times
+  `localize.STARTS` (`cholesky`, `canonical`). The model set is `PMConfig()` (ibo/cholesky):
+  the existing token file when there is one, so the viewer shows exactly the orbitals the model
+  reads. The other sets are built with `build_molecule_tokens(rec, pm_config=...)` and saved
+  with upstream `save_tokens` and provenance (the QM record as input, `token_config(pm)`) under
+  `data/serve/workbench/orbitals/`. No Foster-Boys: tblite exposes no dipole integrals.
+- **QM records load only in the worker.** `qm.records.load_record` re-derives the AO layout
+  through `qm.ao`, which imports tblite and runs a single-atom tblite call per element. The
+  synthetic chemistry is read without that probe (its records were written with the current
+  layout; the provenance header is still verified); real records go through `load_record`.
+- **Densities are valence-only, minimal-basis.** The density is
+  `rowsum((A C_occ sqrt(n))^2)`, P = C diag(n) C^T over the valence MOs of GFN2's minimal
+  basis. The AOs on the grid are the STO-nG fit of GFN2's valence Slater functions
+  (`physics.gto`), which is not tblite's own basis evaluation: under real chemistry the grid
+  integral of the density differs a little from N_valence. Every cube therefore reports its
+  integral and the exact value (comment line, sidecar, `X-Cube-Integral` / `X-Cube-Expected`).
+  On the synthetic chemistry (whose S is the STO-nG overlap) |psi|^2, f+, f- integrate to 1
+  and the density to N_valence within 1% at 0.2 Angstrom with 5 Angstrom of padding.
+- **Fukui surfaces.** Frozen-orbital: the mean |psi|^2 over the HOMO (f-) or LUMO (f+)
+  degenerate block of `frontier_blocks` (0.05 eV), so each integrates to 1 and equivalent
+  atoms look alike, as `frozen_orbital_fukui_blocks` does for the condensed values. No block:
+  NO_FRONTIER.
+- **ESP approximation.** sum_A q_A / max(|r - R_A|, 0.2 bohr) over the Mulliken charges, in
+  hartree/e. It is not the electrostatic potential of the electron density: it is a cheap,
+  sign-correct picture (positive around NH4+, negative around acetate away from the nuclei,
+  Q/r far away), labelled approximate in the cube and the sidecar. The floor keeps it finite
+  at the nuclei.
+- **Grid policy.** One whole-molecule box, `cubes.grid_around(all atoms, spacing, padding)`,
+  default padding 3.0 Angstrom. The spacing is explicit or set by `quality` (draft / normal /
+  fine: about 120k / 350k / 1.2M points, rounded up to 0.001 Angstrom so the cache key is
+  stable); `cubes.MAX_POINTS` (4M) still applies (CUBE_TOO_LARGE). Set-independent kinds drop
+  set, start and index from the request, so they share one cache entry.
+- **Statuses and errors.** A molecule is missing, running, ready, qm_only (a QM record but no
+  tokens, e.g. cached chemistry: geometry, properties, canonical orbitals and surfaces still
+  work; the model set is then built by the workbench) or failed. New codes: INVALID_MOLFILE,
+  MULTIPLE_FRAGMENTS, ORBITAL_OUT_OF_RANGE, NO_FRONTIER, LOCALIZATION_FAILED (422),
+  MOLECULE_NOT_FOUND (404), MOLECULE_NOT_READY (409) and the report code MAPPING_FAILED.

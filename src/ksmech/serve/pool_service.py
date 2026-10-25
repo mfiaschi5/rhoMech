@@ -18,7 +18,7 @@ import logging
 import math
 from collections import Counter
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -36,6 +36,12 @@ from ksmech.serve.candidates import SCOPE_EXCLUDED, SELF_SITE_PAIR, reason_name,
 from ksmech.serve.contracts import PoolState, log_softmax_valid
 from ksmech.serve.errors import Code, ServeError, error_body
 from ksmech.serve.pools import SpeciesInput, preflight_inputs, save_state
+from ksmech.serve.token_rows import diag_float as _diag_float
+from ksmech.serve.token_rows import fg_label as _fg_label
+from ksmech.serve.token_rows import jsonish as _jsonish
+from ksmech.serve.token_rows import orbital_model_input, parents_text
+from ksmech.serve.token_rows import overlap_sign as _overlap_sign
+from ksmech.serve.token_rows import spectral_set as _spectral_set
 from ksmech.serve.worker import task_key
 
 if TYPE_CHECKING:
@@ -233,35 +239,6 @@ def centres_out(rt: ReactantTokens, token: int) -> list[S.CentreOut]:
     ]
 
 
-def _overlap_sign(x: float) -> int:
-    return 0 if x == 0 else (1 if x > 0 else -1)
-
-
-def _spectral_set(d) -> list[tuple[float, float]]:
-    w = np.asarray(d.spectral_weights, dtype=float)
-    e = np.asarray(d.spectral_energies, dtype=float)
-    return [(float(e[k]), float(w[k])) for k in np.flatnonzero(w > 0)]
-
-
-def orbital_model_input(o: OrbitalToken) -> S.OrbitalModelInputOut:
-    """Exactly the model-input descriptors (`orbitals/descriptors.py`, `model_input=True`);
-    the spectral set as (E_k, weight) rows with weight > 0, the overlap sign alongside."""
-    d = o.descriptors
-    return S.OrbitalModelInputOut(
-        occupation=float(d.occupation),
-        n_centers=int(d.n_centers),
-        center_weights=[float(x) for x in np.asarray(d.center_weights).ravel()],
-        center_spd=np.asarray(d.center_spd, dtype=float).tolist(),
-        cos_a=float(d.cos_a),
-        cos_b=float(d.cos_b),
-        overlap_population=float(d.overlap_population),
-        overlap_sign=_overlap_sign(float(d.overlap_population)),
-        distance_ab=float(d.distance_ab),
-        radius_gyration=float(d.radius_gyration),
-        spectral_set=_spectral_set(d),
-    )
-
-
 @dataclass(frozen=True)
 class _Tok:
     """An orbital token resolved in the pool's index space."""
@@ -312,22 +289,11 @@ def _masks(rt: ReactantTokens, k: _Tok) -> S.OrbitalMasksOut:
     )
 
 
-def _diag_float(x: float) -> float | None:
-    return None if x is None or not math.isfinite(float(x)) else float(x)
-
-
-def _parents(k: _Tok) -> str:
-    return ",".join(
-        f"{k.t.symbol(int(a))}{int(a)}:{float(w):.2f}"
-        for a, w in zip(k.o.parent_atoms, k.o.parent_weights, strict=False)
-    )
-
-
 def _orbital_diagnostic(k: _Tok) -> S.OrbitalDiagnosticOut:
     return S.OrbitalDiagnosticOut(
         type=str(k.o.type),
         token_class=pv.token_class(k.o, k.t),
-        parents=_parents(k),
+        parents=parents_text(k.t, k.o),
         s_share=_diag_float(k.o.s_share),
         p_share=_diag_float(k.o.p_share),
         d_share=_diag_float(k.o.d_share),
@@ -346,27 +312,6 @@ def orbital_out(rt: ReactantTokens, token: int) -> S.OrbitalTokenOut:
         masks=_masks(rt, k),
         diagnostic=_orbital_diagnostic(k),
     )
-
-
-def _jsonish(value: Any) -> Any:
-    if isinstance(value, np.ndarray):
-        return [_jsonish(v) for v in value.tolist()]
-    if isinstance(value, list | tuple):
-        return [_jsonish(v) for v in value]
-    if isinstance(value, bool | np.bool_):
-        return bool(value)
-    if isinstance(value, int | np.integer):
-        return int(value)
-    if isinstance(value, float | np.floating):
-        return float(value) if math.isfinite(float(value)) else None
-    return value
-
-
-def _fg_label(fg_id: int) -> str:
-    from ksmech.orbitals.fgroups import default_vocab
-
-    labels = default_vocab().labels
-    return labels[fg_id] if 0 <= fg_id < len(labels) else f"fg{fg_id}"
 
 
 def atom_out(rt: ReactantTokens, site: int) -> S.AtomTokenOut:

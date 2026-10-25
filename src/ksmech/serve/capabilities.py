@@ -5,8 +5,8 @@ Klopman-Salem floor and applied with `arrows.apply_predicted`. Spec v8 predicts 
 step as a reaction matrix R = Delta(BE) decoded around a forming anchor bond, and
 `apply_predicted_arrows` now needs a leaving-bond choice per arrow. Every feature that ranks,
 applies or re-checks orbital-pair arrows is therefore off until it is ported; features that only
-read molecules (tokens, geometry, orbitals, depiction, PMechDB browse, the curation database)
-stay on.
+read molecules (tokens, geometry, orbitals, depiction, PMechDB browse, the curation database,
+the molecule workbench) stay on; `workbench` is listed as a capability that is always on.
 
 `CAPABILITIES` is evaluated once at import: {name: (enabled, reason)}, reason None when on.
 `require(name)` is the FastAPI dependency of a gated route: ServeError FEATURE_DISABLED (503)
@@ -56,7 +56,9 @@ ORDER = (
     "curate_edit",
     "curate_recheck",
     "export",
+    "workbench",
 )
+ALWAYS_ON = frozenset({"workbench"})  # display-only features that read molecules
 
 
 def _contact() -> tuple[bool, str | None]:
@@ -80,7 +82,10 @@ def _contact() -> tuple[bool, str | None]:
 def _evaluate() -> dict[str, tuple[bool, str | None]]:
     out: dict[str, tuple[bool, str | None]] = {}
     for name in ORDER:
-        out[name] = _contact() if name == "contact" else (False, _DISABLED[name])
+        if name in ALWAYS_ON:
+            out[name] = (True, None)
+        else:
+            out[name] = _contact() if name == "contact" else (False, _DISABLED[name])
     return out
 
 

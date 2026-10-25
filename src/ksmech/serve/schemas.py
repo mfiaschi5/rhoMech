@@ -1152,6 +1152,202 @@ class StepViewOut(_Out):
     recheck: RecheckRowOut | None
 
 
+# ---- molecule workbench (display only)
+
+
+class MoleculeIn(_In):
+    """Exactly one of `molblock` (V2000 / V3000, explicit H kept, stereo from the wedges) and
+    `smiles`. `retry` submits featurize again after a recorded failure."""
+
+    molblock: str | None = None
+    smiles: str | None = None
+    retry: bool = False
+
+
+class SketchMappingOut(_Out):
+    """Sketch atom i <-> record atom r (`prepare_mol(key)` order, H explicit)."""
+
+    n_sketch_atoms: int
+    n_record_atoms: int
+    sketch_to_record: list[int]
+    record_to_sketch: list[int | None]  # None: an implicit H of the drawing
+    record_parent_sketch: list[int | None]  # an implicit H -> its drawn heavy atom
+    chirality_matched: bool  # False: matched only with chirality ignored
+
+
+class MoleculeOut(_Out):
+    molecule_id: str
+    key: str  # data.chem.unmapped_canonical: the QM / token cache key
+    status: Literal["missing", "running", "ready", "qm_only", "failed"]
+    error: ErrorBody | None  # the recorded featurize failure (status failed or qm_only)
+    n_atoms: int | None
+    charge: int | None
+    multiplicity: int | None
+    chemistry: str
+    method: str
+    qm_ready: bool
+    tokens_ready: bool
+    mapping: SketchMappingOut | None  # only in the response to the POST of a drawing
+    mapping_error: str | None  # MAPPING_FAILED when the posted drawing did not match
+    warnings: list[str]
+
+
+class WorkbenchProvenanceOut(_Out):
+    chemistry: str
+    method: str
+    key: str
+    qm_digest: str  # sha256[:16] of the QM record file
+    token_digest: str | None  # sha256[:16] of the model token file, when one was used
+    versions: dict[str, int | str]
+    notes: list[str]
+
+
+class MoleculeGeometryOut(_Out):
+    molecule_id: str
+    key: str
+    charge: int
+    multiplicity: int
+    atoms: list[AtomXYZOut]  # global_site = record index, map None
+    bonds: list[tuple[int, int, int]]  # (record i, record j, order; 4 = aromatic)
+    xyz: str
+    molblock: str
+    frame_note: str
+
+
+class GlobalPropsOut(_Out):
+    energy_ha: float
+    energy_ev: float
+    homo_ev: float | None
+    lumo_ev: float | None
+    gap_ev: float | None
+    mu_ev: float | None  # chemical potential (E_HOMO + E_LUMO) / 2
+    eta_ev: float | None  # hardness (E_LUMO - E_HOMO) / 2
+    omega_ev: float | None  # electrophilicity mu^2 / (2 eta)
+    charge: int
+    multiplicity: int
+    n_atoms: int
+    n_ao: int
+    n_mo: int
+    n_occupied: int
+    n_valence_electrons: float
+    fermi_smeared: bool
+    pm_converged: bool | None  # of the model token file (None: no token file)
+    pm_sweeps_occ: int | None
+    pm_sweeps_virt: int | None
+    warnings: list[str]
+
+
+class AtomDiagnosticOut(_Out):
+    """model_input=False: chemist's labels, display only."""
+
+    diagnostic: Literal[True] = True
+    hybridization: str
+    aromatic: bool
+    fg_label: str
+
+
+class AtomPropsOut(_Out):
+    index: int  # record atom index
+    element: str
+    Z: int
+    formal_charge: int
+    mulliken_charge: float
+    f_plus_fd: float | None  # finite-difference condensed Fukui (diagnostic in the tokens)
+    f_minus_fd: float | None
+    f_zero_fd: float | None
+    dual_fd: float | None  # the dual descriptor the tokens carry (model input)
+    f_plus_fmo: float | None  # frozen-orbital, LUMO block / its size (model input)
+    f_minus_fmo: float | None
+    fmo_weights: list[float | None]  # HOMO-1, HOMO, LUMO, LUMO+1 block populations
+    vbur: float | None  # %Vbur, 3.5 Angstrom sphere
+    chirality: float  # +1 / -1 on a specified stereocentre, else 0
+    wiberg_valence: float  # sum of the atom's Wiberg indices
+    diagnostic: AtomDiagnosticOut
+
+
+class BondPropsOut(_Out):
+    i: int
+    j: int
+    bonded: bool  # a Lewis bond of the record; False: a non-bonded pair with W >= threshold
+    order: int | None  # Lewis order (4 = aromatic, not kekulized); None when not bonded
+    wiberg: float
+    length_ang: float
+
+
+class MoleculePropertiesOut(_Out):
+    molecule_id: str
+    key: str
+    global_props: GlobalPropsOut
+    atoms: list[AtomPropsOut]
+    bonds: list[BondPropsOut]
+    fmo_levels: list[str]
+    wiberg_threshold: float
+    geometry: MoleculeGeometryOut
+    provenance: WorkbenchProvenanceOut
+
+
+class OrbitalCentreOut(_Out):
+    atom: int  # record atom index
+    element: str
+    weight: float  # Mulliken (canonical) or the descriptor population (LMO)
+
+
+class OrbitalRowDiagnosticOut(_Out):
+    """model_input=False: the classifier's labels, display only."""
+
+    diagnostic: Literal[True] = True
+    type: str
+    parents: str
+    s_share: float | None
+    p_share: float | None
+    d_share: float | None
+    classifier_overlap_population: float | None
+    metal_bound: bool
+
+
+class OrbitalRowOut(_Out):
+    index: int  # the orbital's index in its set (the cube's `index`)
+    kind: Literal["occupied", "virtual"]
+    occupation: float
+    energy_ev: float  # canonical eps_k, or the LMO's E_r = sum_k p_rk E_k
+    label: str | None  # canonical: HOMO, HOMO-2, LUMO+1, ...
+    frontier: str | None  # canonical: homo_minus_1 | homo | lumo | lumo_plus_1 block member
+    level: int | None  # canonical: degenerate level (0.05 eV), ascending energy
+    centres: list[OrbitalCentreOut]
+    centroid: list[float] | None
+    model_input: OrbitalModelInputOut | None  # LMO: exactly the model-input descriptors
+    spectral: list[tuple[int, float, float]] | None  # LMO: (canonical index, E eV, weight)
+    retained_fraction: float | None
+    diagnostic: OrbitalRowDiagnosticOut | None
+
+
+class OrbitalSetStatsOut(_Out):
+    n_occupied: int
+    n_virtual: int
+    converged: bool | None  # localization convergence (None: canonical)
+    sweeps_occ: int | None
+    sweeps_virt: int | None
+    orthonormality_error: float  # max |C^T S C - I|
+    occupied_projector_error: float  # max |C_occ C_occ^T - (canonical)|, AO basis
+
+
+class OrbitalSetOut(_Out):
+    molecule_id: str
+    key: str
+    set: str  # canonical | ibo | pm_mulliken
+    start: str | None  # cholesky | canonical (None for the canonical set)
+    is_model_set: bool  # the localization the model's tokens use
+    source: Literal["canonical", "token_file", "workbench"]
+    homo_index: int | None
+    orbitals: list[OrbitalRowOut]
+    stats: OrbitalSetStatsOut
+    sets: list[str]
+    starts: list[str]
+    model_set: tuple[str, str]
+    notes: list[str]
+    provenance: WorkbenchProvenanceOut
+
+
 # ---- the TypeScript mirror
 
 TS_MODELS: list[type[BaseModel]] = [
