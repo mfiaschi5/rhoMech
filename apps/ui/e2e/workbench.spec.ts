@@ -14,6 +14,12 @@
 // and the quaternion convention matching 3Dmol's own screen positions
 // (data-projection-residual). Undo steps back through the three layouts. With
 // KSMECH_E2E_SHOTS=<dir> it saves screenshots there.
+// The overflow test computes ethanol and checks, at 1024 and 1440 px, that no button, select or
+// input of the workbench sticks out of its panel and that no panel scrolls sideways (only the
+// tables scroll inside theirs); a flip keeps the page linked. The transform test imports
+// L-alanine and flips it (the wedge becomes a hash, the SMILES is unchanged), turns it with the
+// selection frame's rotate handle (one undo step), rotates by the R key and scales from the "⋯"
+// menu, the canonical isomeric SMILES unchanged throughout.
 // Skipped, with the server's reason, while the workbench capability is off.
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -211,4 +217,119 @@ test.describe("layout", () => {
     await expect(sketch).toHaveAttribute("data-has-depth", "false");
     await expect(sketch).toHaveAttribute("data-break-crossings", "false");
   });
+});
+
+/** Buttons, selects and inputs of the workbench outside their panel, and panels that scroll
+ *  sideways; the tables (.wb-table-wrap, .wb-orbital-list) and popovers may scroll or overhang. */
+async function layoutOverflow(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const bad: string[] = [];
+    for (const panel of document.querySelectorAll<HTMLElement>(".workbench .panel")) {
+      const r = panel.getBoundingClientRect();
+      const name = panel.dataset.testid || panel.className;
+      if (panel.scrollWidth > panel.clientWidth + 1) bad.push(`${name} scrolls sideways (${panel.scrollWidth} > ${panel.clientWidth})`);
+      for (const el of panel.querySelectorAll<HTMLElement>("button, select, input")) {
+        if (el.closest(".wb-table-wrap, .wb-orbital-list, .sk-popover")) continue;
+        const b = el.getBoundingClientRect();
+        if (b.width === 0) continue;
+        if (b.left < r.left - 0.5 || b.right > r.right + 0.5) bad.push(`${name}: ${el.tagName} ${el.dataset.testid ?? el.textContent?.trim()} [${b.left}, ${b.right}] outside [${r.left}, ${r.right}]`);
+      }
+    }
+    if (document.documentElement.scrollWidth > window.innerWidth) bad.push("the page scrolls sideways");
+    return bad;
+  });
+}
+
+async function importSmiles(page: Page, smiles: string): Promise<void> {
+  await page.getByTestId("sketch-import").click();
+  await page.getByTestId("sketch-import-text").fill(smiles);
+  await page.getByTestId("sketch-import-load").click();
+}
+
+test("no control outside its panel at 1024 and 1440 px; a flip keeps the link", async ({ page, request }) => {
+  test.setTimeout(300_000);
+  await skipWithoutWorkbench(request);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/#/workbench");
+  await expect(page.locator("body[data-rdkit=ready]")).toBeAttached({ timeout: 90_000 });
+  await importSmiles(page, "CCO");
+  await expect(page.locator('[data-testid=sketch][data-smiles="CCO"]')).toBeVisible();
+  await page.getByTestId("wb-compute").click();
+  await expect(page.locator("[data-testid=wb-status][data-status=ready]")).toBeVisible({ timeout: 180_000 });
+  await expect(page.getByTestId("wb-orbitals")).toBeVisible({ timeout: 60_000 });
+  await page.getByTestId("tab-atoms").click();
+  await expect(page.locator("[data-testid=atom-row]").first()).toBeVisible({ timeout: 60_000 });
+  for (const width of [1024, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect.poll(() => layoutOverflow(page), { message: `overflow at ${width} px` }).toEqual([]);
+    await shot(page, "workbench", `layout-${width}.png`);
+  }
+  const wb = page.getByTestId("workbench");
+  await expect(wb).toHaveAttribute("data-linked", "true");
+  const before = await atomPositions(page);
+  await page.getByTestId("sketch-flip-h").click();
+  await expect.poll(() => atomPositions(page)).not.toBe(before);
+  await expect(wb).toHaveAttribute("data-linked", "true");
+  await expect(page.getByTestId("wb-stale-note")).toHaveCount(0);
+});
+
+/** data-smiles once the analysis describes the drawing on screen. */
+async function settledSmiles(page: Page): Promise<string> {
+  const sketch = page.getByTestId("sketch");
+  await expect(sketch).toHaveAttribute("data-status", "ready");
+  return (await sketch.getAttribute("data-smiles")) ?? "";
+}
+
+test("sketch transforms: flip, rotate handle, R key and scale keep the stereoisomer", async ({ page, request }) => {
+  test.setTimeout(180_000);
+  await skipWithoutWorkbench(request);
+  await page.goto("/#/workbench");
+  await expect(page.locator("body[data-rdkit=ready]")).toBeAttached({ timeout: 90_000 });
+  await importSmiles(page, "C[C@H](N)C(=O)O");
+  const sketch = page.getByTestId("sketch");
+  await expect(sketch).toHaveAttribute("data-atoms", "6");
+  const smiles = await settledSmiles(page);
+  expect(smiles).toContain("@");
+  const mark = page.locator(MARKS).first();
+  const stereo = (await mark.getAttribute("data-stereo")) ?? "";
+
+  // flip, nothing selected: the whole drawing; the wedge becomes a hash (or back)
+  let before = await atomPositions(page);
+  await page.getByTestId("sketch-flip-h").click();
+  await expect.poll(() => atomPositions(page)).not.toBe(before);
+  await expect(mark).toHaveAttribute("data-stereo", stereo === "wedge" ? "hash" : "wedge");
+  expect(await settledSmiles(page)).toBe(smiles);
+
+  // select all, drag the rotate handle a quarter turn about the frame
+  await page.getByTestId("sketch-canvas").hover();
+  await page.keyboard.press("Control+a");
+  const frame = page.getByTestId("sketch-frame");
+  await expect(frame).toBeVisible();
+  const fb = await frame.boundingBox();
+  const hb = await page.getByTestId("sketch-frame-rotate").boundingBox();
+  if (!fb || !hb) throw new Error("the selection frame has no box");
+  const [hx, hy] = [hb.x + hb.width / 2, hb.y + hb.height / 2];
+  const [cx, cy] = [fb.x + fb.width / 2, fb.y + fb.height / 2 + 11];
+  const flipped = await atomPositions(page);
+  await page.mouse.move(hx, hy);
+  await page.mouse.down();
+  await page.mouse.move(cx + (cy - hy), cy, { steps: 10 });
+  await page.mouse.up();
+  await expect.poll(() => atomPositions(page)).not.toBe(flipped);
+  expect(await settledSmiles(page)).toBe(smiles);
+  await page.getByTestId("sketch-undo").click();
+  await expect.poll(() => atomPositions(page)).toBe(flipped);
+
+  // R rotates 15 degrees, the menu scales by 10 %
+  before = await atomPositions(page);
+  await page.getByTestId("sketch-canvas").hover();
+  await page.keyboard.press("r");
+  await expect.poll(() => atomPositions(page)).not.toBe(before);
+  before = await atomPositions(page);
+  await page.getByTestId("sketch-more").click();
+  await page.getByTestId("sketch-scale-up").click();
+  await expect(page.getByTestId("sketch-more-menu")).toHaveCount(0);
+  await expect.poll(() => atomPositions(page)).not.toBe(before);
+  expect(await settledSmiles(page)).toBe(smiles);
+  await shot(page, "sketch", "transform.png");
 });

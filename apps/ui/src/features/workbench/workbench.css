@@ -1,5 +1,7 @@
 /* Molecule workbench: layout, 3D view, surfaces, level diagram, tables. Theme tokens of
-   styles.css only; the 3D canvas stays white in dark mode (3Dmol paints on white). */
+   styles.css only; the 3D canvas stays white in dark mode (3Dmol paints on white).
+   Overflow rule: toolbars wrap in groups, selects have bounded widths, and only the tables
+   (.wb-table-wrap, .wb-orbital-list) scroll inside their panel (e2e/workbench.spec.ts checks). */
 
 .workbench {
   --wb-selected: color-mix(in srgb, #f2c200 28%, transparent);
@@ -12,16 +14,32 @@
   gap: var(--gap);
 }
 
+.workbench select {
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+.workbench .panel {
+  min-width: 0;
+}
+
+/* sketch | 3D side by side from 1000 px, stacked below */
 .wb-grid {
   display: grid;
-  grid-template-columns: minmax(340px, 5fr) minmax(380px, 7fr);
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
   gap: var(--gap);
   align-items: start;
 }
 
-@media (max-width: 960px) {
+@media (min-width: 1700px) {
   .wb-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 999px) {
+  .wb-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -71,6 +89,11 @@
   align-items: center;
 }
 
+.wb-status {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .wb-status[data-status="ready"] {
   color: var(--ok);
 }
@@ -84,13 +107,27 @@
 
 .wb-toolbar {
   align-items: center;
-  gap: 8px;
+  gap: 6px 14px;
   margin-bottom: 8px;
+}
+
+.wb-tgroup {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.wb-export {
+  gap: 3px;
 }
 
 .wb-toolbar select {
   padding: 3px 6px;
   font-size: 13px;
+  min-width: 6em;
+  max-width: 12em;
 }
 
 .wb-viewer {
@@ -197,6 +234,13 @@
 
 .wb-layer-look input[type="range"] {
   width: 110px;
+  max-width: 100%;
+}
+
+.wb-layer-look .wb-inline,
+.wb-layer-head > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .wb-layer-look input[type="color"] {
@@ -210,11 +254,21 @@
   gap: 6px;
 }
 
+.wb-add-layer select {
+  min-width: 10em;
+  max-width: 18em;
+}
+
 /* ---- orbitals */
 
 .wb-orbital-pickers {
   align-items: center;
-  gap: 8px;
+  gap: 6px 12px;
+}
+
+.wb-orbital-pickers select {
+  min-width: 6em;
+  max-width: 14em;
 }
 
 .wb-levels {
@@ -222,7 +276,7 @@
 }
 
 .wb-levels svg {
-  max-width: 420px;
+  max-width: min(420px, 100%);
   display: block;
 }
 
@@ -293,6 +347,7 @@
 
 .wb-tab-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 2px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 8px;
@@ -316,6 +371,7 @@
 }
 
 .wb-table-wrap {
+  max-width: 100%;
   max-height: 380px;
   overflow: auto;
 }
@@ -340,9 +396,10 @@
 }
 
 .wb-kv {
-  grid-template-columns: max-content max-content;
+  grid-template-columns: max-content minmax(0, 1fr);
 }
 
 .wb-kv dd {
   text-align: left;
+  overflow-wrap: anywhere;
 }

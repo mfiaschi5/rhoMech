@@ -1,9 +1,12 @@
 // Pointer handling of the sketch canvas: hover by geometric hit test, clicks through
 // tools.applyClick, drags through gestures.dragModel (preview, committed on release), the
-// select tool's rubber band, middle-button (or Alt) panning and Ctrl/Cmd + wheel zoom.
+// select tool's rubber band, the selection frame's handles (frame.ts: rotate and scale the
+// selection, any tool; one commit on release), middle-button (or Alt) panning and Ctrl/Cmd +
+// wheel zoom.
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { dist, inRect, rectFrom, toModel, toScreen, type Rect, type Vec, type View } from "./geometry";
 import { dragModel, finishMove, movedAtoms, type DragStart } from "./gestures";
+import { frameHandleAt, handleDragModel, type HandleDrag, type SelectionFrame } from "./frame";
 import { applyClick, hitTest, NO_SELECTION, selectInRect, type Hit, type Selection } from "./tools";
 import type { SketchEditor } from "./useSketchEditor";
 
@@ -17,6 +20,8 @@ interface Press {
   moved: boolean;
   additive: boolean;
   pan: View | null;
+  /** A drag of a selection-frame handle. */
+  handle: HandleDrag | null;
 }
 
 export interface SketchPointer {
@@ -74,12 +79,19 @@ function finishDrag(ed: SketchEditor, view: View, d: Press, p: Vec, freeAngle: b
   else ed.commit(d.start.tool === "select" ? finishMove(d.start, m, toHit) : m);
 }
 
+/** The handle drag a press at p starts, or null when p is on no handle of the frame. */
+function startHandle(frame: SelectionFrame | null, p: Vec, ed: SketchEditor): HandleDrag | null {
+  const handle = frameHandleAt(frame, p);
+  return handle && frame ? { handle, ids: frame.ids, centre: frame.centre, from: p, base: ed.committed } : null;
+}
+
 export function useSketchPointer(
   ed: SketchEditor,
   svgRef: RefObject<SVGSVGElement | null>,
   view: View,
   setView: (v: View) => void,
   readOnly: boolean,
+  frame: SelectionFrame | null,
 ): SketchPointer {
   const press = useRef<Press | null>(null);
   const inside = useRef(false);
@@ -109,7 +121,8 @@ export function useSketchPointer(
     }
     const hit = hitTest(ed.committed, view, p);
     const start: DragStart = { tool: ed.tool, hit, at: toModel(view, p), base: ed.committed, selection: ed.selection };
-    press.current = { start, screen: p, moved: false, additive: e.shiftKey, pan: pan ? view : null };
+    const handle = pan ? null : startHandle(frame, p, ed);
+    press.current = { start, screen: p, moved: false, additive: e.shiftKey, pan: pan ? view : null, handle };
   };
 
   const onPointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
@@ -121,6 +134,10 @@ export function useSketchPointer(
     }
     if (!d.moved && dist(p, d.screen) < DRAG_START_PX) return;
     d.moved = true;
+    if (d.handle) {
+      ed.setPreview(handleDragModel(d.handle, view, p, e.shiftKey));
+      return;
+    }
     if (d.pan) {
       setView({ ...d.pan, ox: d.pan.ox + p[0] - d.screen[0], oy: d.pan.oy + p[1] - d.screen[1] });
       return;
@@ -140,6 +157,13 @@ export function useSketchPointer(
     press.current = null;
     if (!d || d.pan) return;
     const p = point(e);
+    if (d.handle) {
+      if (!d.moved) return;
+      const next = handleDragModel(d.handle, view, p, e.shiftKey);
+      if (next !== ed.committed) ed.commit(next);
+      else ed.setPreview(null);
+      return;
+    }
     if (!d.moved) clickPress(ed, view, d, p);
     else if (d.start.tool === "select" && !d.start.hit) {
       ed.setSelection(rubberSelection(view, d, p));

@@ -53,15 +53,31 @@
 }
 
 /* toolbar */
+/* two rows (tools + palette, actions), each of wrapping groups: nothing spills out of the panel */
 .sk-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sk-tool-row,
+.sk-action-row {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+  min-width: 0;
+}
+
+.sk-action-row {
+  column-gap: 10px;
 }
 
 .sk-group {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border);
@@ -70,9 +86,85 @@
 }
 
 .sk-actions {
-  gap: 4px;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
   border: none;
   background: none;
+}
+
+.sk-actions .btn-small {
+  height: 28px;
+  white-space: nowrap;
+}
+
+.sk-icon-btn {
+  width: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.sk-icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* the "⋯" menu of rarely used transforms */
+.sk-menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.sk-menu {
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 230px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.sk-menu.sk-menu-left {
+  right: auto;
+  left: 0;
+}
+
+.sk-menu-scope {
+  font-size: 11px;
+  padding: 2px 8px 4px;
+}
+
+.sk-menu-item {
+  font: inherit;
+  font-size: 13px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sk-menu-item:hover,
+.sk-menu-item:focus-visible {
+  background: var(--panel-2);
+}
+
+.sk-menu-item kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .sk-tool,
@@ -361,6 +453,9 @@
 .sk-style {
   font: inherit;
   font-size: 12px;
+  height: 28px;
+  min-width: 6.5em;
+  max-width: 9em;
   padding: 2px 4px;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -384,4 +479,28 @@
 
 .sk-fix-report.sk-error {
   color: var(--error);
+}
+
+/* selection frame: rotate and scale handles (frame.ts) */
+.sk-frame-box {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+
+.sk-frame-handle {
+  fill: var(--panel);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  pointer-events: all;
+}
+
+.sk-frame-rotate {
+  cursor: grab;
+}
+
+.sk-frame-handle:hover {
+  fill: var(--accent);
 }

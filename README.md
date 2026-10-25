@@ -101,6 +101,12 @@ then look at it:
   stays linked to the record, since only coordinates and wedges that keep its stereo change.
   `uv run --no-sync ksmech-serve gallery [--out DIR]` draws a fixed gallery of 22 hard
   molecules with every method, to judge the layouts by eye.
+- rotate and scale in the sketcher: with two or more atoms selected (rectangle or Ctrl+A) a
+  frame shows a rotation handle (drag; Shift snaps to 15°) and corner handles (drag to scale;
+  Shift for 5 % steps); the action row rotates by 15° (R / Shift+R), flips (Alt+H / Alt+V; a
+  flip swaps wedges and hashes so the drawing stays the same stereoisomer), and its "⋯" menu
+  turns by 90°, scales by 10 % (Ctrl+= / Ctrl+-) or resets the bond length. Without a selection
+  they apply to the whole drawing; each is one undo step and keeps the sketch linked.
 
 Defaults and approximations: the density is valence-only on GFN2's minimal basis (an STO-nG
 fit, so its integral is shown next to N_valence), the ESP is an approximate point-charge

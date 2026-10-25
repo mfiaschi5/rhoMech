@@ -20,7 +20,9 @@
 //      data-valid data-atoms data-bonds data-tool data-status (useSketchInfo status)
 //      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth
 //      data-busy (a layout is waiting for the server) data-clean-style>
-//   the toolbar (Toolbar.tsx), <svg data-testid="sketch-canvas"> (SketchCanvas.tsx), the
+//   the toolbar (Toolbar.tsx, ActionBar.tsx), <svg data-testid="sketch-canvas">
+//   (SketchCanvas.tsx; with two or more atoms selected, the selection frame with its rotate and
+//   scale handles, frame.ts), the
 //   import/export popovers (ImportExport.tsx) and <div data-testid="sketch-info"> (InfoBar.tsx).
 //
 // Keys (while the pointer is over the sketcher or focus is inside it; never while
@@ -33,6 +35,10 @@
 //   Ctrl+A                              select all
 //   Ctrl+V                              import the clipboard (SMILES or molfile)
 //   Shift+D  Shift+X                    3D -> 2D, crossing breaks
+//   R  Shift+R                          rotate 15 degrees clockwise / counter-clockwise
+//   Alt+H  Alt+V                        flip horizontal / vertical (wedges swap: same isomer)
+//   Ctrl+=  Ctrl+-                      scale up / down by 10 %
+//                                       (transforms: the selection, else the whole drawing)
 //   Esc                                 cancel the gesture, clear the selection, close popovers
 //
 // Demo / test harness (not a page; for a scratch mount or a Playwright test):
@@ -44,7 +50,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, 
 import { useRDKit, type RDKitModule } from "../../../chem/rdkit";
 import { setElement, type SketchModel } from "./model";
 import { fitView, type Vec, type View } from "./geometry";
-import { applyKey, NO_SELECTION } from "./tools";
+import { applyKey, NO_SELECTION, selectionAtoms } from "./tools";
+import { applyTransform, transformKey, transformTargets, type TransformAction } from "./transform";
+import { selectionFrame } from "./frame";
 import { exportSketch, importSketch } from "./rdkitSketch";
 import { useSketchEditor, type SketchEditor } from "./useSketchEditor";
 import { useSketchInfo } from "./useSketchInfo";
@@ -98,6 +106,7 @@ interface KeyDeps {
   closePanel(): void;
   importText(text: string): string | null;
   layout: LayoutActions;
+  transform(a: TransformAction): void;
 }
 
 /** Window keydown/paste listeners, live while the pointer is over the sketcher or focus is in the
@@ -134,9 +143,14 @@ function useSketchKeys(deps: KeyDeps) {
 }
 
 /** One keydown; true when it was handled. */
-function handleKey(e: KeyboardEvent, { ed, pointer, closePanel, layout }: KeyDeps): boolean {
+function handleKey(e: KeyboardEvent, { ed, pointer, closePanel, layout, transform }: KeyDeps): boolean {
   const mod = e.ctrlKey || e.metaKey;
   const k = e.key.toLowerCase();
+  const tf = transformKey(e);
+  if (tf) {
+    transform(tf);
+    return true;
+  }
   if (e.shiftKey && !mod && !e.altKey && layoutKey(k, layout)) return true;
   if (mod && k === "z") {
     if (e.shiftKey) ed.redo();
@@ -222,7 +236,12 @@ function useSketchActions(ed: SketchEditor, rdkit: RDKitModule | null, readOnly:
     if (err) console.warn("sketch drop:", err);
   };
   const clear = () => ed.commit({ atoms: [], bonds: [], nextId: ed.committed.nextId });
-  return { importText, onElement, onDrop, clear };
+  /** One undoable step; coordinates (and, for a flip, wedges and depth) only. */
+  const transform = (a: TransformAction) => {
+    const next = applyTransform(ed.committed, transformTargets(ed.committed, ed.selection), a);
+    if (next !== ed.committed) ed.commit(next);
+  };
+  return { importText, onElement, onDrop, clear, transform };
 }
 
 type SketchActions = ReturnType<typeof useSketchActions>;
@@ -261,6 +280,8 @@ function EditorToolbar(p: {
       onToggleBreaks={layout.toggleBreaks}
       panel={p.panel}
       onPanel={p.onPanel}
+      onTransform={act.transform}
+      hasSelection={ed.selection.atoms.size + ed.selection.bonds.size > 0}
     />
   );
 }
@@ -295,13 +316,14 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
   const svgRef = useRef<SVGSVGElement>(null);
   const { view, setView, fit } = useView(ed, useWidth(stageRef), height);
   const [panel, setPanel] = useState<SketchPanel>(null);
-  const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly);
+  const frame = useMemo(() => selectionFrame(ed.model, [...selectionAtoms(ed.committed, ed.selection)], view), [ed.model, ed.committed, ed.selection, view]);
+  const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly, frame);
   const act = useSketchActions(ed, rdkit, readOnly);
   const [cleanStyle, setCleanStyle] = useCleanStyle();
   const layout = useLayoutActions(ed, rdkit, projection, depictor, cleanStyle);
   const fresh = !info.stale && ed.model === ed.committed && info.valid;
   const closePanel = () => setPanel(null);
-  useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, importText: act.importText, layout });
+  useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, importText: act.importText, layout, transform: act.transform });
   const highlight = useMemo(() => new Set(highlightAtoms ?? []), [highlightAtoms]);
   const invalid = useMemo(() => new Set(info.badAtoms), [info.badAtoms]);
   const crossings = useMemo(() => findCrossings(ed.committed).length, [ed.committed]);
@@ -351,6 +373,7 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           highlight={highlight}
           invalid={invalid}
           rubber={pointer.rubber}
+          frame={frame}
           height={height}
           pointer={pointer}
           svgRef={svgRef}

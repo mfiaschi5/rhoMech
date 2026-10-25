@@ -1,20 +1,22 @@
-// Toolbar of the sketcher: the drawing tools, the element palette with its periodic picker,
-// and the actions (undo, redo, clean, fit, clear, import, export).
+// Toolbar of the sketcher: the drawing tools and the element palette with its periodic picker
+// on the first row (wrapping groups of icon buttons), the action row below (ActionBar.tsx: undo,
+// redo, clean, 3D->2D, crossing breaks, rotate/flip/scale, fit, clear, import, export).
 //
 // Props: tool / onTool, element / onElement (also the picker), the action callbacks with their
-// enabled flags, and `panel` / onPanel for the import/export popovers.
+// enabled flags, onTransform with hasSelection (the transforms' scope), and `panel` / onPanel
+// for the import/export popovers.
 //
 // DOM: <div data-testid="sketch-toolbar">, buttons tool-<name>[data-active], element-<El>
 // [data-active], element-more (opens <div data-testid="periodic-picker"> with periodic-<El>),
-// sketch-undo, sketch-redo, sketch-clean, <select data-testid="sketch-clean-style"> (textbook |
-// perspective), sketch-project (3D -> 2D; only with a projection source, disabled with the
-// reason as its title), sketch-break-toggle [data-active aria-pressed], sketch-fit,
-// sketch-clear, sketch-import, sketch-export. There is no "Fix layout": the server's RDKit
-// depiction replaced the home-made relaxation (docs/decisions.md, 2026-10-25).
+// then <div data-testid="sketch-actions"> (its testids in ActionBar.tsx). There is no "Fix
+// layout": the server's RDKit depiction replaced the home-made relaxation (docs/decisions.md,
+// 2026-10-25).
 import { useEffect, useState, type ReactNode } from "react";
 import { PALETTE, PERIODIC_ROWS, elementClass } from "./elements";
 import type { ToolName } from "./tools";
-import { CLEAN_STYLES, type CleanStyle } from "./depiction";
+import type { CleanStyle } from "./depiction";
+import type { TransformAction } from "./transform";
+import { ActionBar } from "./ActionBar";
 
 export type SketchPanel = "import" | "export" | null;
 
@@ -41,6 +43,9 @@ export interface ToolbarProps {
   onToggleBreaks(): void;
   panel: SketchPanel;
   onPanel(p: SketchPanel): void;
+  /** Rotate, flip or scale the selection (the whole drawing without one). */
+  onTransform(a: TransformAction): void;
+  hasSelection: boolean;
 }
 
 const ICON: Partial<Record<ToolName, ReactNode>> = {
@@ -141,22 +146,9 @@ function PeriodicPicker({ current, onPick }: { current: string; onPick(el: strin
   );
 }
 
-/** The 3D -> 2D button; a disabled one sits in a span that carries the reason as its tooltip
- *  (a disabled button gets no pointer events, so its own title never shows). */
-function ProjectButton({ enabled, reason, onProject }: NonNullable<ToolbarProps["projection"]>) {
-  const title = enabled
-    ? "Redraw the sketch as the 3D view shows the computed structure now (RDKit depiction matched to the view, or a perspective template; wedges keep the structure's stereo; crossings broken by depth) (Shift+D)"
-    : `3D→2D unavailable: ${reason ?? "no 3D view"}`;
-  return (
-    <span className="sk-tip" title={title} data-testid="sketch-project-wrap">
-      <button type="button" className="btn btn-small" data-testid="sketch-project" data-reason={enabled ? "" : (reason ?? "")} disabled={!enabled} onClick={onProject}>
-        3D→2D
-      </button>
-    </span>
-  );
-}
+const inPalette = (el: string) => PALETTE.includes(el as (typeof PALETTE)[number]);
 
-export function Toolbar(p: ToolbarProps) {
+function Palette({ tool, element, onPick }: { tool: ToolName; element: string; onPick(el: string): void }) {
   const [picker, setPicker] = useState(false);
   useEffect(() => {
     if (!picker) return;
@@ -166,83 +158,47 @@ export function Toolbar(p: ToolbarProps) {
   }, [picker]);
   const pick = (el: string) => {
     setPicker(false);
-    p.onElement(el);
+    onPick(el);
   };
-  const act = (id: string, label: string, onClick: () => void, enabled = true, title?: string) => (
-    <button type="button" className="btn btn-small" data-testid={id} disabled={!enabled} onClick={onClick} title={title}>
-      {label}
-    </button>
+  return (
+    <div className="sk-group sk-palette">
+      {PALETTE.map((el) => (
+        <button
+          key={el}
+          type="button"
+          data-testid={`element-${el}`}
+          data-active={tool === "atom" && element === el}
+          className={`sk-el ${elementClass(el)}${tool === "atom" && element === el ? " active" : ""}`}
+          title={`Element ${el}`}
+          onClick={() => pick(el)}
+        >
+          {el}
+        </button>
+      ))}
+      <span className="sk-picker-anchor">
+        <button type="button" data-testid="element-more" className={`sk-el${!inPalette(element) ? " active" : ""}`} title="Periodic table" aria-expanded={picker} onClick={() => setPicker((v) => !v)}>
+          {inPalette(element) ? "…" : element}
+        </button>
+        {picker && <PeriodicPicker current={element} onPick={pick} />}
+      </span>
+    </div>
   );
+}
+
+export function Toolbar(p: ToolbarProps) {
   return (
     <div className="sk-toolbar" data-testid="sketch-toolbar">
-      {GROUPS.map((g, i) => (
-        <div key={i} className="sk-group">
-          {g.map((t) => (
-            <ToolButton key={t} name={t} active={p.tool === t} onTool={p.onTool} />
-          ))}
-        </div>
-      ))}
-      <div className="sk-group sk-palette">
-        {PALETTE.map((el) => (
-          <button
-            key={el}
-            type="button"
-            data-testid={`element-${el}`}
-            data-active={p.tool === "atom" && p.element === el}
-            className={`sk-el ${elementClass(el)}${p.tool === "atom" && p.element === el ? " active" : ""}`}
-            onClick={() => pick(el)}
-          >
-            {el}
-          </button>
+      <div className="sk-tool-row">
+        {GROUPS.map((g, i) => (
+          <div key={i} className="sk-group">
+            {g.map((t) => (
+              <ToolButton key={t} name={t} active={p.tool === t} onTool={p.onTool} />
+            ))}
+          </div>
         ))}
-        <span className="sk-picker-anchor">
-          <button
-            type="button"
-            data-testid="element-more"
-            className={`sk-el${!PALETTE.includes(p.element as (typeof PALETTE)[number]) ? " active" : ""}`}
-            title="Periodic table"
-            aria-expanded={picker}
-            onClick={() => setPicker((v) => !v)}
-          >
-            {PALETTE.includes(p.element as (typeof PALETTE)[number]) ? "…" : p.element}
-          </button>
-          {picker && <PeriodicPicker current={p.element} onPick={pick} />}
-        </span>
+        <Palette tool={p.tool} element={p.element} onPick={p.onElement} />
       </div>
-      <div className="sk-group sk-actions">
-        {act("sketch-undo", "Undo", p.onUndo, p.canUndo, "Ctrl+Z")}
-        {act("sketch-redo", "Redo", p.onRedo, p.canRedo, "Ctrl+Shift+Z / Ctrl+Y")}
-        {act("sketch-clean", p.busy ? "Clean…" : "Clean", p.onClean, p.canClean, "Server 2D layout (RDKit): textbook = ring templates or CoordGen, perspective = chairs, cages and bicycles drawn in perspective")}
-        <select
-          className="sk-style"
-          data-testid="sketch-clean-style"
-          value={p.cleanStyle}
-          title="Clean style"
-          onChange={(e) => p.onCleanStyle(e.target.value as CleanStyle)}
-        >
-          {CLEAN_STYLES.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        {p.projection && <ProjectButton {...p.projection} />}
-        <button
-          type="button"
-          className={`btn btn-small sk-toggle${p.breakCrossings ? " active" : ""}`}
-          data-testid="sketch-break-toggle"
-          data-active={p.breakCrossings}
-          aria-pressed={p.breakCrossings}
-          onClick={p.onToggleBreaks}
-          title="Break crossings: draw the bond behind a crossing with a gap (by depth after a projection, else the later bond is in front) (Shift+X)"
-        >
-          Break crossings
-        </button>
-        {act("sketch-fit", "Fit", p.onFit)}
-        {act("sketch-clear", "Clear", p.onClear)}
-        {act("sketch-import", "Import", () => p.onPanel(p.panel === "import" ? null : "import"), true, "Paste SMILES or a molfile, or drop a .mol/.sdf file")}
-        {act("sketch-export", "Export", () => p.onPanel(p.panel === "export" ? null : "export"))}
-      </div>
+      <ActionBar {...p} />
     </div>
   );
 }

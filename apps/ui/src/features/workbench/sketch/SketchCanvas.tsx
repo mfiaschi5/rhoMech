@@ -9,6 +9,7 @@
 //   hover, selection     the hovered object and the selection (tools.Hit / tools.Selection)
 //   highlight, invalid   atom ids drawn with the highlight halo / in the error colour
 //   rubber               select rubber band (screen px) or null
+//   frame                the selection frame (frame.ts) or null: drawn with its handles
 //   height               px; the width follows the container
 //   pointer              the useSketchPointer handlers
 //   svgRef
@@ -18,11 +19,14 @@
 //      data-broken="<n>" (only on a bond drawn broken behind n crossings)>
 //   <g data-testid="sketch-atom-<id>" data-element data-charge data-h data-selected
 //      data-highlighted data-invalid data-hovered>
+//   <g data-testid="sketch-frame" data-atoms="<n>"> with sketch-frame-rotate (circle) and
+//      sketch-frame-corner-<0..3> (top-left, top-right, bottom-right, bottom-left)
 import type { RefObject } from "react";
 import type { SketchModel } from "./model";
 import type { Rect, Vec, View } from "./geometry";
 import type { Hit, Selection } from "./tools";
 import type { SketchPointer } from "./useSketchPointer";
+import type { SelectionFrame } from "./frame";
 import { buildScene, FONT_PX, hLabelWidth, labelHalfWidth, type AtomScene, type BondScene } from "./drawing";
 import { elementClass } from "./elements";
 
@@ -35,6 +39,7 @@ export interface SketchCanvasProps {
   highlight: ReadonlySet<number>;
   invalid: ReadonlySet<number>;
   rubber: Rect | null;
+  frame: SelectionFrame | null;
   height: number;
   pointer: SketchPointer;
   svgRef: RefObject<SVGSVGElement | null>;
@@ -137,8 +142,29 @@ function AtomView(props: { s: AtomScene; selected: boolean; hovered: boolean; hi
   );
 }
 
+const CORNER_CURSORS = ["nwse-resize", "nesw-resize", "nwse-resize", "nesw-resize"];
+
+function FrameView({ f }: { f: SelectionFrame }) {
+  const { box, rotate } = f;
+  const top: Vec = [(box.x0 + box.x1) / 2, box.y0];
+  return (
+    <g className="sk-frame" data-testid="sketch-frame" data-atoms={f.ids.length}>
+      <rect className="sk-frame-box" x={box.x0} y={box.y0} width={box.x1 - box.x0} height={box.y1 - box.y0} />
+      <line className="sk-frame-box" x1={top[0]} y1={top[1]} x2={rotate[0]} y2={rotate[1]} />
+      <circle className="sk-frame-handle sk-frame-rotate" data-testid="sketch-frame-rotate" cx={rotate[0]} cy={rotate[1]} r={5.5}>
+        <title>Drag to rotate about the centre (Shift: 15° steps)</title>
+      </circle>
+      {f.corners.map((c, i) => (
+        <rect key={i} className="sk-frame-handle" data-testid={`sketch-frame-corner-${i}`} x={c[0] - 4.5} y={c[1] - 4.5} width={9} height={9} style={{ cursor: CORNER_CURSORS[i] }}>
+          <title>Drag to scale (Shift: 5 % steps)</title>
+        </rect>
+      ))}
+    </g>
+  );
+}
+
 export function SketchCanvas(props: SketchCanvasProps) {
-  const { model, view, hCounts, hover, selection, highlight, invalid, rubber, height, pointer, svgRef, readOnly } = props;
+  const { model, view, hCounts, hover, selection, highlight, invalid, rubber, frame, height, pointer, svgRef, readOnly } = props;
   const scene = buildScene(model, view, hCounts);
   const isHover = (kind: "atom" | "bond", id: number) => hover?.kind === kind && hover.id === id;
   return (
@@ -172,6 +198,7 @@ export function SketchCanvas(props: SketchCanvasProps) {
           />
         ))}
       </g>
+      {frame && !readOnly && <FrameView f={frame} />}
       {rubber && <rect className="sk-rubber" x={rubber.x0} y={rubber.y0} width={rubber.x1 - rubber.x0} height={rubber.y1 - rubber.y0} />}
     </svg>
   );
