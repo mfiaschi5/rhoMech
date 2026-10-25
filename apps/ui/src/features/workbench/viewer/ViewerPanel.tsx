@@ -1,25 +1,26 @@
 // ViewerPanel: the workbench's one 3Dmol view of the computed molecule (record geometry and
 // atom order): representation, labels, colour by property with its colour bar, Wiberg labels,
-// orbital centroids, selection halos, click-to-measure, exports and the surface layers.
+// orbital centroids, selection halos, click-to-measure and exports. The surface layers are their
+// own panel (SurfaceControls.tsx, placed by the page's layout) drawing on the same viewer.
 //
 // onViewer(v) hands the 3Dmol viewer (null when gone) to the page, which reads its orientation
-// for the sketcher's 3D -> 2D projection (viewProjection.ts).
+// for the sketcher's 3D -> 2D projection (viewProjection.ts) and gives it to the surfaces.
+// `height` is the view's height in px (the layout's row splitter); the viewer is resized
+// whenever its box changes (splitters, a panel shown again).
 //
-// DOM: <section data-testid="wb-viewer-panel">, <div data-testid="wb-viewer"
+// DOM: <div data-testid="wb-viewer-panel">, <div data-testid="wb-viewer"
 // data-state="loading|ready|error|webgl-unavailable" data-rep data-selected-atoms="0,2"
-// data-has-geometry>, measurement rows wb-measure, the toolbar and SurfaceControls.
+// data-has-geometry>, measurement rows wb-measure and the toolbar.
 import { useEffect, useMemo, useState } from "react";
 import type { GLViewer } from "3dmol";
 import type { CubeQuality } from "../../../api/client";
 import type { MoleculeGeometryOut, MoleculePropertiesOut, OrbitalSetOut } from "../../../api/types.gen";
 import { atomPropDefs, findProp, propRange } from "../atomProps";
-import type { LayerSpec, Rep } from "../params";
+import type { Rep } from "../params";
 import { setHover, toggleAtom, useSelection } from "../store";
 import { ColourBar } from "./ColourBar";
-import type { SurfaceLayer } from "./layers";
 import { MEASURE_ATOMS, measure, measureText, type Measurement, type P3 } from "./measure";
 import { useAtomClicks, useAtomLabels, useBondLabels, useCentroids, useHalos, useMeasurements, useModel, useStyle, type AtomColouring } from "./scene";
-import { SurfaceControls } from "./SurfaceControls";
 import { useGLViewer, type ViewerHandle } from "./useGLViewer";
 import { DEFAULT_VIEW, ViewerToolbar, type ViewOptions } from "./ViewerToolbar";
 
@@ -34,14 +35,29 @@ export interface ViewerPanelProps {
   onRep(r: Rep): void;
   quality: CubeQuality;
   onQuality(q: CubeQuality): void;
-  layers: SurfaceLayer[];
-  orbitalSpec: LayerSpec | null;
-  onLayerChange(l: SurfaceLayer): void;
-  onLayerRemove(id: string): void;
-  onLayerPin(l: SurfaceLayer): void;
-  onLayerAdd(s: LayerSpec): void;
   fileStem: string;
   onViewer?(v: GLViewer | null): void;
+  /** Height of the 3D view (px). */
+  height?: number;
+}
+
+/** Resize the viewer to its element whenever the element's box changes. */
+function useViewerResize(viewer: GLViewer | null, el: HTMLDivElement | null): void {
+  useEffect(() => {
+    if (!viewer || !el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      try {
+        if (el.clientWidth > 0 && el.clientHeight > 0) {
+          viewer.resize();
+          viewer.render();
+        }
+      } catch {
+        // the viewer is going away
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [viewer, el]);
 }
 
 function download(name: string, href: string): void {
@@ -114,6 +130,7 @@ export function ViewerPanel(p: ViewerPanelProps) {
   const [el, setEl] = useState<HTMLDivElement | null>(null);
   const handle = useGLViewer(el);
   const viewer = handle.viewer;
+  useViewerResize(viewer, el);
   const { onViewer } = p;
   useEffect(() => {
     onViewer?.(viewer);
@@ -139,7 +156,7 @@ export function ViewerPanel(p: ViewerPanelProps) {
     if (what === "mol") downloadText(`${p.fileStem}.mol`, p.geometry.molblock, "chemical/x-mdl-molfile");
   };
   return (
-    <section className="panel wb-viewer-panel" data-testid="wb-viewer-panel">
+    <div className="wb-viewer-panel" data-testid="wb-viewer-panel">
       <ViewerToolbar rep={p.rep} onRep={p.onRep} quality={p.quality} onQuality={p.onQuality} view={view} onView={setView} props={defs} canExport={!!p.geometry} onExport={onExport} />
       <ViewerStatus handle={handle} />
       <div
@@ -149,6 +166,7 @@ export function ViewerPanel(p: ViewerPanelProps) {
         data-rep={p.rep}
         data-selected-atoms={sel.atoms.join(",")}
         data-has-geometry={p.geometry ? "true" : "false"}
+        style={p.height ? { height: p.height } : undefined}
         onPointerLeave={() => setHover(null)}
       >
         <div className="wb-canvas" ref={setEl} />
@@ -158,19 +176,6 @@ export function ViewerPanel(p: ViewerPanelProps) {
         <ColourBar role="atoms" label={colouring.def.label} scale={colouring.def.signed ? "rwb" : "seq"} min={colouring.range[0]} max={colouring.range[1]} note={colouring.def.title} />
       )}
       <Measurements m={tool} onClear={tool.clear} />
-      {p.mid && (
-        <SurfaceControls
-          viewer={viewer}
-          mid={p.mid}
-          quality={p.quality}
-          layers={p.layers}
-          orbital={p.orbitalSpec}
-          onChange={p.onLayerChange}
-          onRemove={p.onLayerRemove}
-          onPin={p.onLayerPin}
-          onAdd={p.onLayerAdd}
-        />
-      )}
-    </section>
+    </div>
   );
 }

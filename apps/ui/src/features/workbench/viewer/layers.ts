@@ -44,14 +44,15 @@ export const KIND_LOOK: Record<CubeKind, KindLook> = {
 
 let counter = 0;
 
-export function newLayer(spec: LayerSpec, follow = false): SurfaceLayer {
+/** A new layer with its kind's look; `iso` overrides the kind's default isovalue. */
+export function newLayer(spec: LayerSpec, follow = false, iso?: number): SurfaceLayer {
   const s = normalizeSpec(spec);
   const look = KIND_LOOK[s.kind];
   counter += 1;
   return {
     id: `${follow ? "follow" : "pin"}-${counter}`,
     spec: s,
-    iso: look.iso,
+    iso: iso ?? look.iso,
     opacity: look.opacity,
     mesh: false,
     pos: look.pos,

@@ -6,7 +6,8 @@
 // enabled flags, onTransform with hasSelection (the transforms' scope), and `panel` / onPanel
 // for the import/export popovers.
 //
-// DOM: <div data-testid="sketch-toolbar">, buttons tool-<name>[data-active], element-<El>
+// DOM: <div data-testid="sketch-toolbar">, buttons tool-<name>[data-active] (tool-radical and
+// tool-diradical give an atom one or two unpaired electrons; again: clear), element-<El>
 // [data-active], element-more (opens <div data-testid="periodic-picker"> with periodic-<El>),
 // then <div data-testid="sketch-actions"> (its testids in ActionBar.tsx). There is no "Fix
 // layout": the server's RDKit depiction replaced the home-made relaxation (docs/decisions.md,
@@ -46,6 +47,9 @@ export interface ToolbarProps {
   /** Rotate, flip or scale the selection (the whole drawing without one). */
   onTransform(a: TransformAction): void;
   hasSelection: boolean;
+  /** The R/S toggle: CIP labels drawn on the canvas and listed in the info bar. */
+  showCip: boolean;
+  onToggleCip(): void;
 }
 
 const ICON: Partial<Record<ToolName, ReactNode>> = {
@@ -69,6 +73,19 @@ const ICON: Partial<Record<ToolName, ReactNode>> = {
   cyclohexane: <polygon points="9,2 15,5.5 15,12.5 9,16 3,12.5 3,5.5" />,
   cyclopentane: <polygon points="9,2 15.7,6.9 13.1,14.8 4.9,14.8 2.3,6.9" />,
   eraser: <path d="M4 12 L10 4 L15 8 L9 16 Z M4 12 L9 16" />,
+  radical: (
+    <g>
+      <text x="2" y="15" className="fill sk-tool-glyph">C</text>
+      <circle cx="14" cy="5" r="2" className="fill" />
+    </g>
+  ),
+  diradical: (
+    <g>
+      <text x="2" y="15" className="fill sk-tool-glyph">C</text>
+      <circle cx="11.5" cy="4.5" r="1.8" className="fill" />
+      <circle cx="16" cy="4.5" r="1.8" className="fill" />
+    </g>
+  ),
 };
 
 const TEXT: Partial<Record<ToolName, string>> = {
@@ -91,6 +108,8 @@ const TITLE: Record<ToolName, string> = {
   "charge-plus": "Charge +1",
   "charge-minus": "Charge −1",
   "explicit-h": "Show the label and H count of an atom",
+  radical: "Radical: click an atom to give it one unpaired electron (again: clear). Key \".\" cycles none / one / two. Radicals can be drawn but not computed yet",
+  diradical: "Diradical / carbene: click an atom to give it two unpaired electrons (again: clear). Radicals can be drawn but not computed yet",
   eraser: "Eraser",
 };
 
@@ -99,6 +118,7 @@ const GROUPS: ToolName[][] = [
   ["bond", "wedge", "hash", "chain"],
   ["benzene", "cyclohexane", "cyclopentane"],
   ["atom", "charge-plus", "charge-minus", "explicit-h"],
+  ["radical", "diradical"],
 ];
 
 function ToolButton({ name, active, onTool }: { name: ToolName; active: boolean; onTool(t: ToolName): void }) {

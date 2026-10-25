@@ -1,7 +1,8 @@
 /* Molecule workbench: layout, 3D view, surfaces, level diagram, tables. Theme tokens of
    styles.css only; the 3D canvas stays white in dark mode (3Dmol paints on white).
    Overflow rule: toolbars wrap in groups, selects have bounded widths, and only the tables
-   (.wb-table-wrap, .wb-orbital-list) scroll inside their panel (e2e/workbench.spec.ts checks). */
+   (.wb-table-wrap, .wb-orbital-list) scroll inside their panel (e2e/workbench.spec.ts checks,
+   for every layout preset). The panel styles of the customizable layout are in layout.css. */
 
 .workbench {
   --wb-selected: color-mix(in srgb, #f2c200 28%, transparent);
@@ -23,37 +24,18 @@
   min-width: 0;
 }
 
-/* sketch | 3D side by side from 1000 px, stacked below */
+/* the columns of the layout (layout/LayoutGrid.tsx sets --wb-cols), stacked below 1000 px */
 .wb-grid {
   display: grid;
-  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-  gap: var(--gap);
+  grid-template-columns: var(--wb-cols, minmax(0, 5fr) 8px minmax(0, 7fr));
   align-items: start;
-}
-
-@media (min-width: 1700px) {
-  .wb-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 999px) {
   .wb-grid {
     grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--gap);
   }
-}
-
-.wb-left,
-.wb-right {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap);
-  min-width: 0;
-}
-
-.wb-left .panel + .panel,
-.wb-right .panel + .panel {
-  margin-top: 0;
 }
 
 .wb-small {
@@ -133,7 +115,7 @@
 .wb-viewer {
   position: relative;
   width: 100%;
-  height: 460px;
+  height: var(--wb-viewer-h, 460px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: #ffffff;
@@ -189,7 +171,7 @@
 /* ---- surfaces */
 
 .wb-surfaces {
-  margin-top: 10px;
+  margin-top: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -280,6 +262,10 @@
   display: block;
 }
 
+.wb-orbital-diagram .wb-levels svg {
+  max-width: 100%;
+}
+
 .wb-axis line {
   stroke: var(--muted);
   stroke-width: 1;
@@ -343,6 +329,74 @@
   overflow: auto;
 }
 
+/* the diagram with the orbital info beside it (or below it in a narrow panel), the thin bar
+   between them folds the info away */
+.wb-orbitals {
+  container-type: inline-size;
+}
+
+.wb-orbital-body {
+  display: grid;
+  grid-template-columns: minmax(180px, 340px) 14px minmax(0, 1fr);
+  gap: 0 8px;
+  align-items: start;
+}
+
+.wb-orbital-body.folded {
+  grid-template-columns: minmax(180px, 340px) 14px;
+}
+
+.wb-orbital-diagram,
+.wb-orbital-info {
+  min-width: 0;
+}
+
+.wb-orbital-info .wb-orbital-list {
+  max-height: max(200px, calc(var(--wb-orbitals-h, 380px) - 40px));
+}
+
+.wb-info-toggle {
+  align-self: stretch;
+  min-height: 60px;
+  margin: 8px 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.wb-info-toggle:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+@container (max-width: 460px) {
+  .wb-orbital-body,
+  .wb-orbital-body.folded {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wb-orbital-diagram svg {
+    max-width: min(420px, 100%);
+  }
+
+  .wb-info-toggle {
+    min-height: 0;
+    height: 14px;
+    margin: 0 0 6px;
+    line-height: 10px;
+  }
+
+  .wb-info-toggle span {
+    display: inline-block;
+    transform: rotate(90deg);
+  }
+}
+
 /* ---- tables */
 
 .wb-tab-bar {
@@ -372,7 +426,7 @@
 
 .wb-table-wrap {
   max-width: 100%;
-  max-height: 380px;
+  max-height: var(--wb-table-h, 380px);
   overflow: auto;
 }
 

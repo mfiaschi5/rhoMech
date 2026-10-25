@@ -13,21 +13,28 @@
 //   height               px; the width follows the container
 //   pointer              the useSketchPointer handlers
 //   svgRef
+//   cip                  CIP labels to draw (the R/S toggle; null: none)
+//   display              label font size and label style (the page's sketch preferences)
 //
 // DOM: <svg data-testid="sketch-canvas"> with
 //   <g data-testid="sketch-bond-<id>" data-order="1|2|3" data-stereo data-selected data-hovered
-//      data-broken="<n>" (only on a bond drawn broken behind n crossings)>
-//   <g data-testid="sketch-atom-<id>" data-element data-charge data-h data-selected
-//      data-highlighted data-invalid data-hovered>
+//      data-broken="<n>" (only on a bond drawn broken behind n crossings) data-cip="E|Z" (only
+//      while R/S is on and RDKit labels it)>, with <text data-testid="sketch-cip-bond-<id>">
+//   <g data-testid="sketch-atom-<id>" data-element data-charge data-h data-radical="1|2" (only
+//      with unpaired electrons; drawn as dots circle.sk-radical) data-cip="R|S|r|s|?" (only
+//      while R/S is on) data-selected data-highlighted data-invalid data-hovered>, with
+//      <text data-testid="sketch-cip-atom-<id>">
 //   <g data-testid="sketch-frame" data-atoms="<n>"> with sketch-frame-rotate (circle) and
 //      sketch-frame-corner-<0..3> (top-left, top-right, bottom-right, bottom-left)
-import type { RefObject } from "react";
+import type { CSSProperties, RefObject } from "react";
 import type { SketchModel } from "./model";
 import type { Rect, Vec, View } from "./geometry";
 import type { Hit, Selection } from "./tools";
 import type { SketchPointer } from "./useSketchPointer";
 import type { SelectionFrame } from "./frame";
-import { buildScene, FONT_PX, hLabelWidth, labelHalfWidth, type AtomScene, type BondScene } from "./drawing";
+import type { StereoLabels } from "./cip";
+import { buildScene, hLabelWidth, labelHalfWidth, type AtomScene, type BondScene, type LabelStyle, type Mark } from "./drawing";
+import { DOT_R_PX } from "./marks";
 import { elementClass } from "./elements";
 
 export interface SketchCanvasProps {
@@ -44,6 +51,8 @@ export interface SketchCanvasProps {
   pointer: SketchPointer;
   svgRef: RefObject<SVGSVGElement | null>;
   readOnly: boolean;
+  cip?: StereoLabels | null;
+  display?: { fontPx?: number; labelStyle?: LabelStyle };
 }
 
 /** A band of half-width w around p-q (a bond's hit target; a line has a zero-area bbox when
@@ -64,6 +73,16 @@ function hitBand(p: Vec, q: Vec, w: number): Vec[] {
 
 const pts = (vs: readonly Vec[]) => vs.map((v) => `${v[0].toFixed(2)},${v[1].toFixed(2)}`).join(" ");
 
+function CipMark({ m, testId }: { m: Mark; testId: string }) {
+  return (
+    <text className="sk-cip" data-testid={testId} x={m.at[0]} y={m.at[1]} textAnchor="middle" dominantBaseline="central">
+      {m.text}
+    </text>
+  );
+}
+
+const cipCode = (m: Mark | undefined) => (m ? m.text.replace(/[()]/g, "") : undefined);
+
 function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; hovered: boolean }) {
   const { bond, shape, axis } = s;
   return (
@@ -72,6 +91,7 @@ function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; h
       data-order={bond.order}
       data-stereo={bond.stereo}
       data-broken={s.broken > 0 ? s.broken : undefined}
+      data-cip={cipCode(s.cip)}
       data-selected={selected}
       data-hovered={hovered}
       className="sk-bond"
@@ -84,18 +104,19 @@ function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; h
       ))}
       {shape.wedges?.map((w, i) => <polygon key={`w${i}`} className="sk-wedge" points={pts(w)} />)}
       <polygon className="sk-hit" points={pts(hitBand(axis.p, axis.q, 5))} />
+      {s.cip && <CipMark m={s.cip} testId={`sketch-cip-bond-${bond.id}`} />}
     </g>
   );
 }
 
 const subDigits = (n: number) => (n > 1 ? String(n) : "");
 
-function AtomLabelView({ s }: { s: AtomScene }) {
+function AtomLabelView({ s, font }: { s: AtomScene; font: number }) {
   const { label, at } = s;
   if (!label) return null;
-  const half = labelHalfWidth(label.el);
+  const half = labelHalfWidth(label.el, font);
   const hText = label.hCount > 0 ? "H" : "";
-  const hWidth = hLabelWidth(label.hCount);
+  const hWidth = hLabelWidth(label.hCount, font);
   const right = label.hSide === "right";
   const chargeX = at[0] + half + (right ? hWidth : 0) + 1;
   return (
@@ -105,11 +126,11 @@ function AtomLabelView({ s }: { s: AtomScene }) {
       </text>
       {hText && (
         <text x={right ? at[0] + half : at[0] - half} y={at[1]} textAnchor={right ? "start" : "end"} dominantBaseline="central">
-          H<tspan className="sk-sub" dy={4}>{subDigits(label.hCount)}</tspan>
+          H<tspan className="sk-sub" dy={font * 0.3}>{subDigits(label.hCount)}</tspan>
         </text>
       )}
       {label.charge && (
-        <text className="sk-charge" x={chargeX} y={at[1] - FONT_PX * 0.55} textAnchor="start" dominantBaseline="central">
+        <text className="sk-charge" x={chargeX} y={at[1] - font * 0.55} textAnchor="start" dominantBaseline="central">
           {label.charge}
         </text>
       )}
@@ -117,8 +138,8 @@ function AtomLabelView({ s }: { s: AtomScene }) {
   );
 }
 
-function AtomView(props: { s: AtomScene; selected: boolean; hovered: boolean; highlighted: boolean; invalid: boolean }) {
-  const { s, selected, hovered, highlighted, invalid } = props;
+function AtomView(props: { s: AtomScene; font: number; selected: boolean; hovered: boolean; highlighted: boolean; invalid: boolean }) {
+  const { s, font, selected, hovered, highlighted, invalid } = props;
   const { atom, at, label } = s;
   const cls = ["sk-atom", invalid ? "sk-invalid" : "", highlighted ? "sk-highlighted" : ""].join(" ").trim();
   return (
@@ -127,6 +148,8 @@ function AtomView(props: { s: AtomScene; selected: boolean; hovered: boolean; hi
       data-element={atom.el}
       data-charge={atom.charge}
       data-h={label ? label.hCount : undefined}
+      data-radical={atom.radical}
+      data-cip={cipCode(s.cip)}
       data-selected={selected}
       data-highlighted={highlighted}
       data-invalid={invalid}
@@ -136,7 +159,11 @@ function AtomView(props: { s: AtomScene; selected: boolean; hovered: boolean; hi
       {highlighted && <circle className="sk-highlight" cx={at[0]} cy={at[1]} r={12} />}
       {invalid && <circle className="sk-invalid-ring" cx={at[0]} cy={at[1]} r={10} />}
       {(selected || hovered) && <circle className={selected ? "sk-dot sk-selected" : "sk-dot"} cx={at[0]} cy={at[1]} r={8} />}
-      <AtomLabelView s={s} />
+      <AtomLabelView s={s} font={font} />
+      {s.dots.map((d, i) => (
+        <circle key={`r${i}`} className="sk-radical" cx={d[0]} cy={d[1]} r={DOT_R_PX} />
+      ))}
+      {s.cip && <CipMark m={s.cip} testId={`sketch-cip-atom-${atom.id}`} />}
       <circle className="sk-hit" cx={at[0]} cy={at[1]} r={9} />
     </g>
   );
@@ -165,7 +192,8 @@ function FrameView({ f }: { f: SelectionFrame }) {
 
 export function SketchCanvas(props: SketchCanvasProps) {
   const { model, view, hCounts, hover, selection, highlight, invalid, rubber, frame, height, pointer, svgRef, readOnly } = props;
-  const scene = buildScene(model, view, hCounts);
+  const scene = buildScene(model, view, hCounts, { ...props.display, cip: props.cip ?? null });
+  const font = scene.fontPx;
   const isHover = (kind: "atom" | "bond", id: number) => hover?.kind === kind && hover.id === id;
   return (
     <svg
@@ -174,6 +202,7 @@ export function SketchCanvas(props: SketchCanvasProps) {
       className={`sketch-svg${readOnly ? " read-only" : ""}`}
       width="100%"
       height={height}
+      style={{ "--sk-font": `${font}px` } as CSSProperties}
       tabIndex={0}
       onPointerDown={pointer.onPointerDown}
       onPointerMove={pointer.onPointerMove}
@@ -191,6 +220,7 @@ export function SketchCanvas(props: SketchCanvasProps) {
           <AtomView
             key={s.atom.id}
             s={s}
+            font={font}
             selected={selection.atoms.has(s.atom.id)}
             hovered={isHover("atom", s.atom.id)}
             highlighted={highlight.has(s.atom.id)}

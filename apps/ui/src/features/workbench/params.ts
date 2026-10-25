@@ -82,8 +82,9 @@ export function formatLayers(specs: readonly LayerSpec[]): string {
   return specs.map(specKey).join(",");
 }
 
-export function parseRep(value: string | null): Rep {
-  return (REPS as readonly string[]).includes(value ?? "") ? (value as Rep) : DEFAULT_REP;
+/** The `rep` param, else `fallback` (the user's default representation). */
+export function parseRep(value: string | null, fallback: Rep = DEFAULT_REP): Rep {
+  return (REPS as readonly string[]).includes(value ?? "") ? (value as Rep) : fallback;
 }
 
 export function parseQuality(value: string | null): CubeQuality {

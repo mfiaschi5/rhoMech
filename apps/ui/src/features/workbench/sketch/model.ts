@@ -14,9 +14,15 @@
 // data like explicitH: kept by every edit (atoms are spread, never rebuilt), by undo and by the
 // session store (sketchExtras), never written to molfile coordinates (z stays 0 there, so
 // RDKit reads a 2D drawing). `breakCrossings` draws the bond behind a crossing interrupted.
+//
+// `radical` is the atom's count of unpaired (radical) electrons: absent (0), 1 (a doublet, one
+// dot) or 2 (a carbene / triplet diradical, two dots). It is chemistry, not display: written to
+// the molfile as `M  RAD` (2 = doublet, 3 = triplet), so RDKit drops the H count by as many.
 
 export type BondOrder = 1 | 2 | 3;
 export type BondStereo = "none" | "wedge" | "hash";
+/** Unpaired electrons on an atom: 0, 1 (radical) or 2 (carbene, diradical). */
+export type RadicalCount = 0 | 1 | 2;
 
 export interface SketchAtom {
   readonly id: number;
@@ -27,6 +33,8 @@ export interface SketchAtom {
   readonly explicitH?: boolean;
   /** Depth from a 3D projection (model units, + towards the viewer); absent when unknown. */
   readonly z?: number;
+  /** Unpaired electrons (1 or 2); absent for none. */
+  readonly radical?: 1 | 2;
 }
 
 /** A bond from `a` to `b`; for wedge and hash bonds `a` is the narrow end (the stereocentre). */
@@ -146,6 +154,33 @@ export function adjustCharge(m: SketchModel, ids: Iterable<number>, delta: numbe
   return mapAtoms(m, ids, (a) => ({ ...a, charge: Math.max(-4, Math.min(4, a.charge + delta)) }));
 }
 
+/** Set the unpaired-electron count of atoms (0 clears it). */
+export function setRadical(m: SketchModel, ids: Iterable<number>, n: RadicalCount): SketchModel {
+  return mapAtoms(m, ids, (a) => {
+    if ((a.radical ?? 0) === n) return a;
+    const { radical: _r, ...rest } = a;
+    return n === 0 ? rest : { ...rest, radical: n };
+  });
+}
+
+/** The radical tools: give every atom `n` unpaired electrons, or clear them when all already
+ *  have `n` (a second click clears). */
+export function toggleRadical(m: SketchModel, ids: Iterable<number>, n: 1 | 2): SketchModel {
+  const list = [...ids];
+  const all = list.length > 0 && list.every((id) => atomById(m, id)?.radical === n);
+  return setRadical(m, list, all ? 0 : n);
+}
+
+/** The "." key: none -> one dot -> two dots -> none, from the first atom's count. */
+export function cycleRadical(m: SketchModel, ids: Iterable<number>): SketchModel {
+  const list = [...ids];
+  const first = list.length ? (atomById(m, list[0])?.radical ?? 0) : 0;
+  return setRadical(m, list, ((first + 1) % 3) as RadicalCount);
+}
+
+/** Total unpaired electrons of the drawing. */
+export const radicalElectrons = (m: SketchModel): number => m.atoms.reduce((s, a) => s + (a.radical ?? 0), 0);
+
 export function toggleExplicitH(m: SketchModel, ids: Iterable<number>): SketchModel {
   return mapAtoms(m, ids, (a) => {
     const { explicitH, ...rest } = a;
@@ -204,7 +239,7 @@ export function removeBonds(m: SketchModel, ids: Iterable<number>): SketchModel 
 }
 
 export function isPlainCarbon(a: SketchAtom): boolean {
-  return a.el === "C" && a.charge === 0 && !a.explicitH;
+  return a.el === "C" && a.charge === 0 && !a.explicitH && !a.radical;
 }
 
 /** Remove a selection: the given atoms (with their bonds) and the given bonds. */

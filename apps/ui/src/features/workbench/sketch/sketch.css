@@ -326,7 +326,7 @@
 
 .sk-stroke {
   stroke: var(--sk-stroke);
-  stroke-width: 1.5;
+  stroke-width: var(--sk-bond-width, 1.5);
   stroke-linecap: round;
 }
 
@@ -375,17 +375,47 @@
 
 .sk-label text {
   font-family: var(--font);
-  font-size: 13px;
+  font-size: var(--sk-font, 13px);
   fill: var(--sk-stroke);
 }
 
 .sk-label .sk-sub {
-  font-size: 9.5px;
+  font-size: calc(var(--sk-font, 13px) * 0.73);
 }
 
 .sk-label .sk-charge {
-  font-size: 10px;
+  font-size: calc(var(--sk-font, 13px) * 0.77);
   font-weight: 600;
+}
+
+/* radical dots and CIP labels (marks.ts) */
+.sk-radical {
+  fill: var(--sk-stroke);
+  pointer-events: none;
+}
+
+.sk-cip {
+  font-family: var(--font);
+  font-size: calc(var(--sk-font, 13px) * 0.75);
+  font-style: italic;
+  fill: var(--cycle);
+  pointer-events: none;
+}
+
+/* the "atom colouring off" preference: every label in the bond colour */
+.sketch.sk-mono .sk-label text {
+  fill: var(--sk-stroke);
+}
+
+.sk-tool-glyph {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  stroke: none;
+}
+
+.sk-cip-list {
+  color: var(--cycle);
 }
 
 .sk-label.el-N text { fill: var(--sk-N); }

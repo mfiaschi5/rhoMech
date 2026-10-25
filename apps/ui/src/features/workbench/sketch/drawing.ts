@@ -3,11 +3,17 @@
 // bond strokes (double bonds offset into rings, centred at terminal ends, triple bonds, wedge
 // and hash bonds), all as plain data. Pure: SketchCanvas only turns it into SVG elements.
 //
+// Options (SceneOptions, the page's sketch preferences): the label font size, the label style
+// (skeletal = ChemDraw's carbon vertices; all = every carbon labelled; no-h = no implicit H
+// drawn) and the CIP labels to place (cip.ts, the R/S toggle). Radical dots and CIP labels go
+// into the free space around their atom (marks.ts).
+//
 // Crossing breaks (model.breakCrossings): where two bonds cross (crossings.ts) the bond behind
 // is drawn with a gap of BREAK_GAP_PX on each side of the front bond's outline, on every one
 // of its strokes (all lines of a multiple bond; the ticks of a hash; a wedge in two pieces).
 import type { SketchAtom, SketchBond, SketchModel } from "./model";
 import type { Vec, View } from "./geometry";
+import type { StereoLabels } from "./cip";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
 import { findCrossings } from "./crossings.ts";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
@@ -16,6 +22,8 @@ import { atomById, bondOrderSum, neighbors, smallestRingThrough } from "./model.
 import { add, len, scale, sideOf, sub, toScreen } from "./geometry.ts";
 // @ts-ignore TS5097: see above
 import { chargeLabel, fallbackHCount } from "./elements.ts";
+// @ts-ignore TS5097: see above
+import { along, bondMarkAt, freeAngle, markDistance, radicalDots, takenAngles } from "./marks.ts";
 
 export const FONT_PX = 13;
 const DOUBLE_GAP_PX = 4.5;
@@ -24,6 +32,25 @@ const WEDGE_HALF_PX = 3.6;
 /** Clearance (px) between the front bond's outline and the ends of the broken bond behind. */
 export const BREAK_GAP_PX = 3.2;
 const CHARGE_FONT_PX = 10;
+/** Half the size (px) of a CIP label such as "(R)", for its clearance. */
+const CIP_HALF_PX = 7;
+
+export type LabelStyle = "skeletal" | "all" | "no-h";
+export const LABEL_STYLES: readonly LabelStyle[] = ["skeletal", "all", "no-h"];
+
+export interface SceneOptions {
+  /** Label font size (px); FONT_PX by default. */
+  fontPx?: number;
+  labelStyle?: LabelStyle;
+  /** CIP labels to draw (null: none). */
+  cip?: StereoLabels | null;
+}
+
+/** A small text mark (a CIP label) at a screen point. */
+export interface Mark {
+  text: string;
+  at: Vec;
+}
 
 export interface AtomLabel {
   el: string;
@@ -47,6 +74,9 @@ export interface AtomScene {
   atom: SketchAtom;
   at: Vec;
   label: AtomLabel | null;
+  /** Centres of the radical dots (screen px); empty without unpaired electrons. */
+  dots: Vec[];
+  cip?: Mark;
 }
 
 export interface BondScene {
@@ -56,15 +86,23 @@ export interface BondScene {
   axis: Seg;
   /** Crossings at which this bond is behind and drawn broken (0 without breaks). */
   broken: number;
+  cip?: Mark;
+}
+
+export interface Scene {
+  atoms: AtomScene[];
+  bonds: BondScene[];
+  fontPx: number;
 }
 
 const H_LEFT_WHEN_ALONE = new Set(["O", "S", "Se", "F", "Cl", "Br", "I"]);
 
 /** The label of an atom, or null for a bare carbon vertex. */
-export function atomLabel(m: SketchModel, atom: SketchAtom, hCount: number, view: View): AtomLabel | null {
+export function atomLabel(m: SketchModel, atom: SketchAtom, hCount: number, view: View, style: LabelStyle = "skeletal"): AtomLabel | null {
   const nbrs = neighbors(m, atom.id);
-  const shown = atom.el !== "C" || atom.charge !== 0 || atom.explicitH === true || nbrs.length === 0;
+  const shown = atom.el !== "C" || atom.charge !== 0 || atom.explicitH === true || nbrs.length === 0 || style === "all";
   if (!shown) return null;
+  if (style === "no-h" && atom.explicitH !== true && nbrs.length > 0) hCount = 0;
   let hSide: "left" | "right" = "right";
   if (nbrs.length === 0) hSide = H_LEFT_WHEN_ALONE.has(atom.el) ? "left" : "right";
   else {
@@ -79,36 +117,37 @@ export function atomLabel(m: SketchModel, atom: SketchAtom, hCount: number, view
 }
 
 /** Half the estimated glyph width of an element symbol (capital ~0.62 em, lowercase ~0.5 em). */
-export const labelHalfWidth = (el: string): number => ((0.62 + 0.5 * (el.length - 1)) * FONT_PX) / 2;
+export const labelHalfWidth = (el: string, font = FONT_PX): number => ((0.62 + 0.5 * (el.length - 1)) * font) / 2;
 
 /** Width (px) of the H part of a label ("H", "H2"...); 0 without H. */
-export const hLabelWidth = (hCount: number): number => (hCount > 0 ? FONT_PX * 0.68 + (hCount > 1 ? FONT_PX * 0.45 : 0) : 0);
+export const hLabelWidth = (hCount: number, font = FONT_PX): number => (hCount > 0 ? font * 0.68 + (hCount > 1 ? font * 0.45 : 0) : 0);
 
 /** The box (screen px about the atom, y down) of everything a label draws: the symbol, the H
  *  count on its side and the charge superscript. SketchCanvas places the glyphs by the same
  *  numbers. */
-export function labelBox(label: AtomLabel): { x0: number; x1: number; y0: number; y1: number } {
-  const half = labelHalfWidth(label.el);
-  const hw = hLabelWidth(label.hCount);
+export function labelBox(label: AtomLabel, font = FONT_PX): { x0: number; x1: number; y0: number; y1: number } {
+  const half = labelHalfWidth(label.el, font);
+  const hw = hLabelWidth(label.hCount, font);
+  const cf = (CHARGE_FONT_PX * font) / FONT_PX;
   const right = label.hSide === "right";
   let x0 = -half - (right ? 0 : hw);
   let x1 = half + (right ? hw : 0);
-  let y1 = FONT_PX * 0.5 + (label.hCount > 1 ? 3 : 0);
-  let y0 = -FONT_PX * 0.5;
+  let y1 = font * 0.5 + (label.hCount > 1 ? 3 : 0);
+  let y0 = -font * 0.5;
   if (label.charge) {
     const cx = half + (right ? hw : 0) + 1;
-    x1 = Math.max(x1, cx + label.charge.length * CHARGE_FONT_PX * 0.62);
-    y0 = Math.min(y0, -FONT_PX * 0.55 - CHARGE_FONT_PX * 0.5);
+    x1 = Math.max(x1, cx + label.charge.length * cf * 0.62);
+    y0 = Math.min(y0, -font * 0.55 - cf * 0.5);
   }
   x0 = Math.min(x0, -half);
-  y1 = Math.max(y1, FONT_PX * 0.5);
+  y1 = Math.max(y1, font * 0.5);
   return { x0, x1, y0, y1 };
 }
 
 /** Pixels a bond stops short of a labelled atom. */
-export function labelTrim(label: AtomLabel | null): number {
+export function labelTrim(label: AtomLabel | null, font = FONT_PX): number {
   if (!label) return 0;
-  return label.el.length > 1 ? FONT_PX * 0.72 : FONT_PX * 0.55;
+  return label.el.length > 1 ? font * 0.72 : font * 0.55;
 }
 
 /** -1 / +1: the side (of p->q on screen) the second line of a double bond goes; 0: centred. */
@@ -280,30 +319,46 @@ function crossingCuts(m: SketchModel, view: View, at: (id: number) => Vec): Map<
   return out;
 }
 
+/** The radical dots and the CIP label of one atom, placed in the free space around it. */
+function atomMarks(m: SketchModel, s: AtomScene, pos: (id: number) => Vec, font: number, cip: StereoLabels | null): Pick<AtomScene, "dots" | "cip"> {
+  const n = s.atom.radical ?? 0;
+  const code = cip?.atoms.get(s.atom.id);
+  if (!n && !code) return { dots: [] };
+  const box = s.label ? labelBox(s.label, font) : null;
+  const hSide = s.label && s.label.hCount > 0 ? s.label.hSide : null;
+  const taken = takenAngles(s.at, neighbors(m, s.atom.id).map(pos), hSide, !!s.label?.charge);
+  const dotAngle = freeAngle(taken);
+  const dots = radicalDots(s.at, box, dotAngle, n);
+  if (!code) return { dots };
+  const a = freeAngle(n ? [...taken, dotAngle] : taken);
+  return { dots, cip: { text: `(${code})`, at: along(s.at, a, markDistance(box, a, CIP_HALF_PX)) } };
+}
+
 /** Everything to draw, in screen pixels. `hCounts` (RDKit's, by atom id) wins over the default
  *  valence fallback. Crossing breaks follow model.breakCrossings. */
-export function buildScene(
-  m: SketchModel,
-  view: View,
-  hCounts: ReadonlyMap<number, number> | null,
-): { atoms: AtomScene[]; bonds: BondScene[] } {
+export function buildScene(m: SketchModel, view: View, hCounts: ReadonlyMap<number, number> | null, opts: SceneOptions = {}): Scene {
+  const font = opts.fontPx ?? FONT_PX;
+  const cip = opts.cip ?? null;
   const at = new Map<number, Vec>(m.atoms.map((a) => [a.id, toScreen(view, [a.x, a.y])]));
+  const pos = (id: number) => at.get(id) ?? ([0, 0] as Vec);
   const atoms: AtomScene[] = m.atoms.map((atom) => {
-    const h = hCounts?.get(atom.id) ?? fallbackHCount(atom.el, atom.charge, bondOrderSum(m, atom.id));
-    return { atom, at: at.get(atom.id) as Vec, label: atomLabel(m, atom, h, view) };
+    const h = hCounts?.get(atom.id) ?? fallbackHCount(atom.el, atom.charge, bondOrderSum(m, atom.id), atom.radical ?? 0);
+    const s: AtomScene = { atom, at: pos(atom.id), label: atomLabel(m, atom, h, view, opts.labelStyle), dots: [] };
+    return { ...s, ...atomMarks(m, s, pos, font, cip) };
   });
   const labels = new Map(atoms.map((s) => [s.atom.id, s.label]));
-  const pos = (id: number) => at.get(id) ?? ([0, 0] as Vec);
   const cuts = m.breakCrossings ? crossingCuts(m, view, pos) : new Map<number, Cut[]>();
   const bonds: BondScene[] = m.bonds.map((bond) => {
     const p = pos(bond.a);
     const q = pos(bond.b);
     const side = bond.order === 2 ? doubleBondSide(m, bond, pos) : 0;
-    const tp = labelTrim(labels.get(bond.a) ?? null);
-    const tq = labelTrim(labels.get(bond.b) ?? null);
+    const tp = labelTrim(labels.get(bond.a) ?? null, font);
+    const tq = labelTrim(labels.get(bond.b) ?? null, font);
     const mine = cuts.get(bond.id) ?? [];
     const shape = breakShape(bondShape(p, q, bond, side, tp, tq), bond, trimmed(p, q, tp, tq), mine);
-    return { bond, shape, axis: { p, q }, broken: mine.length };
+    const code = cip?.bonds.get(bond.id);
+    const mark = code ? { cip: { text: `(${code})`, at: bondMarkAt(p, q, side) } } : {};
+    return { bond, shape, axis: { p, q }, broken: mine.length, ...mark };
   });
-  return { atoms, bonds };
+  return { atoms, bonds, fontPx: font };
 }

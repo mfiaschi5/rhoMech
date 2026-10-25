@@ -8,7 +8,8 @@
 // DOM: sketch-undo, sketch-redo, sketch-clean, <select data-testid="sketch-clean-style">
 // (textbook | perspective), sketch-project (3D -> 2D; only with a projection source, disabled
 // with the reason as data-reason and as the tooltip of sketch-project-wrap),
-// sketch-break-toggle [data-active aria-pressed], sketch-rotate-cw, sketch-rotate-ccw,
+// sketch-break-toggle [data-active aria-pressed], sketch-cip-toggle [data-active aria-pressed]
+// (R/S: CIP labels on the canvas and in the info bar), sketch-rotate-cw, sketch-rotate-ccw,
 // sketch-flip-h, sketch-flip-v, sketch-more [aria-expanded] opening <div
 // data-testid="sketch-more-menu"> with sketch-rotate-cw90, sketch-rotate-ccw90, sketch-scale-up,
 // sketch-scale-down, sketch-reset-bond; sketch-fit, sketch-clear, sketch-import, sketch-export.
@@ -125,6 +126,17 @@ function CleanGroup(p: ToolbarProps) {
         title="Break crossings: draw the bond behind a crossing with a gap (by depth after a projection, else the later bond is in front) (Shift+X)"
       >
         <Icon name="breaks" />
+      </button>
+      <button
+        type="button"
+        className={`btn btn-small sk-toggle sk-cip-toggle${p.showCip ? " active" : ""}`}
+        data-testid="sketch-cip-toggle"
+        data-active={p.showCip}
+        aria-pressed={p.showCip}
+        onClick={p.onToggleCip}
+        title="R/S: show the CIP labels (R, S; r, s pseudo-asymmetric; ? undefined) of the stereocentres and E/Z of the double bonds, from RDKit"
+      >
+        R/S
       </button>
     </div>
   );

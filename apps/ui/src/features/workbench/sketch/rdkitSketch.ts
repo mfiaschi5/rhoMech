@@ -6,15 +6,19 @@
 // is model atom i (H atoms drawn by the user stay atoms). SMILES, InChI and descriptors come
 // from a second parse with the H atoms removed. Sanitization errors are read from a captured
 // RDKit log ("Explicit valence for atom # 3 N ...", "Unkekulized atoms: 1 2 3") to mark the
-// offending atoms.
+// offending atoms. The CIP labels (cip.ts) come from get_stereo_tags() on the first parse, so
+// their atom indices are the model's. Radicals reach RDKit as `M  RAD` (molfile.ts).
 import type { RDKitModule, RDKitMol } from "../../../chem/rdkit";
 import type { SketchModel } from "./model";
+import type { StereoLabels } from "./cip";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
 import { bondOrderSum, centroid, clearDepth, normalizeBondLength } from "./model.ts";
 // @ts-ignore TS5097: see above
 import { fromMolblock, looksLikeMolfile, MolfileError, molblockBondStereo, toMolblock } from "./molfile.ts";
 // @ts-ignore TS5097: see above
 import { fallbackHCount, hillFormula } from "./elements.ts";
+// @ts-ignore TS5097: see above
+import { NO_STEREO, parseStereoTags } from "./cip.ts";
 
 export interface SketchAnalysis {
   /** The model this analysis describes (stale once the drawing changed). */
@@ -32,6 +36,8 @@ export interface SketchAnalysis {
   badAtoms: number[];
   /** Implicit H count by atom id (RDKit's when valid, else default valences). */
   hCounts: Map<number, number>;
+  /** CIP labels by atom and bond id (empty when invalid). */
+  stereo: StereoLabels;
 }
 
 const NO_REMOVE_HS = JSON.stringify({ removeHs: false });
@@ -80,7 +86,7 @@ function lastMessage(log: string): string | null {
 }
 
 function fallbackCounts(m: SketchModel): Map<number, number> {
-  return new Map(m.atoms.map((a) => [a.id, fallbackHCount(a.el, a.charge, bondOrderSum(m, a.id))]));
+  return new Map(m.atoms.map((a) => [a.id, fallbackHCount(a.el, a.charge, bondOrderSum(m, a.id), a.radical ?? 0)]));
 }
 
 function formulaOf(m: SketchModel, h: ReadonlyMap<number, number>): string {
@@ -105,7 +111,7 @@ function rdkitHCounts(m: SketchModel, mol: RDKitMol): Map<number, number> {
 }
 
 export function analyzeSketch(rdkit: RDKitModule, m: SketchModel): SketchAnalysis {
-  const base = { forModel: m, smiles: "", inchi: "", descriptors: null, badAtoms: [] as number[] };
+  const base = { forModel: m, smiles: "", inchi: "", descriptors: null, badAtoms: [] as number[], stereo: NO_STEREO };
   if (m.atoms.length === 0) {
     return { ...base, empty: true, valid: false, formula: "", error: null, hCounts: new Map() };
   }
@@ -120,10 +126,35 @@ export function analyzeSketch(rdkit: RDKitModule, m: SketchModel): SketchAnalysi
   try {
     const h = rdkitHCounts(m, mol);
     const [ids] = captured(rdkit, () => identifiers(rdkit, mb));
-    return { ...base, ...ids, empty: false, valid: true, formula: formulaOf(m, h), error: null, hCounts: h };
+    const stereo = stereoOf(m, mol);
+    return { ...base, ...ids, stereo, empty: false, valid: true, formula: formulaOf(m, h), error: null, hCounts: h };
   } finally {
     mol.delete();
   }
+}
+
+/** The CIP labels of a parsed drawing (atom order = model order); none when RDKit cannot. */
+function stereoOf(m: SketchModel, mol: RDKitMol): StereoLabels {
+  try {
+    return parseStereoTags(m, mol.get_stereo_tags());
+  } catch {
+    return NO_STEREO;
+  }
+}
+
+/** The CIP labels of a drawing (R/S, r/s, ? on atoms; E/Z on double bonds), by id. */
+export function stereoLabels(rdkit: RDKitModule, m: SketchModel): StereoLabels {
+  if (m.atoms.length === 0) return NO_STEREO;
+  const [out] = captured(rdkit, () => {
+    const mol = parse(rdkit, toMolblock(m), NO_REMOVE_HS);
+    if (!mol) return NO_STEREO;
+    try {
+      return stereoOf(m, mol);
+    } finally {
+      mol.delete();
+    }
+  });
+  return out;
 }
 
 function identifiers(rdkit: RDKitModule, mb: string): Pick<SketchAnalysis, "smiles" | "inchi" | "descriptors"> {

@@ -69,11 +69,11 @@ export function saveComputed(c: ComputedDrawing): void {
 }
 
 /** The constitution of a drawing, independent of positions, depth and wedges: elements,
- *  charges, bonds by unordered atom position and their orders. Equal topologies map onto the
+ *  charges, unpaired electrons, bonds by unordered atom position and their orders. Equal topologies map onto the
  *  record the same way (the POST's mapping is atom to atom). */
 export function sketchTopology(m: SketchModel): string {
   const pos = new Map(m.atoms.map((a, i) => [a.id, i]));
-  const atoms = m.atoms.map((a) => `${a.el}${a.charge}`).join(",");
+  const atoms = m.atoms.map((a) => `${a.el}${a.charge}${a.radical ? `r${a.radical}` : ""}`).join(",");
   const bonds = m.bonds
     .map((b) => {
       const [i, j] = [pos.get(b.a) ?? -1, pos.get(b.b) ?? -1].sort((x, y) => x - y);

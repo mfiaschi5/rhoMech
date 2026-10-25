@@ -159,7 +159,6 @@ export function SurfaceControls(props: SurfaceControlsProps) {
   const { layers, orbital, onAdd, ...rest } = props;
   return (
     <div className="wb-surfaces" data-testid="wb-surfaces">
-      <h4>Surfaces</h4>
       {layers.length === 0 && <p className="muted wb-small">Pick an orbital in the list or the level diagram, or add a density, Fukui, dual or ESP layer.</p>}
       {layers.map((l) => (
         <LayerRow key={l.id} layer={l} {...rest} />

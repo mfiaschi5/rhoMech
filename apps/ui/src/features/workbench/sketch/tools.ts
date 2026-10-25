@@ -1,10 +1,12 @@
 // The sketcher's tools as pure model edits: what a click does with each tool, what a key does
 // on the hovered atom or bond (ChemDraw hotkeys), and the hit test that finds that object.
+// Radicals: the radical tool gives an atom one unpaired electron, the diradical (carbene) tool
+// two; a second click with the same tool clears them. The "." key cycles none -> one -> two.
 import type { BondOrder, SketchModel } from "./model";
 import type { Vec, View } from "./geometry";
 import type { RingKind } from "./templates";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { addAtom, adjustCharge, atomById, cycleBondOrder, removeAtoms, removeBonds, removeSelection, setBondOrder, setBondStereo, setElement, toggleExplicitH } from "./model.ts";
+import { addAtom, adjustCharge, atomById, cycleBondOrder, cycleRadical, removeAtoms, removeBonds, removeSelection, setBondOrder, setBondStereo, setElement, toggleExplicitH, toggleRadical } from "./model.ts";
 // @ts-ignore TS5097: see above
 import { dist, segmentDistance, toScreen } from "./geometry.ts";
 // @ts-ignore TS5097: see above
@@ -23,6 +25,8 @@ export const TOOLS = [
   "charge-plus",
   "charge-minus",
   "explicit-h",
+  "radical",
+  "diradical",
   "eraser",
 ] as const;
 export type ToolName = (typeof TOOLS)[number];
@@ -98,6 +102,9 @@ export function applyClick(m: SketchModel, tool: ToolName, element: string, hit:
       return hit?.kind === "atom" ? adjustCharge(m, [hit.id], tool === "charge-plus" ? 1 : -1) : m;
     case "explicit-h":
       return hit?.kind === "atom" ? toggleExplicitH(m, [hit.id]) : m;
+    case "radical":
+    case "diradical":
+      return hit?.kind === "atom" ? toggleRadical(m, [hit.id], tool === "radical" ? 1 : 2) : m;
     case "eraser":
       if (hit?.kind === "atom") return removeAtoms(m, [hit.id]);
       return hit?.kind === "bond" ? removeBonds(m, [hit.id]) : m;
@@ -127,6 +134,9 @@ export const KEY_ELEMENTS: Readonly<Record<string, string>> = {
   h: "H",
 };
 
+/** The key that cycles an atom's unpaired electrons (none -> one -> two -> none). */
+export const RADICAL_KEY = ".";
+
 /** The edit of a key on the hovered object, or on the selection when nothing is hovered; null
  *  when the key means nothing there (the event is then left alone). */
 export function applyKey(m: SketchModel, key: string, hit: Hit, sel: Selection): SketchModel | null {
@@ -138,6 +148,7 @@ export function applyKey(m: SketchModel, key: string, hit: Hit, sel: Selection):
     if (KEY_ELEMENTS[k]) return setElement(m, [hit.id], KEY_ELEMENTS[k]);
     if (delta) return adjustCharge(m, [hit.id], delta);
     if (order) return growBond(m, hit.id, order).model;
+    if (k === RADICAL_KEY) return cycleRadical(m, [hit.id]);
     return del ? removeAtoms(m, [hit.id]) : null;
   }
   if (hit?.kind === "bond") {
@@ -148,6 +159,7 @@ export function applyKey(m: SketchModel, key: string, hit: Hit, sel: Selection):
   if (del) return removeSelection(m, sel.atoms, sel.bonds);
   if (KEY_ELEMENTS[k] && sel.atoms.size) return setElement(m, sel.atoms, KEY_ELEMENTS[k]);
   if (delta && sel.atoms.size) return adjustCharge(m, sel.atoms, delta);
+  if (k === RADICAL_KEY && sel.atoms.size) return cycleRadical(m, sel.atoms);
   if (order && sel.bonds.size) return [...sel.bonds].reduce((acc, id) => setBondOrder(acc, id, order), m);
   return null;
 }

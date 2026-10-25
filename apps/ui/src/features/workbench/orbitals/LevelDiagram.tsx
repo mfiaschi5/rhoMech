@@ -19,10 +19,12 @@ export interface LevelDiagramProps {
   window: Window;
   onPickCanonical(index: number): void;
   onPickLmo(index: number): void;
+  /** Height of the drawing in viewBox units (px at 340 px wide); 380 by default. */
+  height?: number;
 }
 
 const W = 340;
-const H = 380;
+const DEFAULT_H = 380;
 const TOP = 14;
 const BOTTOM = 14;
 const AXIS_X = 40;
@@ -38,11 +40,11 @@ function occText(occ: number): string {
   return "";
 }
 
-function Axis({ y, lo, hi }: { y: (e: number) => number; lo: number; hi: number }) {
+function Axis({ y, lo, hi, H }: { y: (e: number) => number; lo: number; hi: number; H: number }) {
   return (
     <g className="wb-axis">
       <line x1={AXIS_X} x2={AXIS_X} y1={TOP} y2={H - BOTTOM} />
-      {niceTicks(lo, hi, 6).map((t) => (
+      {niceTicks(lo, hi, Math.max(4, Math.round(H / 64))).map((t) => (
         <g key={t}>
           <line x1={AXIS_X - 4} x2={AXIS_X} y1={y(t)} y2={y(t)} />
           <text x={AXIS_X - 6} y={y(t) + 3} textAnchor="end">
@@ -120,6 +122,7 @@ function LmoLevels(p: { rows: OrbitalRowOut[]; y: (e: number) => number; lo: num
 }
 
 export function LevelDiagram(p: LevelDiagramProps) {
+  const H = p.height ?? DEFAULT_H;
   const [lo, hi] = energyWindow([...p.canonical, ...(p.lmos ?? [])], p.window);
   const y = (e: number) => TOP + ((hi - e) / (hi - lo)) * (H - TOP - BOTTOM);
   const lmo = p.lmos?.find((r) => r.index === p.selected);
@@ -128,7 +131,7 @@ export function LevelDiagram(p: LevelDiagramProps) {
   return (
     <figure className="wb-levels" data-testid="level-diagram" data-mode={p.lmos ? "lmo" : "canonical"}>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="orbital energy levels">
-        <Axis y={y} lo={lo} hi={hi} />
+        <Axis y={y} lo={lo} hi={hi} H={H} />
         <CanonicalLevels rows={p.canonical} y={y} lo={lo} hi={hi} selected={p.selected} weights={weights} onPick={p.onPickCanonical} />
         {p.lmos && <LmoLevels rows={p.lmos} y={y} lo={lo} hi={hi} selected={p.selected} onPick={p.onPickLmo} />}
       </svg>

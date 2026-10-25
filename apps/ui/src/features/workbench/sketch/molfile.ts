@@ -2,12 +2,15 @@
 //
 // Writer: atoms in model order with 2D coordinates (z = 0 always: the drawing's depth from a
 // perspective template or a 3D->2D is display data), charges as `M  CHG` lines (the atom-block
-// charge field stays 0), bond stereo 1 = wedge and 6 = hash with the narrow end first. The
-// server's 2D depiction (POST /api/depict2d) answers in this atom and bond order.
+// charge field stays 0), unpaired electrons as `M  RAD` lines (2 = doublet for one, 3 = triplet
+// for two), bond stereo 1 = wedge and 6 = hash with the narrow end first. The server's 2D
+// depiction (POST /api/depict2d) answers in this atom and bond order.
 // Reader: the first record of a molfile or SDF; `M  CHG` replaces the atom-block charges when
-// present (as the format says). Bond types other than 1-3 (aromatic 4, query types) and V3000
+// present (as the format says), `M  RAD` likewise the atom-block doublet radical (old charge
+// code 4); RAD 1 (singlet) and 3 (triplet) are two unpaired electrons, RAD 2 one. Bond types
+// other than 1-3 (aromatic 4, query types) and V3000
 // are refused with a message; importSketch() sends those through RDKit first (kekulized V2000).
-import type { BondOrder, BondStereo, SketchAtom, SketchBond, SketchModel } from "./model";
+import type { BondOrder, BondStereo, RadicalCount, SketchAtom, SketchBond, SketchModel } from "./model";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
 import { normalizeBondLength } from "./model.ts";
 
@@ -25,13 +28,18 @@ export function toMolblock(m: SketchModel, name = ""): string {
     const stereo = b.order === 1 ? (b.stereo === "wedge" ? 1 : b.stereo === "hash" ? 6 : 0) : 0;
     lines.push(`${i3(index.get(b.a) ?? 0)}${i3(index.get(b.b) ?? 0)}${i3(b.order)}${i3(stereo)}`);
   }
-  const charged = m.atoms.map((a, i) => [i + 1, a.charge] as const).filter(([, c]) => c !== 0);
-  for (let k = 0; k < charged.length; k += 8) {
-    const chunk = charged.slice(k, k + 8);
-    lines.push(`M  CHG${i3(chunk.length)}${chunk.map(([i, c]) => `${String(i).padStart(4)}${String(c).padStart(4)}`).join("")}`);
-  }
+  propertyLines(lines, "CHG", m.atoms.map((a, i) => [i + 1, a.charge] as const).filter(([, c]) => c !== 0));
+  propertyLines(lines, "RAD", m.atoms.flatMap((a, i) => (a.radical ? [[i + 1, a.radical === 1 ? 2 : 3] as const] : [])));
   lines.push("M  END");
   return lines.join("\n") + "\n";
+}
+
+/** `M  <tag>` lines of (atom, value) pairs, eight per line. */
+function propertyLines(lines: string[], tag: string, pairs: readonly (readonly [number, number])[]): void {
+  for (let k = 0; k < pairs.length; k += 8) {
+    const chunk = pairs.slice(k, k + 8);
+    lines.push(`M  ${tag}${i3(chunk.length)}${chunk.map(([i, c]) => `${String(i).padStart(4)}${String(c).padStart(4)}`).join("")}`);
+  }
 }
 
 const OLD_CHARGE: Record<number, number> = { 1: 3, 2: 2, 3: 1, 5: -1, 6: -2, 7: -3 };
@@ -62,7 +70,9 @@ function parseAtom(line: string, i: number): SketchAtom {
   if (!Number.isFinite(x) || !Number.isFinite(y) || !/^[A-Z][a-z]?$/.test(el)) {
     throw new MolfileError(`atom ${i + 1}: cannot read "${line.trim()}"`);
   }
-  return { id: i + 1, el, x, y, charge: OLD_CHARGE[int(line.slice(36, 39))] ?? 0 };
+  const code = int(line.slice(36, 39));
+  const atom: SketchAtom = { id: i + 1, el, x, y, charge: OLD_CHARGE[code] ?? 0 };
+  return code === 4 ? { ...atom, radical: 1 } : atom;
 }
 
 function parseBond(line: string, k: number, nAtoms: number, id: number): SketchBond {
@@ -76,16 +86,33 @@ function parseBond(line: string, k: number, nAtoms: number, id: number): SketchB
   return { id, a, b, order: type as BondOrder, stereo };
 }
 
-/** Apply the `M  CHG` property lines (they reset every atom-block charge when present). */
-function applyChargeLines(atoms: SketchAtom[], props: string[]): SketchAtom[] {
-  const chg = props.filter((l) => l.startsWith("M  CHG"));
-  if (chg.length === 0) return atoms;
-  const charges = new Map<number, number>();
-  for (const l of chg) {
+/** The (atom number -> value) pairs of the `M  <tag>` property lines; null without such lines. */
+function readProperty(props: string[], tag: string): Map<number, number> | null {
+  const found = props.filter((l) => l.startsWith(`M  ${tag}`));
+  if (found.length === 0) return null;
+  const out = new Map<number, number>();
+  for (const l of found) {
     const n = int(l.slice(6, 9));
-    for (let k = 0; k < n; k++) charges.set(int(l.slice(9 + 8 * k, 13 + 8 * k)), int(l.slice(13 + 8 * k, 17 + 8 * k)));
+    for (let k = 0; k < n; k++) out.set(int(l.slice(9 + 8 * k, 13 + 8 * k)), int(l.slice(13 + 8 * k, 17 + 8 * k)));
   }
-  return atoms.map((a, i) => ({ ...a, charge: charges.get(i + 1) ?? 0 }));
+  return out;
+}
+
+/** Unpaired electrons of an `M  RAD` value: 2 (doublet) is one, 1 (singlet) and 3 (triplet) two. */
+const RAD_ELECTRONS: Record<number, RadicalCount> = { 1: 2, 2: 1, 3: 2 };
+
+/** Apply the `M  CHG` and `M  RAD` property lines (each resets the atom-block values when
+ *  present). */
+function applyPropertyLines(atoms: SketchAtom[], props: string[]): SketchAtom[] {
+  const charges = readProperty(props, "CHG");
+  const rads = readProperty(props, "RAD");
+  return atoms.map((a, i) => {
+    const charged = charges ? { ...a, charge: charges.get(i + 1) ?? 0 } : a;
+    if (!rads) return charged;
+    const { radical: _r, ...rest } = charged;
+    const n = RAD_ELECTRONS[rads.get(i + 1) ?? 0] ?? 0;
+    return n ? { ...rest, radical: n as 1 | 2 } : rest;
+  });
 }
 
 export interface ReadOptions {
@@ -102,7 +129,7 @@ export function fromMolblock(text: string, opts: ReadOptions = {}): SketchModel 
   const atomLines = lines.slice(4, 4 + nAtoms);
   const bondLines = lines.slice(4 + nAtoms, 4 + nAtoms + nBonds);
   const props = lines.slice(4 + nAtoms + nBonds);
-  const atoms = applyChargeLines(atomLines.map(parseAtom), props);
+  const atoms = applyPropertyLines(atomLines.map(parseAtom), props);
   const bonds = bondLines.map((l, k) => parseBond(l, k, nAtoms, nAtoms + k + 1));
   const model: SketchModel = { atoms, bonds, nextId: nAtoms + nBonds + 1 };
   return opts.normalize ? normalizeBondLength(model) : model;

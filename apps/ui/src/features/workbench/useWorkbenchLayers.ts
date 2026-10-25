@@ -1,7 +1,9 @@
 // The surface layers of the page: the selected-orbital layer (follows set, start and orb) and
 // the pinned layers of the hash `layers` param. A layer's look (iso, opacity, style, colours)
-// is kept per spec on the client, so editing it never touches the hash or refetches.
-import { useMemo, useRef, useState } from "react";
+// is kept per spec on the client, so editing it never touches the hash or refetches. New
+// orbital (psi) layers start at the user's default isovalue (`orbitalIso`); changing that
+// preference resets the selected-orbital layer's isovalue to it.
+import { useEffect, useMemo, useRef, useState } from "react";
 import { formatLayers, parseLayers, specKey, type LayerSpec } from "./params";
 import { newLayer, type SurfaceLayer } from "./viewer/layers";
 
@@ -15,18 +17,22 @@ export interface WorkbenchLayers {
 }
 
 /** `layersParam`: the hash value; `setParam` writes a new one. */
-export function useWorkbenchLayers(layersParam: string | null, orbitalSpec: LayerSpec | null, setParam: (v: string | null) => void): WorkbenchLayers {
+export function useWorkbenchLayers(layersParam: string | null, orbitalSpec: LayerSpec | null, setParam: (v: string | null) => void, orbitalIso?: number): WorkbenchLayers {
   const specs = useMemo(() => parseLayers(layersParam), [layersParam]);
   const looks = useRef(new Map<string, SurfaceLayer>());
   const [version, setVersion] = useState(0);
-  const [follow, setFollow] = useState<SurfaceLayer>(() => newLayer({ kind: "orbital", set: null, start: null, index: 0 }, true));
+  const [follow, setFollow] = useState<SurfaceLayer>(() => newLayer({ kind: "orbital", set: null, start: null, index: 0 }, true, orbitalIso));
+  const isoFor = (s: LayerSpec) => (s.kind === "orbital" ? orbitalIso : undefined);
+  useEffect(() => {
+    if (orbitalIso !== undefined) setFollow((f) => (f.iso === orbitalIso ? f : { ...f, iso: orbitalIso }));
+  }, [orbitalIso]);
   const pinned = useMemo(
     () =>
       specs.map((s) => {
         const k = specKey(s);
         let l = looks.current.get(k);
         if (!l) {
-          l = newLayer(s);
+          l = newLayer(s, false, isoFor(s));
           looks.current.set(k, l);
         }
         return l;

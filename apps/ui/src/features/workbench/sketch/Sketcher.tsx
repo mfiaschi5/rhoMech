@@ -15,9 +15,17 @@
 //                                the style picked next to the button (textbook | perspective,
 //                                kept per tab in sessionStorage); without it, or when the server
 //                                fails, Clean is RDKit.js's CoordGen layout with a notice
+//   display        SketchDisplay optional; label font size, bond line width, atom colouring
+//                                and label style (the page's preferences)
+//
+// The R/S toggle (kept per tab in sessionStorage) draws RDKit's CIP labels by the stereocentres
+// and double bonds and lists them in the info bar; they follow every edit (wedges, rotations,
+// flips: a flip keeps the stereoisomer, so the labels stay). Radicals (the radical and diradical
+// tools, the "." key) are drawn as dots and reach RDKit as M  RAD.
 //
 // DOM: <div data-testid="sketch" data-smiles (RDKit canonical, "" when invalid/empty)
 //      data-valid data-atoms data-bonds data-tool data-status (useSketchInfo status)
+//      data-radicals (unpaired electrons drawn) data-show-cip
 //      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth
 //      data-busy (a layout is waiting for the server) data-clean-style>
 //   the toolbar (Toolbar.tsx, ActionBar.tsx), <svg data-testid="sketch-canvas">
@@ -30,6 +38,7 @@
 //   c n o s f p, l=Cl, b=Br, i=I, h=H   element of the atom
 //   1 2 3                               bond order (on an atom: grow a bond of that order)
 //   + (or =)  -                         charge
+//   .                                   radical: none -> one dot -> two dots -> none
 //   Delete / Backspace                  erase
 //   Ctrl+Z   Ctrl+Shift+Z / Ctrl+Y      undo / redo
 //   Ctrl+A                              select all
@@ -46,7 +55,7 @@
 //   <Sketcher value={m} onChange={setM} highlightAtoms={[1]} height={400} />
 //   e2e: click tool-bond, click the canvas, click sketch-atom-2, hover the third atom, press
 //   "o"; expect sketch[data-smiles="CCO"].
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type RefObject } from "react";
 import { useRDKit, type RDKitModule } from "../../../chem/rdkit";
 import { setElement, type SketchModel } from "./model";
 import { fitView, type Vec, type View } from "./geometry";
@@ -63,7 +72,9 @@ import { ExportPanel, ImportPanel, readDroppedText } from "./ImportExport";
 import { InfoBar } from "./InfoBar";
 import { useLayoutActions, type LayoutActions, type ProjectionSource } from "./useLayoutActions";
 import { findCrossings } from "./crossings";
-import { hasDepth } from "./model";
+import { hasDepth, radicalElectrons } from "./model";
+import { cipItems } from "./cip";
+import type { LabelStyle } from "./drawing";
 import { restoreCleanStyle, saveCleanStyle, type CleanStyle, type Depictor } from "./depiction";
 import "./sketch.css";
 
@@ -75,6 +86,16 @@ export interface SketcherProps {
   height?: number;
   projection?: ProjectionSource;
   depictor?: Depictor;
+  display?: SketchDisplay;
+}
+
+/** How the sketch draws (the page's preferences); every field optional. */
+export interface SketchDisplay {
+  fontPx?: number;
+  bondWidth?: number;
+  /** Element colours on the labels (default on). */
+  colourAtoms?: boolean;
+  labelStyle?: LabelStyle;
 }
 
 /** Pixels per model unit at 100 %: a 1.5 bond is 37.5 px. */
@@ -198,18 +219,30 @@ interface ViewState {
 }
 
 /** The screen transform: centred on the origin until the user pans, zooms or fits; refitted when
- *  a drawing arrives from outside (value prop, import, clean-up) and once the width is known. */
+ *  a drawing arrives from outside (value prop, import, clean-up), once the width is known, and
+ *  when the canvas changes size (a layout splitter or preset) while the view is still a fit, i.e.
+ *  the user has not panned or zoomed since. */
 function useView(ed: SketchEditor, width: number, height: number): ViewState {
-  const [viewState, setView] = useState<View | null>(null);
+  const [viewState, setViewState] = useState<View | null>(null);
+  const fitted = useRef(false);
   const view: View = viewState ?? { s: DEFAULT_SCALE, ox: width / 2, oy: height / 2 };
   const fit = () => {
-    if (width > 0) setView(fitView(ed.committed.atoms.map((a): Vec => [a.x, a.y]), width, height, DEFAULT_SCALE));
+    if (width <= 0) return;
+    fitted.current = true;
+    setViewState(fitView(ed.committed.atoms.map((a): Vec => [a.x, a.y]), width, height, DEFAULT_SCALE));
+  };
+  const setView = (v: View) => {
+    fitted.current = false;
+    setViewState(v);
   };
   const measured = width > 0;
   useEffect(() => {
     if (measured && ed.committed.atoms.length) fit();
     // refit only on those two events, not on every edit
   }, [ed.externalVersion, measured]);
+  useEffect(() => {
+    if (fitted.current && ed.committed.atoms.length) fit();
+  }, [width, height]);
   return { view, setView, fit };
 }
 
@@ -256,6 +289,8 @@ function EditorToolbar(p: {
   onFit(): void;
   panel: SketchPanel;
   onPanel(p: SketchPanel): void;
+  showCip: boolean;
+  onToggleCip(): void;
 }) {
   const { ed, act, layout } = p;
   return (
@@ -282,6 +317,8 @@ function EditorToolbar(p: {
       onPanel={p.onPanel}
       onTransform={act.transform}
       hasSelection={ed.selection.atoms.size + ed.selection.bonds.size > 0}
+      showCip={p.showCip}
+      onToggleCip={p.onToggleCip}
     />
   );
 }
@@ -298,6 +335,33 @@ function ExportFor({ rdkit, model, onClose }: { rdkit: RDKitModule | null; model
   return <ExportPanel {...out} onClose={onClose} />;
 }
 
+const CIP_KEY = "ksmech.sketch.showCip";
+
+/** The R/S toggle, kept per tab (sessionStorage; off when unavailable). */
+function useShowCip(): [boolean, () => void] {
+  const [on, setOn] = useState<boolean>(() => {
+    try {
+      return window.sessionStorage.getItem(CIP_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggle = () =>
+    setOn((v) => {
+      try {
+        window.sessionStorage.setItem(CIP_KEY, v ? "0" : "1");
+      } catch {
+        // storage unavailable: the toggle lasts as long as the page
+      }
+      return !v;
+    });
+  return [on, toggle];
+}
+
+function displayStyle(d: SketchDisplay | undefined): CSSProperties | undefined {
+  return d?.bondWidth ? ({ "--sk-bond-width": String(d.bondWidth) } as CSSProperties) : undefined;
+}
+
 function useCleanStyle(): [CleanStyle, (s: CleanStyle) => void] {
   const [style, setStyle] = useState<CleanStyle>(restoreCleanStyle);
   const set = (s: CleanStyle) => {
@@ -307,7 +371,7 @@ function useCleanStyle(): [CleanStyle, (s: CleanStyle) => void] {
   return [style, set];
 }
 
-export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor }: SketcherProps) {
+export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor, display }: SketcherProps) {
   const ed = useSketchEditor(value, onChange);
   const info = useSketchInfo(ed.committed);
   const { rdkit } = useRDKit();
@@ -327,13 +391,18 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
   const highlight = useMemo(() => new Set(highlightAtoms ?? []), [highlightAtoms]);
   const invalid = useMemo(() => new Set(info.badAtoms), [info.badAtoms]);
   const crossings = useMemo(() => findCrossings(ed.committed).length, [ed.committed]);
+  const [showCip, toggleCip] = useShowCip();
+  const cip = showCip && info.valid ? info.stereo : null;
+  const cipList = useMemo(() => (cip ? cipItems(ed.committed, cip) : null), [cip, ed.committed]);
+  const radicals = radicalElectrons(ed.committed);
   const setInside = (v: boolean) => () => {
     pointer.inside.current = v;
   };
   return (
     <div
       ref={rootRef}
-      className="sketch"
+      className={`sketch${display?.colourAtoms === false ? " sk-mono" : ""}`}
+      style={displayStyle(display)}
       data-testid="sketch"
       data-smiles={info.smiles}
       data-valid={info.valid}
@@ -347,6 +416,8 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
       data-has-depth={hasDepth(ed.committed) ? "true" : "false"}
       data-busy={layout.busy ? "true" : "false"}
       data-clean-style={cleanStyle}
+      data-radicals={radicals}
+      data-show-cip={showCip ? "true" : "false"}
       onPointerEnter={setInside(true)}
       onPointerLeave={setInside(false)}
     >
@@ -361,6 +432,8 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           onFit={fit}
           panel={panel}
           onPanel={setPanel}
+          showCip={showCip}
+          onToggleCip={toggleCip}
         />
       )}
       <div className="sk-stage" ref={stageRef} onDragOver={(e) => e.preventDefault()} onDrop={act.onDrop}>
@@ -378,11 +451,13 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           pointer={pointer}
           svgRef={svgRef}
           readOnly={readOnly}
+          cip={cip}
+          display={display}
         />
         {panel === "import" && <ImportPanel onImport={act.importText} onClose={closePanel} />}
         {panel === "export" && <ExportFor rdkit={rdkit} model={ed.committed} onClose={closePanel} />}
       </div>
-      <InfoBar info={info} report={layout.report} />
+      <InfoBar info={info} report={layout.report} cip={cipList} radicals={radicals} />
     </div>
   );
 }

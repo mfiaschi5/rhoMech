@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRDKit } from "../../../chem/rdkit";
 import type { SketchModel } from "./model";
 import { analyzeSketch, type SketchAnalysis } from "./rdkitSketch";
+import { NO_STEREO } from "./cip";
 
 export type SketchInfoStatus = "empty" | "loading" | "unavailable" | "pending" | "ready";
 
@@ -32,6 +33,7 @@ function placeholder(model: SketchModel, error: string | null): SketchAnalysis {
     error,
     badAtoms: [],
     hCounts: new Map(),
+    stereo: NO_STEREO,
   };
 }
 

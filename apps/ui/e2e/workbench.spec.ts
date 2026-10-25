@@ -14,9 +14,15 @@
 // and the quaternion convention matching 3Dmol's own screen positions
 // (data-projection-residual). Undo steps back through the three layouts. With
 // KSMECH_E2E_SHOTS=<dir> it saves screenshots there.
-// The overflow test computes ethanol and checks, at 1024 and 1440 px, that no button, select or
-// input of the workbench sticks out of its panel and that no panel scrolls sideways (only the
-// tables scroll inside theirs); a flip keeps the page linked. The transform test imports
+// The overflow test computes ethanol and checks, at 1024, 1280, 1440 and 1920 px and with every
+// layout preset, that no button, select or input of the workbench sticks out of its panel and
+// that no panel scrolls sideways (only the tables scroll inside theirs); a flip keeps the page
+// linked. The radical test draws ethyl with the radical tool (one dot, data-radical, [CH2]C),
+// the carbene with the diradical tool and cycles with "."; Compute is off with the reason. The
+// R/S test toggles the CIP labels on L-alanine (S, kept by a flip) and (E)-2-butene. The layout
+// test folds and unfolds the orbital info beside the diagram, applies a preset, drags a column
+// and a row splitter, hides, moves and collapses panels, sets preferences (font, theme), reloads
+// and finds all of it again, then resets. The transform test imports
 // L-alanine and flips it (the wedge becomes a hash, the SMILES is unchanged), turns it with the
 // selection frame's rotate handle (one undo step), rotates by the R key and scales from the "⋯"
 // menu, the canonical isomeric SMILES unchanged throughout.
@@ -246,7 +252,16 @@ async function importSmiles(page: Page, smiles: string): Promise<void> {
   await page.getByTestId("sketch-import-load").click();
 }
 
-test("no control outside its panel at 1024 and 1440 px; a flip keeps the link", async ({ page, request }) => {
+const PRESETS = ["default", "sketch", "3d", "orbitals"];
+
+async function applyPreset(page: Page, name: string): Promise<void> {
+  await page.getByTestId("wb-layout-button").click();
+  await page.getByTestId(`layout-preset-${name}`).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("wb-layout-bar")).toHaveAttribute("data-preset", name);
+}
+
+test("no control outside its panel at 1024, 1280, 1440 and 1920 px with every preset; a flip keeps the link", async ({ page, request }) => {
   test.setTimeout(300_000);
   await skipWithoutWorkbench(request);
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -259,11 +274,15 @@ test("no control outside its panel at 1024 and 1440 px; a flip keeps the link", 
   await expect(page.getByTestId("wb-orbitals")).toBeVisible({ timeout: 60_000 });
   await page.getByTestId("tab-atoms").click();
   await expect(page.locator("[data-testid=atom-row]").first()).toBeVisible({ timeout: 60_000 });
-  for (const width of [1024, 1440]) {
-    await page.setViewportSize({ width, height: 1000 });
-    await expect.poll(() => layoutOverflow(page), { message: `overflow at ${width} px` }).toEqual([]);
-    await shot(page, "workbench", `layout-${width}.png`);
+  for (const preset of PRESETS) {
+    await applyPreset(page, preset);
+    for (const width of [1024, 1280, 1440, 1920]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await expect.poll(() => layoutOverflow(page), { message: `overflow at ${width} px, preset ${preset}` }).toEqual([]);
+      await shot(page, "workbench", `layout-${preset}-${width}.png`);
+    }
   }
+  await applyPreset(page, "default");
   const wb = page.getByTestId("workbench");
   await expect(wb).toHaveAttribute("data-linked", "true");
   const before = await atomPositions(page);
@@ -332,4 +351,163 @@ test("sketch transforms: flip, rotate handle, R key and scale keep the stereoiso
   await expect.poll(() => atomPositions(page)).not.toBe(before);
   expect(await settledSmiles(page)).toBe(smiles);
   await shot(page, "sketch", "transform.png");
+});
+
+async function openWorkbench(page: Page, request: import("@playwright/test").APIRequestContext): Promise<void> {
+  await skipWithoutWorkbench(request);
+  await page.goto("/#/workbench");
+  await expect(page.locator("body[data-rdkit=ready]")).toBeAttached({ timeout: 90_000 });
+}
+
+test("radicals: one dot, two dots, the '.' key; drawn but not computable", async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await openWorkbench(page, request);
+  const canvas = page.getByTestId("sketch-canvas");
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error("the sketch canvas has no box");
+  await canvas.click({ position: { x: box.width / 2 - 20, y: box.height / 2 } });
+  const sketch = page.getByTestId("sketch");
+  await expect(sketch).toHaveAttribute("data-smiles", "CC");
+  await page.getByTestId("tool-radical").click();
+  const c2 = page.getByTestId("sketch-atom-2");
+  await c2.click();
+  await expect(c2).toHaveAttribute("data-radical", "1");
+  await expect(c2.locator("circle.sk-radical")).toHaveCount(1);
+  await expect(sketch).toHaveAttribute("data-smiles", "[CH2]C");
+  await expect(sketch).toHaveAttribute("data-radicals", "1");
+  await expect(page.getByTestId("wb-compute")).toBeDisabled();
+  await expect(page.getByTestId("wb-compute-wrap")).toHaveAttribute("data-reason", /RADICAL_NOT_SUPPORTED/);
+  await expect(page.getByTestId("wb-radical-note")).toBeVisible();
+  await shot(page, "sketch", "radical.png");
+  await c2.click(); // the same tool again clears
+  await expect(c2).not.toHaveAttribute("data-radical", /./);
+  await expect(page.getByTestId("wb-compute")).toBeEnabled();
+  await page.getByTestId("tool-diradical").click();
+  await c2.click();
+  await expect(c2).toHaveAttribute("data-radical", "2");
+  await expect(c2.locator("circle.sk-radical")).toHaveCount(2);
+  await expect(sketch).toHaveAttribute("data-smiles", "[CH]C");
+  await page.getByTestId("sketch-atom-1").hover();
+  await page.keyboard.press(".");
+  await expect(page.getByTestId("sketch-atom-1")).toHaveAttribute("data-radical", "1");
+  await expect(sketch).toHaveAttribute("data-radicals", "3");
+});
+
+test("R/S: CIP labels on L-alanine (S, kept by a flip) and (E)-2-butene", async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await openWorkbench(page, request);
+  await importSmiles(page, "C[C@H](N)C(=O)O");
+  const sketch = page.getByTestId("sketch");
+  await expect(sketch).toHaveAttribute("data-atoms", "6");
+  await page.getByTestId("sketch-cip-toggle").click();
+  await expect(page.getByTestId("sketch-cip-toggle")).toHaveAttribute("data-active", "true");
+  const centre = page.locator("[data-testid^=sketch-atom-][data-cip]");
+  await expect(centre).toHaveCount(1);
+  await expect(centre).toHaveAttribute("data-cip", "S");
+  await expect(page.locator("[data-testid^=sketch-cip-atom-]")).toHaveText("(S)");
+  await expect(page.getByTestId("sketch-cip-list")).toContainText(/C2 S/);
+  await shot(page, "sketch", "cip-alanine.png");
+  await page.getByTestId("sketch-flip-h").click();
+  await expect(sketch).toHaveAttribute("data-status", "ready");
+  await expect(centre).toHaveAttribute("data-cip", "S");
+  await importSmiles(page, "C/C=C/C");
+  await expect(page.locator("[data-testid^=sketch-bond-][data-cip]")).toHaveAttribute("data-cip", "E");
+  await expect(page.getByTestId("sketch-cip-list")).toContainText("E");
+  await page.getByTestId("sketch-cip-toggle").click();
+  await expect(page.locator("[data-cip]")).toHaveCount(0);
+  await expect(page.getByTestId("sketch-cip-list")).toHaveCount(0);
+});
+
+/** The rendered width of a panel. */
+const panelWidth = async (page: Page, id: string) => (await page.getByTestId(`wb-panel-${id}`).boundingBox())?.width ?? 0;
+
+/** Drag a splitter by (dx, dy) px. */
+async function drag(page: Page, testId: string, dx: number, dy: number): Promise<void> {
+  const b = await page.getByTestId(testId).boundingBox();
+  if (!b) throw new Error(`${testId} has no box`);
+  const [x, y] = [b.x + b.width / 2, b.y + b.height / 2];
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + dx, y + dy, { steps: 8 });
+  await page.mouse.up();
+}
+
+test("layout: orbital info beside the diagram folds; presets, splitters, panels and preferences persist", async ({ page, request }) => {
+  test.setTimeout(300_000);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openWorkbench(page, request);
+  await importSmiles(page, "CCO");
+  await expect(page.locator('[data-testid=sketch][data-smiles="CCO"]')).toBeVisible();
+  await page.getByTestId("wb-compute").click();
+  await expect(page.locator("[data-testid=wb-status][data-status=ready]")).toBeVisible({ timeout: 180_000 });
+
+  // the orbital info sits beside the diagram, and folds away
+  const rows = page.locator("[data-testid=orbital-row]");
+  await expect(rows.first()).toBeVisible({ timeout: 120_000 });
+  const diagram = await page.getByTestId("level-diagram").boundingBox();
+  const list = await page.getByTestId("orbital-list").boundingBox();
+  if (!diagram || !list) throw new Error("no orbital boxes");
+  expect(list.x).toBeGreaterThan(diagram.x + diagram.width - 1);
+  expect(list.y).toBeLessThan(diagram.y + diagram.height);
+  await shot(page, "wb-panel-orbitals", "orbitals-open.png");
+  await page.getByTestId("orbital-info-toggle").click();
+  await expect(page.getByTestId("wb-orbitals")).toHaveAttribute("data-info", "closed");
+  await expect(page.getByTestId("orbital-info")).toBeHidden();
+  await expect(page.getByTestId("level-diagram")).toBeVisible();
+  await shot(page, "wb-panel-orbitals", "orbitals-folded.png");
+  await page.getByTestId("orbital-info-toggle").click();
+  await expect(rows.first()).toBeVisible();
+
+  // a preset, then a column splitter and a row splitter
+  await applyPreset(page, "sketch");
+  await expect(page.getByTestId("wb-col-0").getByTestId("wb-panel-sketch")).toBeVisible();
+  const w0 = await panelWidth(page, "sketch");
+  await drag(page, "wb-splitter-col-1", -120, 0);
+  await expect.poll(() => panelWidth(page, "sketch")).toBeLessThan(w0 - 80);
+  await expect(page.getByTestId("wb-layout-bar")).toHaveAttribute("data-preset", "custom");
+  const canvasH = async () => (await page.getByTestId("sketch-canvas").boundingBox())?.height ?? 0;
+  const h0 = await canvasH();
+  await drag(page, "wb-splitter-row-sketch", 0, -100);
+  await expect.poll(canvasH).toBeLessThan(h0 - 60);
+  const w1 = await panelWidth(page, "sketch");
+  const h1 = await canvasH();
+
+  // hide, move, collapse
+  await page.getByTestId("panel-hide-surfaces").click();
+  await expect(page.getByTestId("wb-panel-surfaces")).toBeHidden();
+  await expect(page.getByTestId("layout-restore-surfaces")).toBeVisible();
+  await page.getByTestId("panel-move-properties-up").click();
+  await expect(page.getByTestId("wb-panel-properties")).toHaveAttribute("data-area", /^col-/);
+  await page.getByTestId("panel-collapse-viewer").click();
+  await expect(page.getByTestId("wb-panel-viewer")).toHaveAttribute("data-collapsed", "true");
+  await expect(page.getByTestId("wb-viewer")).toBeHidden();
+
+  // preferences
+  await page.getByTestId("wb-layout-button").click();
+  await page.getByTestId("pref-font").fill("17");
+  await page.getByTestId("pref-theme").selectOption("dark");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByTestId("sketch-canvas")).toHaveAttribute("style", /--sk-font: 17px/);
+  await shot(page, "workbench", "layout-custom-dark.png");
+
+  // everything is back after a reload
+  await page.reload();
+  await expect(page.locator("body[data-rdkit=ready]")).toBeAttached({ timeout: 90_000 });
+  await expect(page.getByTestId("wb-layout-bar")).toHaveAttribute("data-preset", "custom");
+  await expect(page.getByTestId("wb-panel-surfaces")).toBeHidden();
+  await expect(page.getByTestId("wb-panel-viewer")).toHaveAttribute("data-collapsed", "true");
+  await expect(page.getByTestId("wb-panel-properties")).toHaveAttribute("data-area", /^col-/);
+  await expect.poll(() => panelWidth(page, "sketch")).toBeCloseTo(w1, -1);
+  await expect.poll(canvasH).toBeCloseTo(h1, 0);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByTestId("sketch-canvas")).toHaveAttribute("style", /--sk-font: 17px/);
+
+  await page.getByTestId("wb-layout-button").click();
+  await page.getByTestId("layout-reset").click();
+  await page.getByTestId("pref-theme").selectOption("auto");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("wb-layout-bar")).toHaveAttribute("data-preset", "default");
+  await expect(page.getByTestId("wb-panel-surfaces")).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
 });

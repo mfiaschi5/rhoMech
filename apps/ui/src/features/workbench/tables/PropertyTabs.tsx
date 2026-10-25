@@ -213,7 +213,7 @@ export function PropertyTabs(p: PropertyTabsProps) {
   const [tab, setTab] = useState<TabName>("global");
   const needsMolecule = tab !== "descriptors" && !p.molecule;
   return (
-    <section className="panel wb-tabs" data-testid="wb-tabs" data-tab={tab}>
+    <div className="wb-tabs" data-testid="wb-tabs" data-tab={tab}>
       <div className="wb-tab-bar" role="tablist">
         {TABS.map((t) => (
           <button key={t} type="button" role="tab" data-testid={`tab-${t}`} aria-selected={tab === t} className={`wb-tab${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>
@@ -229,6 +229,6 @@ export function PropertyTabs(p: PropertyTabsProps) {
         {!needsMolecule && tab === "orbitals" && <Pending res={p.orbitals} what="orbitals">{(d) => <OrbitalsTab data={d} selected={p.selectedOrbital} onPick={p.onPickOrbital} />}</Pending>}
         {tab === "descriptors" && <DescriptorsTab descriptors={p.descriptors} />}
       </div>
-    </section>
+    </div>
   );
 }

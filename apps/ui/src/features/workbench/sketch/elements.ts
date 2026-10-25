@@ -28,12 +28,13 @@ const GROUP_13_14 = new Set(["B", "C", "Si", "Ge"]);
 
 /** Implicit H count from default valences, the stand-in until RDKit's count arrives: groups 13
  *  and 14 lose one valence per charge of either sign, groups 15-17 gain one per positive charge
- *  (N+ 4, O+ 3) and lose one per negative charge (N- 2, O- 1). */
-export function fallbackHCount(el: string, charge: number, bondOrderSum: number): number {
+ *  (N+ 4, O+ 3) and lose one per negative charge (N- 2, O- 1); each unpaired electron takes one
+ *  more (CH3-CH2. has 2 H, :CH2 has 2). */
+export function fallbackHCount(el: string, charge: number, bondOrderSum: number, radical = 0): number {
   const v = VALENCE[el];
   if (v === undefined) return 0;
   const valence = GROUP_13_14.has(el) ? v - Math.abs(charge) : v + charge;
-  return Math.max(0, valence - bondOrderSum);
+  return Math.max(0, valence - bondOrderSum - radical);
 }
 
 /** Hill formula (C, H, then alphabetical; alphabetical throughout without carbon) with the net

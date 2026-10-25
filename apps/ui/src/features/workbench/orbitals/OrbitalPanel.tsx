@@ -1,9 +1,19 @@
-// OrbitalPanel: the orbital set and LMO start pickers, the energy-level diagram and the orbital
-// list of the shown set. Picking an orbital (list, diagram, a centroid in 3D) shows it as the
-// selected-orbital surface layer.
+// OrbitalPanel: the orbital set and LMO start pickers, then the energy-level diagram with the
+// orbital info (set stats and the orbital list) NEXT TO it. The info is retractable: the thin
+// bar between the two (orbital-info-toggle) folds it away, leaving the diagram and the bar. The
+// panel stacks the two when it is narrower than 460 px (a container query in workbench.css),
+// the bar then running across. Picking an orbital (list, diagram, a centroid in 3D) shows it as
+// the selected-orbital surface layer.
 //
-// DOM: set-select, start-select, window-select, <div data-testid="orbital-list"> with
-// <tr data-testid="orbital-row" data-set data-index data-selected data-frontier>.
+// Props besides the pickers': infoOpen / onInfoToggle (the layout state keeps it), height (the
+// diagram's height; the list scrolls within it).
+//
+// DOM: <div data-testid="wb-orbitals" data-info="open|closed">, set-select, start-select,
+// window-select, <div data-testid="orbital-body">, the diagram (LevelDiagram.tsx), <button
+// data-testid="orbital-info-toggle" aria-expanded>, <div data-testid="orbital-info"> (hidden when
+// folded) with <div data-testid="orbital-list"> of <tr data-testid="orbital-row" data-set
+// data-index data-selected data-frontier>.
+import type { CSSProperties } from "react";
 import type { ApiError } from "../../../api/client";
 import type { PendingCached } from "../../../api/hooks";
 import type { OrbitalRowOut, OrbitalSetOut } from "../../../api/types.gen";
@@ -26,6 +36,10 @@ export interface OrbitalPanelProps {
   onPickCanonical(index: number): void;
   window: Window;
   onWindow(w: Window): void;
+  infoOpen: boolean;
+  onInfoToggle(): void;
+  /** Diagram height (px); the list scrolls within it. */
+  height: number;
 }
 
 const SET_LABELS: Record<string, string> = { canonical: "canonical MOs", ibo: "IBO", pm_mulliken: "Pipek-Mezey (Mulliken)" };
@@ -110,48 +124,72 @@ function SetStats({ data }: { data: OrbitalSetOut }) {
   );
 }
 
+function Pickers({ p, sets, starts }: { p: OrbitalPanelProps; sets: string[]; starts: string[] }) {
+  const lmo = p.set !== CANONICAL;
+  const homo = p.canonical.data?.orbitals.find((r) => r.frontier === "homo");
+  return (
+    <div className="row wb-orbital-pickers">
+      <label className="wb-inline">
+        set
+        <select data-testid="set-select" value={p.set} onChange={(e) => p.onSet(e.target.value)}>
+          {sets.map((s) => (
+            <option key={s} value={s}>
+              {SET_LABELS[s] ?? s}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="wb-inline" title="the start of the localization">
+        start
+        <select data-testid="start-select" value={p.start} disabled={!lmo} onChange={(e) => p.onStart(e.target.value)}>
+          {starts.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+      </label>
+      <select data-testid="window-select" value={p.window} onChange={(e) => p.onWindow(e.target.value as Window)} aria-label="energy window">
+        <option value="frontier">frontier window</option>
+        <option value="all">all levels</option>
+      </select>
+      {homo && <span className="muted wb-small">{frontierLabel("homo")} {fmt(homo.energy_ev, 2)} eV</span>}
+    </div>
+  );
+}
+
+function InfoToggle({ open, onToggle }: { open: boolean; onToggle(): void }) {
+  const label = open ? "Hide the orbital list" : "Show the orbital list";
+  return (
+    <button type="button" className="wb-info-toggle" data-testid="orbital-info-toggle" aria-expanded={open} aria-controls="wb-orbital-info" title={label} aria-label={label} onClick={onToggle}>
+      <span aria-hidden="true">{open ? "›" : "‹"}</span>
+    </button>
+  );
+}
+
 export function OrbitalPanel(p: OrbitalPanelProps) {
   const data = p.shown.data;
   const sets = data?.sets ?? p.canonical.data?.sets ?? FALLBACK_SETS;
   const starts = data?.starts ?? p.canonical.data?.starts ?? FALLBACK_STARTS;
   const lmo = p.set !== CANONICAL;
-  const homo = p.canonical.data?.orbitals.find((r) => r.frontier === "homo");
+  const open = p.infoOpen;
   return (
-    <section className="panel wb-orbitals" data-testid="wb-orbitals">
-      <div className="row wb-orbital-pickers">
-        <label className="wb-inline">
-          set
-          <select data-testid="set-select" value={p.set} onChange={(e) => p.onSet(e.target.value)}>
-            {sets.map((s) => (
-              <option key={s} value={s}>
-                {SET_LABELS[s] ?? s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="wb-inline" title="the start of the localization">
-          start
-          <select data-testid="start-select" value={p.start} disabled={!lmo} onChange={(e) => p.onStart(e.target.value)}>
-            {starts.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <select data-testid="window-select" value={p.window} onChange={(e) => p.onWindow(e.target.value as Window)} aria-label="energy window">
-          <option value="frontier">frontier window</option>
-          <option value="all">all levels</option>
-        </select>
-        {homo && <span className="muted wb-small">{frontierLabel("homo")} {fmt(homo.energy_ev, 2)} eV</span>}
-      </div>
+    <div className="wb-orbitals" data-testid="wb-orbitals" data-info={open ? "open" : "closed"} style={{ "--wb-orbitals-h": `${p.height}px` } as CSSProperties}>
+      <Pickers p={p} sets={sets} starts={starts} />
       <Loading res={p.canonical} what="canonical orbitals" />
-      {p.canonical.data && (
-        <LevelDiagram canonical={p.canonical.data.orbitals} lmos={lmo ? (data?.set === p.set ? data.orbitals : null) : null} selected={p.selected} window={p.window} onPickCanonical={p.onPickCanonical} onPickLmo={p.onPick} />
-      )}
-      {lmo && <Loading res={p.shown} what={`${SET_LABELS[p.set] ?? p.set} orbitals`} />}
-      {data && <SetStats data={data} />}
-      {data && <OrbitalList data={data} selected={p.selected} onPick={p.onPick} />}
-    </section>
+      <div className={`wb-orbital-body${open ? "" : " folded"}`} data-testid="orbital-body">
+        <div className="wb-orbital-diagram">
+          {p.canonical.data && (
+            <LevelDiagram canonical={p.canonical.data.orbitals} lmos={lmo ? (data?.set === p.set ? data.orbitals : null) : null} selected={p.selected} window={p.window} onPickCanonical={p.onPickCanonical} onPickLmo={p.onPick} height={p.height} />
+          )}
+        </div>
+        <InfoToggle open={open} onToggle={p.onInfoToggle} />
+        <div className="wb-orbital-info" id="wb-orbital-info" data-testid="orbital-info" hidden={!open}>
+          {lmo && <Loading res={p.shown} what={`${SET_LABELS[p.set] ?? p.set} orbitals`} />}
+          {data && <SetStats data={data} />}
+          {data && <OrbitalList data={data} selected={p.selected} onPick={p.onPick} />}
+        </div>
+      </div>
+    </div>
   );
 }

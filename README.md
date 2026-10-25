@@ -107,6 +107,26 @@ then look at it:
   flip swaps wedges and hashes so the drawing stays the same stereoisomer), and its "⋯" menu
   turns by 90°, scales by 10 % (Ctrl+= / Ctrl+-) or resets the bond length. Without a selection
   they apply to the whole drawing; each is one undo step and keeps the sketch linked.
+- radicals in the sketcher: the radical tool (one dot) and the diradical / carbene tool (two
+  dots) on an atom, again to clear; the "." key cycles none, one, two on the hovered atom or the
+  selection. The dots sit in the largest free angle by the atom, and the molfile carries them as
+  `M  RAD` (2 = doublet, 3 = triplet), so RDKit drops the H count (`C[CH2]`, `[CH2]`). Radicals
+  can be drawn but not computed yet: Compute is off and its tooltip and a note say why (the
+  server answers RADICAL_NOT_SUPPORTED). Clean and 3D→2D keep them by atom id.
+- an R/S toggle in the sketcher: RDKit.js's CIP labels (new labeler) beside the stereocentres
+  (R, S, pseudo-asymmetric r, s, and "?" for a possible stereocentre the drawing leaves
+  undefined) and E/Z beside the stereo double bonds, plus a list in the info bar ("C2 S · C3=C4
+  E"). They follow every edit; a flip keeps the stereoisomer, so the labels stay.
+- the orbital panel shows the energy-level diagram with the orbital list and set stats beside
+  it; the thin bar between them folds the list away (a narrow panel stacks them).
+- a customizable layout: every panel (sketch, 3D view, orbitals, surfaces, properties) has a
+  header that collapses it, hides it and moves it left, right, up or down (into a third column
+  or the full-width row); drag the splitters between columns and under the sketch, the 3D view,
+  the level diagram and the tables. The "Layout" menu has the presets (default, sketch-, 3D- and
+  orbitals-focused), reset layout, a show / hide box per panel, and the preferences: sketch
+  font size, bond line width, atom colours, label style (skeletal, all atoms, no implicit H),
+  the default 3D representation, the default orbital isovalue and the theme (auto, light,
+  dark). Layout and preferences are kept per browser (localStorage).
 
 Defaults and approximations: the density is valence-only on GFN2's minimal basis (an STO-nG
 fit, so its integral is shown next to N_valence), the ESP is an approximate point-charge

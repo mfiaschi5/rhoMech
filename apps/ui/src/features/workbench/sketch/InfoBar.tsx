@@ -7,9 +7,12 @@
 // <div data-testid="sketch-depict-report" data-kind (clean | project) data-method data-template
 // data-stereo (none | kept | mismatch) data-score data-label-overlaps data-close-contacts
 // data-crossings data-view-residual data-fallback (true when the browser laid it out)
-// data-error>.
+// data-error>; with R/S on, <span data-testid="sketch-cip-list" data-count> ("C3 R · C1=C2 E";
+// "?" marks a possible stereocentre the drawing leaves undefined); with radicals drawn,
+// <span data-testid="sketch-radical-note" data-electrons>.
 import type { SketchInfo } from "./useSketchInfo";
 import type { LayoutReport } from "./useLayoutActions";
+import { cipText, type CipItem } from "./cip";
 
 function describe(r: LayoutReport): string {
   const what = r.kind === "project" ? "3D→2D" : "Clean";
@@ -57,7 +60,35 @@ function fmt(v: number | undefined, digits: number): string {
   return Number(s) === 0 ? (0).toFixed(digits) : s; // never "-0.00"
 }
 
-export function InfoBar({ info, report = null }: { info: SketchInfo; report?: LayoutReport | null }) {
+function CipList({ items }: { items: readonly CipItem[] }) {
+  const undefinedOnes = items.filter((x) => x.code === "?").length;
+  const title = "CIP labels from RDKit (new labeler): R/S, r/s pseudo-asymmetric, E/Z; ? = a possible stereocentre the drawing does not define (add a wedge)";
+  return (
+    <span className="sk-desc sk-cip-list" data-testid="sketch-cip-list" data-count={items.length} title={title}>
+      <span className="muted">R/S</span> {items.length ? cipText(items) : "no stereocentres"}
+      {undefinedOnes > 0 && <span className="muted"> ({undefinedOnes} undefined)</span>}
+    </span>
+  );
+}
+
+function RadicalNote({ electrons }: { electrons: number }) {
+  return (
+    <span className="sk-desc muted" data-testid="sketch-radical-note" data-electrons={electrons} title="The QM featurization is closed-shell: the server refuses radicals (RADICAL_NOT_SUPPORTED)">
+      {electrons} unpaired e⁻: drawn, not computable yet
+    </span>
+  );
+}
+
+export interface InfoBarProps {
+  info: SketchInfo;
+  report?: LayoutReport | null;
+  /** The CIP list (R/S on), null when off. */
+  cip?: readonly CipItem[] | null;
+  /** Unpaired electrons drawn (0: no note). */
+  radicals?: number;
+}
+
+export function InfoBar({ info, report = null, cip = null, radicals = 0 }: InfoBarProps) {
   const d = info.descriptors;
   const items: [string, string, string][] = d
     ? [
@@ -97,6 +128,8 @@ export function InfoBar({ info, report = null }: { info: SketchInfo; report?: La
           <span className="muted">{label}</span> {value}
         </span>
       ))}
+      {cip && info.valid && <CipList items={cip} />}
+      {radicals > 0 && <RadicalNote electrons={radicals} />}
       {report && <DepictReport r={report} />}
     </div>
   );
