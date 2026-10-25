@@ -2,8 +2,14 @@
 // unless charged, isolated or flagged explicitH; heteroatoms carry their implicit H count),
 // bond strokes (double bonds offset into rings, centred at terminal ends, triple bonds, wedge
 // and hash bonds), all as plain data. Pure: SketchCanvas only turns it into SVG elements.
+//
+// Crossing breaks (model.breakCrossings): where two bonds cross (crossings.ts) the bond behind
+// is drawn with a gap of BREAK_GAP_PX on each side of the front bond's outline, on every one
+// of its strokes (all lines of a multiple bond; the ticks of a hash; a wedge in two pieces).
 import type { SketchAtom, SketchBond, SketchModel } from "./model";
 import type { Vec, View } from "./geometry";
+// @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
+import { findCrossings } from "./crossings.ts";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
 import { atomById, bondOrderSum, neighbors, smallestRingThrough } from "./model.ts";
 // @ts-ignore TS5097: see above
@@ -15,6 +21,9 @@ export const FONT_PX = 13;
 const DOUBLE_GAP_PX = 4.5;
 const INNER_SHORTEN = 0.14;
 const WEDGE_HALF_PX = 3.6;
+/** Clearance (px) between the front bond's outline and the ends of the broken bond behind. */
+export const BREAK_GAP_PX = 3.2;
+const CHARGE_FONT_PX = 10;
 
 export interface AtomLabel {
   el: string;
@@ -30,8 +39,8 @@ export interface Seg {
 
 export interface BondShape {
   lines: Seg[];
-  /** Filled wedge triangle (wedge bonds). */
-  wedge?: Vec[];
+  /** Filled wedge polygons (one; two or more when a crossing breaks it). */
+  wedges?: Vec[][];
 }
 
 export interface AtomScene {
@@ -45,6 +54,8 @@ export interface BondScene {
   shape: BondShape;
   /** Full-length centre line (hit target, hover and selection halo). */
   axis: Seg;
+  /** Crossings at which this bond is behind and drawn broken (0 without breaks). */
+  broken: number;
 }
 
 const H_LEFT_WHEN_ALONE = new Set(["O", "S", "Se", "F", "Cl", "Br", "I"]);
@@ -65,6 +76,33 @@ export function atomLabel(m: SketchModel, atom: SketchAtom, hCount: number, view
     hSide = dx > 0 ? "left" : "right";
   }
   return { el: atom.el, hCount, hSide, charge: chargeLabel(atom.charge) };
+}
+
+/** Half the estimated glyph width of an element symbol (capital ~0.62 em, lowercase ~0.5 em). */
+export const labelHalfWidth = (el: string): number => ((0.62 + 0.5 * (el.length - 1)) * FONT_PX) / 2;
+
+/** Width (px) of the H part of a label ("H", "H2"...); 0 without H. */
+export const hLabelWidth = (hCount: number): number => (hCount > 0 ? FONT_PX * 0.68 + (hCount > 1 ? FONT_PX * 0.45 : 0) : 0);
+
+/** The box (screen px about the atom, y down) of everything a label draws: the symbol, the H
+ *  count on its side and the charge superscript. SketchCanvas places the glyphs by the same
+ *  numbers; the layout correction (layoutFix.ts) uses the box in model units. */
+export function labelBox(label: AtomLabel): { x0: number; x1: number; y0: number; y1: number } {
+  const half = labelHalfWidth(label.el);
+  const hw = hLabelWidth(label.hCount);
+  const right = label.hSide === "right";
+  let x0 = -half - (right ? 0 : hw);
+  let x1 = half + (right ? hw : 0);
+  let y1 = FONT_PX * 0.5 + (label.hCount > 1 ? 3 : 0);
+  let y0 = -FONT_PX * 0.5;
+  if (label.charge) {
+    const cx = half + (right ? hw : 0) + 1;
+    x1 = Math.max(x1, cx + label.charge.length * CHARGE_FONT_PX * 0.62);
+    y0 = Math.min(y0, -FONT_PX * 0.55 - CHARGE_FONT_PX * 0.5);
+  }
+  x0 = Math.min(x0, -half);
+  y1 = Math.max(y1, FONT_PX * 0.5);
+  return { x0, x1, y0, y1 };
 }
 
 /** Pixels a bond stops short of a labelled atom. */
@@ -119,7 +157,7 @@ export function bondShape(
   tq: number,
 ): BondShape {
   const main = trimmed(p, q, tp, tq);
-  if (b.order === 1 && b.stereo === "wedge") return { lines: [], wedge: wedgePolygon(main) };
+  if (b.order === 1 && b.stereo === "wedge") return { lines: [], wedges: [wedgePolygon(main)] };
   if (b.order === 1 && b.stereo === "hash") return { lines: hashLines(main) };
   if (b.order === 1) return { lines: [main] };
   if (b.order === 2 && side === 0) {
@@ -154,8 +192,96 @@ function hashLines(s: Seg): Seg[] {
   });
 }
 
+/** A crossing as the drawing sees it: the point (px), the front bond's direction and the
+ *  half-width of its outline (px). */
+interface Cut {
+  at: Vec;
+  dir: Vec;
+  half: number;
+}
+
+/** Half-width (px) of what a bond draws at parameter t (for the gap of the bond behind). */
+function outlineHalf(b: Pick<SketchBond, "order" | "stereo">, t: number): number {
+  if (b.order === 2) return DOUBLE_GAP_PX;
+  if (b.order === 3) return DOUBLE_GAP_PX + 0.8;
+  return b.stereo === "wedge" || b.stereo === "hash" ? 0.6 + (WEDGE_HALF_PX - 0.6) * t : 0.8;
+}
+
+/** The arclength interval [s0, s1] of segment s that the cut removes, or null when s runs
+ *  parallel to the front bond. */
+function cutInterval(s: Seg, c: Cut): [number, number] | null {
+  const d = sub(s.q, s.p);
+  const l = len(d);
+  const den = d[0] * c.dir[1] - d[1] * c.dir[0];
+  if (l < 1e-9 || Math.abs(den) < 1e-9 * l) return null;
+  const w = sub(c.at, s.p);
+  const along = ((w[0] * c.dir[1] - w[1] * c.dir[0]) / den) * l;
+  const sin = Math.abs(den) / l;
+  const g = (BREAK_GAP_PX + c.half) / Math.max(sin, 0.35);
+  return [along - g, along + g];
+}
+
+function cutSeg(s: Seg, c: Cut): Seg[] {
+  const iv = cutInterval(s, c);
+  const l = len(sub(s.q, s.p));
+  if (!iv || iv[1] <= 0 || iv[0] >= l) return [s];
+  const u = scale(sub(s.q, s.p), 1 / l);
+  const out: Seg[] = [];
+  if (iv[0] > 0.6) out.push({ p: s.p, q: add(s.p, scale(u, iv[0])) });
+  if (l - iv[1] > 0.6) out.push({ p: add(s.p, scale(u, iv[1])), q: s.q });
+  return out;
+}
+
+const lerp = (p: Vec, q: Vec, t: number): Vec => [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+
+/** A wedge polygon [narrow left, wide left, wide right, narrow right] without the cut. */
+function cutWedge(w: Vec[], axis: Seg, c: Cut): Vec[][] {
+  const iv = cutInterval(axis, c);
+  const l = len(sub(axis.q, axis.p));
+  if (!iv || iv[1] <= 0 || iv[0] >= l) return [w];
+  const piece = (t0: number, t1: number): Vec[] => [lerp(w[0], w[1], t0), lerp(w[0], w[1], t1), lerp(w[3], w[2], t1), lerp(w[3], w[2], t0)];
+  const out: Vec[][] = [];
+  if (iv[0] > 0.6) out.push(piece(0, iv[0] / l));
+  if (l - iv[1] > 0.6) out.push(piece(iv[1] / l, 1));
+  return out;
+}
+
+/** The shape of bond `b` (centre line `main`) with the crossing cuts applied. */
+export function breakShape(shape: BondShape, b: Pick<SketchBond, "order" | "stereo">, main: Seg, cuts: readonly Cut[]): BondShape {
+  if (cuts.length === 0) return shape;
+  let lines = shape.lines;
+  let wedges = shape.wedges;
+  for (const c of cuts) {
+    if (b.order === 1 && b.stereo === "hash") {
+      const iv = cutInterval(main, c);
+      lines = lines.filter((tick) => {
+        const mid = scale(add(tick.p, tick.q), 0.5);
+        const along = len(sub(mid, main.p));
+        return !iv || along < iv[0] || along > iv[1];
+      });
+    } else lines = lines.flatMap((s) => cutSeg(s, c));
+    if (wedges) wedges = wedges.flatMap((w) => cutWedge(w, main, c));
+  }
+  return wedges ? { lines, wedges } : { lines };
+}
+
+/** The cuts of each bond behind a crossing (screen px), by bond id. */
+function crossingCuts(m: SketchModel, view: View, at: (id: number) => Vec): Map<number, Cut[]> {
+  const out = new Map<number, Cut[]>();
+  const byId = new Map(m.bonds.map((b) => [b.id, b]));
+  for (const c of findCrossings(m)) {
+    const front = byId.get(c.front);
+    if (!front) continue;
+    const d = sub(at(front.b), at(front.a));
+    const l = len(d) || 1;
+    const cut: Cut = { at: toScreen(view, c.at), dir: scale(d, 1 / l), half: outlineHalf(front, c.tFront) };
+    out.set(c.back, [...(out.get(c.back) ?? []), cut]);
+  }
+  return out;
+}
+
 /** Everything to draw, in screen pixels. `hCounts` (RDKit's, by atom id) wins over the default
- *  valence fallback. */
+ *  valence fallback. Crossing breaks follow model.breakCrossings. */
 export function buildScene(
   m: SketchModel,
   view: View,
@@ -168,12 +294,16 @@ export function buildScene(
   });
   const labels = new Map(atoms.map((s) => [s.atom.id, s.label]));
   const pos = (id: number) => at.get(id) ?? ([0, 0] as Vec);
+  const cuts = m.breakCrossings ? crossingCuts(m, view, pos) : new Map<number, Cut[]>();
   const bonds: BondScene[] = m.bonds.map((bond) => {
     const p = pos(bond.a);
     const q = pos(bond.b);
     const side = bond.order === 2 ? doubleBondSide(m, bond, pos) : 0;
-    const shape = bondShape(p, q, bond, side, labelTrim(labels.get(bond.a) ?? null), labelTrim(labels.get(bond.b) ?? null));
-    return { bond, shape, axis: { p, q } };
+    const tp = labelTrim(labels.get(bond.a) ?? null);
+    const tq = labelTrim(labels.get(bond.b) ?? null);
+    const mine = cuts.get(bond.id) ?? [];
+    const shape = breakShape(bondShape(p, q, bond, side, tp, tq), bond, trimmed(p, q, tp, tq), mine);
+    return { bond, shape, axis: { p, q }, broken: mine.length };
   });
   return { atoms, bonds };
 }

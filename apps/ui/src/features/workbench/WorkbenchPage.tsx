@@ -5,12 +5,17 @@
 //
 // Hash params (params.ts): smiles, m, set, start, orb, rep, layers, q. The drawing persists in
 // sessionStorage (session.ts). Selections link the tables, the 3D view and the sketch through
-// the POST's sketch mapping, only while the sketch is unchanged since the compute.
+// the POST's sketch mapping, only while the sketch is unchanged since the compute (topology, and
+// wedges unless they draw the record's configuration: session.sketchChanged; coordinates never
+// count). The sketcher's 3D -> 2D projection reads the 3D view through a ProjectionSource
+// (viewer/viewProjection.ts), so the sketch module never sees 3Dmol.
 //
-// DOM: <div data-testid="workbench" data-molecule-id data-linked>, wb-compute, wb-status
+// DOM: <div data-testid="workbench" data-molecule-id data-linked data-projection-residual
+// (screen-fit residual of the last projection, viewProjection.screenResidual)>, wb-compute, wb-status
 // [data-status=idle|posting|running|ready|qm_only|failed|missing|error], wb-stale-note,
 // wb-chemistry-banner[data-chemistry], wb-mapping-note.
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { GLViewer } from "3dmol";
 import type { PageProps } from "../../registry";
 import { navigate, parseHash, withParams, type Route } from "../../router";
 import { useRDKit } from "../../chem/rdkit";
@@ -18,18 +23,19 @@ import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
 import { useCapability } from "../../state/store";
-import type { MoleculeOut } from "../../api/types.gen";
+import type { MoleculeGeometryOut, MoleculeOut } from "../../api/types.gen";
 import { useGeometry, useOrbitalSet, useProperties } from "./data";
 import { OrbitalPanel } from "./orbitals/OrbitalPanel";
 import type { Window } from "./orbitals/levels";
 import { CANONICAL, DEFAULT_SET, DEFAULT_START, isMoleculeId, isOrbitalKind, parseIndex, parseLayers, parseQuality, parseRep, formatLayers, type LayerSpec } from "./params";
-import { restoreComputed, restoreSketch, saveComputed, saveSketch, sketchSignature } from "./session";
-import { emptySketch, fromMolblock, importSketch, Sketcher, toMolblock, useSketchInfo, type SketchModel } from "./sketch";
+import { restoreComputed, restoreSketch, saveComputed, saveSketch, sketchChanged, sketchTopology } from "./session";
+import { emptySketch, exportSketch, fromMolblock, importSketch, molblockSmiles, Sketcher, toMolblock, useSketchInfo, type ProjectionSource, type SketchModel } from "./sketch";
 import { clearSelection, useSelection } from "./store";
 import { PropertyTabs } from "./tables/PropertyTabs";
 import { useMolecule, type ComputeState } from "./useMolecule";
 import { useWorkbenchLayers } from "./useWorkbenchLayers";
 import { ViewerPanel } from "./viewer/ViewerPanel";
+import { screenResidual, viewProjection } from "./viewer/viewProjection";
 import "./workbench.css";
 
 type Update = Record<string, string | number | null>;
@@ -174,6 +180,47 @@ function sketchHighlight(state: ComputeState, model: SketchModel, linked: boolea
   return [...new Set(ids.filter((x): x is number => x !== undefined))];
 }
 
+/** Whether the sketch still links to the computed record (see session.sketchChanged). */
+function useStale(model: SketchModel, state: ComputeState, geometry: MoleculeGeometryOut | undefined): boolean {
+  const { rdkit } = useRDKit();
+  const recordSmiles = useMemo(() => (rdkit && geometry ? molblockSmiles(rdkit, geometry.molblock) : ""), [rdkit, geometry]);
+  return useMemo(
+    () =>
+      sketchChanged(model, state.model, () =>
+        rdkit && state.model
+          ? { drawn: exportSketch(rdkit, model, "smiles"), computed: exportSketch(rdkit, state.model, "smiles"), record: recordSmiles }
+          : null,
+      ),
+    [model, state.model, rdkit, recordSmiles],
+  );
+}
+
+/** Why the projection is off, or null. */
+function projectionBlocker(state: ComputeState, model: SketchModel, geometry: MoleculeGeometryOut | undefined, viewer: GLViewer | null): string | null {
+  const ready = state.status === "ready" || state.status === "qm_only";
+  if (!state.molecule || !ready) return "compute the molecule first";
+  if (!state.mapping || !state.model) return "no sketch mapping for this molecule: recompute the drawing";
+  if (sketchTopology(model) !== sketchTopology(state.model)) return "sketch changed since compute";
+  if (!geometry) return "the 3D geometry is still loading";
+  if (!viewer) return "no 3D view (WebGL unavailable)";
+  return null;
+}
+
+/** The sketcher's projection source: the record geometry seen through the 3D view now. */
+function useProjectionSource(state: ComputeState, model: SketchModel, geometry: MoleculeGeometryOut | undefined, viewer: GLViewer | null) {
+  const [residual, setResidual] = useState<number | null>(null);
+  const source: ProjectionSource = {
+    disabledReason: projectionBlocker(state, model, geometry, viewer),
+    project: () => {
+      if (!viewer || !geometry || !state.mapping) return null;
+      const p = viewProjection(viewer, model, state.mapping, geometry);
+      if (p) setResidual(screenResidual(viewer, geometry, model, state.mapping, p));
+      return p;
+    },
+  };
+  return { source, residual };
+}
+
 function Workbench({ route }: { route: Route }) {
   const prm = route.params;
   const set = prm.get("set") || DEFAULT_SET;
@@ -193,10 +240,10 @@ function Workbench({ route }: { route: Route }) {
   const canonical = useOrbitalSet(mid, CANONICAL, "");
   const [win, setWin] = useState<Window>("frontier");
   const sel = useSelection();
-  const signature = useMemo(() => sketchSignature(model), [model]);
-  const computedSignature = useMemo(() => (state.model ? sketchSignature(state.model) : null), [state.model]);
-  const stale = computedSignature !== null && computedSignature !== signature;
+  const stale = useStale(model, state, geometry.data);
   const linked = !!state.mapping && !stale;
+  const [viewer, setViewer] = useState<GLViewer | null>(null);
+  const projection = useProjectionSource(state, model, geometry.data, viewer);
   const orbitalSpec: LayerSpec | null = mid && orb !== null ? { kind: "orbital", set, start: set === CANONICAL ? null : start, index: orb } : null;
   const layers = useWorkbenchLayers(prm.get("layers"), orbitalSpec, (v) => update({ layers: v }));
   const onCompute = (retry = false) => {
@@ -215,12 +262,18 @@ function Workbench({ route }: { route: Route }) {
   const highlight = useMemo(() => sketchHighlight(state, model, linked, sel.atoms), [state, model, linked, sel.atoms]);
   const pick = (i: number) => update({ orb: i });
   return (
-    <div className="workbench" data-testid="workbench" data-molecule-id={mid ?? ""} data-linked={linked ? "true" : "false"}>
+    <div
+      className="workbench"
+      data-testid="workbench"
+      data-molecule-id={mid ?? ""}
+      data-linked={linked ? "true" : "false"}
+      data-projection-residual={projection.residual === null ? undefined : projection.residual.toFixed(4)}
+    >
       <ChemistryBanner molecule={state.molecule} />
       <div className="wb-grid">
         <div className="wb-left">
           <section className="panel wb-sketch-panel">
-            <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={340} />
+            <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={340} projection={projection.source} />
             <ComputeBar state={state} canCompute={info.valid && !info.stale} stale={stale} onCompute={onCompute} />
           </section>
           {mid && (
@@ -259,6 +312,7 @@ function Workbench({ route }: { route: Route }) {
             onLayerRemove={layers.onRemove}
             onLayerPin={layers.onPin}
             onLayerAdd={layers.onAdd}
+            onViewer={setViewer}
             fileStem={`ksmech-${(state.molecule?.key ?? "molecule").replace(/[^A-Za-z0-9]+/g, "_").slice(0, 40)}`}
           />
         </div>

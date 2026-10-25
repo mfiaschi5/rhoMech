@@ -88,6 +88,12 @@ then look at it:
   input), bonds (Wiberg index, length) and the RDKit.js descriptors of the sketch. Clicking an
   atom row selects it in 3D and highlights the drawn atom in the sketch, while the sketch is
   unchanged since the compute.
+- 3D -> 2D: once computed, the sketcher's "3D→2D" button (Shift+D) redraws the sketch as the 3D
+  view is oriented now (wedges from the depth, the bond behind each crossing drawn broken),
+  then "Fix layout" (Shift+G, also on any drawing) resolves overlapping labels and atoms, atoms
+  on bonds, short bonds and tight angles; "Break crossings" (Shift+X) toggles the breaks. The
+  sketch stays linked to the record, since only coordinates and wedges that keep its stereo
+  change.
 
 Defaults and approximations: the density is valence-only on GFN2's minimal basis (an STO-nG
 fit, so its integral is shown next to N_valence), the ESP is an approximate point-charge

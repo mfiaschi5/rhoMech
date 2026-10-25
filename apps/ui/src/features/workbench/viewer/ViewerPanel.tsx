@@ -2,10 +2,14 @@
 // atom order): representation, labels, colour by property with its colour bar, Wiberg labels,
 // orbital centroids, selection halos, click-to-measure, exports and the surface layers.
 //
+// onViewer(v) hands the 3Dmol viewer (null when gone) to the page, which reads its orientation
+// for the sketcher's 3D -> 2D projection (viewProjection.ts).
+//
 // DOM: <section data-testid="wb-viewer-panel">, <div data-testid="wb-viewer"
 // data-state="loading|ready|error|webgl-unavailable" data-rep data-selected-atoms="0,2"
 // data-has-geometry>, measurement rows wb-measure, the toolbar and SurfaceControls.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { GLViewer } from "3dmol";
 import type { CubeQuality } from "../../../api/client";
 import type { MoleculeGeometryOut, MoleculePropertiesOut, OrbitalSetOut } from "../../../api/types.gen";
 import { atomPropDefs, findProp, propRange } from "../atomProps";
@@ -37,6 +41,7 @@ export interface ViewerPanelProps {
   onLayerPin(l: SurfaceLayer): void;
   onLayerAdd(s: LayerSpec): void;
   fileStem: string;
+  onViewer?(v: GLViewer | null): void;
 }
 
 function download(name: string, href: string): void {
@@ -109,6 +114,11 @@ export function ViewerPanel(p: ViewerPanelProps) {
   const [el, setEl] = useState<HTMLDivElement | null>(null);
   const handle = useGLViewer(el);
   const viewer = handle.viewer;
+  const { onViewer } = p;
+  useEffect(() => {
+    onViewer?.(viewer);
+    return () => onViewer?.(null);
+  }, [viewer, onViewer]);
   const [view, setView] = useState<ViewOptions>(DEFAULT_VIEW);
   const sel = useSelection();
   const defs = useMemo(() => atomPropDefs(p.properties), [p.properties]);

@@ -10,7 +10,7 @@
 import type { RDKitModule, RDKitMol } from "../../../chem/rdkit";
 import type { SketchModel } from "./model";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { bondOrderSum, centroid, normalizeBondLength } from "./model.ts";
+import { bondOrderSum, centroid, clearDepth, normalizeBondLength, setBondMarks } from "./model.ts";
 // @ts-ignore TS5097: see above
 import { fromMolblock, looksLikeMolfile, MolfileError, molblockBondStereo, toMolblock } from "./molfile.ts";
 // @ts-ignore TS5097: see above
@@ -168,7 +168,8 @@ export function cleanUpSketch(rdkit: RDKitModule, m: SketchModel): SketchModel |
     const [i, j, st] = stereo[k];
     return { ...b, a: m.atoms[i].id, b: m.atoms[j].id, stereo: b.order === 1 ? st : b.stereo };
   });
-  return normalizeBondLength({ ...m, atoms, bonds }, centroid(m));
+  // a new layout is no longer a projection: its depth would order crossings it never had
+  return clearDepth(normalizeBondLength({ ...m, atoms, bonds }, centroid(m)));
 }
 
 export class ImportError extends Error {}
@@ -211,4 +212,74 @@ export function exportSketch(rdkit: RDKitModule | null, m: SketchModel, fmt: Exp
   if (!rdkit || m.atoms.length === 0) return "";
   const [ids] = captured(rdkit, () => identifiers(rdkit, toMolblock(m)));
   return fmt === "smiles" ? ids.smiles : ids.inchi;
+}
+
+/** RDKit's reading of a drawing's tetrahedral stereo: canonical isomeric SMILES and the CIP
+ *  label (or "?" when RDKit gives none) of each chiral atom, by atom id. */
+export interface StereoReading {
+  smiles: string;
+  centres: Map<number, string>;
+}
+
+function stereoReading(rdkit: RDKitModule, m: SketchModel, mb: string): StereoReading | null {
+  const [out] = captured(rdkit, () => {
+    const mol = parse(rdkit, mb, NO_REMOVE_HS);
+    if (!mol) return null;
+    try {
+      const json = JSON.parse(mol.get_json()) as { molecules?: { atoms?: { stereo?: string }[] }[] };
+      const atoms = json.molecules?.[0]?.atoms ?? [];
+      const tags = JSON.parse(mol.get_stereo_tags()) as { CIP_atoms?: [number, string][] };
+      const cip = new Map((tags.CIP_atoms ?? []).map(([i, l]) => [i, l]));
+      const centres = new Map<number, string>();
+      atoms.forEach((a, i) => {
+        if ((a.stereo === "cw" || a.stereo === "ccw") && m.atoms[i]) centres.set(m.atoms[i].id, cip.get(i) ?? "?");
+      });
+      for (const [i, l] of cip) if (m.atoms[i]) centres.set(m.atoms[i].id, l);
+      return { smiles: identifiers(rdkit, mb).smiles, centres };
+    } finally {
+      mol.delete();
+    }
+  });
+  return out;
+}
+
+/** The stereo of a projection read from its 3D coordinates (x, y and the depth z): the target
+ *  the projected drawing's wedges must reproduce. Null without depth or when RDKit refuses. */
+export function stereoFromDepth(rdkit: RDKitModule, m: SketchModel): StereoReading | null {
+  if (m.atoms.length === 0 || m.atoms.some((a) => a.z === undefined)) return null;
+  return stereoReading(rdkit, m, toMolblock(m, "", { depth: true }));
+}
+
+/** The stereo the 2D drawing (coordinates and wedges) means to RDKit. */
+export function drawnStereo(rdkit: RDKitModule, m: SketchModel): StereoReading | null {
+  if (m.atoms.length === 0) return null;
+  return stereoReading(rdkit, m, toMolblock(m));
+}
+
+/** Flip the mark (wedge <-> hash) of every centre whose CIP label differs from the target's,
+ *  up to three rounds, until the canonical isomeric SMILES matches. Returns the drawing and
+ *  whether it matches. */
+export function repairStereo(rdkit: RDKitModule, m: SketchModel, target: StereoReading): { model: SketchModel; ok: boolean } {
+  let cur = m;
+  for (let round = 0; round < 3; round++) {
+    const now = drawnStereo(rdkit, cur);
+    if (!now) return { model: cur, ok: false };
+    if (now.smiles === target.smiles) return { model: cur, ok: true };
+    const flips = new Map<number, { stereo: "wedge" | "hash"; narrow: number }>();
+    for (const [c, label] of target.centres) {
+      if (now.centres.get(c) === label) continue;
+      const b = cur.bonds.find((x) => x.a === c && x.order === 1 && x.stereo !== "none");
+      if (b) flips.set(b.id, { stereo: b.stereo === "wedge" ? "hash" : "wedge", narrow: c });
+    }
+    if (flips.size === 0) return { model: cur, ok: false };
+    cur = setBondMarks(cur, flips);
+  }
+  const last = drawnStereo(rdkit, cur);
+  return { model: cur, ok: !!last && last.smiles === target.smiles };
+}
+
+/** The canonical isomeric SMILES of a molblock (e.g. the record's 3D one), "" when refused. */
+export function molblockSmiles(rdkit: RDKitModule, molblock: string): string {
+  const [ids] = captured(rdkit, () => identifiers(rdkit, molblock));
+  return ids.smiles;
 }

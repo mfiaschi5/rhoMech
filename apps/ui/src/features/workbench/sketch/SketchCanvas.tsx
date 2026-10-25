@@ -14,7 +14,8 @@
 //   svgRef
 //
 // DOM: <svg data-testid="sketch-canvas"> with
-//   <g data-testid="sketch-bond-<id>" data-order="1|2|3" data-stereo data-selected data-hovered>
+//   <g data-testid="sketch-bond-<id>" data-order="1|2|3" data-stereo data-selected data-hovered
+//      data-broken="<n>" (only on a bond drawn broken behind n crossings)>
 //   <g data-testid="sketch-atom-<id>" data-element data-charge data-h data-selected
 //      data-highlighted data-invalid data-hovered>
 import type { RefObject } from "react";
@@ -22,7 +23,7 @@ import type { SketchModel } from "./model";
 import type { Rect, Vec, View } from "./geometry";
 import type { Hit, Selection } from "./tools";
 import type { SketchPointer } from "./useSketchPointer";
-import { buildScene, FONT_PX, type AtomScene, type BondScene } from "./drawing";
+import { buildScene, FONT_PX, hLabelWidth, labelHalfWidth, type AtomScene, type BondScene } from "./drawing";
 import { elementClass } from "./elements";
 
 export interface SketchCanvasProps {
@@ -65,6 +66,7 @@ function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; h
       data-testid={`sketch-bond-${bond.id}`}
       data-order={bond.order}
       data-stereo={bond.stereo}
+      data-broken={s.broken > 0 ? s.broken : undefined}
       data-selected={selected}
       data-hovered={hovered}
       className="sk-bond"
@@ -75,14 +77,11 @@ function BondView({ s, selected, hovered }: { s: BondScene; selected: boolean; h
       {shape.lines.map((l, i) => (
         <line key={i} className="sk-stroke" x1={l.p[0]} y1={l.p[1]} x2={l.q[0]} y2={l.q[1]} />
       ))}
-      {shape.wedge && <polygon className="sk-wedge" points={pts(shape.wedge)} />}
+      {shape.wedges?.map((w, i) => <polygon key={`w${i}`} className="sk-wedge" points={pts(w)} />)}
       <polygon className="sk-hit" points={pts(hitBand(axis.p, axis.q, 5))} />
     </g>
   );
 }
-
-/** Half the estimated glyph width of an element symbol (capital ~0.62 em, lowercase ~0.5 em). */
-const labelHalfWidth = (el: string) => ((0.62 + 0.5 * (el.length - 1)) * FONT_PX) / 2;
 
 const subDigits = (n: number) => (n > 1 ? String(n) : "");
 
@@ -91,7 +90,7 @@ function AtomLabelView({ s }: { s: AtomScene }) {
   if (!label) return null;
   const half = labelHalfWidth(label.el);
   const hText = label.hCount > 0 ? "H" : "";
-  const hWidth = hText ? FONT_PX * 0.68 + (label.hCount > 1 ? FONT_PX * 0.45 : 0) : 0;
+  const hWidth = hLabelWidth(label.hCount);
   const right = label.hSide === "right";
   const chargeX = at[0] + half + (right ? hWidth : 0) + 1;
   return (

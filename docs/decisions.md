@@ -3998,3 +3998,67 @@ is now v7.5, sha256 6c6a023f66dd).
 - **e2e chemistry.** `e2e/serve.mjs` adds ethanol (the workbench test's molecule) to the
   `probe-cache` species: cached chemistry never computes a new molecule, so the run falls back
   to synthetic unless ethanol is cached too.
+
+## 2026-10-25 — Workbench sketcher: 3D -> 2D projection, crossing breaks, layout fix
+
+- **Projection convention.** The sketcher's "3D→2D" (Shift+D) draws the record geometry of each
+  drawn atom (`sketch_to_record`) as the 3D view shows it now: `v = R(q) p` with `q` the
+  rotationGroup quaternion of 3Dmol's `getView()` (indices 4-7, x y z w) and R the matrix of
+  3Dmol's `setRotationFromQuaternion` (the renderer's; note that 3Dmol's own
+  `Vector3.applyQuaternion` rotates by the conjugate, so it is not used). View x is screen right,
+  y screen up, z towards the viewer; the projection is orthographic (the translation is dropped,
+  the drawing is centred on its old centroid). Checked twice: a node test against 3Dmol's matrix
+  formula and the axes' handedness, and in the browser on every projection, by fitting 3Dmol's
+  `modelToScreen` of the same atoms with a scale and a translation only (no rotation, no
+  mirror; a negative scale counts as a failure): the RMS residual over the screen spread is
+  exposed as `data-projection-residual` (0.024 for the e2e camphor view; 3Dmol's perspective,
+  fov 20 deg, accounts for it). Scale: the median 3D bond becomes BOND_LENGTH (a projection is
+  a uniform scale of the 3D picture; foreshortened bonds are then restored by the fix). The
+  sketch module never imports 3Dmol: the page passes a `ProjectionSource` (why it is off, or
+  the rotated coordinates).
+- **Depth storage.** `SketchAtom.z` (model units, + towards the viewer), display data like
+  explicitH: kept by edits, undo and the session store (sessionStorage now holds
+  `{molblock, extras}`; a bare molblock still reads), never written to molfile coordinates
+  (z = 0, header 2D, so RDKit always reads a 2D drawing; only RDKit's 3D stereo reading of a
+  projection writes it, with a 3D header). RDKit's clean-up drops it (a new layout is no
+  projection). `SketchModel.breakCrossings` is stored the same way.
+- **Linking after a projection.** A projection changes coordinates and wedges only, so the page
+  no longer compares a signature that includes wedges by bond direction: it unlinks on another
+  topology (elements, charges, unordered bonds, orders), or on wedges that draw neither the
+  computed drawing's isomeric SMILES nor the record's (RDKit canonical SMILES of the 3D
+  geometry molblock, chirality from 3D). Wedges that redraw the record's configuration keep
+  the link.
+- **Stereo rule.** Centres and the target come from RDKit's reading of the projected x, y, z
+  (heavy atoms with implicit H; JSON `stereo` cw/ccw plus CIP labels), which equals the
+  record's isomeric SMILES in every orientation tested. A configuration is the sign of a
+  volume over the drawn neighbours in id order (3: det(v1, v2, v3); 4: det(v2-v1, v3-v1,
+  v4-v1)), with depth (true) or with a pseudo-depth +-|v| behind a wedge/hash whose narrow end
+  is the centre (drawn). One mark per centre, on the single bond that draws the true sign and
+  scores best: acyclic +4, terminal neighbour +2, neighbour not a centre +3, |V| up to +1,
+  depth: +2|dz|/L and +3 when the mark follows the depth (wedge in front, hash behind) else
+  -3; a degenerate volume (|V| < 0.08) or an ambiguous four-neighbour mark (the three other
+  neighbours within 170 deg, where RDKit's pseudo-3D reading need not follow the volume) is
+  -20. All other marks are cleared. RDKit then reads the drawing back and flips any centre
+  whose CIP label differs (never needed on the six fixtures x 66 orientations of the tests and
+  the sweep: alanine, CHFClBr, camphor, 2-methylcyclohexanol, menthol, cocaine).
+- **Layout fix.** "Fix layout" (Shift+G, also after every projection): Gauss-Seidel position
+  corrections in a fixed order, at most 300 sweeps, stopping when the net motion of a sweep is
+  below 1e-4 L. Terms: bond length to L (stiffness 1; a bond under 0.05 L is first opened along
+  growthAngle); angles under 40 deg open (0.3); non-bonded atoms under 0.68 L part (0.5); an
+  atom under 0.36 L from a bond it is not on moves off (0.5); label boxes (drawing.labelBox:
+  symbol, H count on its side, charge; 3 px padding at 25 px/unit) part from other labels,
+  atoms and bonds (0.5); an anchor to the start positions, 0.02 after a projection, 0.005 for a
+  hand drawing. Metrics use stricter thresholds (contacts 0.6 L, atom on bond 0.3 L, angles 35
+  deg, no padding) so a converged layout reports zero. The wedge configurations drawn before
+  are drawn again afterwards (the same scoring, the old mark +5). A projection also tries 12
+  slightly tilted views (8 and 15 deg about the screen axes, the depth is known) when the exact
+  view leaves defects, scoring 10 x label overlaps + 5 x contacts + 5 x atom-on-bond + 2 x
+  small angles + 0.5 x crossings + 20 x bond RMS + 0.15 per degree of tilt: local relaxation
+  cannot untangle an atom lined up behind a cage. On the six fixtures x 30 orientations this
+  leaves one case (cocaine) with a contact and an atom on a bond; bond RMS <= 0.045.
+- **Crossing breaks.** Render-time only (drawing.ts): where two bonds cross (no shared atom,
+  ends excluded) the one behind (interpolated depth at the crossing; without depth on all four
+  atoms the bond drawn later is in front) loses BREAK_GAP_PX = 3.2 px plus the front bond's
+  half-width on each side, divided by the sine of the crossing angle (at least 0.35), on every
+  stroke; wedges split in two, hashes lose the ticks inside. On by default after a projection,
+  a toolbar toggle (Shift+X) otherwise.

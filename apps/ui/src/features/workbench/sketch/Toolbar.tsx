@@ -6,7 +6,9 @@
 //
 // DOM: <div data-testid="sketch-toolbar">, buttons tool-<name>[data-active], element-<El>
 // [data-active], element-more (opens <div data-testid="periodic-picker"> with periodic-<El>),
-// sketch-undo, sketch-redo, sketch-clean, sketch-fit, sketch-clear, sketch-import, sketch-export.
+// sketch-undo, sketch-redo, sketch-clean, sketch-project (3D -> 2D; only with a projection
+// source, disabled with the reason as its title), sketch-fix, sketch-break-toggle
+// [data-active aria-pressed], sketch-fit, sketch-clear, sketch-import, sketch-export.
 import { useEffect, useState, type ReactNode } from "react";
 import { PALETTE, PERIODIC_ROWS, elementClass } from "./elements";
 import type { ToolName } from "./tools";
@@ -26,6 +28,12 @@ export interface ToolbarProps {
   canClean: boolean;
   onFit(): void;
   onClear(): void;
+  /** The projection button: null hides it (no 3D source). */
+  projection: { enabled: boolean; reason: string | null; onProject(): void } | null;
+  onFix(): void;
+  canFix: boolean;
+  breakCrossings: boolean;
+  onToggleBreaks(): void;
   panel: SketchPanel;
   onPanel(p: SketchPanel): void;
 }
@@ -128,6 +136,21 @@ function PeriodicPicker({ current, onPick }: { current: string; onPick(el: strin
   );
 }
 
+/** The 3D -> 2D button; a disabled one sits in a span that carries the reason as its tooltip
+ *  (a disabled button gets no pointer events, so its own title never shows). */
+function ProjectButton({ enabled, reason, onProject }: NonNullable<ToolbarProps["projection"]>) {
+  const title = enabled
+    ? "Project the 3D view, as it is oriented now, onto the drawing: wedges from the depth, crossings broken by depth, then Fix layout (Shift+D)"
+    : `3D→2D unavailable: ${reason ?? "no 3D view"}`;
+  return (
+    <span className="sk-tip" title={title} data-testid="sketch-project-wrap">
+      <button type="button" className="btn btn-small" data-testid="sketch-project" data-reason={enabled ? "" : (reason ?? "")} disabled={!enabled} onClick={onProject}>
+        3D→2D
+      </button>
+    </span>
+  );
+}
+
 export function Toolbar(p: ToolbarProps) {
   const [picker, setPicker] = useState(false);
   useEffect(() => {
@@ -185,6 +208,19 @@ export function Toolbar(p: ToolbarProps) {
         {act("sketch-undo", "Undo", p.onUndo, p.canUndo, "Ctrl+Z")}
         {act("sketch-redo", "Redo", p.onRedo, p.canRedo, "Ctrl+Shift+Z / Ctrl+Y")}
         {act("sketch-clean", "Clean", p.onClean, p.canClean, "RDKit 2D layout")}
+        {p.projection && <ProjectButton {...p.projection} />}
+        {act("sketch-fix", "Fix layout", p.onFix, p.canFix, "Resolve overlapping labels and atoms, atoms on bonds, short bonds and tight angles; keeps the wedges' meaning (Shift+G)")}
+        <button
+          type="button"
+          className={`btn btn-small sk-toggle${p.breakCrossings ? " active" : ""}`}
+          data-testid="sketch-break-toggle"
+          data-active={p.breakCrossings}
+          aria-pressed={p.breakCrossings}
+          onClick={p.onToggleBreaks}
+          title="Break crossings: draw the bond behind a crossing with a gap (by depth after a projection, else the later bond is in front) (Shift+X)"
+        >
+          Break crossings
+        </button>
         {act("sketch-fit", "Fit", p.onFit)}
         {act("sketch-clear", "Clear", p.onClear)}
         {act("sketch-import", "Import", () => p.onPanel(p.panel === "import" ? null : "import"), true, "Paste SMILES or a molfile, or drop a .mol/.sdf file")}

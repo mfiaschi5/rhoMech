@@ -9,9 +9,12 @@
 //   highlightAtoms number[]      sketch atom ids drawn with the highlight halo
 //   readOnly       boolean       no toolbar, no edits (hover, pan and zoom still work)
 //   height         number        canvas height in px (default 360); the width follows the parent
+//   projection     ProjectionSource  optional; the 3D -> 2D projection (useLayoutActions.ts):
+//                                why it is off, or the drawn atoms in the 3D view's frame
 //
 // DOM: <div data-testid="sketch" data-smiles (RDKit canonical, "" when invalid/empty)
-//      data-valid data-atoms data-bonds data-tool data-status (useSketchInfo status)>
+//      data-valid data-atoms data-bonds data-tool data-status (useSketchInfo status)
+//      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth>
 //   the toolbar (Toolbar.tsx), <svg data-testid="sketch-canvas"> (SketchCanvas.tsx), the
 //   import/export popovers (ImportExport.tsx) and <div data-testid="sketch-info"> (InfoBar.tsx).
 //
@@ -24,6 +27,7 @@
 //   Ctrl+Z   Ctrl+Shift+Z / Ctrl+Y      undo / redo
 //   Ctrl+A                              select all
 //   Ctrl+V                              import the clipboard (SMILES or molfile)
+//   Shift+D  Shift+G  Shift+X           3D -> 2D projection, fix layout, crossing breaks
 //   Esc                                 cancel the gesture, clear the selection, close popovers
 //
 // Demo / test harness (not a page; for a scratch mount or a Playwright test):
@@ -44,6 +48,9 @@ import { SketchCanvas } from "./SketchCanvas";
 import { Toolbar, type SketchPanel } from "./Toolbar";
 import { ExportPanel, ImportPanel, readDroppedText } from "./ImportExport";
 import { InfoBar } from "./InfoBar";
+import { useLayoutActions, type LayoutActions, type ProjectionSource } from "./useLayoutActions";
+import { findCrossings } from "./crossings";
+import { hasDepth } from "./model";
 import "./sketch.css";
 
 export interface SketcherProps {
@@ -52,6 +59,7 @@ export interface SketcherProps {
   highlightAtoms?: readonly number[];
   readOnly?: boolean;
   height?: number;
+  projection?: ProjectionSource;
 }
 
 /** Pixels per model unit at 100 %: a 1.5 bond is 37.5 px. */
@@ -82,6 +90,7 @@ interface KeyDeps {
   readOnly: boolean;
   closePanel(): void;
   importText(text: string): string | null;
+  layout: LayoutActions;
 }
 
 /** Window keydown/paste listeners, live while the pointer is over the sketcher or focus is in the
@@ -118,9 +127,10 @@ function useSketchKeys(deps: KeyDeps) {
 }
 
 /** One keydown; true when it was handled. */
-function handleKey(e: KeyboardEvent, { ed, pointer, closePanel }: KeyDeps): boolean {
+function handleKey(e: KeyboardEvent, { ed, pointer, closePanel, layout }: KeyDeps): boolean {
   const mod = e.ctrlKey || e.metaKey;
   const k = e.key.toLowerCase();
+  if (e.shiftKey && !mod && !e.altKey && layoutKey(k, layout)) return true;
   if (mod && k === "z") {
     if (e.shiftKey) ed.redo();
     else ed.undo();
@@ -145,6 +155,23 @@ function handleKey(e: KeyboardEvent, { ed, pointer, closePanel }: KeyDeps): bool
   if (!next) return false;
   if (next !== ed.committed) ed.commit(next);
   return true;
+}
+
+/** Shift+D / Shift+G / Shift+X: projection, fix layout, crossing breaks (not element keys). */
+function layoutKey(k: string, layout: LayoutActions): boolean {
+  if (k === "d") {
+    if (layout.canProject) layout.project();
+    return true;
+  }
+  if (k === "g") {
+    layout.fix();
+    return true;
+  }
+  if (k === "x") {
+    layout.toggleBreaks();
+    return true;
+  }
+  return false;
 }
 
 interface ViewState {
@@ -204,12 +231,14 @@ type SketchActions = ReturnType<typeof useSketchActions>;
 function EditorToolbar(p: {
   ed: SketchEditor;
   act: SketchActions;
+  layout: LayoutActions;
+  projection: ProjectionSource | undefined;
   canClean: boolean;
   onFit(): void;
   panel: SketchPanel;
   onPanel(p: SketchPanel): void;
 }) {
-  const { ed, act } = p;
+  const { ed, act, layout } = p;
   return (
     <Toolbar
       tool={ed.tool}
@@ -224,6 +253,11 @@ function EditorToolbar(p: {
       canClean={p.canClean}
       onFit={p.onFit}
       onClear={act.clear}
+      projection={p.projection ? { enabled: layout.canProject, reason: p.projection.disabledReason, onProject: layout.project } : null}
+      onFix={layout.fix}
+      canFix={ed.committed.atoms.length > 1}
+      breakCrossings={ed.committed.breakCrossings ?? false}
+      onToggleBreaks={layout.toggleBreaks}
       panel={p.panel}
       onPanel={p.onPanel}
     />
@@ -242,7 +276,7 @@ function ExportFor({ rdkit, model, onClose }: { rdkit: RDKitModule | null; model
   return <ExportPanel {...out} onClose={onClose} />;
 }
 
-export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360 }: SketcherProps) {
+export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection }: SketcherProps) {
   const ed = useSketchEditor(value, onChange);
   const info = useSketchInfo(ed.committed);
   const { rdkit } = useRDKit();
@@ -253,11 +287,13 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
   const [panel, setPanel] = useState<SketchPanel>(null);
   const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly);
   const act = useSketchActions(ed, rdkit, readOnly);
+  const fresh = !info.stale && ed.model === ed.committed && info.valid;
+  const layout = useLayoutActions(ed, rdkit, projection, fresh ? info.hCounts : null);
   const closePanel = () => setPanel(null);
-  useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, importText: act.importText });
+  useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, importText: act.importText, layout });
   const highlight = useMemo(() => new Set(highlightAtoms ?? []), [highlightAtoms]);
   const invalid = useMemo(() => new Set(info.badAtoms), [info.badAtoms]);
-  const fresh = !info.stale && ed.model === ed.committed && info.valid;
+  const crossings = useMemo(() => findCrossings(ed.committed).length, [ed.committed]);
   const setInside = (v: boolean) => () => {
     pointer.inside.current = v;
   };
@@ -273,11 +309,14 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
       data-tool={ed.tool}
       data-status={info.status}
       data-readonly={readOnly}
+      data-crossings={crossings}
+      data-break-crossings={ed.committed.breakCrossings ? "true" : "false"}
+      data-has-depth={hasDepth(ed.committed) ? "true" : "false"}
       onPointerEnter={setInside(true)}
       onPointerLeave={setInside(false)}
     >
       {!readOnly && (
-        <EditorToolbar ed={ed} act={act} canClean={!!rdkit && ed.committed.atoms.length > 1} onFit={fit} panel={panel} onPanel={setPanel} />
+        <EditorToolbar ed={ed} act={act} layout={layout} projection={projection} canClean={!!rdkit && ed.committed.atoms.length > 1} onFit={fit} panel={panel} onPanel={setPanel} />
       )}
       <div className="sk-stage" ref={stageRef} onDragOver={(e) => e.preventDefault()} onDrop={act.onDrop}>
         <SketchCanvas
@@ -297,7 +336,7 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
         {panel === "import" && <ImportPanel onImport={act.importText} onClose={closePanel} />}
         {panel === "export" && <ExportFor rdkit={rdkit} model={ed.committed} onClose={closePanel} />}
       </div>
-      <InfoBar info={info} />
+      <InfoBar info={info} report={layout.report} />
     </div>
   );
 }

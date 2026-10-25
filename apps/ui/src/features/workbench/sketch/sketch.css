@@ -356,3 +356,22 @@
 .sk-error {
   color: var(--error);
 }
+
+/* layout actions: the crossing-breaks toggle and the fix report */
+.sk-toggle.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-2));
+}
+
+.sk-tip {
+  display: inline-flex;
+}
+
+.sk-fix-report {
+  flex-basis: 100%;
+  color: var(--muted);
+}
+
+.sk-fix-report.sk-error {
+  color: var(--error);
+}

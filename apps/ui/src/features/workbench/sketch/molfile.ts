@@ -1,6 +1,8 @@
 // V2000 molfile writer and reader for the sketch model (pure, no RDKit).
 //
-// Writer: atoms in model order with 2D coordinates, charges as `M  CHG` lines (the atom-block
+// Writer: atoms in model order with 2D coordinates (z = 0 always: the drawing's depth from a
+// projection is display data; only toMolblock(m, name, { depth: true }), RDKit's 3D stereo
+// perception of a projection, writes it, with a 3D header), charges as `M  CHG` lines (the atom-block
 // charge field stays 0), bond stereo 1 = wedge and 6 = hash with the narrow end first.
 // Reader: the first record of a molfile or SDF; `M  CHG` replaces the atom-block charges when
 // present (as the format says). Bond types other than 1-3 (aromatic 4, query types) and V3000
@@ -12,15 +14,16 @@ import { normalizeBondLength } from "./model.ts";
 const f10 = (v: number) => v.toFixed(4).padStart(10);
 const i3 = (v: number) => String(v).padStart(3);
 
-export function toMolblock(m: SketchModel, name = ""): string {
+export function toMolblock(m: SketchModel, name = "", opts: { depth?: boolean } = {}): string {
   const index = new Map(m.atoms.map((a, i) => [a.id, i + 1]));
-  const lines = [name, "  ksmech            2D", ""];
+  const lines = [name, `  ksmech            ${opts.depth ? "3D" : "2D"}`, ""];
   lines.push(`${i3(m.atoms.length)}${i3(m.bonds.length)}  0  0  0  0  0  0  0  0999 V2000`);
   for (const a of m.atoms) {
-    lines.push(`${f10(a.x)}${f10(a.y)}${f10(0)} ${a.el.padEnd(3)} 0${"  0".repeat(11)}`);
+    const z = opts.depth ? (a.z ?? 0) : 0;
+    lines.push(`${f10(a.x)}${f10(a.y)}${f10(z)} ${a.el.padEnd(3)} 0${"  0".repeat(11)}`);
   }
   for (const b of m.bonds) {
-    const stereo = b.order === 1 ? (b.stereo === "wedge" ? 1 : b.stereo === "hash" ? 6 : 0) : 0;
+    const stereo = b.order === 1 && !opts.depth ? (b.stereo === "wedge" ? 1 : b.stereo === "hash" ? 6 : 0) : 0;
     lines.push(`${i3(index.get(b.a) ?? 0)}${i3(index.get(b.b) ?? 0)}${i3(b.order)}${i3(stereo)}`);
   }
   const charged = m.atoms.map((a, i) => [i + 1, a.charge] as const).filter(([, c]) => c !== 0);

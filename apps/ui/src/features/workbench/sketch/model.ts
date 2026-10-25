@@ -8,6 +8,12 @@
 //
 // `explicitH` is a display flag: the atom is drawn with its label and implicit H count even
 // when it is a carbon (ChemDraw's "show element symbol"). It is not written to the molfile.
+//
+// `z` is an atom's depth (model units, positive towards the viewer) from a 3D -> 2D projection
+// (projection.ts). It orders crossing bonds front / back and guides the wedges; it is display
+// data like explicitH: kept by every edit (atoms are spread, never rebuilt), by undo and by the
+// session store (sketchExtras), never written to molfile coordinates (z stays 0 there, so
+// RDKit reads a 2D drawing). `breakCrossings` draws the bond behind a crossing interrupted.
 
 export type BondOrder = 1 | 2 | 3;
 export type BondStereo = "none" | "wedge" | "hash";
@@ -19,6 +25,8 @@ export interface SketchAtom {
   readonly y: number;
   readonly charge: number;
   readonly explicitH?: boolean;
+  /** Depth from a 3D projection (model units, + towards the viewer); absent when unknown. */
+  readonly z?: number;
 }
 
 /** A bond from `a` to `b`; for wedge and hash bonds `a` is the narrow end (the stereocentre). */
@@ -34,6 +42,8 @@ export interface SketchModel {
   readonly atoms: readonly SketchAtom[];
   readonly bonds: readonly SketchBond[];
   readonly nextId: number;
+  /** Draw the bond behind each crossing with a gap (render-time only). */
+  readonly breakCrossings?: boolean;
 }
 
 export const BOND_LENGTH = 1.5;
@@ -213,6 +223,78 @@ export function setCoords(m: SketchModel, coords: ReadonlyMap<number, readonly [
     const c = coords.get(a.id);
     return c ? { ...a, x: c[0], y: c[1] } : a;
   });
+}
+
+/** Replace positions (and depths, where given) by atom id; atoms not in the map keep theirs. */
+export function setPositions(m: SketchModel, pos: ReadonlyMap<number, readonly [number, number, number?]>): SketchModel {
+  return mapAtoms(m, pos.keys(), (a) => {
+    const p = pos.get(a.id);
+    if (!p) return a;
+    const z = p[2];
+    return z === undefined ? { ...a, x: p[0], y: p[1] } : { ...a, x: p[0], y: p[1], z };
+  });
+}
+
+/** Drop every atom's depth (the drawing no longer follows a 3D view). */
+export function clearDepth(m: SketchModel): SketchModel {
+  if (!m.atoms.some((a) => a.z !== undefined)) return m;
+  return { ...m, atoms: m.atoms.map(({ z: _z, ...rest }) => rest) };
+}
+
+export const hasDepth = (m: SketchModel): boolean => m.atoms.length > 0 && m.atoms.every((a) => a.z !== undefined && Number.isFinite(a.z));
+
+export function setBreakCrossings(m: SketchModel, on: boolean): SketchModel {
+  return (m.breakCrossings ?? false) === on ? m : { ...m, breakCrossings: on };
+}
+
+/** Replace the stereo marks of some bonds by id ("none" clears); `narrow` is the atom at the
+ *  mark's narrow end (the bond's ends are swapped when it is b). Other bonds are unchanged. */
+export function setBondMarks(
+  m: SketchModel,
+  marks: ReadonlyMap<number, { stereo: BondStereo; narrow: number }>,
+): SketchModel {
+  let changed = false;
+  const bonds = m.bonds.map((b) => {
+    const k = marks.get(b.id);
+    if (!k) return b;
+    const stereo = b.order === 1 ? k.stereo : "none";
+    const [a, c] = stereo !== "none" && k.narrow === b.b ? [b.b, b.a] : [b.a, b.b];
+    if (stereo === b.stereo && a === b.a) return b;
+    changed = true;
+    return { ...b, a, b: c, stereo };
+  });
+  return changed ? { ...m, bonds } : m;
+}
+
+/** What the molfile does not carry (depth, explicitH, breakCrossings), by atom position, for
+ *  the session store. */
+export interface SketchExtras {
+  z?: (number | null)[];
+  explicitH?: number[];
+  breakCrossings?: boolean;
+}
+
+export function sketchExtras(m: SketchModel): SketchExtras {
+  const out: SketchExtras = {};
+  if (m.atoms.some((a) => a.z !== undefined)) out.z = m.atoms.map((a) => (a.z === undefined ? null : a.z));
+  const h = m.atoms.flatMap((a, i) => (a.explicitH ? [i] : []));
+  if (h.length) out.explicitH = h;
+  if (m.breakCrossings) out.breakCrossings = true;
+  return out;
+}
+
+/** Put extras back on a model read from the molfile (same atom order); malformed parts are
+ *  ignored. */
+export function withExtras(m: SketchModel, x: SketchExtras | null | undefined): SketchModel {
+  if (!x) return m;
+  const zs = Array.isArray(x.z) && x.z.length === m.atoms.length ? x.z : null;
+  const hs = new Set(Array.isArray(x.explicitH) ? x.explicitH : []);
+  const atoms = m.atoms.map((a, i) => {
+    const z = zs?.[i];
+    const withZ = typeof z === "number" && Number.isFinite(z) ? { ...a, z } : a;
+    return hs.has(i) ? { ...withZ, explicitH: true } : withZ;
+  });
+  return { ...m, atoms, ...(x.breakCrossings === true ? { breakCrossings: true } : {}) };
 }
 
 /** Merge atom `drop` into `keep`: drop's bonds move to keep (duplicates and the bond between the
