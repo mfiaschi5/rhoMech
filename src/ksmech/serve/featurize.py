@@ -10,6 +10,12 @@ Three chemistry modes:
 - `synthetic` (`SyntheticFeaturizer`): charge-iterated EHT (`synthetic.eht_record`) into the
   serve-owned caches under the method `SYNTHETIC-EHT/v1`; never xTB.
 
+A key with a transition metal takes the metal path in `real` and `cached` mode: its QM record
+and tokens live under `<GFN2 method>+metal-geom-v1` (`metal_geometry.method_for`, applied by
+`qm_npz_path`, the token loader and `method_for`), and a miss runs `metal_qm.
+process_metal_molecule` (coordination template, metal-aware connectivity check) instead of
+`qm.batch.process_molecule`. Every other key keeps the standard method and path unchanged.
+
 `preflight` runs on the API side, is instant and never computes.
 """
 
@@ -27,6 +33,7 @@ import numpy as np
 from ksmech.serve.contracts import LRU, to_jsonable
 from ksmech.serve.errors import Code
 from ksmech.serve.loader import LayeredTokenLoader
+from ksmech.serve.metal_geometry import method_for
 from ksmech.serve.settings import ServeSettings, append_failure, assert_writable
 from ksmech.serve.synthetic import SYNTHETIC_METHOD, SyntheticError, supported_elements
 
@@ -80,6 +87,16 @@ class SpeciesPreflight:
     errors: list[tuple[str, str]] = field(default_factory=list)  # (Code, message)
 
 
+class KeyedMethodLoader(LayeredTokenLoader):
+    """The layered loader with each key's token file under `method_for(key, method)`."""
+
+    def _candidates(self, key: str) -> list[Path]:
+        from ksmech.orbitals.build import tokens_path
+
+        method = method_for(key, self.method)
+        return [tokens_path(d, key, 0, method) for d in self.dirs]
+
+
 class Featurizer(Protocol):
     mode: Literal["real", "cached", "synthetic"]
     method: str
@@ -90,14 +107,18 @@ class Featurizer(Protocol):
 
     def loader(self) -> LayeredTokenLoader: ...
 
+    def method_for(self, key: str) -> str: ...  # the record / token method of one key
+
     def occupations(self, key: str) -> np.ndarray | None: ...  # np.load(qm npz)["occupations"]
 
 
 def qm_npz_path(s: ServeSettings, key: str, method: str) -> Path | None:
-    """The QM record of `key` under `method`: the shared cache first (never for the synthetic
-    method), then `data/serve/qm`; None when neither holds a valid file."""
+    """The QM record of `key` under `method` (the metal method for a metal key, see
+    `method_for`): the shared cache first (never for the synthetic method), then
+    `data/serve/qm`; None when neither holds a valid file."""
     from ksmech.qm.records import cache_path, is_valid_cache_file
 
+    method = method_for(key, method)
     dirs = [s.serve_qm] if method == SYNTHETIC_METHOD else [s.shared_qm, s.serve_qm]
     for d in dirs:
         path = cache_path(d, key, 0, method)
@@ -116,6 +137,8 @@ def featurize_label(featurizer: Featurizer, key: str) -> str:
     except QMError:
         n = ""
     name = "synthetic EHT" if featurizer.method == SYNTHETIC_METHOD else "GFN2-xTB"
+    if method_for(key, featurizer.method) != featurizer.method:
+        name += " (metal template)"
     return f"{name} for {key}{n}"
 
 
@@ -149,6 +172,10 @@ def _preflight(key: str, loader: LayeredTokenLoader, s: ServeSettings, method: s
     bad = sorted(z - allowed)
     if bad:
         errors.append((Code.UNSUPPORTED_ELEMENT, f"{key}: no parameters for Z={bad}"))
+    if not synthetic and not unpaired:
+        from ksmech.serve.metal_geometry import preflight_problems
+
+        errors += [(Code.RADICAL_NOT_SUPPORTED, f"{key}: {p}") for p in preflight_problems(mol)]
     mult = None if unpaired is None else int(unpaired) + 1
     tokens_cached = loader.has(key)
     qm_cached = qm_npz_path(s, key, method) is not None
@@ -189,6 +216,10 @@ class _Base:
     def loader(self) -> LayeredTokenLoader:
         return self._loader
 
+    def method_for(self, key: str) -> str:
+        """The method of `key`'s QM record and tokens (the metal method for a metal key)."""
+        return method_for(key, self.method)
+
     def preflight(self, key: str) -> SpeciesPreflight:
         return _preflight(key, self._loader, self.settings, self.method, self.mode == "synthetic")
 
@@ -222,7 +253,7 @@ class QMFeaturizer(_Base):
         self.allow_compute = bool(allow_compute)
         dirs = [settings.shared_tokens, settings.serve_tokens]
         roots = [settings.shared_root, None]  # shared files name their QM inputs from there
-        super().__init__(settings, LayeredTokenLoader(dirs, self.method, roots=roots))
+        super().__init__(settings, KeyedMethodLoader(dirs, self.method, roots=roots))
 
     def ensure(self, key: str) -> FeaturizeResult:
         t0 = time.perf_counter()
@@ -263,6 +294,11 @@ class QMFeaturizer(_Base):
 
         s = self.settings
         assert_writable(s.serve_qm, s)
+        if self.method_for(key) != self.method:
+            from ksmech.serve import metal_qm
+
+            mconfig = metal_qm.MetalQMConfig(cache_dir=s.serve_qm, timeout_s=int(s.qm_timeout_s))
+            return metal_qm.process_metal_molecule(key, mconfig)
         config = QMConfig(cache_dir=s.serve_qm, timeout_s=int(s.qm_timeout_s))
         return batch.process_molecule(batch.MolTask(key, 1, config))[0]
 
@@ -271,9 +307,8 @@ class QMFeaturizer(_Base):
 
         s = self.settings
         assert_writable(s.serve_tokens, s)
-        config = build.BuildConfig(
-            qm_cache_dir=qm.parent, out_dir=s.serve_tokens, method=self.method
-        )
+        method = self.method_for(key)
+        config = build.BuildConfig(qm_cache_dir=qm.parent, out_dir=s.serve_tokens, method=method)
         row = build.process_molecule(key, config)
         if row.status == "stale_qm":  # a QM record without (or with another) provenance header
             detail = f"{row.detail} (run `ksmech-data provenance --backfill qm` on that cache)"
@@ -281,7 +316,7 @@ class QMFeaturizer(_Base):
         if row.status not in ("built", "loaded"):
             return self._fail(key, t0, Code.TOKENS_FAILED, f"{row.status}: {row.detail}", qm=qm)
         status = FeaturizeStatus.BUILT if row.status == "built" else FeaturizeStatus.CACHED
-        tokens = build.tokens_path(s.serve_tokens, key, 0, self.method)
+        tokens = build.tokens_path(s.serve_tokens, key, 0, method)
         return _result(key, status, t0, tokens=tokens, qm=qm, warn=warnings)
 
 

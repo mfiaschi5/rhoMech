@@ -40,6 +40,7 @@ from rdkit import Chem, rdBase
 from ksmech.serve import schemas as S
 from ksmech.serve.errors import Code, Pending, ServeError, error_body, jsonable
 from ksmech.serve.featurize import featurize_label, qm_npz_path
+from ksmech.serve.metal_geometry import method_for
 from ksmech.serve.pools import atomic_write_text
 from ksmech.serve.worker import task_key
 
@@ -341,7 +342,7 @@ def molecule_out(
         charge=pf.charge,
         multiplicity=pf.multiplicity,
         chemistry=ctx.chemistry,
-        method=ctx.featurizer.method,
+        method=method_for(key, ctx.featurizer.method),
         qm_ready=qm_npz_path(ctx.settings, key, ctx.featurizer.method) is not None,
         tokens_ready=status == "ready",
         mapping=None if mapping is None else S.SketchMappingOut(**mapping),

@@ -153,9 +153,10 @@ def load_qm(rt: Runtime, key: str) -> tuple[QMRecord, Path, str]:
     from ksmech.data.provenance import StaleArtifact
     from ksmech.qm.records import load_record
     from ksmech.serve.featurize import qm_npz_path
+    from ksmech.serve.metal_geometry import method_for
     from ksmech.serve.synthetic import SYNTHETIC_METHOD
 
-    method = rt.featurizer.method
+    method = method_for(key, rt.featurizer.method)  # a metal key's record: +metal-geom-v1
     path = qm_npz_path(rt.settings, key, method)
     if path is None:
         raise ServeError(Code.MOLECULE_NOT_READY, f"no QM record for {key}", status=409)

@@ -4416,3 +4416,74 @@ view convention, the depth storage, the linking rule and the crossing breaks sti
   (not 8 px glyphs) and dropped where neighbouring levels are closer than 8 px (zoom shows
   them); frontier labels are spread at least 15 px apart with dashed leaders; below 380 px
   width the labels drop their energies.
+
+## 2026-10-25 — Workbench metal complexes: coordination-template start geometry (serve adapter)
+
+- **Diagnosis** (real GFN2-xTB through the workbench featurizer in a scratch data root, 33
+  complexes; before: 19 right, 4 wrong, 8 failed, 2 rejected). Root causes, by weight:
+  1. *Embedding.* MMFF has no transition-metal parameters and UFF types no charged metal, so
+     every metal record carried EMBED_UFF_FALLBACK with raw ETKDG coordinates. ETKDG fails
+     (EMBED_FAILED) on every five- and six-coordinate metal without SMILES stereo
+     ([Co(NH3)6]3+, [Fe(CN)6]4-, Cr(CO)6, [Fe(H2O)6]2+, Fe(CO)5), hits an RDKit invariant
+     violation on ferrocene (UNEXPECTED), and embeds every four-coordinate metal tetrahedral,
+     square-planar d8 included (start angle RMS 6-33 degrees off square planar).
+  2. *GFN2 from a wrong start.* GFN2 recovers square planar for small complexes, but not for
+     RhCl(PPh3)3 or Pd(acac)2 (both stay tetrahedral, Wilkinson's with Rh-Cl 2.88 A and no
+     warning); cisplatin and Pd(acac)2 dissociated an M-L bond (1.38x, 1.90x) and needed the
+     walls (RESTRAINED_GEOM); a Grubbs-type Ru(=CHPh)Cl2(PMe3)2 ended with Cl trans to P;
+     PtCl2(NH3)2 without stereo came out cis or trans by chance.
+  3. *Spin.* The pipeline is closed-shell: [NiCl4]2- (a tetrahedral triplet) came out as a
+     square-planar singlet. d9 Cu(II) is already SPIN_PARITY (RDKit puts no radical on metals).
+  4. Not causes: dative bonds (`->`) parse and stay bonds; charge-separated forms
+     (`[NH3+][Pt-2]`) work; RDKit honours @SP/@TB/@OH, so stereo-tagged Co(III) isomers were
+     already right; tblite has GFN2 parameters for Z 1-86 (no UNSUPPORTED_ELEMENT). The 1.3x
+     connectivity check is not too strict for M-L bonds (final M-L bonds lie at 0.81-1.03x the
+     radii sum; the breaks it caught were real), and the flat-bottom walls did not distort
+     (restrained cisplatin = free cisplatin from the template). Ionic multi-fragment SMILES
+     (`[Fe+2].c1cc[cH-]c1.c1cc[cH-]c1`, `N.N.Cl[Pt]Cl`) fail; the workbench already refuses
+     them as MULTIPLE_FRAGMENTS.
+- **Adapter** (`serve/metal_geometry.py`, RDKit + numpy; `serve/metal_qm.py`, the GFN2 driver,
+  `qm/` untouched). Sites from the metal's bonds (mutually bonded neighbours form one eta-n
+  site); oxidation state = formal charge + covalent bond orders to non-metals (dative 0, M=C 0,
+  bonds to alkali/alkaline-earth/Al -1); polyhedron by site count, SMILES stereo first, d8
+  Pd/Pt/Au/Rh/Ir (Ni with C/P or all-N donors) square planar, five-coordinate d6 square
+  pyramidal; isomer from @SP/@TB/@OH (tables derived from RDKit's own embedder and re-derived
+  in the tests; handedness not enforced) or the stated default (chelates cis, then the most
+  like-ligand pairs trans); donors at r_M + r_L - 0.05 A (sp C 0.69); ETKDG of the metal-
+  stripped molecule with the template atoms in the coordMap and the bounds (metal floors
+  capped), ligands moved rigidly onto their donors, monodentates turned to point their lone
+  pair at the metal, eta-n substituents in the ring plane, the seed with the best
+  radius-scaled closest contact. Then `GFN2Calculator.run` (inherited) with a metal-aware
+  connectivity check: the M-L factor is its own knob, kept at 1.3 (walls 1.2) on the evidence
+  above, and walls only if a bond breaks. Mononuclear connected complexes with CN <= 6 only;
+  otherwise the standard embed and METAL_TEMPLATE_SKIPPED. METAL_POLYHEDRON_CHANGED /
+  METAL_ISOMER_CHANGED (best vertex assignment of the final geometry) and FERMI_SMEARED are
+  added to the record warnings.
+- **Open shells refused at preflight** with RADICAL_NOT_SUPPORTED (the workbench's
+  closed-shell code): Werner complexes (no C, P, Si, H or eta-n donor) with octahedral d2/d4/d8,
+  high-spin 3d d6 (not Co(III), not six aromatic N), or tetrahedral d2-d8. Deliberately
+  conservative: organometallic ligand fields are never refused.
+- **Method tag.** Records and tokens of the metal path use `<GFN2 method>+metal-geom-v1`,
+  applied by `metal_geometry.method_for` only to keys with a d-block metal and only to the GFN2
+  method (non-metal keys and the synthetic method are untouched). The cache key and the
+  provenance config differ (solvation unchanged), so they never collide with the batch's
+  records; the shared layer is still read first under the tagged method, so an upstream
+  adoption with the same tag is picked up. `orbital_sets.load_qm` verifies the record against
+  `method_for(key)`.
+- **After**: 27 right (every connected closed-shell case: polyhedron and isomer, no
+  RESTRAINED_GEOM), 4 refused (2 d9, [Fe(H2O)6]2+, [NiCl4]2-), 2 failed (the two ionic
+  multi-fragment SMILES). Wilkinson's catalyst: 167 s instead of 339 s. On 22 PMechDB metal
+  species (read-only comparison with the batch manifest): 6 of 8 SCF_NOT_CONVERGED TiCl4
+  carbonyl adducts now converge (square pyramidal, flagged METAL_POLYHEDRON_CHANGED from the
+  TBP start), bent ZnCl2 becomes linear, the clean ones are unchanged; the RESTRAINED_GEOM ones
+  are one-coordinate fragments the template cannot help.
+- **Upstream proposal** (not applied, for the user to decide): move `metal_geometry` to `qm/`;
+  `QMConfig.metal_template` (default off) and `QMConfig.method_for(smiles)`, used for the cache
+  path in `batch._compute/_is_done/build_manifest`, `orbitals.build.process_molecule` and
+  `arrows.reactants.TokenCache`; `embed()` dispatches metal molecules to the template; the M-L
+  factor in `GFN2Calculator._relax`; a failure code OPEN_SHELL_LIKELY. `provenance.verify`
+  compares kind, schema, config and inputs only (code hashes are tracing), so the change stales
+  no existing record; switching it on recomputes the 302 PMechDB metal molecules (179 records,
+  46 RESTRAINED_GEOM; 123 failures, 99 of them SPIN_PARITY) under the new method and re-runs
+  the samples of their steps. It must not be edited into the checkout while a batch runs
+  (records stamped `code_dirty`, refused by `require_clean`).
