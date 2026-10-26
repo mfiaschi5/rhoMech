@@ -4363,3 +4363,110 @@ stay valid.
 - Nothing else read it: the top-k ranks take the best anchor, and `best.pt` is chosen by
   top-1, then by the loss. The run `flex_first` (pod, code 7b090cb) logged `val_anchor_nll` the
   old way, slightly low wherever variants share an anchor.
+
+## 2026-10-26 — The first run: flex on the molecule split, on a RunPod RTX 3090 Ti
+
+- **Run (user decision: flex first, on a pod).** `ksmech-train fit --run flex_first --encoder
+  flex` with every default:
+  - 30 epochs, cell budget 1.1 M, batches of at most 64;
+  - AdamW at 3e-4 with weight decay 0.01, 2,000 warm-up steps, gradient clip 1;
+  - bfloat16 on CUDA.
+
+  The model has 7.11 M parameters. 9,994 training samples (3 skipped as TOO_LARGE) and 1,239
+  validation samples make 12,750 steps.
+  - Code 7b090cb, a clean clone on the pod, so the run's provenance is clean.
+  - The run directory is copied back to `data/models/pmechdb/flex_first/`, with the pod's
+    stdout as `stdout.log`; `load_model` reads `best.pt` here.
+- **Speed.** The RTX 3090 Ti (24 GB, driver 580.65, the cu130 build) ran 27 min wall for the
+  30 epochs.
+  - About 48 s of training per epoch at about 220 samples/s, plus a few seconds of validation.
+  - The first epoch took 111 s, of which about 60 s was the FlexAttention compiles.
+  - GPU memory stayed at 3.3 GB.
+  - On the RX 6600 XT the probe estimated 3.8 min per epoch, so this is about 4.7 times
+    faster.
+- **Validation per epoch** (anchor top-k over the candidate atom pairs with set
+  marginalization; R exact = the greedy R is a variant of the label class). The physics floor
+  is 15.2 / 25.8 / 30.8% (top-1 / 3 / 5).
+
+  | epoch | top-1 | top-3 | top-5 | R exact | val loss | train loss |
+  |---|---|---|---|---|---|---|
+  | 1 | 27.8% | 47.9% | 57.9% | 14.7% | 7.93 | 126.66 |
+  | 2 | 40.8% | 60.6% | 69.5% | 23.0% | 5.60 | 8.51 |
+  | 3 | 44.1% | 64.5% | 73.7% | 28.2% | 5.23 | 5.92 |
+  | 4 | 38.3% | 62.7% | 73.2% | 25.2% | 5.15 | 4.77 |
+  | 5 | 46.5% | 70.7% | 79.3% | 36.2% | 3.82 | 3.92 |
+  | 6 | 50.1% | 71.7% | 81.0% | 40.7% | 3.72 | 3.14 |
+  | 7 | 50.3% | 72.5% | 81.4% | 41.5% | 3.37 | 2.59 |
+  | 8 | 53.2% | 74.0% | 82.1% | 46.7% | 3.33 | 2.19 |
+  | 9 | 54.8% | 77.8% | 86.4% | 44.6% | 2.85 | 1.89 |
+  | 10 | 50.9% | 73.8% | 80.1% | 44.5% | 3.37 | 1.60 |
+  | 11 | 57.1% | 78.0% | 84.1% | 49.6% | 2.74 | 1.45 |
+  | 12 | 55.7% | 75.8% | 83.1% | 49.6% | 2.85 | 1.20 |
+  | 13 | 57.0% | 78.2% | 87.2% | 49.2% | 2.87 | 1.11 |
+  | 14 | 57.1% | 76.6% | 86.5% | 51.8% | 3.02 | 0.90 |
+  | 15 | 55.3% | 77.6% | 88.5% | 49.9% | 2.81 | 0.81 |
+  | 16 | 56.7% | 75.0% | 85.6% | 50.9% | 3.04 | 0.67 |
+  | 17 | 56.4% | 80.5% | 87.3% | 50.6% | 2.97 | 0.61 |
+  | 18 | 57.7% | 77.3% | 87.3% | 52.3% | 2.79 | 0.54 |
+  | 19 | 57.0% | 80.7% | 87.2% | 51.7% | 2.99 | 0.43 |
+  | 20 (best) | **60.9%** | **79.9%** | **87.3%** | **55.6%** | 2.93 | 0.40 |
+  | 21 | 58.2% | 79.7% | 86.3% | 53.3% | 3.25 | 0.34 |
+  | 22 | 58.4% | 79.3% | 86.4% | 52.9% | 3.30 | 0.31 |
+  | 23 | 59.0% | 80.3% | 86.8% | 53.8% | 3.41 | 0.26 |
+  | 24 | 58.8% | 78.5% | 86.4% | 53.8% | 3.53 | 0.23 |
+  | 25 | 58.8% | 79.3% | 86.4% | 53.4% | 3.77 | 0.20 |
+  | 26 | 59.2% | 79.6% | 86.0% | 53.8% | 3.89 | 0.19 |
+  | 27 | 59.6% | 79.3% | 85.7% | 54.6% | 4.13 | 0.17 |
+  | 28 | 58.6% | 79.0% | 85.5% | 53.4% | 4.29 | 0.16 |
+  | 29 | 58.6% | 79.0% | 85.6% | 53.8% | 4.36 | 0.15 |
+  | 30 | 58.7% | 78.8% | 85.7% | 53.8% | 4.37 | 0.14 |
+
+  - The dip at epoch 4 is the end of the warm-up, when the LR reaches its peak.
+  - The `val_anchor_nll` of this run uses the old definition (the entry above), so it reads
+    slightly low; it is left out of the table.
+- **It overfits from about epoch 11.**
+  - Validation loss is lowest at epoch 11 (2.74) and climbs to 4.37 by epoch 30, while the
+    training loss falls to 0.14.
+  - Top-1 still rises to 60.9% at epoch 20, then stays at 58-59%.
+  - `best.pt` is epoch 20 (by top-1, then loss).
+  - The next levers, none decided yet: the resonance augmentation (user decision: after a first
+    run), a shorter schedule or stopping on validation loss, and regularization. The model has
+    no dropout.
+  - The test split is not evaluated yet.
+- **Pod lessons.**
+  - *Check CUDA first.* Two RTX 3080 Ti pods, very likely the same host (same bus id), had
+    CUDA broken at host level: `nvidia-smi` fine, `cuInit` 999, `/dev/nvidia-uvm` failing to
+    open with EIO. That needs a host reboot, so the fix was another machine. On a new pod,
+    open `/dev/nvidia-uvm` and call `cuInit` before installing anything.
+  - *RunPod's proxy SSH* (`<pod>@ssh.runpod.io`) takes only PTY sessions. Commands work with
+    `ssh -tt` and stdin; scp and rsync do not. base64 through the PTY moved 18 KiB/s. Data
+    needs "SSH over exposed TCP".
+  - *uv on a CUDA host.* `uv run` re-synced to the default `rocm` group and began
+    reinstalling the ROCm build. `UV_NO_SYNC=1` after the CUDA sync (README, CLAUDE.md).
+  - *Threads on a 112-core host.* The unit suite with `-n 32` reached a load of 120 (each
+    worker's BLAS threads) and was stopped halfway. The run capped OMP, OpenBLAS and MKL at 8
+    threads.
+- **Transfer lessons.**
+  - *What the pod needs.* A run needs 20,642 files, 3.2 GiB:
+    - the views, split file, steps parquet and the 49 shards, 0.53 GB;
+    - 10,293 token files, 2.75 GB;
+    - 10,293 bond-index files, 16 MB.
+
+    The loaders verify every shard's inputs, so the token files must travel although training
+    reads only the shards.
+  - *Not through GitHub's public repo.* `rhoMech` is public, so the data went to a private
+    `rhoMech-data` repo, pushed with the account key and cloned on the pod with a read-only
+    deploy key, removed from the pod after use. GitHub refuses a deploy key that is already an
+    account key; "Hi user!" (account) against "Hi user/repo!" (deploy key) tells which.
+  - *Rates.*
+    - Uploads from here reached GitHub at 1.9 MB/s.
+    - The route to the pod's datacenter (RTT 135 ms, about 0.7% retransmissions) collapsed
+      each TCP stream to a congestion window of 2-3 packets. One rsync gave 0.8-1.4 MB/s,
+      four 1.8 MB/s at first and 0.13 MB/s once the losses grew, sixteen 0.39 MB/s.
+    - GitHub to the pod was just as lossy for one connection (0.3 MB/s). Eight parallel
+      partial clones (`--filter=blob:none` and a sparse checkout per eighth of the missing
+      files) reached 2.5 MB/s.
+    - In the end the direct rsync supplied 1.5 GB, and GitHub the remaining 1.7 GB (one push
+      of the missing tokens on top of the views and shards).
+  - Left to clean up: the private `rhoMech-data` repo and the 3.2 GB staging repository
+    `/home/jacopo/Documents/rhoMech-data-push.git`.
