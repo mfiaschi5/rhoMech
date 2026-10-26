@@ -4558,3 +4558,53 @@ stay valid.
   - Until `gbdt` is re-run, the `predict` worktree's server sees its LightGBM model (in this
     checkout's `data/processed`) as stale.
   - Push the schema-16 shards to `rhoMech-data` before a pod run.
+
+## 2026-10-26 — ReactMech: the loader checked on the released files, a 10,000-step pilot
+
+- **Download (user request).** FlowER (`data.zip`, Figshare 10.6084/m9.figshare.32513667, MIT),
+  ReactMech (Zenodo 10.5281/zenodo.20305780, CC BY 4.0) and mech-USPTO-31k (Figshare
+  10.6084/m9.figshare.24797220, CC BY 4.0) are in `data/raw/`. mech-USPTO-31k stays for
+  evaluation only (user). The model checkpoints of FlowER and DeepMech were not unpacked.
+- **The ReactMech loader** (`data.reactmech`, no longer `untested_on_real_data`;
+  docs/data_schema.md, "ReactMech").
+  - It reads the ID and OOD split files, each line once: 114,199 steps. 114,046 are accepted
+    and 153 rejected (0.13%).
+  - Classes come from the OOD mechanism files: 9,948 steps of Set1's 5 classes. Set2's 4
+    classes match no step, and the other 58 classes are not released.
+  - `ID_CRM.csv` and `PrebioMech/` are not read.
+  - The real-data test reads only the two val files: 2 min, against 12 for all six.
+- **Size of a full build** (estimated from the PMechDB QM manifest: GFN2 time and record size
+  per heavy-atom count).
+  - ReactMech has 108,615 distinct reactant molecules (median 26 heavy atoms, against 13 in
+    PMechDB). Its QM would take about 2,300 CPU-hours, with 62 GB of QM records and 68 GB of
+    tokens, more than this host has free (105 GB).
+  - FlowER has 1,134,119 distinct molecules, about ten times that. It also contains PMechDB
+    and RMechDB steps, which must leave it before any split with our PMechDB.
+  - Model tokens per step's reactant pool (median / p99): PMechDB 125 / 484, ReactMech
+    251 / 498, FlowER 336 / 1,022. 1.0% of FlowER's steps are over the 1,024 cap.
+- **A 10,000-step pilot (user decision).** `ksmech-data ingest --sample N --seed S` keeps N
+  accepted steps drawn at random over the sorted step ids, independent of file order; the
+  report records the draw.
+  - QM, bond indices and tokens run from the worktree `claude/reactmech`, at a fixed commit.
+    A batch of a day does not then block edits in the main checkout: an edit to a tracked
+    file there would make the batch's records dirty.
+  - The worktree has its own `data/cache`. The raw files are hard links. Provenance records
+    resolved paths relative to the repository, so files reached through a symlink into the
+    main checkout would be recorded by their absolute path, which does not travel to a pod.
+    The worktree's caches are moved into the main checkout's after the batch: their
+    relative paths stay valid there.
+- **d-metal geometries** (`tests/test_qm_dmetals.py`).
+  - RDKit's force fields type none of these metals (`EMBED_UFF_FALLBACK`), so GFN2 starts
+    from raw ETKDG coordinates.
+  - GFN2 then finds the right coordination:
+    - [PdCl4]2-: square planar, Pd-Cl 2.29 Å (experiment 2.30);
+    - trans-PdCl2(PMe3)2: square planar and trans, Pd-P 2.30 and Pd-Cl 2.28 Å (2.33 / 2.30);
+    - chromate: tetrahedral, Cr-O 1.62 Å (1.65);
+    - chromic acid as ReactMech draws it: tetrahedral, Cr=O 1.57 Å against Cr-OH 1.65 Å.
+  - 3-27 s per species.
+- **Open: the Pd(0) phosphines.** ReactMech writes a Pd(0)-phosphine as a phosphonium on a
+  neutral metal (`[P+]([Pd])`). That has an odd electron count, so the domain screen excludes it
+  as `OPEN_SHELL_METAL` (1,251 steps). Read as a dative bond (Pd-1, as rule R2 does for d0 / d10
+  acceptors), Pd(0) is d10 and closed shell; adding Pd and Pt to R2's acceptors is a decision
+  left to the user. FlowER draws the same complexes with a neutral four-bonded `[P]`, which
+  RDKit does not sanitize; its loader does not exist yet.

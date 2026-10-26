@@ -34,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
         if name == "ingest":
             p.add_argument("--raw", type=Path, default=None, help="raw file or dir")
+            p.add_argument(
+                "--sample", type=int, default=0, help="keep N random accepted steps (pilots)"
+            )
+            p.add_argument("--seed", type=int, default=0, help="the --sample generator's seed")
     v = sub.add_parser("provenance", help="print an artifact's provenance chain, or backfill")
     v.add_argument("path", type=Path, nargs="?", help="artifact to describe")
     v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
@@ -47,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     console = Console()
     if args.command == "ingest":
-        return cmd_ingest(Source(args.source), args.raw, args.processed_dir, console)
+        sample = (args.sample, args.seed) if args.sample else None
+        return cmd_ingest(Source(args.source), args.raw, args.processed_dir, console, sample)
     if args.command == "provenance":
         return cmd_provenance(args, console)
     return cmd_stats(Source(args.source), args.processed_dir, console)
@@ -74,12 +79,21 @@ def cmd_provenance(args: argparse.Namespace, console: Console) -> int:
     return 1 if any(" STALE" in line or "  ! " in line for line in lines) else 0
 
 
-def cmd_ingest(source: Source, raw: Path | None, processed: Path, console: Console) -> int:
+def cmd_ingest(
+    source: Source,
+    raw: Path | None,
+    processed: Path,
+    console: Console,
+    sample: tuple[int, int] | None = None,
+) -> int:
+    """Load, validate and write a source; `sample` (n, seed) keeps n random accepted steps."""
     try:
         result = LOADERS[source](raw)
     except (NotImplementedError, FileNotFoundError) as exc:
         console.print(f"[red]cannot ingest {source}:[/red] {exc}")
         return 2
+    if sample is not None:
+        result.keep_sample(*sample)
     paths = write_outputs(result, processed)
     print_ingest_report(result, console)
     for kind, path in paths.items():

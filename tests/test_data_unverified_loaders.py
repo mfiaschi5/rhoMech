@@ -1,7 +1,8 @@
-"""ReactMech and mech-USPTO-31K loaders, written against the published formats.
+"""ReactMech and mech-USPTO-31K loaders. ReactMech is checked against its released files;
+mech-USPTO-31K's loader is written against the published format.
 
 The real-file tests are skipped until the raw files sit in data/raw/. The format-level tests use
-only strings quoted in the papers or READMEs.
+strings quoted in the papers or READMEs, or rows written like the released files.
 """
 
 import pytest
@@ -15,9 +16,9 @@ MECH_USPTO_MISSING = not mech_uspto.RAW_FILE.is_file()
 
 
 def test_modules_flag_untested():
-    for mod in (reactmech, mech_uspto):
-        assert "untested_on_real_data=True" in mod.__doc__
-        assert mod.UNTESTED_ON_REAL_DATA is True
+    assert "untested_on_real_data=True" in mech_uspto.__doc__
+    assert mech_uspto.UNTESTED_ON_REAL_DATA is True
+    assert reactmech.UNTESTED_ON_REAL_DATA is False  # checked on the released files, 2026-10-26
 
 
 # --- ReactMech --------------------------------------------------------------------------------
@@ -30,15 +31,54 @@ def test_modules_flag_untested():
     "needs approval",
 )
 def test_reactmech_real_files():
-    result = reactmech.load()
-    assert result.n_records > 0
+    """The two val files only (2 min; all six files take 12 min and give 114,199 steps, 9,948
+    of them classified): the ID and OOD splits, each step read once."""
+    result = reactmech.load(parts=("val.txt",))
+    assert result.n_records == 19_730 and result.notes["repeat_across_files"] == 929
     assert result.rejected_fraction < 0.02
+    classes = {s.mechanism_class for s in result.steps} - {None}
+    assert classes == {"acid_halide", "sul_halide", "anhydride", "haloformate", "carbamic_halide"}
+    assert result.notes["with_mechanism_class"] == 1_013
 
 
 def test_reactmech_line_without_arrows():
     step = reactmech.parse_line("[OH-:1].[CH3:2][Cl:3]>>[OH:1][CH3:2].[Cl-:3]", "reactmech-x")
     assert step.arrows == []
     assert step.mechanism_class is None
+
+
+def test_reactmech_reads_each_step_once_and_takes_classes_from_mechanisms(tmp_path):
+    root = tmp_path / "data"
+    for split in reactmech.SPLITS:
+        (root / split).mkdir(parents=True)
+    sn2 = "[OH-:1].[CH3:2][Cl:3]>>[OH:1][CH3:2].[Cl-:3]"
+    other = "[OH-:1].[CH3:2][Br:3]>>[OH:1][CH3:2].[Br-:3]"
+    (root / "ID_Split42" / "train.txt").write_text(sn2 + "\n")
+    (root / "OOD_Split42" / "test.txt").write_text(sn2 + "\n" + other + "\n")
+    classes = root / "OOD_Split42" / "OOD_CRM_dataset"
+    classes.mkdir()
+    (classes / "OOD_Set1.csv").write_text(
+        "mechanistic_class,mechanisms\nsn2_bromide,\"['[OH-].CBr', 'CO.[Br-]']\"\n"
+    )
+    result = reactmech.load(tmp_path)
+    assert result.n_records == 2 and result.notes["repeat_across_files"] == 1
+    assert sorted(str(s.mechanism_class) for s in result.steps) == ["None", "sn2_bromide"]
+
+
+def test_a_sample_keeps_n_random_steps_whatever_the_file_order(tmp_path):
+    from ksmech.data.ingest import IngestResult
+
+    def loaded(order):
+        result = IngestResult("reactmech")
+        for k in order:
+            step = reactmech.parse_line("[OH-:1].[CH3:2][Cl:3]>>[OH:1][CH3:2].[Cl-:3]", f"r-{k}")
+            result.add(f"r-{k}", str(k), lambda s=step: s)
+        result.keep_sample(3, seed=0)
+        return sorted(s.step_id for s in result.steps), result.report()["sample"]
+
+    ids, sample = loaded(range(10))
+    assert len(ids) == 3 and loaded(reversed(range(10)))[0] == ids
+    assert sample == {"n": 3, "seed": 0, "of_accepted": 10}
 
 
 def test_reactmech_still_validates_balance():

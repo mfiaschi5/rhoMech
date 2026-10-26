@@ -144,8 +144,10 @@ uv run pre-commit install     # enable the commit hook: ruff, then the two pytes
 
 Main CLI entry points are added phase by phase and listed here as they land:
 
-- Data: `uv run ksmech-data ingest --source pmechdb` (steps parquet, `resonance_pairs.parquet`,
-  rejections and report under `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
+- Data: `uv run ksmech-data ingest --source pmechdb|reactmech [--sample N --seed S]` (steps parquet,
+  `resonance_pairs.parquet`, rejections and report under `data/processed/<source>/`; `--sample`
+  keeps N random accepted steps for a pilot; ReactMech reads its ID and OOD split files once each,
+  classes from the OOD mechanism files), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts

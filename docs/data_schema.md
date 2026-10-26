@@ -121,6 +121,60 @@ We do not ingest this file because it adds nothing beyond `raw/`.
 - `pathway_datasets/ORD_USPTO/raw/ORD_USPTO_transformations.csv` (133 lines). No header; one
   unmapped reaction SMILES per line.
 
+## ReactMech (via the DeepMech data release)
+
+Inspected 2026-10-26.
+
+### Where the files are
+
+Zenodo record 10.5281/zenodo.20305780 (CC BY 4.0), `DeepMech_Dataset_Model.zip` (45 MB, 139 MB
+unpacked), from DeepMech (Das, Hoque, Baranwal, Sunoj, Chem. Sci. 2026, arXiv:2509.15872). Only
+its `data/` folder is unpacked, under `data/raw/reactmech/DeepMech_Dataset_Model/`; the model
+checkpoint `models/DeepMech_Split42.pth` is not.
+
+| Path under `data/` | Content |
+|---|---|
+| `ID_Split42/{train,val,test}.txt` | **Ingested.** 73,474 / 10,497 / 20,993 steps, no line in two parts |
+| `OOD_Split42/{train,val,test}.txt` | **Ingested.** 71,129 / 10,162 / 20,323 steps: the same steps partitioned by class, plus 9,235 not in the ID split |
+| `OOD_Split42/OOD_CRM_dataset/OOD_Set1.csv` | **Read for classes.** 3,340 mechanisms, 5 classes |
+| `OOD_Split42/OOD_CRM_dataset/OOD_Set2.csv` | **Read for classes.** 438 mechanisms, 4 classes; none matches a step |
+| `ID_Split42/ID_CRM_dataset/ID_CRM.csv` | 2,751 mechanisms, no class column. Not read |
+| `PrebioMech/{train,val,test}.txt` | 21,588 / 3,066 / 6,133 prebiotic steps, same line format. Not read |
+
+### Step file format (`*_Split42/*.txt`)
+
+One elementary step per line: an atom-mapped reaction SMILES `reactants>>products`, nothing else
+(no `|`, no space, no header, no arrows). Implicit H on mapped atoms (`[CH3:1]`), aromatic
+lowercase atoms, charges as drawn. Every line of the six files has `>>`.
+
+- The two splits give 114,199 distinct lines (ID 104,964 + 9,235 OOD-only); 92,379 lines repeat
+  one already read. The ingester reads each line once and counts the repeats
+  (`repeat_across_files`); neither split's membership is stored.
+- Ingest of all six files (RDKit 2026.09.1): 114,046 accepted, 153 rejected (0.13%):
+  `CHARGE_UNBALANCED` 70, `MAP_NOT_BIJECTIVE` 48, `UNBALANCED` 35. 6,528 resonance steps.
+  Domain exclusions: `OPEN_SHELL_METAL` 1,251, `METAL_PLACEHOLDER` 1,122, `RADICAL_DRAWN` 792.
+- The reaction matrix comes from the two mapped sides; there are no arrows to apply.
+- d-metal species are drawn with charge-separated dative bonds to a neutral metal, e.g. a Pd(0)
+  phosphine as `CC(C)(C)[P+]([Pd])(C(C)(C)C)C(C)(C)C`: an odd electron count, which the domain
+  screen excludes as `OPEN_SHELL_METAL` (Pd is not among the d0 / d10 acceptors of rule R2).
+  Chromic acid is drawn `[O]=[Cr](=[O])([OH])[OH]` and passes. The most common metals are Pd
+  (1,711 distinct reactant molecules), Cr (223), Ni (138), Ag (`[Ag+]`).
+
+### Mechanism files (`*_CRM_dataset/*.csv`)
+
+CSV with a header: `mechanisms` (ID_CRM) or `mechanistic_class,mechanisms` (OOD sets). A
+`mechanisms` cell is a Python list literal of unmapped SMILES, one species (the whole pool) per
+step boundary: 2-11 species in ID_CRM, 4 in Set1, 5 in Set2.
+
+- **Classes.** A step takes a class when its map-free canonical reactants and products are two
+  consecutive species of a classified mechanism; no pair is claimed by two classes. 9,948 steps
+  get one of Set1's 5 classes: acid_halide 4,365, sul_halide 2,730, anhydride 1,584,
+  haloformate 1,071, carbamic_halide 198. Set2's 4 classes (CO_coupling, bidentate_Ni_bha,
+  bidentate_bha, intramolecular_bha: Buchwald-Hartwig aminations with octylamine, Pd and Ni)
+  match no step: the split files' Ni steps are other couplings (aryl boronic acids). The other
+  58 of the paper's 67 classes are not released.
+- Not used yet: the pathways themselves (step order), ID_CRM's mechanisms.
+
 ## Processed: `data/processed/<source>/steps.parquet`
 
 There is one row per `ksmech.data.schema.ElementaryStep`:
