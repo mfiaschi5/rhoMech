@@ -1,6 +1,8 @@
 """Training (spec v9, "Training objective"): AdamW with a linear warm-up and a cosine decay,
 gradient clipping, mixed precision, batches by a cell budget, and the edit-level metrics on the
-validation part after every epoch.
+validation part after every epoch. Each epoch every training sample is drawn in a random one of
+its resonance drawings (`--resonance-draws`, on by default; spec v9, "Resonance augmentation"),
+with its label recomputed for that drawing; validation always reads the dataset's drawing.
 
 The encoder is `--encoder dense | flex | sparse`. The sparse encoder's indexer KL is added to
 the loss (it reaches only the indexer), and it runs in its dense warm-up mode while the
@@ -37,7 +39,7 @@ from ksmech.model.inputs import FeatureStats, fit_feature_stats, to_device
 from ksmech.model.loss import anchor_ranks, edit_matches, greedy_edit, step_loss
 from ksmech.model.net import KSMech
 from ksmech.physics.pairs import PairStats
-from ksmech.train.batching import CellBudgetSampler
+from ksmech.train.batching import CellBudgetSampler, DrawnSamples
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +66,7 @@ class TrainConfig:
     limit: int = 0  # use only the first n training and validation samples (smoke runs)
     log_every: int = 20  # optimizer steps
     stop_weight: float = -1.0  # lambda_stop; < 0: the source's (0.5, 0 on PMechDB)
+    resonance_draws: bool = True  # each epoch, every training sample in a random drawing
 
 
 STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0}  # PMechDB: isolated steps, no stop labels
@@ -147,12 +150,18 @@ def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[list, d
     return keep, {"n": len(samples), "used": len(keep), "skipped": skipped, "path": str(path)}
 
 
-def make_loader(samples: list, cfg: TrainConfig, shuffle: bool) -> torch.utils.data.DataLoader:
+def make_loader(
+    samples: list, cfg: TrainConfig, shuffle: bool, draw: bool = False
+) -> torch.utils.data.DataLoader:
+    """Batches by the cell budget; with `draw` (and `shuffle`) each sample in a random one of
+    its resonance drawings every epoch."""
+    draws = [s.n_drawings for s in samples] if draw else None
+    sizes = [_size(s) for s in samples]
     sampler = CellBudgetSampler(
-        [_size(s) for s in samples], cfg.cell_budget, cfg.max_batch, shuffle, cfg.seed
+        sizes, cfg.cell_budget, cfg.max_batch, shuffle, cfg.seed, drawings=draws
     )
     return torch.utils.data.DataLoader(
-        samples,
+        DrawnSamples(samples),
         batch_sampler=sampler,
         collate_fn=collate_samples,
         num_workers=cfg.workers,
@@ -345,7 +354,8 @@ def fit(
     model = KSMech(model_cfg, fit_feature_stats(train), load_pair_stats(stats_path)).to(device)
     header = _run_header(cfg, model_cfg, {"train": train_info, "val": val_info}, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)
-    train_loader, val_loader = make_loader(train, cfg, True), make_loader(val, cfg, False)
+    train_loader = make_loader(train, cfg, True, cfg.resonance_draws)
+    val_loader = make_loader(val, cfg, False)
     total = cfg.epochs * len(train_loader.batch_sampler)
     opt = _optimizer(model, cfg)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, cfg.warmup, total))
@@ -359,6 +369,10 @@ def fit(
     n_params = sum(p.numel() for p in model.parameters())
     log.info("%d parameters, %d train / %d val samples, %d steps on %s (%s), lambda_stop %g",
              n_params, len(train), len(val), total, device, dtype, stop_weight(cfg))  # fmt: skip
+    if cfg.resonance_draws:
+        other = sum(s.n_drawings > 1 for s in train)
+        log.info("resonance draws: %d of %d training samples have other drawings, %d in all",
+                 other, len(train), sum(s.n_drawings - 1 for s in train))  # fmt: skip
     skipped = {"train": train_info["skipped"], "val": val_info["skipped"]}
     for epoch in range(state["epoch"], cfg.epochs):
         state["epoch"] = epoch

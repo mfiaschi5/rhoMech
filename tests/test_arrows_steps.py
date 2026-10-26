@@ -102,9 +102,8 @@ def test_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path
     assert np.array_equal(back.pair_valid, valid)
     assert np.array_equal(back.pair_defined[valid], s.pair_defined[valid])
     assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-6)  # float16
-    assert np.array_equal(back.pair_contact_sites[valid], s.pair_contact_sites[valid])
-    assert not back.pair_defined[~valid].any() and (back.pair_contact_sites[~valid] == -1).all()
-    assert back.pair_z.dtype == np.float32 and back.atom_coulomb.dtype == np.float32
+    assert not back.pair_defined[~valid].any() and back.pair_z.dtype == np.float32
+    assert back.drawings == s.drawings == []  # 2-bromopropane and ethoxide: one drawing each
 
 
 def test_skip_reasons(token_loader):
@@ -324,7 +323,7 @@ def test_loader_and_cli(mini_processed, token_loader, monkeypatch, capsys):
 def test_sample_stores_the_pair_block(mini_steps, token_loader):
     import numpy as np
 
-    from ksmech.physics.pairs import atom_coulomb_matrix, valid_pairs
+    from ksmech.physics.pairs import valid_pairs
     from ksmech.physics.params import REDUCED
     from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 
@@ -342,9 +341,6 @@ def test_sample_stores_the_pair_block(mini_steps, token_loader):
     donors = s.donor_mask[s.orbital_occupied]
     acceptors = s.acceptor_mask[~s.orbital_occupied]
     assert not (s.pair_valid & ~(donors[:, None] & acceptors[None, :])).any()
-    assert s.atom_coulomb.shape == (s.n_atoms, s.n_atoms)
-    assert np.allclose(s.atom_coulomb, s.atom_coulomb.T)
-    assert np.allclose(s.atom_coulomb, atom_coulomb_matrix(tokens, REDUCED), rtol=1e-6)
 
 
 def test_old_sample_versions_are_refused(mini_steps, token_loader, tmp_path):
@@ -466,7 +462,7 @@ def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, 
 
     s = sample_for_step(mini_steps["e2"], token_loader)
     assert s.pair_features == STAGE_A_FEATURES
-    assert s.pair_z.shape[-1] == len(STAGE_A_FEATURES) and (s.pair_contact_sites == -1).all()
+    assert s.pair_z.shape[-1] == len(STAGE_A_FEATURES)
     block = stage_a_block(s.tokens(token_loader))
     assert np.allclose(s.pair_z, block.z, rtol=1e-6, atol=1e-6)
     (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))

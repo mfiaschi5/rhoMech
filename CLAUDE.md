@@ -168,8 +168,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   ksmech-arrows samples --source
   pmechdb` (the sample store `samples/shard_*.npz` + `index.json`: every training step with
   tokens, its reaction-matrix label class and anchors, the reactant's Lewis structure on the token
-  atoms (bonds, lone pairs, Wiberg indices), the geometry-free pair features, and the
-  orbital-pair labels where every arrow aligns; one `samples_<strategy>_<part>.json` view per
+  atoms (bonds, lone pairs, Wiberg indices), the geometry-free pair features, the other
+  resonance drawings of the pool with their labels (`arrows.drawings`), and the orbital-pair labels
+  where every arrow aligns; one `samples_<strategy>_<part>.json` view per
   split of `molecule`, `scaffold` and
   `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
@@ -188,7 +189,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   from each training part), then `ksmech-physics gbdt`, then `textbook`.
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
-  [--resume]` (the spec-v9 model on one split; `--encoder`: `dense` the pair track of spec v9,
+  [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; each epoch every training
+  sample in a random one of its resonance drawings unless `--no-resonance-draws`; `--encoder`: `dense` the pair track of spec v9,
   `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
   learned indexer, dense during the LR warm-up; `--stop-weight` is lambda_stop of the END_MECH head,
   by default 0.5 and 0 on PMechDB; `data/models/<source>/<run>/`: `run.json` with the provenance of

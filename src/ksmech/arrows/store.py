@@ -9,10 +9,11 @@ A split is `samples_<split>.json` next to the store: its ids and counts, with th
 split file as inputs. Nothing is copied per split.
 
 On disk a sample keeps its pair arrays for the valid cells only (`pair_valid`, ~89% of the
-cells): `pair_z` and `atom_coulomb` as float16, the 0/1 features (`BINARY_FEATURES` among the
-sample's `pair_features`) and `pair_defined` bit-packed, `pair_contact_sites` (always -1,
-schema 15 only) as int16, the symmetric `atom_coulomb` as its upper triangle. In memory every
-array is dense float32 again, invalid cells zero / undefined / -1.
+cells): `pair_z` as float16, the 0/1 features (`BINARY_FEATURES` among the sample's
+`pair_features`) and `pair_defined` bit-packed. Its resonance drawings are stacked
+(`drawing_charges`, `drawing_orders`, `drawing_lone_pairs`, one row per drawing) with their
+labels in the JSON. In memory every array is dense float32 again, invalid cells zero /
+undefined.
 float16 keeps 3 significant digits: the largest error measured on the pair features was 5e-3
 on log-features spanning ~30 units, below 1e-7 absolute on the tiny ones
 (docs/decisions.md, fix item 8).
@@ -34,8 +35,13 @@ if TYPE_CHECKING:
     from ksmech.arrows.steps import MechanismSample
 
 SHARD_SIZE = 256
-VALID_ONLY = ("pair_z", "pair_defined", "pair_gap_sign", "pair_contact_sites")
-_HALF = ("pair_z", "atom_coulomb")
+VALID_ONLY = ("pair_z", "pair_defined", "pair_gap_sign")
+# Drawing field -> the stacked array of a sample's drawings
+DRAWING_ARRAYS = {
+    "charges": "drawing_charges",
+    "orders": "drawing_orders",
+    "lone_pairs": "drawing_lone_pairs",
+}
 BINARY_FEATURES = ("inter", "clash", "bonded")  # exact 0/1 pair features: bits, not float16
 
 
@@ -55,7 +61,10 @@ def pack(sample: MechanismSample) -> tuple[dict[str, np.ndarray], dict[str, Any]
         if isinstance(value, np.ndarray):
             arrays[f.name] = value
         else:
-            if f.name == "labels":
+            if f.name == "drawings":
+                arrays |= _pack_drawings(sample)
+                value = [d.edit_label.to_dict() for d in value]
+            elif f.name == "labels":
                 value = [lab.to_dict() for lab in value]
             elif f.name == "edit_label" and value is not None:
                 value = value.to_dict()
@@ -68,13 +77,7 @@ def pack(sample: MechanismSample) -> tuple[dict[str, np.ndarray], dict[str, Any]
     if not np.isin(flags, (0.0, 1.0)).all():
         raise ValueError(f"{sample.step_id}: a binary pair feature is not 0/1")
     arrays["pair_flags"] = np.packbits(flags.astype(bool), axis=-1)
-    arrays["pair_z"] = np.delete(arrays["pair_z"], binary, axis=-1)
-    for name in _HALF:
-        arrays[name] = arrays[name].astype(np.float16)
-    arrays["pair_z"] = _byte_planes(arrays["pair_z"])
-    coul = arrays["atom_coulomb"]  # symmetric: the upper triangle is enough
-    arrays["atom_coulomb"] = coul[np.triu_indices(len(coul))]
-    arrays["pair_contact_sites"] = arrays["pair_contact_sites"].astype(np.int16)
+    arrays["pair_z"] = _byte_planes(np.delete(arrays["pair_z"], binary, axis=-1))
     arrays["pair_defined"] = np.packbits(arrays["pair_defined"], axis=-1)
     meta["n_pair_features"] = int(sample.pair_z.shape[-1])
     return arrays, meta
@@ -86,6 +89,7 @@ def unpack(
     """The dense MechanismSample of `pack`'s output (cls: MechanismSample)."""
     from ksmech.arrows.align import ArrowLabel
     from ksmech.arrows.delta_be import EditLabel
+    from ksmech.arrows.drawings import Drawing
 
     meta = dict(meta)
     n_feat = meta.pop("n_pair_features")
@@ -96,7 +100,6 @@ def unpack(
         "pair_z": np.zeros((*shape, n_feat), dtype=np.float32),
         "pair_defined": np.zeros((*shape, n_feat), dtype=bool),
         "pair_gap_sign": np.zeros(shape, dtype=np.int8),
-        "pair_contact_sites": np.full((*shape, 2), -1, dtype=np.int64),
     }
     binary = _binary_columns(meta["pair_features"])
     rest = [k for k in range(n_feat) if k not in binary]
@@ -107,16 +110,30 @@ def unpack(
     bits = np.unpackbits(arrays["pair_defined"], axis=-1, count=n_feat)
     dense["pair_defined"][valid] = bits.astype(bool)
     dense["pair_gap_sign"][valid] = arrays["pair_gap_sign"]
-    dense["pair_contact_sites"][valid] = arrays["pair_contact_sites"]
-    out = {k: v for k, v in arrays.items() if k not in (*VALID_ONLY, "pair_flags")}
-    n_atoms = len(arrays["atom_categorical"])
-    coul = np.zeros((n_atoms, n_atoms), dtype=np.float32)
-    coul[np.triu_indices(n_atoms)] = arrays["atom_coulomb"].astype(np.float32)
-    out["atom_coulomb"] = np.triu(coul) + np.triu(coul, 1).T
+    skip = (*VALID_ONLY, "pair_flags", *DRAWING_ARRAYS.values())
+    out = {k: v for k, v in arrays.items() if k not in skip}
+    rows = [
+        {f: arrays[name][k] for f, name in DRAWING_ARRAYS.items()}
+        for k in range(len(arrays["drawing_orders"]))
+    ]
+    meta["drawings"] = [
+        Drawing(**row, edit_label=EditLabel.from_dict(lab))
+        for row, lab in zip(rows, meta["drawings"], strict=True)
+    ]
     meta["labels"] = [ArrowLabel.from_dict(x) for x in meta["labels"]]
     if meta.get("edit_label") is not None:
         meta["edit_label"] = EditLabel.from_dict(meta["edit_label"])
     return cls(**out, **dense, **meta)
+
+
+def _pack_drawings(sample: MechanismSample) -> dict[str, np.ndarray]:
+    """The drawings' arrays stacked, one row per drawing (zero rows without drawings)."""
+    width = {"charges": sample.n_atoms, "orders": len(sample.bonds), "lone_pairs": sample.n_atoms}
+    out = {}
+    for f, name in DRAWING_ARRAYS.items():
+        rows = [getattr(d, f) for d in sample.drawings]
+        out[name] = np.array(rows, dtype=np.int8).reshape(-1, width[f])
+    return out
 
 
 def _byte_planes(z: np.ndarray) -> np.ndarray:

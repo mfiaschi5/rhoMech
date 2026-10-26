@@ -4470,3 +4470,91 @@ stay valid.
       of the missing tokens on top of the views and shards).
   - Left to clean up: the private `rhoMech-data` repo and the 3.2 GB staging repository
     `/home/jacopo/Documents/rhoMech-data-push.git`.
+
+## 2026-10-26 — Resonance augmentation: each pool drawn in its resonance forms, the label recomputed (schema 16)
+
+- **Why.** The formal charges of the atom tokens, the matrix B on which R is decoded and the
+  pair feature `bond_order` belong to one drawing of the reactant pool, while the wavefunction
+  does not. Without augmentation the model learns the dataset's choice of drawing (spec v9,
+  "Resonance augmentation"; user decision 2026-10-25: after a first run).
+- **Which forms (user decision).** A molecule is drawn in its resonance forms
+  (`resonance_forms`: H frozen, odd structures dropped) with no more formal charges (the sum
+  of |q|) than the molecule as drawn: an enolate's charge on C or O, a carboxylate's on either
+  O, the positions of a benzyl or allyl ion. The charge-separated minor forms are never drawn.
+  - On 600 random training steps (1,369 reactant molecules, 875 distinct), RDKit returns 50 or
+    more structures for 76 molecules, nearly all charge-separated, so uniform draws over every
+    form would mostly be zwitterions.
+  - With the charge rule, 18% of the molecules have another form, mostly 2 or 3.
+  - The drawn form had the fewest charges in all but one molecule.
+- **What follows the drawing** (`arrows.drawings`, `MechanismSample.drawn(k)`):
+  - the formal charge of every atom token;
+  - the bond orders, hence the decoder masks `can_break` and `can_form`;
+  - the lone pairs, hence `can_lose_pair`;
+  - the pair feature `bond_order`;
+  - the label class.
+
+  The sigma bonds, H counts, Wiberg indices, graph distances and every orbital token are
+  shared by all drawings.
+- **`bond_order` is read on the drawn B, for the dataset's drawing too** (`lewis.pair_bond_orders`,
+  in `reactant_sample`). It used to be read on the QM record's own Kekulé structure (RDKit's
+  kekulization of the aromatic cache key), which differed from the drawn B in 94 of 398
+  sampled steps. The textbook samples get the same rule.
+- **The label of a drawing** (`delta_be.drawn_label`). It is the parsimonious class of the spec
+  with the drawing's B in place of the drawn one, built as for the drawn step. The candidates
+  are:
+  - the product's resonance forms, enumerated once per step;
+  - the drawn edit's product, which the drawing reaches with `matrix_between` (it plays the
+    part of R_data and always passes);
+  - the structures that the drawn label's members reach from the drawing. A drawing that
+    differs far from the reaction centre then keeps the drawn class, even where the capped
+    enumeration lacks the matching product structure.
+- **Each form keeps the drawn Kekulé structure wherever it can** (`kekule_closest`).
+  - RDKit's structure of a delocalized cation also swaps rings the charge never reaches: in
+    three of the four forms of a 3-phenylbenzyl cation it swaps the phenyl, and in a trityl
+    cation it swaps the two other rings.
+  - The label then has to swap them back. On 398 sampled steps the label of a drawing grew by
+    up to 24 entries.
+  - A swap is an alternating cycle of ±1 pi-bond changes. Undoing it keeps every atom's bond
+    total, charge and lone pairs, so the structure stays valid (`without_kekule_cycles`;
+    bonds that form or break never take part, so a Diels-Alder ring is not undone).
+  - After the fix a drawing's label differs from the drawn one by -4 to +14 entries. The
+    largest are real: a cation drawn in the far ring of a naphthalene has to come back.
+- **Not used on the label candidates.** Undoing Kekulé cycles in RDKit's product structures
+  would change 22 of 1,000 dataset labels.
+  - 8 gain an equal-cost member.
+  - 14 are replaced by a smaller label, mostly an iminium (C=N+) written as its carbocation
+    form (C+ next to a neutral N), which has as many formal charges and two entries fewer.
+  - The label's cost (formal charges, then entries) cannot tell a sextet from an octet. Today
+    those steps keep the iminium only because RDKit's carbocation structure carries a ring
+    swap. That is left as it is, and it is an open question whether the cost should prefer full
+    octets.
+- **How many drawings.** Up to 8 per sample (`MAX_DRAWINGS`), the dataset's own included:
+  every combination of one form per molecule when there are no more, else 7 random ones, the
+  generator seeded by the step id, so a build is reproducible. A drawing whose label cannot
+  be recomputed or fails `check_edit` is dropped and counted (`drawing_skips`, the
+  `drawings` block of the reports).
+- **Measured** on 398 random training steps (`sample_for_step` on the token cache):
+  - 132 samples (33%) have other drawings, 274 in all.
+  - Drawings per sample 1 / 2 / 3 / 4 / 5 / 6 / 8: 266 / 75 / 18 / 21 / 4 / 7 / 7.
+  - None was dropped.
+  - Label size, drawing minus drawn: 0 in 120 drawings, +2 in 66, +4 in 31, -2 in 30, +6 in 16,
+    and 11 others between -4 and +14.
+  - Building a sample took 0.38 s per step (p95 1.6 s, max 4.5 s).
+- **Schema 16** (`SAMPLE_VERSION`). A sample stores its drawings as stacked int8 arrays
+  (`drawing_charges`, `drawing_orders`, `drawing_lone_pairs`) with their labels in the JSON.
+  The two fields kept only for schema 15, `pair_contact_sites` and `atom_coulomb`, are gone.
+- **Training** (`--resonance-draws`, on by default).
+  - Each epoch every training sample is drawn in a uniformly random one of its drawings, from
+    the seed and the epoch.
+  - The choice is made in the batch sampler, in the main process, so persistent DataLoader
+    workers see each epoch's draw.
+  - Validation and test always read the dataset's drawing.
+- **Resonance pairs: later (user decision).** The 471 pairs need a consistency term of their
+  own, since they have no step label. They wait until a run with the augmentation shows
+  whether drawing invariance is still lacking.
+- **To do.**
+  - Rebuild the samples from a committed tree, then `ksmech-eval floor`,
+    `ksmech-physics gbdt` and `textbook`.
+  - Until `gbdt` is re-run, the `predict` worktree's server sees its LightGBM model (in this
+    checkout's `data/processed`) as stale.
+  - Push the schema-16 shards to `rhoMech-data` before a pod run.

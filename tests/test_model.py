@@ -68,7 +68,7 @@ ORBITAL_FIELDS = (
     "acceptor_mask",
     "orbital_centroids",
 )
-BLOCK_FIELDS = ("pair_z", "pair_defined", "pair_gap_sign", "pair_valid", "pair_contact_sites")
+BLOCK_FIELDS = ("pair_z", "pair_defined", "pair_gap_sign", "pair_valid")
 
 
 @pytest.fixture(scope="module")
@@ -497,6 +497,23 @@ def test_cell_budget_batches():
     assert sampler.batches() != first
     with pytest.raises(ValueError, match="over the budget"):
         CellBudgetSampler([1000], cell_budget=10_000)
+
+
+def test_each_epoch_draws_every_sample_in_one_of_its_drawings():
+    sizes = np.random.default_rng(0).integers(10, 300, size=500)
+    drawings = np.random.default_rng(1).integers(1, 4, size=500)
+    sampler = CellBudgetSampler(sizes, 200_000, max_batch=16, seed=3, drawings=drawings)
+    plain = CellBudgetSampler(sizes, 200_000, max_batch=16, seed=3)
+    first = sampler.batches()
+    assert [[i for i, _ in b] for b in first] == plain.batches()  # the same batches, keyed
+    assert all(0 <= k < drawings[i] for b in first for i, k in b)
+    assert {k for b in first for i, k in b if drawings[i] == 3} == {0, 1, 2}
+    assert all(k == 0 for b in first for i, k in b if drawings[i] == 1)
+    assert sampler.batches() == first
+    sampler.set_epoch(1)
+    assert sampler.batches() != first
+    unshuffled = CellBudgetSampler(sizes, 200_000, shuffle=False, drawings=drawings)
+    assert all(isinstance(i, int) for b in unshuffled.batches() for i in b)  # evaluation
 
 
 def test_floor_ranks_the_largest_pooled_gap_first(samples):
