@@ -5441,3 +5441,66 @@ committed; the user kept two network views and all three step views.
     the pod read schema 16, so their numbers compare only with schema-16 evaluations.
   - A batch's label tensors are (B, V, A, A) and V now reaches 32: watch memory in the first
     training run.
+
+## 2026-10-26 — `ksmech-eval embedding`: one sample through a trained model, as a page
+
+- **Why.** Scores say how often the model is right, not what it does with a pool. The tool
+  traces one sample through a checkpoint and draws every stage on one page, to read the model.
+- **What it records** (`eval/embedding.py`).
+  - h^(0) split into its additive parts (`embedding_parts`). Their sum is `TokenEmbedding`'s
+    output exactly, padding and MECH included (tested).
+  - Every encoder layer's inputs and output, recorded by forward hooks on `model.encode`. The
+    encoder loop is not re-implemented, so the page shows the forward pass that ran.
+  - Each layer's attention, rebuilt from the recorded inputs with the layer's own weights:
+    content q·k/√d_h plus the learned bias. The bias is the pair track (dense),
+    `FlexBias.dense` (flex), or the pair MLP on the full grid restricted to the keys the
+    indexer selects (sparse).
+  - The rebuild is checked: h + the attention update + the feed-forward update must equal the
+    layer's output. It holds within 1e-5 on real samples (the page shows the largest
+    deviation), and the tests check it at 1e-4 for the three encoders.
+  - The decoder's anchor logit split into site + pair + physics terms (`anchor_terms`); the sum
+    is checked against `anchor_logits`.
+- **The page** (`eval/embedding_page.py`, `embedding_page.html`).
+  - One self-contained HTML file with the data inlined and no external script.
+  - Token vectors after every layer, as float32.
+  - Attention as bytes, sqrt-scaled (p = (b/255)²), so small weights keep resolution. Every head
+    is kept while L·H·N² ≤ 8M cells, else only the head mean. The largest val pool
+    (489 tokens) gives a 9 MB page.
+  - Orbitals are named by the classifier's types (σ, π, n, ...). These are diagnostics from the
+    token files, and the page marks them as no model input.
+  - The 2D layout is RDKit's, on the Lewis structure of the token atoms with every H drawn.
+    `symmetry.lewis_mol` was factored out of `symmetry_classes` for it.
+  - Every layer has its own PCA, with signs aligned to the layer before.
+  - The current view is kept in the URL hash.
+- **Where the pages go.** Under `data/models/<source>/<run>/embedding/`, which is gitignored.
+  They hold PMechDB pools, so they never reach the public repository.
+- **SMILES mode.** Missing tokens and Wiberg sidecars are built the way `textbook` builds them:
+  GFN2-xTB at a force-field conformer, into the QM cache. Such a pool has no label.
+- **First reading of `flex_first/best.pt`** (200 random val samples, float32 on the CPU):
+  - *Orbital tokens enter mostly as their spectral sets.* Mean norms of the h^(0) parts:
+    - spectral set encoder 85.8 (cos with h^(0) 0.87);
+    - inherited atom vectors 22.5;
+    - fragment 16.0;
+    - MLP_O of the descriptors 10.8.
+
+    The set encoder sums its up to 8 entries rather than averaging them.
+  - *Atom tokens:* element 16.4, charge 15.7 and fragment 15.9. The descriptors (MLP_A) are the
+    smallest part, 9.4, with cos 0.22.
+  - *Fragment embedding:* it is as large as the element's on every token.
+  - *Through the layers:* the tokens drift gradually, with cos(h_l, h_0) going from 0.98 after
+    layer 1 to 0.76 after layer 8. The feed-forward updates exceed the attention updates in
+    layers 1–2 and 8.
+  - *Attention:* the bias carries 20–24% of the logit spread per layer (8–40% per head), so
+    attention is mostly by content.
+  - *Decoder:* the label's best anchor beats the mean candidate by the following margins (mean,
+    with the spread):
+    - pair +17.5 ± 5.4;
+    - site +3.9 ± 1.4;
+    - physics +1.4 ± 1.0.
+
+    In flex the pair term is `AtomPairHead`: the static atom-pair inputs plus products of the
+    two atoms' final vectors. The MLP_Y term over G^atom and the pooled orbital-pair features
+    separates the least.
+  - These are readings, not changes. Open questions:
+    - whether the spectral set should be averaged rather than summed;
+    - what the fragment embedding contributes beyond the same-fragment bias.

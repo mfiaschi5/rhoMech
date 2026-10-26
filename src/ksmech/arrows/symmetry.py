@@ -38,9 +38,9 @@ MAX_VARIANTS = 32
 _TYPES = {1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}
 
 
-def symmetry_classes(z: np.ndarray, charges: np.ndarray, bonds: np.ndarray) -> list[int]:
-    """RDKit's canonical rank of every atom without tie breaking: atoms an automorphism may
-    swap share one (elements, charges, bond orders; every H an atom, no stereo)."""
+def lewis_mol(z: np.ndarray, charges: np.ndarray, bonds: np.ndarray) -> Chem.Mol:
+    """The Lewis structure on the token atoms as an unsanitized RDKit molecule: atom k is token
+    atom k, every H an atom, no implicit H; ring info found."""
     rw = Chem.RWMol()
     for el, q in zip(z, charges, strict=True):
         atom = Chem.Atom(int(el))
@@ -52,6 +52,13 @@ def symmetry_classes(z: np.ndarray, charges: np.ndarray, bonds: np.ndarray) -> l
     mol = rw.GetMol()
     mol.UpdatePropertyCache(strict=False)
     Chem.FastFindRings(mol)
+    return mol
+
+
+def symmetry_classes(z: np.ndarray, charges: np.ndarray, bonds: np.ndarray) -> list[int]:
+    """RDKit's canonical rank of every atom without tie breaking: atoms an automorphism may
+    swap share one (elements, charges, bond orders; every H an atom, no stereo)."""
+    mol = lewis_mol(z, charges, bonds)
     with rdBase.BlockLogs():
         return list(Chem.CanonicalRankAtoms(mol, breakTies=False, includeChirality=False))
 

@@ -213,4 +213,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   run)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, no learned parameter, val and test
-  top-1/3/5, `anchor_floor_report_<split>.json`)
+  top-1/3/5, `anchor_floor_report_<split>.json`), `uv run ksmech-eval embedding --run NAME
+  [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
+  [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
+  under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts
+  of h(0), every layer's attention and token updates (rebuilt from the recorded layer inputs and
+  checked against the model's own forward), the decoder's anchor logits split into site, pair
+  and physics terms; CPU by default; `--smiles` builds missing tokens with GFN2-xTB)
