@@ -4350,3 +4350,16 @@ stay valid.
   - Wall time was about 100 s each, mostly loading the samples; flex took 207 s with its
     compiles. Peak RSS was 6 GB.
   - The run directories were deleted.
+
+## 2026-10-26 — The anchor NLL counts an anchor once, however many variants share it
+
+- `anchor_nll` (and so `val_anchor_nll`) is -log P(any admissible anchor). `step_loss` took the
+  logsumexp over the (variant, anchor) rows, so an anchor that several variants of the label
+  class share was counted once per variant. Its probability could then add up past 1, and one
+  logged step of the first flex run showed an anchor NLL of -0.045.
+- The rows are now deduplicated on (sample, i, j, sign) for this metric only. The loss keeps one
+  path per (variant, anchor), since each path is a different R. A hand-computed test with two
+  variants on one anchor gives -log 1/5 (it gave -log 2/5 before).
+- Nothing else read it: the top-k ranks take the best anchor, and `best.pt` is chosen by
+  top-1, then by the loss. The run `flex_first` (pod, code 7b090cb) logged `val_anchor_nll` the
+  old way, slightly low wherever variants share an anchor.

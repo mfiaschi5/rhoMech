@@ -58,6 +58,13 @@ def _entry_sums(pair_lp, atom_lp, r_pairs, r_atoms, real, i, j) -> torch.Tensor:
     return torch.where(m, lp, 0.0).sum((1, 2)) + torch.where(real, la[..., 0], 0.0).sum(1)
 
 
+def _anchor_nll(lp_anchor: torch.Tensor, b, i, j, sign) -> torch.Tensor:
+    """(B,) -log P(any admissible anchor). An anchor that several variants share is one
+    choice of the pointer, so it counts once; the loss keeps one path per variant."""
+    ub, ui, uj, us = torch.unique(torch.stack([b, i, j, sign], 1), dim=0).unbind(1)
+    return -_segment_logsumexp(lp_anchor[ub, ui, uj, us], ub, lp_anchor.shape[0])
+
+
 def stop_bce(logits: torch.Tensor, batch: dict) -> torch.Tensor | None:
     """(B,) BCE of END_MECH, 0 on the samples without a stop label; None when the batch has no
     labels. `batch["stop_label"]` (B,), optional: 1 the mechanism ends after this step, 0 it
@@ -96,7 +103,7 @@ def step_loss(
     )
     terms = lp_anchor[b, i, j, sign] + sums
     per_sample = -_segment_logsumexp(terms, b, lp_anchor.shape[0])
-    anchor_nll = -_segment_logsumexp(lp_anchor[b, i, j, sign], b, lp_anchor.shape[0])
+    anchor_nll = _anchor_nll(lp_anchor, b, i, j, sign)
     stop = dec.stop_logits(h)
     bce = stop_bce(stop, batch) if stop_weight else None
     if bce is not None:

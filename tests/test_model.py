@@ -413,6 +413,17 @@ def test_step_loss_by_hand():
         assert parts["p_stop"].item() == pytest.approx(3 / 4)
 
 
+def test_anchor_nll_counts_an_anchor_shared_by_variants_once():
+    """Two variants with the same anchor (0, 1): the anchor NLL is -log 1/5, not -log 2/5,
+    while the loss sums the two paths (every entry at 1/3 given that anchor)."""
+    first = ({(0, 1): 1}, {}, [(0, 1, FORM)])
+    second = ({(0, 1): 1}, {0: -2}, [(0, 1, FORM)])
+    loss, parts = step_loss(_StubDecoder(), None, None, None, _hand_batch([first, second]))
+    assert parts["anchor_nll"].item() == pytest.approx(-math.log(1 / 5), rel=1e-6)
+    path = math.log(1 / 5) + 5 * math.log(1 / 3)
+    assert loss.item() == pytest.approx(-math.log(2 * math.exp(path)), rel=1e-6)
+
+
 def test_stop_head_gives_one_probability_per_sample(samples, model):
     b = collate_samples(samples)
     with torch.no_grad():

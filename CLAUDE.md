@@ -134,6 +134,7 @@ ranked a step's first arrow worse than G alone.
 ```bash
 uv sync                       # install everything into .venv (torch: the ROCm build)
 uv sync --no-group rocm --group cuda   # an NVIDIA host: the CUDA build of torch
+export UV_NO_SYNC=1           # then, on that host: else uv run re-syncs to the default rocm group
 uv run pytest -n 14 -m "not realdata"  # unit tests in 14 processes (pytest-xdist; -x stops at the first failure)
 uv run pytest -m realdata     # real-data tests one at a time, each pass in 14 spawned processes
 uv run ruff check .           # lint
