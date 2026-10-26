@@ -56,19 +56,19 @@ export function PathwayList(props: PathwayListProps) {
           const selected = current?.id === p.id;
           return (
             <li key={p.id} data-testid={`predict-pathway-${p.rank}`} data-pathway={p.id} data-selected={selected ? "true" : "false"} className={`pathway-item${selected ? " selected" : ""}`}>
-              <div className="row pv-inline-row">
-                <button type="button" className="legend-button pv-grow" aria-pressed={selected} onClick={() => onSelect(p.id)}>
-                  <span className="legend-kind">#{p.rank}</span>
-                  <span className="legend-main">
-                    {p.n_steps} step{p.n_steps === 1 ? "" : "s"}, ends {p.ends_with}
-                    {p.n_corrected > 0 && <span className="badge badge-corrected">{p.n_corrected} corrected</span>}
-                    {p.closes_cycle && <span className="badge legend-cycle">cycle</span>}
+              <div className="pv-path-row">
+                <button type="button" className="legend-button pv-path-button" aria-pressed={selected} onClick={() => onSelect(p.id)} title={`${p.n_steps} steps, ends ${p.ends_with}`}>
+                  <span className="pv-path-rank">#{p.rank}</span>
+                  <span className="pv-path-main">
+                    {p.n_steps} step{p.n_steps === 1 ? "" : "s"} · {p.ends_with.toLowerCase().replace(/_/g, " ")}
+                    {p.n_corrected > 0 && <span className="nv-chip nv-chip-corrected">{p.n_corrected} corrected</span>}
+                    {p.closes_cycle && <span className="nv-chip nv-chip-cycle">↺</span>}
                   </span>
-                  <span className="num" title={`log score ${p.logp}`}>
+                  <span className="num pv-path-score" title={`log score ${p.logp}`}>
                     {probabilities ? `p ${fmt(p.probability, 3)}` : `Σ ${fmt(p.logp, 2)}`}
                   </span>
                 </button>
-                <a className="btn btn-small" data-testid={`predict-curate-link-${p.rank}`} href={curateHash(jobId, p.id)}>
+                <a className="pv-path-curate" data-testid={`predict-curate-link-${p.rank}`} href={curateHash(jobId, p.id)} title="curate this pathway">
                   curate
                 </a>
               </div>

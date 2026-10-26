@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   arrowEnds,
+  arrowFromControls,
   bezierArrow,
   cubicPoint,
   cubicTangent,
@@ -104,4 +105,13 @@ test("a reading's duplicate arrows alternate sides; unplaced ones are null", () 
   assert.ok(p && q);
   assert.notEqual(Math.sign(p.mid[1] - 0), Math.sign(q.mid[1] - 0));
   assert.equal(r, null);
+});
+
+test("arrow from explicit control points: the same arrow bezierArrow draws from its bow", () => {
+  const o = { centroid: [50, 100], gapTail: 3, gapHead: 4, headLength: 9, headWidth: 7 };
+  const a = bezierArrow([0, 0], [100, 0], o);
+  const b = arrowFromControls([0, 0], a.c1, a.c2, [100, 0], o);
+  assert.equal(b.d, a.d);
+  assert.deepEqual(b.head, a.head);
+  assert.match(b.d, /^M [-\d.]+ [-\d.]+ C /);
 });

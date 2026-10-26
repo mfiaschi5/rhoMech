@@ -4804,3 +4804,25 @@ stay valid.
   with the inputs resolved against `KSMECH_SHARED_CACHE_ROOT`, as the token loader does, and
   reads the booster without upstream's verify. On the host the model is available and ranks
   the MeO- + MeCl SN2 product first.
+
+## 2026-10-26 — Predict UI: network and step views (user choice among previews)
+
+Three versions of each viewport were built and compared on real jobs before anything was
+committed; the user kept two network views and all three step views.
+
+- Network: **Scheme** (default) and **Pathways**. The force-directed graph was dropped: past about
+  20 states its cycle edges tangle. Scheme is hand-rendered (HTML cards plus SVG curves), no
+  longer cytoscape: card sizes are computed first, each depth column is stacked with fixed gaps
+  in barycentre order (split into sub-columns past 7 states), so no card or caption can overlap;
+  unit tests assert it on two real networks and a synthetic 200-state one. Cycle back-edges are
+  hidden behind a "↺ n" chip unless hovered or toggled. Pathways merges shared prefixes into one
+  trunk and places cards depth-first at their parent's height.
+- Step: **Textbook** (default), **Animated**, **Orbitals**. Textbook uses ACS-1996 lines and fonts
+  with a 17 pt bond instead of 14.4 pt, because at 14.4 pt a bond between two labels shrinks to a
+  stub. Animated keeps atom identity by pool atom and relaxes the reactant drawing into the
+  product with springs instead of morphing to RDKit's product layout, so substituents do not swap
+  sides mid-animation; its last frame can therefore differ slightly from Textbook's product.
+  Orbitals shows the dominant channel's donor and acceptor LMOs over the pool geometry with the
+  canonical pair in a two-level diagram.
+- The step type colour (substitution, addition, proton transfer, ...) in Pathways is a rough
+  classification of the arrow reading for colour only, never a label.

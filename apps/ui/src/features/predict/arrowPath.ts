@@ -208,6 +208,14 @@ const f2 = (v: number) => (Math.round(v * 100) / 100).toString();
 
 export function bezierArrow(tail: Vec, head: Vec, o: BezierOptions): ArrowPath {
   const [c1, c2] = controlPoints(tail, head, o);
+  return arrowFromControls(tail, c1, c2, head, o);
+}
+
+export type ArrowStyle = Pick<BezierOptions, "gapTail" | "gapHead" | "headLength" | "headWidth">;
+
+/** The arrow (trimmed stroke and filled head) of the cubic tail-c1-c2-head (a router's own
+ *  control points; bezierArrow derives them from a bow). */
+export function arrowFromControls(tail: Vec, c1: Vec, c2: Vec, head: Vec, o: ArrowStyle = {}): ArrowPath {
   const L = len(sub(head, tail));
   const k = Math.min(1, (0.5 * Math.max(L, 1)) / Math.max((o.gapTail ?? 4) + (o.gapHead ?? 4), 1));
   const t0 = tAtArcLength(tail, c1, c2, head, (o.gapTail ?? 4) * k);

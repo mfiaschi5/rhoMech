@@ -11,7 +11,7 @@
 //   onSelectEdge   (id) => void
 //   probabilities  boolean                    scores are probabilities (the edge's number)
 //
-// DOM: <details data-testid="predict-network-list" open> "Network list" > <ul>
+// DOM: <details data-testid="predict-network-list"> (closed: a secondary view) "Network list" > <ul>
 //   <li data-testid="predict-network-node-{id}" data-root data-status data-terminal-reason data-depth><button/></li>
 //   <li data-testid="predict-network-edge-{id}" data-kind data-status data-rank data-closes-cycle
 //       data-recurrence data-source data-target><button/></li>
@@ -90,7 +90,7 @@ export function NetworkLegend(props: NetworkLegendProps) {
   const pNodes = new Set(pathway?.node_ids ?? []);
   const pEdges = new Set(pathway?.edge_ids ?? []);
   return (
-    <details className="network-legend-panel" data-testid="predict-network-list" open>
+    <details className="network-legend-panel" data-testid="predict-network-list">
       <summary>
         Network list <span className="muted">({net.nodes.length} nodes, {net.edges.length} edges, {net.cycles.length} cycles)</span>
       </summary>

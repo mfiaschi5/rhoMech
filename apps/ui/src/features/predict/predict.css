@@ -437,14 +437,80 @@ input[type="number"] {
 
 .pv-job-grid {
   display: grid;
-  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  grid-template-columns: minmax(0, 3fr) minmax(250px, 1fr);
   gap: var(--gap);
-  align-items: start;
+  align-items: stretch;
+}
+
+/* the pathway list takes the network panel's height and scrolls inside it */
+.pv-side-fill {
+  position: relative;
+  min-width: 0;
+}
+
+.pv-side-fill > .pv-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pv-side-fill > .pv-panel > .pv-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pv-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pv-path-button {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap !important;
+  padding: 2px 6px;
+}
+
+.pv-path-rank {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 2.4em;
+}
+
+.pv-path-main {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pv-path-score {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.pv-path-curate {
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 @media (max-width: 1100px) {
   .pv-job-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pv-side-fill > .pv-panel {
+    position: static;
+    max-height: 50vh;
   }
 }
 
@@ -455,8 +521,7 @@ input[type="number"] {
 }
 
 .pv-pathways-panel .pathway-list {
-  max-height: 520px;
-  overflow-y: auto;
+  gap: 2px;
 }
 
 .pv-steps {

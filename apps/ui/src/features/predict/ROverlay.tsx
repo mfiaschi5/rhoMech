@@ -7,6 +7,8 @@
 // Badges are placed clear of labels, bonds, arrows and each other (badges.ts).
 //   arrows                         cubic Bézier arrows with filled heads (arrowPath.ts)
 // Atoms with an issue are haloed (highlight), the bond tool's first atom ringed (pending).
+// The step viewport passes its own routed arrows (paths), fades or hides the R marks
+// (marksOpacity; 0 keeps them in the DOM) and draws the arrows on (arrowProgress, arrowOpacity).
 //
 // DOM (prefix = the canvas test id): <g data-testid="<prefix>-r-bond-<i>-<j>" data-delta
 // data-forming>, <g data-testid="<prefix>-r-lone-<i>" data-delta>, <g data-testid=
@@ -34,6 +36,13 @@ export interface ROverlayProps {
   pending?: number | null;
   selectedKeys?: ReadonlySet<string>;
   onArrowPointerDown?: (index: number, e: ReactPointerEvent<SVGPathElement>) => void;
+  /** Arrow geometry from a router (the step viewport); default: layoutReading. */
+  paths?: readonly (ArrowPath | null)[];
+  /** Opacity of the R marks (bonds, lone badges, charges; 0 keeps them in the DOM, hidden). */
+  marksOpacity?: number;
+  /** Stroke progress (0-1) and opacity of the arrows (the animated step draws them on). */
+  arrowProgress?: number;
+  arrowOpacity?: number;
 }
 
 const sub = (p: Vec, q: Vec): Vec => [p[0] - q[0], p[1] - q[1]];
@@ -162,18 +171,20 @@ function ChargeMarks({ s, m, at, after, prefix }: { s: PoolStructure; m: MatrixI
   );
 }
 
-function Arrows(props: { arrows: readonly ArrowReadingOut[]; paths: readonly (ArrowPath | null)[]; prefix: string; faded?: boolean; onDown?: ROverlayProps["onArrowPointerDown"] }) {
+function Arrows(props: { arrows: readonly ArrowReadingOut[]; paths: readonly (ArrowPath | null)[]; prefix: string; faded?: boolean; onDown?: ROverlayProps["onArrowPointerDown"]; progress?: number; opacity?: number }) {
   const { paths } = props;
+  const prog = props.progress ?? 1;
+  const draw = prog < 1 ? { pathLength: 1, strokeDasharray: "1 1", strokeDashoffset: 1 - prog } : {};
   return (
-    <g className={`pv-arrows${props.faded ? " pv-faded" : ""}`}>
+    <g className={`pv-arrows${props.faded ? " pv-faded" : ""}`} opacity={props.opacity !== undefined && props.opacity < 1 ? props.opacity : undefined}>
       {paths.map((p, k) => {
         const a = props.arrows[k];
         if (!p) return null;
         return (
           <g key={k} className="pv-arrow" data-testid={`${props.prefix}-arrow-${k}`} data-kind={a.kind} data-source={a.source.join(",")} data-target={a.target.join(",")} data-mx={p.mid[0].toFixed(1)} data-my={p.mid[1].toFixed(1)}>
             <path className="pv-arrow-hit" d={p.d} onPointerDown={props.onDown ? (e) => props.onDown?.(k, e) : undefined} />
-            <path className="pv-arrow-line" d={p.d} />
-            <polygon className="pv-arrow-head" points={p.head.map((v) => `${v[0].toFixed(2)},${v[1].toFixed(2)}`).join(" ")} />
+            <path className="pv-arrow-line" d={p.d} {...draw} />
+            <polygon className="pv-arrow-head" points={p.head.map((v) => `${v[0].toFixed(2)},${v[1].toFixed(2)}`).join(" ")} opacity={prog < 0.97 ? 0 : undefined} />
           </g>
         );
       })}
@@ -183,10 +194,12 @@ function Arrows(props: { arrows: readonly ArrowReadingOut[]; paths: readonly (Ar
 
 export function ROverlay(props: ROverlayProps) {
   const { structure: s, pv, ctx, prefix, matrix } = props;
-  const paths = layoutReading(props.arrows, ctx);
+  const paths = props.paths ?? layoutReading(props.arrows, ctx);
   const at = matrix ? badgeLayout(s, pv, ctx, matrix, paths) : new Map<string, Vec>();
+  const mo = props.marksOpacity ?? 1;
   return (
     <g className="pv-overlay">
+      <g className={mo <= 0.001 ? "pv-marks pv-marks-hidden" : "pv-marks"} opacity={mo > 0.001 && mo < 1 ? mo : undefined}>
       {[...(props.highlight ?? [])].map((i) => {
         const p = pv.xy.get(i);
         return p ? <circle key={`h${i}`} className="pv-halo" cx={p[0]} cy={p[1]} r={14} data-testid={`${prefix}-halo-${i}`} /> : null;
@@ -202,7 +215,8 @@ export function ROverlay(props: ROverlayProps) {
       })}
       {matrix && <LoneMarks m={matrix} at={at} prefix={prefix} selected={props.selectedKeys} />}
       {matrix && <ChargeMarks s={s} m={matrix} at={at} after={props.chargesAfter} prefix={prefix} />}
-      <Arrows arrows={props.arrows} paths={paths} prefix={prefix} faded={props.arrowsFaded} onDown={props.onArrowPointerDown} />
+      </g>
+      <Arrows arrows={props.arrows} paths={paths} prefix={prefix} faded={props.arrowsFaded} onDown={props.onArrowPointerDown} progress={props.arrowProgress} opacity={props.arrowOpacity} />
     </g>
   );
 }

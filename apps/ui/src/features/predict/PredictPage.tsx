@@ -16,11 +16,10 @@ import { predictPrefillHash, type Route } from "../../router";
 import { useCapability } from "../../state/store";
 import { usePredictors } from "./hooks";
 import { JobProgress } from "./JobProgress";
-import { currentPathway, cycleEdgeIds } from "./network";
-import { NetworkLegend } from "./NetworkLegend";
-import { NetworkView } from "./NetworkView";
+import { currentPathway } from "./network";
+import { NetworkPanel } from "./netview/NetworkPanel";
+import { useNetHeight } from "./netview/shared";
 import { NodePanel } from "./NodePanel";
-import { Panel } from "./Panel";
 import { PathwayList } from "./PathwayList";
 import { PredictForm } from "./PredictForm";
 import { scoreBadge } from "./PredictorSelect";
@@ -32,7 +31,8 @@ import type { NetworkOut } from "./v9types";
 export function PredictPage({ route }: PageProps) {
   const cap = useCapability("predict");
   if (cap.known && !cap.enabled) return <CapabilityNotice name="predict" title="Predict is disabled" />;
-  if (route.parts[0] === "job" && route.parts[1]) return <JobView key={route.parts[1]} jobId={route.parts[1]} route={route} />;
+  // ?rev= changes after an expansion: the job view remounts and reads the grown network
+  if (route.parts[0] === "job" && route.parts[1]) return <JobView key={`${route.parts[1]}|${route.params.get("rev") ?? ""}`} jobId={route.parts[1]} route={route} />;
   const prefillKey = route.params.getAll("r").join("|") + "#" + route.params.getAll("n").join("|");
   return <PredictForm key={prefillKey} route={route} />;
 }
@@ -59,22 +59,21 @@ function JobHeader({ job, net, probabilities, badge }: { job: JobOut | null; net
   );
 }
 
-function NetworkSection({ jobId, net, sel, select, probabilities }: { jobId: string; net: NetworkOut; sel: JobSelection; select: (u: SelectionUpdate) => void; probabilities: boolean }) {
+function NetworkSection({ jobId, net, sel, select, probabilities, onChanged }: { jobId: string; net: NetworkOut; sel: JobSelection; select: (u: SelectionUpdate) => void; probabilities: boolean; onChanged: () => void }) {
   const pathway = currentPathway(net, sel.pathway);
   const edge = sel.edge ? net.edges.find((e) => e.id === sel.edge) : undefined;
   const node = sel.node ? net.nodes.find((n) => n.id === sel.node) : undefined;
-  const cycles = cycleEdgeIds(net, edge, pathway);
   const onNode = (id: string) => select({ node: id, edge: null });
   const onEdge = (id: string) => select({ edge: id, node: null });
   const onPathway = (id: string) => select({ pathway: id, edge: net.pathways.find((p) => p.id === id)?.edge_ids[0] ?? null, node: null });
+  const [height, setHeight] = useNetHeight();
   return (
     <>
       <div className="pv-job-grid">
-        <Panel title="Network" note={`revision ${net.revision}${net.complete ? "" : ", incomplete"} · ${net.nodes.length} states, ${net.edges.length} steps`} className="pv-network-panel">
-          <NetworkView net={net} selectedNode={sel.node} selectedEdge={sel.edge} pathway={pathway} cycleEdges={cycles} onSelectNode={onNode} onSelectEdge={onEdge} probabilities={probabilities} height={380} />
-          <NetworkLegend net={net} selectedNode={sel.node} selectedEdge={sel.edge} pathway={pathway} onSelectNode={onNode} onSelectEdge={onEdge} probabilities={probabilities} />
-        </Panel>
-        <PathwayList jobId={jobId} net={net} current={pathway} onSelect={onPathway} probabilities={probabilities} selectedEdge={sel.edge} onEdge={onEdge} />
+        <NetworkPanel height={height} onHeight={setHeight} jobId={jobId} net={net} selectedNode={sel.node} selectedEdge={sel.edge} pathway={pathway} pathwayFocus={!!sel.pathway} probabilities={probabilities} onSelectNode={onNode} onSelectEdge={onEdge} onSelectPathway={onPathway} onNetworkChanged={onChanged} />
+        <div className="pv-side-fill">
+          <PathwayList jobId={jobId} net={net} current={pathway} onSelect={onPathway} probabilities={probabilities} selectedEdge={sel.edge} onEdge={onEdge} />
+        </div>
       </div>
       {sel.edge && !edge && <div className="banner banner-error">step {sel.edge} is not in this network</div>}
       {sel.node && !node && <div className="banner banner-error">state {sel.node} is not in this network</div>}
@@ -96,7 +95,7 @@ function JobView({ jobId, route }: { jobId: string; route: Route }) {
     <div className="pv-page stack" data-testid="predict-job" data-job-id={jobId}>
       <JobHeader job={job} net={net} probabilities={probabilities} badge={scoreBadge(info)} />
       <JobProgress job={job} pollError={error} title="Prediction job" />
-      {net ? <NetworkSection jobId={jobId} net={net} sel={sel} select={select} probabilities={probabilities} /> : job && <div className="muted">no network yet</div>}
+      {net ? <NetworkSection jobId={jobId} net={net} sel={sel} select={select} probabilities={probabilities} onChanged={() => select({ rev: Date.now() })} /> : job && <div className="muted">no network yet</div>}
     </div>
   );
 }

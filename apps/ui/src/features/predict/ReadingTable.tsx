@@ -5,7 +5,8 @@
 //
 // Columns: G^atom; the channel r -> s with G(r, s) and its term of G^atom (1/eV); the dominant
 // canonical pair as frontier labels (HOMO-1 -> LUMO) with k, m, energies and the pair's share.
-// Props: readings, structure (atom labels), stateId (null: no 3D button).
+// Props: readings, structure (atom labels), stateId (null: no 3D button), onHover (a row's bond
+// atoms while the pointer is on it).
 // DOM: <table data-testid="<prefix>-readings"> > tr[data-testid=<prefix>-reading-<k>][data-i][data-j]
 // [data-g-atom], button[data-testid=<prefix>-reading-3d-<k>]; the OrbitalModal.
 import { useState } from "react";
@@ -19,6 +20,8 @@ export interface ReadingTableProps {
   structure: PoolStructure | null;
   stateId: string | null;
   prefix: string;
+  /** Hovering a row reports its bond's atoms (the step viewport halos them). */
+  onHover?: (h: { atoms: ReadonlySet<number>; bonds: ReadonlySet<string> } | null) => void;
 }
 
 function Diag({ text }: { text: string | null }) {
@@ -29,7 +32,7 @@ function Diag({ text }: { text: string | null }) {
   ) : null;
 }
 
-export function ReadingTable({ readings, structure, stateId, prefix }: ReadingTableProps) {
+export function ReadingTable({ readings, structure, stateId, prefix, onHover }: ReadingTableProps) {
   const [open, setOpen] = useState<number | null>(null);
   const label = (i: number) => structure?.label(i) ?? String(i);
   if (!readings.length) return <p className="muted" data-testid={`${prefix}-readings-empty`}>No forming bond to read (a step without a +1 entry).</p>;
@@ -51,7 +54,15 @@ export function ReadingTable({ readings, structure, stateId, prefix }: ReadingTa
         </thead>
         <tbody>
           {readings.map((x, k) => (
-            <tr key={k} data-testid={`${prefix}-reading-${k}`} data-i={x.i} data-j={x.j} data-g-atom={exact(x.g_atom)}>
+            <tr
+              key={k}
+              data-testid={`${prefix}-reading-${k}`}
+              data-i={x.i}
+              data-j={x.j}
+              data-g-atom={exact(x.g_atom)}
+              onPointerEnter={onHover ? () => onHover({ atoms: new Set([x.i, x.j]), bonds: new Set([x.i < x.j ? `${x.i}-${x.j}` : `${x.j}-${x.i}`]) }) : undefined}
+              onPointerLeave={onHover ? () => onHover(null) : undefined}
+            >
               <td>
                 {label(x.i)}–{label(x.j)}
               </td>

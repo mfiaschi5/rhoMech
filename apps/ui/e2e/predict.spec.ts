@@ -88,6 +88,38 @@ async function expectNoOverflow(page: Page, label: string): Promise<void> {
   expect(problems, label).toEqual([]);
 }
 
+/** The two network viewports behind the header's switch (remembered across a reload): the
+ *  scheme's cards never overlap; its double-click on a state without steps out expands it
+ *  (POST /jobs/{id}/expand) and the network reloads; the pathway explorer's cards. */
+async function checkVariants(page: Page, jobId: string, request: import("@playwright/test").APIRequestContext): Promise<void> {
+  const net = page.getByTestId("predict-network");
+  await page.getByTestId("predict-network-variant-layered").click();
+  await expect(net).toHaveAttribute("data-variant", "layered");
+  const cards = page.locator("[data-testid=predict-network] .nv-card-state");
+  await expect(cards.first()).toBeVisible();
+  const boxes = await cards.evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => [r.left, r.top, r.right, r.bottom]));
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+    const [a, b] = [boxes[i], boxes[j]];
+    expect(a[0] < b[2] - 0.5 && b[0] < a[2] - 0.5 && a[1] < b[3] - 0.5 && b[1] < a[3] - 0.5, `cards ${i} and ${j} overlap`).toBe(false);
+  }
+  await page.getByTestId("predict-network-variant-explorer").click();
+  await expect(net).toHaveAttribute("data-variant", "explorer");
+  await expect(page.locator("[data-testid^=predict-net-card-]").first()).toBeVisible();
+  await page.reload();
+  await expect(net).toHaveAttribute("data-variant", "explorer");
+  await page.getByTestId("predict-network-variant-layered").click();
+  const job = (await (await request.get(`/api/jobs/${jobId}`)).json()) as { result: { root: string; nodes: { id: string; depth: number }[]; edges: { source: string; target: string }[] } };
+  const depth = new Map(job.result.nodes.map((n) => [n.id, n.depth] as const));
+  const leaf = job.result.nodes.find((n) => n.id !== job.result.root && !job.result.edges.some((e) => e.source === n.id && (depth.get(e.target) ?? 0) > n.depth));
+  if (!leaf) return;
+  const before = Number(await net.getAttribute("data-edge-count"));
+  await page.getByTestId(`predict-net-node-${leaf.id}`).dblclick();
+  await page.waitForURL(/[?&]rev=\d+/, { timeout: 180_000 });
+  const after = Number(await net.getAttribute("data-edge-count"));
+  console.log(`[predict] expanded ${leaf.id}: ${before} -> ${after} steps`);
+  expect(after).toBeGreaterThanOrEqual(before);
+}
+
 test("MeO- + MeCl: network, pathways, a step as R with its arrows and reading, then correct it", async ({ page, request }) => {
   test.setTimeout(300_000);
   await skipUnless(request, "predict");
@@ -102,7 +134,9 @@ test("MeO- + MeCl: network, pathways, a step as R with its arrows and reading, t
   const jobId = JOB_HASH.exec(page.url())?.[1] ?? "";
   await expect(page.locator("[data-testid=predict-job-status][data-status=done]")).toBeVisible({ timeout: 240_000 });
   await expect(page.getByTestId("predict-network")).not.toHaveAttribute("data-edge-count", "0");
+  await page.getByTestId("predict-network-list").locator("summary").click();
   await expect(page.locator("[data-testid^=predict-network-edge-]").first()).toBeVisible();
+  await checkVariants(page, jobId, request);
 
   // the first pathway is shown; its first step opens the step panel
   await expect(page.locator("[data-testid=predict-pathway-1][data-selected=true]")).toBeVisible();
