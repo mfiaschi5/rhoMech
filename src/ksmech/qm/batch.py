@@ -19,6 +19,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from multiprocessing import get_context
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -57,6 +58,7 @@ MANIFEST_COLUMNS = [
 _FLUSH_EVERY = 500
 _WINDOW_PER_WORKER = 4
 OnRows = Callable[[list[dict]], None]
+Worker = Callable[[Any], list[dict]]  # a task -> its manifest rows, never raising
 
 
 @dataclass(frozen=True)
@@ -199,26 +201,29 @@ def _is_done(
     return not retry_failed
 
 
-def _run_isolated(task: MolTask, on_rows: OnRows) -> None:
+def _crash_row(task: MolTask) -> dict:
+    return _row(task.smiles, 0, reason=str(ReasonCode.WORKER_CRASH), detail="pool broke")
+
+
+def _run_isolated(task, on_rows: OnRows, worker: Worker, crash) -> None:
     """Run one task in its own pool, so a hard crash is pinned on this molecule."""
     with ProcessPoolExecutor(1, mp_context=get_context("spawn"), initializer=_init_worker) as ex:
         try:
-            on_rows(ex.submit(process_molecule, task).result())
+            on_rows(ex.submit(worker, task).result())
         except BrokenProcessPool:
-            log.error("worker crashed on %s", task.smiles)
-            row = _row(task.smiles, 0, reason=str(ReasonCode.WORKER_CRASH), detail="pool broke")
-            on_rows([row])
+            log.error("worker crashed on %s", task)
+            on_rows([crash(task)])
 
 
-def _run_window(pending: list[MolTask], n_workers: int, on_rows: OnRows) -> list[MolTask]:
+def _run_window(pending: list, n_workers: int, on_rows: OnRows, worker: Worker) -> list:
     """Keep a window of tasks in flight. Returns the tasks lost if the pool broke, else []."""
-    in_flight: dict[Future, MolTask] = {}
+    in_flight: dict[Future, Any] = {}
     ex = ProcessPoolExecutor(n_workers, mp_context=get_context("spawn"), initializer=_init_worker)
     try:
         while pending or in_flight:
             while pending and len(in_flight) < n_workers * _WINDOW_PER_WORKER:
                 task = pending.pop()
-                in_flight[ex.submit(process_molecule, task)] = task
+                in_flight[ex.submit(worker, task)] = task
             done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
             lost = []
             for fut in done:
@@ -234,14 +239,14 @@ def _run_window(pending: list[MolTask], n_workers: int, on_rows: OnRows) -> list
     return []
 
 
-def _run_pool(tasks: list[MolTask], n_workers: int, on_rows: OnRows) -> None:
+def _run_pool(tasks: list, n_workers: int, on_rows: OnRows, worker: Worker, crash) -> None:
     pending = list(reversed(tasks))  # pop() takes from the end
     while pending:
-        lost = _run_window(pending, n_workers, on_rows)
+        lost = _run_window(pending, n_workers, on_rows, worker)
         if lost:
             log.error("process pool broke; re-running %d in-flight tasks one by one", len(lost))
         for task in lost:
-            _run_isolated(task, on_rows)
+            _run_isolated(task, on_rows, worker, crash)
 
 
 def manifest_path(source: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
@@ -324,16 +329,22 @@ def print_summary(manifest: pd.DataFrame, console: Console) -> dict:
     return s
 
 
-def _execute(tasks: list[MolTask], n_workers: int, on_rows: OnRows) -> None:
+def execute(
+    tasks: list, n_workers: int, on_rows: OnRows, worker: Worker | None = None, crash=None
+) -> None:
+    """Run `worker` (`process_molecule` by default, looked up at call time) on every task, in
+    `n_workers` spawned processes of one thread each; a task whose process crashes is re-run
+    alone and reported by `crash(task)`."""
+    worker, crash = worker or process_molecule, crash or _crash_row
     if n_workers <= 1:
         _init_worker()
         for task in tasks:
-            on_rows(process_molecule(task))
+            on_rows(worker(task))
         return
     prev_omp = os.environ.get("OMP_NUM_THREADS")
     os.environ["OMP_NUM_THREADS"] = "1"  # one thread per worker; children inherit this
     try:
-        _run_pool(tasks, n_workers, on_rows)
+        _run_pool(tasks, n_workers, on_rows, worker, crash)
     finally:
         if prev_omp is None:
             os.environ.pop("OMP_NUM_THREADS", None)
@@ -380,7 +391,7 @@ def featurize_dataset(
             _write(path, build_manifest(smiles_list, n_conformers, config, rows, prev))
 
     try:
-        _execute(todo, n_workers, on_rows)
+        execute(todo, n_workers, on_rows)
     finally:
         bar.close()
         full = build_manifest(smiles_list, n_conformers, config, rows, prev)

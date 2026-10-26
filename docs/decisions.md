@@ -4612,3 +4612,48 @@ stay valid.
     (`drop_undecodable_drawings`), logs each one, and counts them in the run's `skipped`. So
     the schema-16 store, here and on `rhoMech-data`, needs no rebuild. The next rebuild drops
     them at the source.
+
+## 2026-10-26 — QMugs for encoder pretraining: GFN2-xTB single points at its own geometries
+
+- **Why.** The spec names QMugs for encoder pretraining. The tokens are built from the GFN2-xTB
+  wavefunction (S, C, the orbital energies, the N+-1 charges for the Fukui features), and no
+  public dataset found ships GFN2 matrices. QMugs has GFN2-optimized geometries, GFN2 and DFT
+  properties, and DFT wavefunctions.
+  - The survey: QMugs, nablaDFT, QCML, OMol25, SPICE, GEOM, PubChemQC, QM7-X, Transition1x and
+    Halo8.
+  - User decision: download QMugs and run single points at its geometries, not new
+    optimizations.
+- **Data.** Downloaded `summary.csv` and `structures.tar.gz` (9.2 GB, sha256 in
+  `data/raw/qmugs/SHA256SUMS`). The 7 TB of wavefunctions were not downloaded. The layout and
+  the SD tags are in `docs/data_schema.md` ("QMugs").
+  - 664,303 molecules, 20,350 with a charge in their SMILES.
+  - Median 30 heavy atoms, at most 100.
+- **Method** (`QMConfig(given_geometry=True)`, `qm.given`, `ksmech-qm qmugs`).
+  - The QMugs geometry is taken as it is; a bond of the Lewis structure stretched past 1.3
+    times the covalent radii is CONNECTIVITY_CHANGED.
+  - Then the same single point in ALPB water as the PMechDB records, the N+-1 Fukui and %Vbur.
+  - The method string is `GFN2-xTB/ALPB-water/given`, so these records never share a key with
+    optimized ones. They have their own cache, `data/cache/qmugs/qm`.
+  - The molfile's atoms are put in the record order of the canonical SMILES with the
+    reactants' `record_correspondence`.
+  - QMugs's energies are gas-phase (CHEMBL1: -117.4268 Ha, against -117.4473 Ha in ALPB water
+    here). Its geometries are therefore gas-phase minima, not ALPB ones; the electronic
+    structure is in water like PMechDB's.
+- **Pilot** (500 conformers, 14 workers, from an uncommitted tree, deleted afterwards).
+  - 500 / 500 ok, no warnings.
+  - 3.9 s per conformer on one thread (median; p95 9.8 s, max 39 s), so 2.94 conformers/s
+    with 14 workers.
+  - 564 KB per record.
+- **Scope (user decision).** Conformer 0 of the first 100,000 molecules in archive order
+  (ChEMBL ids sorted as strings): about 56 GB and 9.5 h here. Kept local.
+  - All 664k would be about 375 GB as records are now, or about 186 GB without `H_core` (read
+    by nothing downstream) and `fock` (rebuilt from S, C and the orbital energies). 93 GB were
+    free here.
+  - GitHub takes 2 GB per push and wants repositories under 5 GB, so later only compact
+    pretraining samples, or a subset, can go to `rhoMech-data`.
+- **Code.**
+  - `batch.execute` runs any worker on the spawned pool (the QMugs driver reuses it).
+  - Two new reason codes: SDF_UNREADABLE and RECORD_ORDER.
+- **Not settled yet.** The pretraining objective (the spec does not define one). The QMugs
+  path for tokens and bond indices: `ksmech-orbitals build` and `ksmech-qm bond-index` read
+  the molecules of a steps parquet and the main cache.

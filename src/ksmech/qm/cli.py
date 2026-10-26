@@ -1,4 +1,5 @@
-"""`ksmech-qm`: GFN2-xTB featurization of the molecules in a processed dataset."""
+"""`ksmech-qm`: GFN2-xTB featurization of the molecules in a processed dataset, the Wiberg bond
+indices of the cached records, and single points at the QMugs geometries (`qm.given`)."""
 
 from __future__ import annotations
 
@@ -9,10 +10,12 @@ from pathlib import Path
 
 from rich.console import Console
 
+from ksmech.data import qmugs
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.data.schema import Source
 from ksmech.qm.batch import featurize_dataset, summarize
 from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, build_bond_indices
+from ksmech.qm.given import featurize_qmugs
 from ksmech.qm.records import DEFAULT_CACHE_DIR, ReasonCode
 from ksmech.qm.xtb_calc import QMConfig
 
@@ -42,6 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     run.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    qm = sub.add_parser("qmugs", help="GFN2 single points at the QMugs geometries")
+    qm.add_argument("--tar", type=Path, default=qmugs.DEFAULT_TAR)
+    qm.add_argument("--conformers", type=int, nargs="+", default=[0], help="QMugs conformers")
+    qm.add_argument("--workers", type=int, default=1)
+    qm.add_argument("--limit", type=int, default=None, help="the first N conformers")
+    qm.add_argument("--chunk", type=int, default=2000, help="conformers read per pass")
+    qm.add_argument("--timeout", type=int, default=900, help="seconds per conformer")
+    qm.add_argument("--retry-failed", action="store_true")
+    qm.add_argument("--cache-dir", type=Path, default=qmugs.CACHE_DIR)
+    qm.add_argument("--out-dir", type=Path, default=qmugs.PROCESSED_DIR)
     wbi = sub.add_parser("bond-index", help="Wiberg bond indices of every cached QM record")
     wbi.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     wbi.add_argument("--out-dir", type=Path, default=DEFAULT_BOND_INDEX_DIR)
@@ -54,12 +67,30 @@ def cmd_bond_index(args: argparse.Namespace, console: Console) -> int:
     return 0 if not any(k.startswith("failed") for k in counts) else 1
 
 
+def cmd_qmugs(args: argparse.Namespace, console: Console) -> int:
+    config = QMConfig(given_geometry=True, timeout_s=args.timeout, cache_dir=args.cache_dir)
+    manifest = featurize_qmugs(
+        args.tar,
+        args.conformers,
+        args.workers,
+        args.limit,
+        args.chunk,
+        config,
+        args.out_dir,
+        args.retry_failed,
+        console,
+    )
+    return 0 if len(manifest) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     console = Console()
     if args.command == "bond-index":
         return cmd_bond_index(args, console)
+    if args.command == "qmugs":
+        return cmd_qmugs(args, console)
     config = QMConfig(
         optimizer=args.optimizer,
         timeout_s=args.timeout,
