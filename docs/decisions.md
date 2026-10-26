@@ -4552,9 +4552,38 @@ stay valid.
 - **Resonance pairs: later (user decision).** The 471 pairs need a consistency term of their
   own, since they have no step label. They wait until a run with the augmentation shows
   whether drawing invariance is still lacking.
-- **To do.**
-  - Rebuild the samples from a committed tree, then `ksmech-eval floor`,
-    `ksmech-physics gbdt` and `textbook`.
-  - Until `gbdt` is re-run, the `predict` worktree's server sees its LightGBM model (in this
-    checkout's `data/processed`) as stale.
-  - Push the schema-16 shards to `rhoMech-data` before a pod run.
+- **Rebuild** (code d172272, 14 workers, 590 s, store 1.2 GB).
+  - 12,418 samples from 12,464 training steps, 46 skipped as MISSING_TOKENS, as before.
+  - The dataset's label classes are unchanged: 11,733 / 619 / 59 / 7.
+  - 3,622 samples (29%) have other drawings, 7,864 in all, and none was dropped.
+  - Drawings per sample 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8: 8,796 / 1,932 / 636 / 474 / 136 / 201
+    / 12 / 231.
+  - In `molecule_train`, 3,111 of 9,997 samples have other drawings, 6,955 in all.
+- **Downstream, re-run on the new samples.**
+  - *Anchor floor:* unchanged, val 15.2 / 25.8 / 30.8% and test 17.1 / 27.2 / 31.5%. It reads
+    the dataset's drawing and no bond order.
+  - *LightGBM,* `--n-jobs 2` as before. The only input change is `bond_order` read on the
+    drawn B.
+
+    | split, part | top-1 / 3 / 5 before | after | trees before | after |
+    |---|---|---|---|---|
+    | molecule val | 44.1 / 60.5 / 69.6% | 44.1 / 62.0 / 70.8% | 467 | 638 |
+    | molecule test | 46.6 / 67.0 / 73.8% | 48.8 / 67.7 / 75.1% | | |
+    | scaffold val | 40.3 / 59.9 / 69.7% | 40.8 / 58.2 / 68.3% | 1,273 | 1,202 |
+    | scaffold test | 45.3 / 64.7 / 75.6% | 45.1 / 66.1 / 75.2% | | |
+
+    Loading the samples took 72 s instead of 300 s.
+  - *Textbook* (expected pair in the top 3): untrained gap kernel 3 / 5; the molecule model
+    2 / 2 on the cases it did not see; the textbook-held-out model 4 / 5.
+  - The `predict` worktree's server checks its LightGBM model against these files, so it saw
+    the model as stale between the sample build and the `gbdt` run.
+- **Smoke runs** (`--limit 64 --epochs 2`, RX 6600 XT).
+  - 17 of the 64 training samples have other drawings, 40 in all.
+  - Dense: training loss 48.8 to 36.2, validation loss 39.8 to 24.4.
+  - Flex in float16 overflows in its first steps (`grad inf` or `nan`, losses in the
+    thousands, steps skipped by the scaler). It does the same without the draws: validation
+    loss 516.96 after the first epoch in both, 19.46 against 19.51 after the second. So this
+    is the float16 start of the flex encoder, not the augmentation. The pod trains in
+    bfloat16.
+- **To do.** Push the schema-16 views and shards to `rhoMech-data` before a pod run; then a
+  full run with the augmentation.
