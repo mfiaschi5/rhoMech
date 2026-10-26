@@ -58,8 +58,9 @@ def test_graph_distances_within_and_between_molecules(token_loader):
 
 
 def test_check_edit_names_what_an_edit_breaks(token_loader):
-    """CH3-Cl: C-Cl heterolysis is valid; a bond order of 2 + 2, a lone pair taken from an atom
-    without one, unbalanced electrons and a breaking anchor on an unbonded pair are not."""
+    """CH3-Cl: C-Cl heterolysis is valid; a bond order changed by 3 (no elementary step), a bond
+    broken where there is none, a lone pair taken from an atom without one, unbalanced
+    electrons and a breaking anchor on an unbonded pair are not."""
     rt, bonds, lone, _ = lewis("CCl", token_loader)
     c = rt.global_atom[0]
     cl = rt.global_atom[1]
@@ -72,11 +73,14 @@ def test_check_edit_names_what_an_edit_breaks(token_loader):
     pair = (min(c, cl), max(c, cl))
     assert check_edit(label([(*pair, -1)], [(cl, 2)], [(*pair, "break")]), bonds, lone) is None
     assert check_edit(label([(*pair, 3)], [(cl, -6)], [(*pair, "form")]), bonds, lone) == (
+        "NOT_ELEMENTARY"
+    )
+    hcl = (min(h, cl), max(h, cl))
+    assert check_edit(label([(*hcl, -1)], [(cl, 2)], [(*hcl, "break")]), bonds, lone) == (
         "BOND_ORDER"
     )
     assert check_edit(label([(*pair, 1)], [(c, -2)], [(*pair, "form")]), bonds, lone) == (
         "LONE_PAIRS"
     )
     assert check_edit(label([(*pair, -1)], [], [(*pair, "break")]), bonds, lone) == "CHARGE"
-    hcl = (min(h, cl), max(h, cl))
     assert check_edit(label([], [], [(*hcl, "break")]), bonds, lone) == "ANCHOR_MASK"

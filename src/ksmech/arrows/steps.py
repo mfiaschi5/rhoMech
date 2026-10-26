@@ -105,6 +105,7 @@ class SkipReason(StrEnum):
     RESONANCE_STEP = "RESONANCE_STEP"
     NO_ANCHOR = "NO_ANCHOR"
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
+    NOT_ELEMENTARY = "NOT_ELEMENTARY"
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
 

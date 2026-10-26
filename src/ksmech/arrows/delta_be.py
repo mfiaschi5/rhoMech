@@ -57,6 +57,7 @@ class EditSkip(StrEnum):
     RESONANCE_STEP = "RESONANCE_STEP"  # the parsimonious class is the empty matrix
     NO_ANCHOR = "NO_ANCHOR"  # no bond order changes (never expected)
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"  # an edited atom has no token atom
+    NOT_ELEMENTARY = "NOT_ELEMENTARY"  # no candidate is an elementary step (`is_elementary`)
 
 
 def _order(mol: Chem.Mol, i: int, j: int) -> int:
@@ -85,6 +86,11 @@ class ReactionMatrix:
         """The same matrix on other atom indices (`index[i]` for every atom)."""
         bonds = tuple(sorted((*sorted((index[i], index[j])), d) for i, j, d in self.bonds))
         return ReactionMatrix(bonds, tuple(sorted((index[i], d) for i, d in self.lone)))
+
+    def is_elementary(self) -> bool:
+        """Every bond order changes by 1 and every atom's non-bonding electrons by 2: a step of
+        spec v9, and all the decoder can write ({-1, 0, +1} per pair, {-2, 0, +2} per atom)."""
+        return all(abs(d) == 1 for *_, d in self.bonds) and all(abs(d) == 2 for _, d in self.lone)
 
     def anchors(self) -> tuple[tuple[int, int, str], ...]:
         """Admissible anchors: the bond orders that rise, else those that fall."""
@@ -258,20 +264,22 @@ def parsimonious_class(
     extra: tuple[Chem.Mol, ...] = (),
 ) -> tuple[tuple[ReactionMatrix, ...], int, bool, int]:
     """(the parsimonious class sorted, structures enumerated, truncated, members rejected) of
-    `r_data`: the R of lowest cost (fewest formal charges in the product structure, then fewest
-    entries) that `accept` (the key check) accepts; `r_data` is always accepted. The product
-    structures are `forms` (`product_forms(prod)` unless given) and `extra`, more resonance
-    structures of the product."""
+    `r_data`: the elementary R (`ReactionMatrix.is_elementary`) of lowest cost (fewest formal
+    charges in the product structure, then fewest entries) that `accept` (the key check)
+    accepts; `r_data` is always accepted when it is elementary, and the class is empty when no
+    candidate is. The product structures are `forms` (`product_forms(prod)` unless given) and
+    `extra`, more resonance structures of the product. A drawing of the reactants with a triple
+    bond that the product needs single has only matrices with a -2 entry there."""
     structures, n = product_forms(prod) if forms is None else forms
     cost = _costs(reac, prod, r_data, (*structures, *extra))
     rejected = 0
     for level in sorted(set(cost.values())):
         members = sorted(r for r, c in cost.items() if c == level)
-        ok = [r for r in members if r == r_data or accept(r)]
+        ok = [r for r in members if r.is_elementary() and (r == r_data or accept(r))]
         rejected += len(members) - len(ok)
         if ok:
             return tuple(ok), n, n >= RESONANCE_CAP, rejected
-    raise AssertionError("r_data is always accepted")
+    return (), n, n >= RESONANCE_CAP, rejected
 
 
 def reproduces(step: ElementaryStep, mol: Chem.Mol, r: ReactionMatrix) -> bool:
@@ -307,6 +315,8 @@ def _label(step: ElementaryStep, mol: Chem.Mol, edit: StepEdit, r_data, extra=()
     variants, n, truncated, rejected = parsimonious_class(
         mol, edit.prod, r_data, accept, edit.forms, extra
     )
+    if not variants:
+        return EditSkip.NOT_ELEMENTARY
     if variants[0].size == 0:
         return EditSkip.RESONANCE_STEP
     anchors = tuple(v.anchors() for v in variants)

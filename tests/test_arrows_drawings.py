@@ -190,3 +190,29 @@ def test_the_training_loader_draws_each_sample_in_its_drawings(token_loader):
     assert seen == {tuple(s.atom_categorical[:, 1]), tuple(s.drawings[0].charges)}
     (b,) = list(make_loader([s], cfg, False))  # validation: the dataset's drawing
     assert b["atom_categorical"][0, :, 1].tolist() == s.atom_categorical[:, 1].tolist()
+
+
+def test_a_class_holds_only_elementary_steps():
+    """A triple bond that the product needs single changes its order by 2, which no decoder can
+    write: such a matrix never enters a class (a class left empty is NOT_ELEMENTARY),
+    `check_edit` refuses it, and the trainer drops a stored drawing that has one."""
+    from ksmech.arrows.delta_be import matrix_between, parsimonious_class
+    from ksmech.arrows.drawings import Drawing
+    from ksmech.arrows.lewis import check_edit
+    from ksmech.train.loop import drop_undecodable_drawings
+
+    reac = chem.parse_mapped("[CH:1]#[CH:2]")
+    r = matrix_between(reac, chem.parse_mapped("[CH:1][CH:2]"))
+    assert r == ReactionMatrix(((0, 1, -2),), ((0, 2), (1, 2))) and not r.is_elementary()
+    assert parsimonious_class(reac, reac, r, forms=([], 0))[0] == ()
+    label = EditLabel((r,), (r.anchors(),), True, 0, False)
+    bonds = np.array([[0, 1, 3]], dtype=np.int16)
+    assert check_edit(label, bonds, np.zeros(2, dtype=np.int8)) == "NOT_ELEMENTARY"
+    z = np.zeros(2, dtype=np.int8)
+    bad = Drawing(z, np.ones(1, dtype=np.int8), z, label)
+
+    class Stub:
+        step_id, drawings = "s", [bad]
+
+    s = Stub()
+    assert drop_undecodable_drawings([s], "train") == 1 and s.drawings == []

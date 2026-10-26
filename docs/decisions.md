@@ -4587,3 +4587,28 @@ stay valid.
     bfloat16.
 - **To do.** Push the schema-16 views and shards to `rhoMech-data` before a pod run; then a
   full run with the augmentation.
+
+## 2026-10-26 — A drawing's label must be an elementary step (the first augmented run crashed)
+
+- **What happened.** `flex_resonance` on a RunPod RTX 5080 crashed early in its second epoch
+  with a CUDA device-side assert: an index out of range in the gather of `_entry_sums` (the
+  loss). The first epoch had ended with val top-1 31.2%.
+- **Why.** The label of a resonance drawing can change a bond order by 2: a drawing with a
+  triple bond that the product needs single (pmechdb-023f2470184b934b: one bond -2). The
+  decoder writes {-1, 0, +1} per pair and {-2, 0, +2} per atom, so `r_pairs + 1` indexed
+  outside the three classes.
+  - `check_edit` checked conservation and ranges, not this.
+  - 5 of the 7,864 drawings of the schema-16 store have such a class (2 in `molecule_train`).
+    None of the dataset's own labels has.
+  - The first epoch drew neither of the two; the second drew one.
+- **Fix.**
+  - A class holds only elementary steps (`ReactionMatrix.is_elementary`: every bond order
+    changes by 1, every atom's non-bonding electrons by 2), at the cheapest level that has one.
+    R_data is always accepted only when it is elementary. A class left empty is
+    NOT_ELEMENTARY: the drawing is dropped and counted, or the step is skipped.
+  - `check_edit` refuses a non-elementary variant (NOT_ELEMENTARY), so no sample or drawing
+    reaches the decoder with one.
+  - The trainer drops such drawings from a store built before this
+    (`drop_undecodable_drawings`), logs each one, and counts them in the run's `skipped`. So
+    the schema-16 store, here and on `rhoMech-data`, needs no rebuild. The next rebuild drops
+    them at the source.
