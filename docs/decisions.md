@@ -4715,3 +4715,32 @@ stay valid.
   - Drawings' classes: 1 / 2 / 3 / 4 / 6: 209 / 51 / 6 / 5 / 2.
 - **Schema 17** (`SAMPLE_VERSION`): the classes change, so a schema-16 store is refused. Any
   checkpoint's val metrics must be recomputed on schema 17 to compare.
+- **Rebuild** (code 81aeaff, 14 workers, 660 s).
+  - 12,418 samples, 46 skipped as MISSING_TOKENS, as before.
+  - 3,132 classes (25.2%) gained members, 4,968 in all, and no closure was cut short. On val,
+    280 of 1,239.
+  - Class sizes 1 / 2 / 3 / 4+: 8,737 / 2,514 / 682 / 485 (before: 11,733 / 619 / 59 / 7).
+    26 classes have 9 or more members.
+  - The 5 drawings whose label is not elementary are now dropped at the source
+    (NOT_ELEMENTARY).
+- **`flex_first/best.pt` on the schema-17 val, without retraining.**
+
+  | labels | top-1 | top-3 | top-5 | R exact |
+  |---|---|---|---|---|
+  | schema 16, float32 | 55.9% | 79.3% | 87.2% | 51.8% |
+  | schema 17, float32 | 63.9% | 81.3% | 88.0% | 59.1% |
+  | schema 17, float16 | 63.9% | 81.3% | 88.0% | 59.1% |
+
+  float32 and float16 agree on every sample. In float16, 40 hits have tied admissible anchors,
+  which are equivalent and all in the label.
+- **Downstream, re-run on the new samples.**
+  - *Anchor floor:* val 15.6 / 26.0 / 31.1% (was 15.2 / 25.8 / 30.8%), test 17.8 / 27.3 / 31.6%
+    (was 17.1 / 27.2 / 31.5%). Its |G^atom| now also gets credit for an equivalent atom.
+  - *LightGBM:* the same results and trees on both splits. It ranks orbital pairs on the
+    ArrowLabels, which the closure does not touch; only its inputs, the views, changed.
+  - *Textbook:* unchanged (3 / 5, 2 / 2, 4 / 5).
+- **To do.**
+  - Push the schema-17 views and shards to `rhoMech-data` before a pod run. The runs queued on
+    the pod read schema 16, so their numbers compare only with schema-16 evaluations.
+  - A batch's label tensors are (B, V, A, A) and V now reaches 32: watch memory in the first
+    training run.
