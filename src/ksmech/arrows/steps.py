@@ -75,6 +75,7 @@ from ksmech.arrows.reactants import (
     TokenCache,
     TokenLoader,
 )
+from ksmech.arrows.symmetry import symmetric_closure
 from ksmech.data import chem, splits
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
@@ -88,7 +89,7 @@ from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 16  # 16: resonance drawings; bond_order on the drawn B; no contact fields
+SAMPLE_VERSION = 17  # 17: label classes closed under the pool's symmetry (`arrows.symmetry`)
 PARTS = ("train", "val", "test")
 STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
@@ -339,7 +340,8 @@ class EditTarget:
 
 def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipReason:
     """The target of a step, or why it has none: an edit-label code, a bond without a Wiberg
-    index, or a label that is no valid edit of the reactant (`lewis.check_edit`)."""
+    index, or a label that is no valid edit of the reactant (`lewis.check_edit`). The label on
+    the global atoms is closed under the pool's symmetry (`symmetry.symmetric_closure`)."""
     edit = step_edit(step)
     mol_label = edit if isinstance(edit, EditSkip) else edit_label(step, edit)
     label = mol_label if isinstance(mol_label, EditSkip) else to_global(mol_label, rt.global_atom)
@@ -350,6 +352,8 @@ def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipRe
     except MissingBondIndex as exc:
         log.info("%s: %s", step.step_id, exc)
         return SkipReason.NO_BOND_INDEX
+    atoms = np.concatenate([f.tokens.atom_categorical() for f in rt.fragments])
+    label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], bonds)
     problem = check_edit(label, bonds, lone_pairs)
     if problem is not None:
         log.info("%s: the edit label is no valid edit of the reactant (%s)", step.step_id, problem)
@@ -358,9 +362,8 @@ def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipRe
 
 
 def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: EditTarget) -> None:
-    charges = sample.atom_categorical[:, 1]
     drawings, dropped = resonance_drawings(
-        step, rt, target.edit, target.mol_label, target.bonds, charges
+        step, rt, target.edit, target.mol_label, target.bonds, sample.atom_categorical
     )
     sample.drawings, sample.drawing_skips = drawings, dict(sorted(dropped.items()))
     if dropped:
@@ -512,6 +515,7 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
         **class_shape([s.edit_label for s in kept if s.edit_label]),
+        "symmetry": symmetry_report(kept),
         "drawings": drawing_report(kept),
         "orbital_reading": dict(Counter(s.orbital_reading for s in kept).most_common()),
         "n_labels": sum(len(s.labels) for s in kept),
@@ -520,6 +524,18 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         ),
         "label_filter": dict(sum((Counter(s.label_filter) for s in kept), Counter()).most_common()),
         "n_fermi_smeared": sum(s.fermi_smeared for s in kept),
+    }
+
+
+def symmetry_report(samples: list[MechanismSample]) -> dict:
+    """The symmetric closure of the labels (`arrows.symmetry`): samples whose class gained
+    members, the members added, the closures cut short, and the class sizes after it."""
+    labels = [s.edit_label for s in samples if s.edit_label]
+    return {
+        "n_extended": sum(x.n_symmetric > 0 for x in labels),
+        "n_added": sum(x.n_symmetric for x in labels),
+        "n_capped": sum(x.symmetry_capped for x in labels),
+        "class_size_after": dict(sorted(Counter(min(len(x.variants), 9) for x in labels).items())),
     }
 
 
@@ -570,7 +586,14 @@ def build_all_samples(
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
         **{
             k: every[k]
-            for k in ("class_size", "anchor_kind", "drawings", "orbital_reading", "label_filter")
+            for k in (
+                "class_size",
+                "anchor_kind",
+                "symmetry",
+                "drawings",
+                "orbital_reading",
+                "label_filter",
+            )
         },
         "splits": {},
         "strategies_not_applicable": {},

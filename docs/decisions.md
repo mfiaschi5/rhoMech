@@ -4657,3 +4657,61 @@ stay valid.
 - **Not settled yet.** The pretraining objective (the spec does not define one). The QMugs
   path for tokens and bond indices: `ksmech-orbitals build` and `ksmech-qm bond-index` read
   the molecules of a steps parquet and the main cache.
+
+## 2026-10-26 — Label classes closed under the pool's symmetry; a tie no longer counts as a hit (schema 17)
+
+- **Why (the analysis of the ~60% top-1 plateau).** Per-sample predictions of
+  `flex_resonance/best.pt` (val top-1 63.4% in training) and `flex_first/best.pt` on the 1,239
+  molecule-split val samples:
+  - In 267 val samples (21.5%) the label names one of several atoms that are equivalent by
+    symmetry: one H of H3O+, of a CH3 or of an NH3+, an atom of either of two identical molecules.
+    A dataset step names its atoms by atom maps; the model reads the pool. The equivalence was
+    checked with real automorphisms of the pool graph (96 of 99 rank-based calls confirmed; the
+    other 3 hit the enumeration cap).
+  - The model learns the symmetry: it gives each of the three H of H3O+ P = 0.34. So top-1 on
+    those samples is a coin toss: 18% in float32, against 71% on the other samples. In 99 of the
+    505 wrong val answers the top-1 is an equivalent atom. Counted up to symmetry, top-1 is 67.2%.
+    The loss also keeps a floor of log k on such samples, in training as well.
+  - `anchor_ranks` counted only strictly higher candidates. In bfloat16 equivalent atoms tie
+    exactly, so 5.1% of val samples (63, all but one of them symmetric) were hits only through a
+    tie: the same `best.pt` scores 63.4% in bfloat16 and 59.2% in float32, and 67.3% / 67.2% up
+    to symmetry. The training metric, and the choice of `best.pt`, depended on the precision.
+  - Not a cause: identical reactant pools with different answers. One answer per pool would still
+    allow 99.1% of val.
+  - What remains (406 val errors, 33%) is mostly near misses and generalization:
+    - 68% share an atom with the true anchor, 17% have the right molecules and other atoms, 15%
+      one wrong molecule;
+    - top-1 is 80% on non-symmetric pools of one molecule, 71% of two, about 50% of three or
+      four;
+    - train top-1 86% (top-5 99.5%) against val 59%;
+    - 65% of val pools have Tanimoto < 0.4 to the nearest training pool, and top-1 there is 56%
+      against 64-79% on closer pools.
+- **The closure** (`arrows.symmetry.symmetric_closure`, in `steps.edit_target` for the dataset's
+  label and in `drawings.drawing_of` for each drawing's).
+  - Every automorphism of the pool's Lewis structure on the token atoms (elements, formal
+    charges, bond orders, every H an atom; no stereo) maps each variant to an equivalent one, and
+    the images join the class with their anchors.
+  - The structure is the drawing's: a Kekulé ring keeps only the symmetry its alternation has
+    (protonating Kekulé benzene: 6 attacks, not 12), and a localized charge breaks what it breaks
+    in B, as for the label.
+  - The automorphism group is not enumerated. Every H with a single heavy neighbour is folded
+    into it; `placements` enumerates the distinct images of the label's atoms by backtracking
+    within RDKit's symmetry classes (`CanonicalRankAtoms` without tie breaking), each completed
+    once to a full automorphism. The folded H's then go to every choice of distinct H's on the
+    image of their atom. Enumerating whole groups had capped 9 of 398 pools (TBS groups,
+    phenyls) and taken 1.2 s a step; placements cap none and take 0.6 s a step (0.38 s
+    before the closure).
+  - Limits: 1,000 placements, 200,000 candidate checks, 32 members a class; a closure cut short
+    is flagged `symmetry_capped`. `EditLabel` gains `n_symmetric` (members added) and
+    `symmetry_capped`. The loss already marginalizes over the class, so it needs no change.
+- **The metric** (`model.loss.anchor_ranks`, `eval.floor.floor_ranks`). The rank counts the
+  candidates outside the label that score at least as high, so a tie with such a candidate is a
+  miss. With symmetric classes, equivalent anchors are all in the label and their ties cannot
+  matter.
+- **Measured on 400 random training steps.**
+  - 92 of 398 classes (23%) gain members, 165 in all.
+  - Class sizes after the closure 1 / 2 / 3 / 4 / 6 / 8 / 9: 281 / 73 / 26 / 12 / 4 / 1 / 1.
+  - No closure was cut short.
+  - Drawings' classes: 1 / 2 / 3 / 4 / 6: 209 / 51 / 6 / 5 / 2.
+- **Schema 17** (`SAMPLE_VERSION`): the classes change, so a schema-16 store is refused. Any
+  checkpoint's val metrics must be recomputed on schema 17 to compare.

@@ -467,6 +467,18 @@ def test_without_stop_labels_the_loss_is_the_step_loss(samples, model):
     assert stop_weight(TrainConfig(stop_weight=0.2)) == 0.2
 
 
+def test_a_tie_with_a_candidate_outside_the_label_counts_against_it():
+    """bfloat16 gives equivalent atoms equal scores; a tie must not decide a hit."""
+    b = _hand_batch([({(0, 1): 1}, {}, [(0, 1, FORM)]), ({(0, 2): 1}, {}, [(0, 2, FORM)])])
+    lp = torch.full((1, 3, 3, 2), -30.0)
+    lp[0, 0, 1, FORM] = lp[0, 0, 2, FORM] = -1.0  # the two admissible anchors tie: rank 0
+    assert anchor_ranks(lp, b).tolist() == [0]
+    lp[0, 1, 2, FORM] = -1.0  # a candidate outside the label ties with them: it counts
+    assert anchor_ranks(lp, b).tolist() == [1]
+    lp[0, 1, 2, FORM] = -1.5
+    assert anchor_ranks(lp, b).tolist() == [0]
+
+
 def test_ranks_and_greedy_edit(samples, model):
     b = collate_samples(samples)
     with torch.no_grad():

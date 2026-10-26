@@ -135,6 +135,8 @@ class EditLabel:
     n_structures: int  # product resonance structures enumerated
     truncated: bool  # the enumeration hit RESONANCE_CAP
     n_rejected: int = 0  # cheaper resonance variants the key check rejected
+    n_symmetric: int = 0  # members added as images under the pool's automorphisms
+    symmetry_capped: bool = False  # that closure was cut short (`arrows.symmetry`)
 
     def atoms(self) -> set[int]:
         return {a for v in self.variants for i, j, _ in v.bonds for a in (i, j)} | {
@@ -158,6 +160,8 @@ class EditLabel:
             "n_structures": self.n_structures,
             "truncated": self.truncated,
             "n_rejected": self.n_rejected,
+            "n_symmetric": self.n_symmetric,
+            "symmetry_capped": self.symmetry_capped,
         }
 
     @classmethod
@@ -165,7 +169,8 @@ class EditLabel:
         anchors = tuple(tuple((int(i), int(j), str(s)) for i, j, s in a) for a in d["anchors"])
         variants = tuple(ReactionMatrix.from_list(v) for v in d["variants"])
         flags = (d["data_parsimonious"], d["n_structures"], d["truncated"], d.get("n_rejected", 0))
-        return cls(variants, anchors, *flags)
+        symmetry = (d.get("n_symmetric", 0), d.get("symmetry_capped", False))
+        return cls(variants, anchors, *flags, *symmetry)
 
 
 def dataset_matrix(step: ElementaryStep) -> tuple[Chem.Mol, Chem.Mol, ReactionMatrix] | EditSkip:

@@ -46,6 +46,7 @@ from ksmech.arrows.delta_be import (
 )
 from ksmech.arrows.lewis import check_edit, lewis_bonds, lewis_lone_pairs
 from ksmech.arrows.reactants import ReactantTokens
+from ksmech.arrows.symmetry import symmetric_closure
 from ksmech.data.resonance import frozen_hydrogens, resonance_forms
 from ksmech.data.schema import ElementaryStep
 
@@ -146,20 +147,22 @@ def _seed(step_id: str) -> int:
 
 
 def drawing_of(
-    rt: ReactantTokens, mol: Chem.Mol, label: EditLabel, bonds: np.ndarray, charges: np.ndarray
+    rt: ReactantTokens, mol: Chem.Mol, label: EditLabel, bonds: np.ndarray, atoms: np.ndarray
 ) -> Drawing | str:
-    """The Drawing of the pool drawing `mol` with its label on the global atoms, or why the
-    label is no valid edit of it. `bonds` and `charges` are the sample's (the drawn pool)."""
+    """The Drawing of the pool drawing `mol` with its label on the global atoms, closed under
+    the drawing's own symmetry (`symmetry.symmetric_closure`), or why the label is no valid edit
+    of it. `bonds` and `atoms` (element, formal charge) are the sample's (the drawn pool)."""
     new = lewis_bonds(rt, mol)
     if not np.array_equal(new[:, :2], bonds[:, :2]):
         raise ValueError("a resonance drawing changed the sigma bonds")
     lone = lewis_lone_pairs(rt, mol)
+    q = atoms[:, 1].astype(np.int8).copy()
+    for m, g in rt.global_atom.items():
+        q[g] = mol.GetAtomWithIdx(m).GetFormalCharge()
+    label = symmetric_closure(label, atoms[:, 0], q, new)
     problem = check_edit(label, new, lone)
     if problem is not None:
         return problem
-    q = charges.astype(np.int8).copy()
-    for m, g in rt.global_atom.items():
-        q[g] = mol.GetAtomWithIdx(m).GetFormalCharge()
     return Drawing(q, new[:, 2].astype(np.int8), lone, label)
 
 
@@ -169,12 +172,12 @@ def resonance_drawings(
     edit: StepEdit,
     label: EditLabel,
     bonds: np.ndarray,
-    charges: np.ndarray,
+    atoms: np.ndarray,
     limit: int = MAX_DRAWINGS,
 ) -> tuple[list[Drawing], Counter]:
     """The other drawings of the step's reactant pool (at most `limit - 1`) and the drawings
     dropped, by reason. `label` is the drawn step's label on the reactant-mol atoms, `bonds`
-    and `charges` the sample's."""
+    and `atoms` (element, formal charge) the sample's."""
     base = frozen_hydrogens(rt.mol)
     if base is None:
         return [], Counter()
@@ -192,7 +195,7 @@ def resonance_drawings(
         if isinstance(lab, EditSkip):
             dropped[str(lab)] += 1
             continue
-        drawing = drawing_of(rt, mol, lab, bonds, charges)
+        drawing = drawing_of(rt, mol, lab, bonds, atoms)
         if isinstance(drawing, str):
             dropped[drawing] += 1
         else:
