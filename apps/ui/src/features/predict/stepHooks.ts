@@ -12,10 +12,10 @@ import type { ArrowReadingOut, EdgeOut, MatrixIO, OrbitalReadingOut } from "./v9
 // @ts-ignore TS5097: see stepScene.ts
 import { BOND_LENGTH } from "../workbench/sketch/model.ts";
 
-export const STEP_VARIANTS = ["textbook", "animated", "orbital"] as const;
+export const STEP_VARIANTS = ["textbook", "animated", "orbital", "embedding"] as const;
 export type StepVariant = (typeof STEP_VARIANTS)[number];
 export const STEP_VARIANT_KEY = "ksmech.predict.stepVariant";
-export const STEP_VARIANT_TITLES: Record<StepVariant, string> = { textbook: "Textbook", animated: "Animated", orbital: "Orbitals" };
+export const STEP_VARIANT_TITLES: Record<StepVariant, string> = { textbook: "Textbook", animated: "Animated", orbital: "Orbitals", embedding: "Embedding" };
 
 function readVariant(): StepVariant {
   try {

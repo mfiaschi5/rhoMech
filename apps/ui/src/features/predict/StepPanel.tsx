@@ -1,7 +1,9 @@
 // StepPanel: the selected edge of the Predict job view: its kind, rank, predictor and score (a
 // log-probability when the predictor's scores are probabilities, else the raw score), the anchor,
-// the step viewport in one of three variants (a segmented control in the header, remembered in
-// localStorage: StepTextbook, StepAnimated, StepOrbital), the facts (R entries, arrows, product,
+// the step viewport in one of four variants (a segmented control in the header, remembered in
+// localStorage: StepTextbook, StepAnimated, StepOrbital, and Embedding: the parent state traced
+// through a trained checkpoint, features/embedding/EmbeddingView; greyed with the reason while
+// the embedding capability is off), the facts (R entries, arrows, product,
 // sigma keys, PMechDB code, beam weight, alternatives), the orbital reading table and "Correct
 // this step" (the Correct page on the parent state with this R preloaded).
 //
@@ -11,15 +13,18 @@
 // Props: jobId, edge, net, probabilities.
 // DOM: <section data-testid="predict-step-panel" data-edge data-kind data-variant data-alt> with
 // predict-step-score [data-unit="logp|score"], predict-step-anchor, predict-step-variant >
-// button[data-testid=predict-step-variant-<textbook|animated|orbital>][aria-pressed],
+// button[data-testid=predict-step-variant-<textbook|animated|orbital|embedding>][aria-pressed],
 // predict-step-alt-prev / -next / -index, the variant's view inside <div data-testid=
-// "predict-step" data-variant> (its canvas "predict-step-canvas" with the ROverlay ids),
+// "predict-step" data-variant> (its canvas "predict-step-canvas" with the ROverlay ids; the
+// embedding variant: EmbeddingView "predict-step-embedding"),
 // predict-step-entries, predict-step-arrow-text-<k>, predict-step-product (data-smiles),
 // predict-step-sigma-<k>, predict-step-pmechdb, predict-step-alternatives >
 // li[data-testid=predict-step-alternative-<k>], the ReadingTable "predict-step",
 // predict-correct-step.
 import { useEffect, useState } from "react";
 import { exact, fmt, fmtSig } from "../../components/format";
+import { useCapability } from "../../state/store";
+import { EmbeddingView } from "../embedding/EmbeddingView";
 import { correctHash } from "../../router";
 import { matrixText, rankOf, speciesLabel } from "./network";
 import { Panel } from "./Panel";
@@ -53,10 +58,13 @@ function Score({ edge, probabilities }: { edge: EdgeOut; probabilities: boolean 
 const scoreWords = (s: { score: number | null; logp: number | null }, probabilities: boolean) => (probabilities && s.logp !== null ? `log p ${fmt(s.logp, 2)}` : `score ${fmtSig(s.score, 4)}`);
 
 function VariantSwitch({ value, onChange }: { value: StepVariant; onChange: (v: StepVariant) => void }) {
+  const embedding = useCapability("embedding");
+  const off = (v: StepVariant) => v === "embedding" && embedding.known && !embedding.enabled;
+  const titleOf = (v: StepVariant) => (off(v) ? `embedding trace unavailable: ${embedding.reason ?? ""}` : v === "embedding" ? "the parent state traced through a trained checkpoint" : undefined);
   return (
     <span className="ss-seg" role="group" aria-label="step view" data-testid="predict-step-variant">
       {STEP_VARIANTS.map((v) => (
-        <button key={v} type="button" className={`ss-seg-btn${v === value ? " ss-seg-on" : ""}`} aria-pressed={v === value} data-testid={`predict-step-variant-${v}`} onClick={() => onChange(v)}>
+        <button key={v} type="button" className={`ss-seg-btn${v === value ? " ss-seg-on" : ""}`} aria-pressed={v === value} data-testid={`predict-step-variant-${v}`} disabled={off(v)} title={titleOf(v)} onClick={() => onChange(v)}>
           {STEP_VARIANT_TITLES[v]}
         </button>
       ))}
@@ -194,6 +202,7 @@ export function StepPanel({ jobId, edge, net, probabilities }: StepPanelProps) {
             {variant === "textbook" && <StepTextbook {...vp} />}
             {variant === "animated" && <StepAnimated {...vp} />}
             {variant === "orbital" && <StepOrbital {...vp} stateId={edge.source_state_id} />}
+            {variant === "embedding" && <EmbeddingView target={{ stateId: edge.source_state_id }} testId="predict-step-embedding" />}
           </div>
           <StepFacts edge={edge} step={step} label={label} probabilities={probabilities} onAlt={setAlt} />
           <h4 className="pv-subtitle">Orbital reading</h4>

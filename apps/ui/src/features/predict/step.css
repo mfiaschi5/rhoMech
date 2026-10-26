@@ -1,5 +1,5 @@
-/* The Predict step viewport (StepPanel and its three variants: StepTextbook, StepAnimated,
-   StepOrbital). Theme tokens of styles.css only, so light and dark both read. */
+/* The Predict step viewport (StepPanel and its variants: StepTextbook, StepAnimated,
+   StepOrbital; the Embedding variant styles itself, features/embedding/embedding.css). Theme tokens of styles.css only, so light and dark both read. */
 
 /* ---- header: the variant switch and the alternatives */
 
@@ -26,6 +26,15 @@
 
 .ss-seg-btn:hover {
   color: var(--fg);
+}
+
+.ss-seg-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ss-seg-btn:disabled:hover {
+  color: var(--muted);
 }
 
 .ss-seg-btn.ss-seg-on {

@@ -22,7 +22,9 @@
 // the layout bar (layout/LayoutMenu.tsx), the grid (layout/LayoutGrid.tsx), wb-compute (inside
 // wb-compute-wrap, whose title says why it is off: data-reason), wb-status
 // [data-status=idle|posting|running|ready|qm_only|failed|missing|error], wb-stale-note,
-// wb-radical-note, wb-chemistry-banner[data-chemistry], wb-mapping-note.
+// wb-radical-note, wb-chemistry-banner[data-chemistry], wb-mapping-note, wb-embedding-open (the
+// computed molecule traced through a trained checkpoint: features/embedding/EmbeddingDialog;
+// greyed with the reason while the embedding capability is off).
 import { useEffect, useMemo, useRef, useState, type Dispatch } from "react";
 import type { GLViewer } from "3dmol";
 import type { PageProps } from "../../registry";
@@ -32,6 +34,7 @@ import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
 import { useCapability } from "../../state/store";
+import { EmbeddingDialog } from "../embedding/EmbeddingDialog";
 import type { MoleculeGeometryOut, MoleculeOut } from "../../api/types.gen";
 import { depict2d } from "../../api/client";
 import { useGeometry, useOrbitalSet, useProperties } from "./data";
@@ -160,6 +163,24 @@ function FailureBanner({ failure }: { failure: NonNullable<MoleculeOut["error"]>
   return <ErrorBanner error={text} title={`Featurize failed: ${failure.code}`} testId="wb-failure" />;
 }
 
+/** "Model trace": the computed molecule through a trained checkpoint, in a dialog. */
+function TraceButton({ state }: { state: ComputeState }) {
+  const cap = useCapability("embedding");
+  const [open, setOpen] = useState(false);
+  const key = state.status === "ready" ? (state.molecule?.key ?? null) : null;
+  const why = cap.known && !cap.enabled ? `embedding trace unavailable: ${cap.reason ?? ""}` : key ? "trace the molecule through a trained spec-v9 checkpoint" : "compute the molecule first (QM record and tokens)";
+  return (
+    <>
+      <span title={why} data-testid="wb-embedding-wrap" data-reason={!key || !cap.enabled ? why : ""}>
+        <button type="button" className="btn btn-small" data-testid="wb-embedding-open" disabled={!key || !cap.enabled} onClick={() => setOpen(true)}>
+          Model trace
+        </button>
+      </span>
+      {open && key && <EmbeddingDialog smiles={key} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
 function ComputeBar(p: { state: ComputeState; blocker: string | null; radicals: number; stale: boolean; onCompute(retry?: boolean): void }) {
   const { state } = p;
   const busy = state.status === "posting" || state.status === "running";
@@ -182,6 +203,7 @@ function ComputeBar(p: { state: ComputeState; blocker: string | null; radicals: 
             retry
           </button>
         )}
+        <TraceButton state={state} />
       </div>
       {p.radicals > 0 && (
         <div className="banner banner-warn wb-small" data-testid="wb-radical-note" data-electrons={p.radicals} role="status">

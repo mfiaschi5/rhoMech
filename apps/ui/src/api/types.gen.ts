@@ -431,9 +431,64 @@ export interface StepCheckOut {
   readings_status: "ready" | "pending" | "unavailable";
 }
 
+export interface CheckpointOut {
+  source: string;
+  run: string;
+  file: string;
+  path: string;
+  size_bytes: number;
+  modified_at: string;
+  encoder: string | null;
+  model: Record<string, number | string>;
+  epoch: number | null;
+  metrics: Record<string, number | null>;
+  clean: boolean | null;
+  usable: boolean;
+  reason: string | null;
+  built_at: string | null;
+}
+
+export interface ModelsOut {
+  roots: string[];
+  checkpoints: CheckpointOut[];
+  embedding: CapabilityOut;
+}
+
+export interface EmbeddingIn {
+  state_id?: string | null;
+  smiles?: string | null;
+  run: string;
+  file?: string;
+  source?: string | null;
+}
+
+export interface EmbeddingResultOut {
+  embedding_id: string;
+  state_id: string;
+  pool_key: string;
+  source: string;
+  run: string;
+  file: string;
+  checkpoint_sha256: string;
+  encoder: string;
+  epoch: number | null;
+  n_atoms: number;
+  n_orbitals: number;
+  n_layers: number;
+  heads: number;
+  max_error: number | null;
+  top_anchor: Record<string, unknown> | null;
+  page_bytes: number;
+  page_url: string;
+  payload_url: string;
+  created_at: string;
+  cached: boolean;
+  seconds: number;
+}
+
 export interface JobOut {
   job_id: string;
-  kind: "predict" | "override" | "expand" | "recheck" | "export" | "index";
+  kind: "predict" | "override" | "expand" | "recheck" | "export" | "index" | "embedding";
   status: "queued" | "running" | "done" | "failed" | "cancelled";
   created_at: string;
   started_at: string | null;
@@ -445,8 +500,8 @@ export interface JobOut {
   partial: boolean;
   unchanged: boolean;
   provenance: Provenance | null;
-  result_kind: "network" | "expand" | "export" | "recheck" | "index" | null;
-  result: NetworkOut | ExpandResultOut | ExportReportOut | RecheckReportOut | IndexStatusOut | null;
+  result_kind: "network" | "expand" | "export" | "recheck" | "index" | "embedding" | null;
+  result: NetworkOut | ExpandResultOut | ExportReportOut | RecheckReportOut | IndexStatusOut | EmbeddingResultOut | null;
 }
 
 export interface JobSummaryOut {
