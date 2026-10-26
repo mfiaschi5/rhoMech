@@ -16,14 +16,6 @@ dependencies = [
     "tqdm",
     "rich",
     "lightgbm>=4.7.0",
-    "fastapi==0.142.2",
-    "uvicorn==0.54.0",
-    "sqlmodel==0.0.47",
-    "sqlalchemy==2.0.54",
-    # the resolver picked starlette 1.9.0 (2026-10-18) and pydantic 2.14.1 (2026-10-11), both
-    # newer than the 2026-10-06 cutoff (releases at least two weeks old), so both are pinned back
-    "starlette<=1.7.0",
-    "pydantic==2.13.5",
 ]
 
 [project.scripts]
@@ -44,6 +36,18 @@ dev = [
     "pytest-xdist>=3.8.0",
     "httpx==0.28.1",
 ]
+# the optional web app (ksmech-serve, src/ksmech/serve + apps/ui): not a dependency of the engine,
+# installed by default for development; the engine never imports ksmech.serve
+serve = [
+    "fastapi==0.142.2",
+    "uvicorn==0.54.0",
+    "sqlmodel==0.0.47",
+    "sqlalchemy==2.0.54",
+    # the resolver picked starlette 1.9.0 (2026-10-18) and pydantic 2.14.1 (2026-10-11), both
+    # newer than the 2026-10-06 cutoff (releases at least two weeks old), so both are pinned back
+    "starlette<=1.7.0",
+    "pydantic==2.13.5",
+]
 # torch comes from one of two builds: ROCm (default here, AMD RX 6600 XT, run with
 # HSA_OVERRIDE_GFX_VERSION=10.3.0) or CUDA (NVIDIA hosts: uv sync --no-group rocm --group cuda).
 rocm = ["torch==2.14.1", "triton-rocm==3.8.0"]
@@ -51,7 +55,7 @@ cuda = ["torch==2.14.1"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-default-groups = ["dev", "rocm"]
+default-groups = ["dev", "rocm", "serve"]
 conflicts = [[{ group = "rocm" }, { group = "cuda" }]]
 # certifi (a dev-only transitive of httpx) resolved to 2026.10.19, released the day before; keep
 # the last release that is at least two weeks old

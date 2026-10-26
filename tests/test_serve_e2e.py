@@ -251,14 +251,7 @@ import {
 } from "@UI@/src/features/curate/ExportReport.tsx";
 import { MechanismWarnings, StaleBanner } from "@UI@/src/features/curate/MechanismView.tsx";
 import { curateRequest } from "@UI@/src/features/curate/PathwayCurate.tsx";
-import { stylesheet } from "@UI@/src/features/predict/NetworkView.tsx";
 import { parseHash } from "@UI@/src/router.ts";
-
-const DARK: Record<string, string> = {
-  "--fg": "#e3e8ef",
-  "--panel": "#1a2029",
-  "--turnover": "#3cc9c9",
-};
 
 async function cacheRetry() {
   const key = "/probe/fails-once";
@@ -279,20 +272,6 @@ async function cacheRetry() {
     return Promise.resolve(42);
   });
   return { droppedByInvalidate, notified, loads, value };
-}
-
-function networkStyles() {
-  const g = globalThis as Record<string, unknown>;
-  g.document = { documentElement: {} };
-  g.getComputedStyle = () => ({ getPropertyValue: (name: string) => DARK[name] ?? "" });
-  try {
-    const sheet = stylesheet() as unknown as { selector: string; style: Record<string, unknown> }[];
-    const style = (selector: string) => sheet.find((s) => s.selector === selector)?.style ?? null;
-    return { edge: style("edge"), virtual: style("edge.turnover-virtual") };
-  } finally {
-    delete g.document;
-    delete g.getComputedStyle;
-  }
 }
 
 function mechanism() {
@@ -358,7 +337,6 @@ function playwright() {
 export async function run() {
   return {
     cache: await cacheRetry(),
-    network: networkStyles(),
     mechanism: mechanism(),
     curate: curate(),
     export: exportViews(),
@@ -393,13 +371,6 @@ def test_cache_refresh_reloads_after_a_failed_load(ui_probe):
     assert c["droppedByInvalidate"] == 0
     assert c["notified"] == ["/probe/fails-once"]
     assert c["loads"] == 2 and c["value"] == 42
-
-
-def test_network_edge_labels_follow_the_theme(ui_probe):
-    edge, virtual = ui_probe["network"]["edge"], ui_probe["network"]["virtual"]
-    assert edge["color"] == "#e3e8ef"
-    assert edge["text-background-color"] == "#1a2029"  # --panel, not a fixed white box
-    assert virtual["color"] == "#3cc9c9"  # turnover edges keep their own colour
 
 
 def test_mechanism_warnings_carry_the_bare_code(ui_probe):

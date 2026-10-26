@@ -330,23 +330,17 @@ name = "ksmech"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fastapi" },
     { name = "hydra-core" },
     { name = "lightgbm" },
     { name = "morfeus-ml" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
-    { name = "pydantic" },
     { name = "rdkit" },
     { name = "rich" },
     { name = "scipy" },
-    { name = "sqlalchemy" },
-    { name = "sqlmodel" },
-    { name = "starlette" },
     { name = "tblite" },
     { name = "tqdm" },
-    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -364,26 +358,28 @@ rocm = [
     { name = "torch", version = "2.14.1+rocm7.2", source = { registry = "https://download.pytorch.org/whl/rocm7.2" } },
     { name = "triton-rocm" },
 ]
+serve = [
+    { name = "fastapi" },
+    { name = "pydantic" },
+    { name = "sqlalchemy" },
+    { name = "sqlmodel" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", specifier = "==0.142.2" },
     { name = "hydra-core" },
     { name = "lightgbm", specifier = ">=4.7.0" },
     { name = "morfeus-ml" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
-    { name = "pydantic", specifier = "==2.13.5" },
     { name = "rdkit" },
     { name = "rich" },
     { name = "scipy" },
-    { name = "sqlalchemy", specifier = "==2.0.54" },
-    { name = "sqlmodel", specifier = "==0.0.47" },
-    { name = "starlette", specifier = "<=1.7.0" },
     { name = "tblite" },
     { name = "tqdm" },
-    { name = "uvicorn", specifier = "==0.54.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -398,6 +394,14 @@ dev = [
 rocm = [
     { name = "torch", specifier = "==2.14.1", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "ksmech", group = "rocm" } },
     { name = "triton-rocm", specifier = "==3.8.0", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "ksmech", group = "rocm" } },
+]
+serve = [
+    { name = "fastapi", specifier = "==0.142.2" },
+    { name = "pydantic", specifier = "==2.13.5" },
+    { name = "sqlalchemy", specifier = "==2.0.54" },
+    { name = "sqlmodel", specifier = "==0.0.47" },
+    { name = "starlette", specifier = "<=1.7.0" },
+    { name = "uvicorn", specifier = "==0.54.0" },
 ]
 
 [[package]]

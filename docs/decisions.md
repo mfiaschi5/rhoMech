@@ -5544,3 +5544,20 @@ committed; the user kept two network views and all three step views.
   reason text was left unchanged: `serve/predictors.py` is part of the physics fingerprint, and
   editing it would re-key every pool analysis and mark curated mechanisms predictor-stale for a
   message.
+
+## 2026-10-26 — The web app is an add-on to the engine (before the merge into main)
+
+User decision: merge the UI into main with minimal changes, the UI being something extra that
+talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` facade, a separate
+`ksmech_serve` package, an optional HTTP engine server) was proposed and deferred.
+
+- The web packages (fastapi, uvicorn, sqlmodel, sqlalchemy, starlette, pydantic) left
+  `[project] dependencies` for a `serve` dependency group, in `default-groups` so `uv sync` still
+  installs them for development; the locked versions are unchanged.
+- `tests/test_engine_boundary.py`: no module of `src/ksmech` outside `serve/` imports
+  `ksmech.serve`, and the engine's dependencies carry no web package.
+- The serve code still calls engine modules directly (about 40 of them) and keeps chemistry that
+  belongs to the engine (the arrow reading of R, the step check, G^atom, the floor completion, the
+  vendored GFN2 basis for cubes, the metal start geometries); moving it behind an engine API is the
+  deferred split.
+- Removed the unused cytoscape `NetworkView.tsx` and the probe test that imported it.

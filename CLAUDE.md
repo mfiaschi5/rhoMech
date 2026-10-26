@@ -187,7 +187,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   model's training marked; builds missing QM records and tokens). After a token rebuild:
   `ksmech-arrows samples` (geometry-free pair features and `pair_feature_stats_<strategy>.json`
   from each training part), then `ksmech-physics gbdt`, then `textbook`.
-- Serve: `uv run ksmech-serve --port 8000` (web app on 127.0.0.1 only, `--host 0.0.0.0` for the
+- Serve (an optional add-on: the engine never imports `ksmech.serve`; its web packages are the
+  `serve` dependency group): `uv run ksmech-serve --port 8000` (web app on 127.0.0.1 only, `--host 0.0.0.0` for the
   LAN; data under `data/serve/`, curation DB `data/curation/curation.sqlite`; one compute worker;
   `--chemistry real|cached|synthetic`, `--dev`, `--no-ui`, `--index-on-start`), `uv run
   ksmech-serve schema-ts` (regenerate `apps/ui/src/api/types.gen.ts`), `uv run ksmech-serve

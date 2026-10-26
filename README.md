@@ -60,8 +60,12 @@ bindings are unavailable (not yet implemented; arrives with the QM phase).
 A local web application to predict mechanisms as reaction networks of elementary steps, read
 each step as curved arrows and the orbital pairs that drive it, correct steps, curate and
 export validated mechanisms, and browse PMechDB and curated steps. Backend in
-`src/ksmech/serve/` (FastAPI, SQLite), frontend in `apps/ui/` (Vite, React, RDKit.js, 3Dmol.js,
-cytoscape).
+`src/ksmech/serve/` (FastAPI, SQLite), frontend in `apps/ui/` (Vite, React, RDKit.js, 3Dmol.js).
+
+The app is an add-on to the engine: it calls the engine's modules, the engine never imports
+`ksmech.serve` (a test enforces it), and its web packages are the `serve` dependency group, not
+dependencies of `ksmech` (`uv sync` installs the group by default; `uv sync --no-group serve`
+gives the engine alone).
 
 **Spec v9 (Predict and Correct).** Every step is a reaction matrix R = Delta(BE) on the pool
 atoms (every H an atom), anchored on a forming bond. A step is applied as B + R with RDKit's
