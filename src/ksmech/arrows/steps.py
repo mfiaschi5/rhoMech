@@ -10,11 +10,15 @@ orbital reading of the arrows, are kept where every arrow aligns; `orbital_readi
 whether they do. It also stores the geometry-free pair-track features z_rs of every (occupied r,
 virtual s) pair (`physics.stage_a.STAGE_A_FEATURES`, named by `pair_features`), computed at
 K = eps = 1 (`physics.params.REDUCED`; `params.to_params` applies other values), their
-`defined` mask, the sign of G (bookkeeping), and the validity filter. Two fields are kept only
-so the schema-15 store stays readable and leave at the next schema bump: `pair_contact_sites`
-(always -1) and the symmetric atom-atom Coulomb matrix `atom_coulomb` (at eps = 1); neither is
-a model input. The full `MoleculeTokens` (coefficients, S, F) are not copied into every sample:
-`fragment_keys` names the token files, and `MechanismSample.tokens(loader)` reloads them.
+`defined` mask, the sign of G (bookkeeping), and the validity filter. The pair feature
+`bond_order` is read on the reactant as drawn (`lewis.pair_bond_orders`), like B, not on the QM
+record's own Kekule structure. The full `MoleculeTokens` (coefficients, S, F) are not copied
+into every sample: `fragment_keys` names the token files, and `MechanismSample.tokens(loader)`
+reloads them.
+
+A sample also keeps the other resonance drawings of its reactant pool (`arrows.drawings`), each
+with its formal charges, bond orders, lone pairs and recomputed label; `MechanismSample.drawn(k)`
+is the sample in its k-th drawing (0: the dataset's), which training draws at random.
 
 A step becomes a sample when every reactant fragment has tokens and the step has an edit
 label that is a valid edit of its reactant (`lewis.check_edit`); every other step is skipped with
@@ -47,8 +51,23 @@ from rich.console import Console
 from ksmech.arrows import store
 from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
 from ksmech.arrows.apply_predicted import PredictedArrow, leaving_labels, with_leaving
-from ksmech.arrows.delta_be import EditLabel, EditSkip, class_shape, edit_label, to_global
-from ksmech.arrows.lewis import MissingBondIndex, check_edit, reactant_lewis
+from ksmech.arrows.delta_be import (
+    EditLabel,
+    EditSkip,
+    StepEdit,
+    class_shape,
+    edit_label,
+    step_edit,
+    to_global,
+)
+from ksmech.arrows.drawings import Drawing, resonance_drawings
+from ksmech.arrows.lewis import (
+    MissingBondIndex,
+    check_edit,
+    lewis_bonds,
+    pair_bond_orders,
+    reactant_lewis,
+)
 from ksmech.arrows.reactants import (
     CorrespondenceError,
     MissingTokens,
@@ -56,20 +75,21 @@ from ksmech.arrows.reactants import (
     TokenCache,
     TokenLoader,
 )
+from ksmech.arrows.symmetry import symmetric_closure
 from ksmech.data import chem, splits
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
 from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import MoleculeTokens
-from ksmech.physics.pairs import PairStats, atom_coulomb_matrix, fit_pair_stats, valid_pairs
+from ksmech.physics.pairs import PairStats, fit_pair_stats, valid_pairs
 from ksmech.physics.params import REDUCED, KSParams, to_params
 from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
 from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 15  # 15: the reaction-matrix target and the reactant's Lewis structure
+SAMPLE_VERSION = 17  # 17: label classes closed under the pool's symmetry (`arrows.symmetry`)
 PARTS = ("train", "val", "test")
 STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
@@ -86,6 +106,7 @@ class SkipReason(StrEnum):
     RESONANCE_STEP = "RESONANCE_STEP"
     NO_ANCHOR = "NO_ANCHOR"
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
+    NOT_ELEMENTARY = "NOT_ELEMENTARY"
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
 
@@ -117,9 +138,6 @@ class MechanismSample:
     pair_defined: np.ndarray  # (n_occ, n_virt, F) bool
     pair_gap_sign: np.ndarray  # (n_occ, n_virt) int8 sign of G (bookkeeping, not a feature)
     pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair
-    pair_contact_sites: np.ndarray  # (n_occ, n_virt, 2) int64, always -1 (schema 15 only)
-    atom_coulomb: np.ndarray  # (A, A) float32 KS2 between atoms at eps = 1, symmetric (schema
-    #   15 only, no model input)
     labels: list[ArrowLabel] = field(default_factory=list)  # empty unless `orbital_reading`
     #   is READING_ALIGNED
     product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
@@ -135,10 +153,36 @@ class MechanismSample:
     inputs: dict[str, str] = field(default_factory=dict)  # provenance: every token file this
     #   sample was built from (`file:<path>` -> content sha256)
     pair_features: tuple[str, ...] = STAGE_A_FEATURES  # the columns of pair_z / pair_defined
+    drawings: list[Drawing] = field(default_factory=list)  # the pool's other resonance drawings
+    drawing_skips: dict[str, int] = field(default_factory=dict)  # drawings dropped, by reason
 
     @property
     def n_atoms(self) -> int:
         return len(self.atom_categorical)
+
+    @property
+    def n_drawings(self) -> int:
+        """The resonance drawings of the pool, the dataset's own included."""
+        return 1 + len(self.drawings)
+
+    def drawn(self, k: int) -> MechanismSample:
+        """The sample in its k-th resonance drawing (0: as the dataset draws it): the formal
+        charges, bond orders, lone pairs, the pair feature `bond_order` and the label class of
+        that drawing; everything else is shared with this sample."""
+        if k == 0:
+            return self
+        d = self.drawings[k - 1]
+        cat, bonds = self.atom_categorical.copy(), self.bonds.copy()
+        cat[:, 1], bonds[:, 2] = d.charges, d.orders
+        return replace(
+            self,
+            atom_categorical=cat,
+            bonds=bonds,
+            lone_pairs=d.lone_pairs,
+            edit_label=d.edit_label,
+            pair_z=with_pair_bond_orders(self, bonds),
+            drawings=[],
+        )
 
     @property
     def n_orbitals(self) -> int:
@@ -147,6 +191,17 @@ class MechanismSample:
     def tokens(self, loader: TokenLoader) -> list[MoleculeTokens]:
         """The full token objects of every fragment, in fragment order."""
         return [loader(key) for key in self.fragment_keys]
+
+
+def with_pair_bond_orders(sample: MechanismSample, bonds: np.ndarray) -> np.ndarray:
+    """A copy of `sample.pair_z` whose `bond_order` column is read on the structure `bonds`
+    (`lewis.pair_bond_orders`) wherever it is defined."""
+    z = sample.pair_z.copy()
+    if "bond_order" in sample.pair_features:
+        c = sample.pair_features.index("bond_order")
+        orders = pair_bond_orders(bonds, sample.incidence, sample.orbital_occupied, sample.n_atoms)
+        z[..., c] = np.where(sample.pair_defined[..., c], orders, 0.0)
+    return z
 
 
 def _incidence(rt: ReactantTokens) -> np.ndarray:
@@ -176,10 +231,11 @@ def make_sample(
 
 def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
-    hand-built reactant sets, e.g. the textbook selectivity checks)."""
+    hand-built reactant sets, e.g. the textbook selectivity checks). The pair feature
+    `bond_order` is read on the side as drawn."""
     tok = [f.tokens for f in rt.fragments]
     block = stage_a_block(tok, REDUCED)
-    return MechanismSample(
+    sample = MechanismSample(
         step_id=step_id,
         source=source,
         fragment_keys=[f.key for f in rt.fragments],
@@ -201,11 +257,11 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
         pair_defined=block.defined,
         pair_gap_sign=block.gap_sign,
         pair_valid=valid_pairs(tok, rt.candidate),
-        pair_contact_sites=block.sites,
-        atom_coulomb=atom_coulomb_matrix(tok, REDUCED).astype(np.float32),
         fermi_smeared=any(t.fermi_smeared for t in tok),
         pair_features=STAGE_A_FEATURES,
     )
+    sample.pair_z = with_pair_bond_orders(sample, lewis_bonds(rt))
+    return sample
 
 
 def _pair_index(sample: MechanismSample) -> tuple[dict[int, int], dict[int, int]]:
@@ -269,13 +325,26 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
     return [with_leaving(x, lab) for x, lab in zip(out, leaving, strict=True)]
 
 
-def edit_target(step: ElementaryStep, rt: ReactantTokens) -> tuple | SkipReason:
-    """(the edit label on the global atoms, bonds, lone pairs, Wiberg indices) of a step, or
-    why it has none: an edit-label code, a bond without a Wiberg index, or a label that is no
-    valid edit of the reactant (`lewis.check_edit`)."""
-    label = edit_label(step)
-    if not isinstance(label, EditSkip):
-        label = to_global(label, rt.global_atom)
+@dataclass(frozen=True)
+class EditTarget:
+    """A step's target: its edit (`delta_be.StepEdit`), the label on the reactant-mol atoms and
+    on the global atoms, and the reactant's Lewis structure on the global atoms."""
+
+    edit: StepEdit
+    mol_label: EditLabel
+    label: EditLabel
+    bonds: np.ndarray
+    lone_pairs: np.ndarray
+    wiberg: np.ndarray
+
+
+def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipReason:
+    """The target of a step, or why it has none: an edit-label code, a bond without a Wiberg
+    index, or a label that is no valid edit of the reactant (`lewis.check_edit`). The label on
+    the global atoms is closed under the pool's symmetry (`symmetry.symmetric_closure`)."""
+    edit = step_edit(step)
+    mol_label = edit if isinstance(edit, EditSkip) else edit_label(step, edit)
+    label = mol_label if isinstance(mol_label, EditSkip) else to_global(mol_label, rt.global_atom)
     if isinstance(label, EditSkip):
         return SkipReason(str(label))
     try:
@@ -283,11 +352,22 @@ def edit_target(step: ElementaryStep, rt: ReactantTokens) -> tuple | SkipReason:
     except MissingBondIndex as exc:
         log.info("%s: %s", step.step_id, exc)
         return SkipReason.NO_BOND_INDEX
+    atoms = np.concatenate([f.tokens.atom_categorical() for f in rt.fragments])
+    label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], bonds)
     problem = check_edit(label, bonds, lone_pairs)
     if problem is not None:
         log.info("%s: the edit label is no valid edit of the reactant (%s)", step.step_id, problem)
         return SkipReason.R_CHECK_FAILED
-    return label, bonds, lone_pairs, wiberg
+    return EditTarget(edit, mol_label, label, bonds, lone_pairs, wiberg)
+
+
+def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: EditTarget) -> None:
+    drawings, dropped = resonance_drawings(
+        step, rt, target.edit, target.mol_label, target.bonds, sample.atom_categorical
+    )
+    sample.drawings, sample.drawing_skips = drawings, dict(sorted(dropped.items()))
+    if dropped:
+        log.info("%s: resonance drawings dropped: %s", step.step_id, sample.drawing_skips)
 
 
 def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment) -> None:
@@ -305,7 +385,8 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
 
 def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
     """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
-    the edit label, and the ArrowLabels when every arrow aligns (`orbital_reading`)."""
+    the edit label, the other resonance drawings of the pool, and the ArrowLabels when every
+    arrow aligns (`orbital_reading`)."""
     with prov.collecting() as used:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
@@ -319,7 +400,9 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
             return target
         alignment = align_step(step, rt)
         sample = make_sample(step, rt, alignment.labels if alignment.complete else [])
-    sample.edit_label, sample.bonds, sample.lone_pairs, sample.wiberg = target
+    sample.edit_label, sample.bonds = target.label, target.bonds
+    sample.lone_pairs, sample.wiberg = target.lone_pairs, target.wiberg
+    _set_drawings(sample, step, rt, target)
     _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))
     return sample
@@ -423,7 +506,7 @@ def load_split_file(path: Path) -> dict[str, list[str]]:
 
 def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> dict:
     """The counts of one split: steps, samples, skip reasons, edit-label class sizes and
-    anchor kinds, orbital readings, ArrowLabels and filtered ArrowLabels."""
+    anchor kinds, resonance drawings, orbital readings, ArrowLabels and filtered ArrowLabels."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
     return {
@@ -432,6 +515,8 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
         **class_shape([s.edit_label for s in kept if s.edit_label]),
+        "symmetry": symmetry_report(kept),
+        "drawings": drawing_report(kept),
         "orbital_reading": dict(Counter(s.orbital_reading for s in kept).most_common()),
         "n_labels": sum(len(s.labels) for s in kept),
         "n_labels_filtered": sum(
@@ -439,6 +524,32 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         ),
         "label_filter": dict(sum((Counter(s.label_filter) for s in kept), Counter()).most_common()),
         "n_fermi_smeared": sum(s.fermi_smeared for s in kept),
+    }
+
+
+def symmetry_report(samples: list[MechanismSample]) -> dict:
+    """The symmetric closure of the labels (`arrows.symmetry`): samples whose class gained
+    members, the members added, the closures cut short, and the class sizes after it."""
+    labels = [s.edit_label for s in samples if s.edit_label]
+    return {
+        "n_extended": sum(x.n_symmetric > 0 for x in labels),
+        "n_added": sum(x.n_symmetric for x in labels),
+        "n_capped": sum(x.symmetry_capped for x in labels),
+        "class_size_after": dict(sorted(Counter(min(len(x.variants), 9) for x in labels).items())),
+    }
+
+
+def drawing_report(samples: list[MechanismSample]) -> dict:
+    """The resonance drawings of `samples`: how many pools have another drawing, the drawings
+    per sample (the dataset's own included), the drawings dropped by reason, and how many
+    drawings change the label's anchors."""
+    moved = sum(d.edit_label.anchors != s.edit_label.anchors for s in samples for d in s.drawings)
+    return {
+        "n_with_other_drawings": sum(bool(s.drawings) for s in samples),
+        "drawings_per_sample": dict(sorted(Counter(s.n_drawings for s in samples).items())),
+        "dropped": dict(sum((Counter(s.drawing_skips) for s in samples), Counter()).most_common()),
+        "n_other_drawings": sum(len(s.drawings) for s in samples),
+        "n_anchors_changed": moved,
     }
 
 
@@ -473,7 +584,17 @@ def build_all_samples(
         "n_training_steps": len(steps),
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
-        **{k: every[k] for k in ("class_size", "anchor_kind", "orbital_reading", "label_filter")},
+        **{
+            k: every[k]
+            for k in (
+                "class_size",
+                "anchor_kind",
+                "symmetry",
+                "drawings",
+                "orbital_reading",
+                "label_filter",
+            )
+        },
         "splits": {},
         "strategies_not_applicable": {},
     }

@@ -189,7 +189,8 @@ def test_registry_lists_three_predictors(synthetic_settings):  # noqa: F811
     assert infos["floor"].available and infos["floor"].kind == "floor"
     assert not infos["floor"].scores_are_probabilities
     net = infos["network"]
-    assert not net.available and net.scores_are_probabilities and "ksmech.model.net" in net.reason
+    assert not net.available and net.scores_are_probabilities
+    assert "no checkpoint" in net.reason or "ksmech.model.net" in net.reason
     assert reg.ref("user").name == "user"
 
 

@@ -39,6 +39,8 @@ class ReasonCode(StrEnum):
     WORKER_CRASH = "WORKER_CRASH"
     UNSUPPORTED_ELEMENT = "UNSUPPORTED_ELEMENT"
     UNEXPECTED = "UNEXPECTED"
+    SDF_UNREADABLE = "SDF_UNREADABLE"  # a dataset's molfile RDKit cannot read (QMugs)
+    RECORD_ORDER = "RECORD_ORDER"  # a dataset's atoms do not map onto the record's (QMugs)
     # warnings: the record is still written
     FUKUI_SCF_FAIL = "FUKUI_SCF_FAIL"
     VBUR_FAIL = "VBUR_FAIL"

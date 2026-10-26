@@ -132,7 +132,9 @@ ranked a step's first arrow worse than G alone.
 ## Commands
 
 ```bash
-uv sync                       # install everything into .venv
+uv sync                       # install everything into .venv (torch: the ROCm build)
+uv sync --no-group rocm --group cuda   # an NVIDIA host: the CUDA build of torch
+export UV_NO_SYNC=1           # then, on that host: else uv run re-syncs to the default rocm group
 uv run pytest -n 14 -m "not realdata"  # unit tests in 14 processes (pytest-xdist; -x stops at the first failure)
 uv run pytest -m realdata     # real-data tests one at a time, each pass in 14 spawned processes
 uv run ruff check .           # lint
@@ -166,8 +168,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   ksmech-arrows samples --source
   pmechdb` (the sample store `samples/shard_*.npz` + `index.json`: every training step with
   tokens, its reaction-matrix label class and anchors, the reactant's Lewis structure on the token
-  atoms (bonds, lone pairs, Wiberg indices), the geometry-free pair features, and the
-  orbital-pair labels where every arrow aligns; one `samples_<strategy>_<part>.json` view per
+  atoms (bonds, lone pairs, Wiberg indices), the geometry-free pair features, the other
+  resonance drawings of the pool with their labels (`arrows.drawings`), and the orbital-pair labels
+  where every arrow aligns; one `samples_<strategy>_<part>.json` view per
   split of `molecule`, `scaffold` and
   `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
@@ -195,5 +198,19 @@ Main CLI entry points are added phase by phase and listed here as they land:
   v3 panels candidates and physics are off, `serve/capabilities.py`, also in `/api/meta`)
 - UI: `npm --prefix apps/ui run build | dev | e2e` (e2e: Playwright with the system Chrome,
   `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`)
-- Training: _not yet_
-- Evaluation: _not yet_
+- Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
+  [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
+  [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; each epoch every training
+  sample in a random one of its resonance drawings unless `--no-resonance-draws`; `--encoder`: `dense` the pair track of spec v9,
+  `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
+  learned indexer, dense during the LR warm-up; `--stop-weight` is lambda_stop of the END_MECH head,
+  by default 0.5 and 0 on PMechDB; `data/models/<source>/<run>/`: `run.json` with the provenance of
+  the views and pair statistics, `train.log` in the `step n / total` format `ksmech-eta` reads,
+  `metrics.jsonl` per epoch, `last.pt` and `best.pt` by validation anchor top-1; batches by a
+  padded-cell budget, samples over `--max-tokens` skipped as TOO_LARGE and counted; the override is
+  for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); every `ModelConfig` field is an option,
+  e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
+  run)
+- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
+  anchors ranked by |G^atom| over the valid orbital pairs, no learned parameter, val and test
+  top-1/3/5, `anchor_floor_report_<split>.json`)

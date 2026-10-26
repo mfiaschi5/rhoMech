@@ -57,6 +57,7 @@ class EditSkip(StrEnum):
     RESONANCE_STEP = "RESONANCE_STEP"  # the parsimonious class is the empty matrix
     NO_ANCHOR = "NO_ANCHOR"  # no bond order changes (never expected)
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"  # an edited atom has no token atom
+    NOT_ELEMENTARY = "NOT_ELEMENTARY"  # no candidate is an elementary step (`is_elementary`)
 
 
 def _order(mol: Chem.Mol, i: int, j: int) -> int:
@@ -85,6 +86,11 @@ class ReactionMatrix:
         """The same matrix on other atom indices (`index[i]` for every atom)."""
         bonds = tuple(sorted((*sorted((index[i], index[j])), d) for i, j, d in self.bonds))
         return ReactionMatrix(bonds, tuple(sorted((index[i], d) for i, d in self.lone)))
+
+    def is_elementary(self) -> bool:
+        """Every bond order changes by 1 and every atom's non-bonding electrons by 2: a step of
+        spec v9, and all the decoder can write ({-1, 0, +1} per pair, {-2, 0, +2} per atom)."""
+        return all(abs(d) == 1 for *_, d in self.bonds) and all(abs(d) == 2 for _, d in self.lone)
 
     def anchors(self) -> tuple[tuple[int, int, str], ...]:
         """Admissible anchors: the bond orders that rise, else those that fall."""
@@ -129,6 +135,8 @@ class EditLabel:
     n_structures: int  # product resonance structures enumerated
     truncated: bool  # the enumeration hit RESONANCE_CAP
     n_rejected: int = 0  # cheaper resonance variants the key check rejected
+    n_symmetric: int = 0  # members added as images under the pool's automorphisms
+    symmetry_capped: bool = False  # that closure was cut short (`arrows.symmetry`)
 
     def atoms(self) -> set[int]:
         return {a for v in self.variants for i, j, _ in v.bonds for a in (i, j)} | {
@@ -152,6 +160,8 @@ class EditLabel:
             "n_structures": self.n_structures,
             "truncated": self.truncated,
             "n_rejected": self.n_rejected,
+            "n_symmetric": self.n_symmetric,
+            "symmetry_capped": self.symmetry_capped,
         }
 
     @classmethod
@@ -159,7 +169,8 @@ class EditLabel:
         anchors = tuple(tuple((int(i), int(j), str(s)) for i, j, s in a) for a in d["anchors"])
         variants = tuple(ReactionMatrix.from_list(v) for v in d["variants"])
         flags = (d["data_parsimonious"], d["n_structures"], d["truncated"], d.get("n_rejected", 0))
-        return cls(variants, anchors, *flags)
+        symmetry = (d.get("n_symmetric", 0), d.get("symmetry_capped", False))
+        return cls(variants, anchors, *flags, *symmetry)
 
 
 def dataset_matrix(step: ElementaryStep) -> tuple[Chem.Mol, Chem.Mol, ReactionMatrix] | EditSkip:
@@ -180,34 +191,100 @@ def _charges(mol: Chem.Mol) -> int:
     return sum(abs(a.GetFormalCharge()) for a in mol.GetAtoms())
 
 
-def _costs(reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix) -> tuple[dict, int]:
-    """(R -> (formal charges of its product structure, entries), structures enumerated). The
-    structures are the resonance forms of the product with its H frozen, Kekule structures as
-    drawn (`resonance.resonance_forms`); a product that does not sanitize has only `r_data`."""
-    cost = {r_data: (_charges(prod), r_data.size)}
+MAX_CYCLE_SEARCH = 20_000  # path extensions tried per alternating-cycle search
+
+
+def _alternating_cycle(edges: dict[tuple[int, int], int]) -> list[tuple[int, int]] | None:
+    """A cycle of `edges` (pair -> +1 or -1) whose signs alternate all the way round, as its
+    pairs; None when there is none (or the search gives up after MAX_CYCLE_SEARCH steps)."""
+    adj: dict[int, list[tuple[int, int]]] = {}
+    for (i, j), d in edges.items():
+        adj.setdefault(i, []).append((j, d))
+        adj.setdefault(j, []).append((i, d))
+    budget = MAX_CYCLE_SEARCH
+    for start in sorted(adj):
+        stack = [(start, 0, (start,), ())]
+        while stack and budget > 0:
+            v, last, atoms, path = stack.pop()
+            for w, d in adj[v]:
+                budget -= 1
+                e = (min(v, w), max(v, w))
+                if d == last or e in path:
+                    continue
+                if w == start and len(path) >= 3 and d != edges[path[0]]:
+                    return [*path, e]
+                if w not in atoms:
+                    stack.append((w, d, (*atoms, w), (*path, e)))
+    return None
+
+
+def without_kekule_cycles(r: ReactionMatrix, reac: Chem.Mol) -> ReactionMatrix:
+    """`r` with every alternating cycle of pi-bond changes removed: a Kekule swap of a ring that
+    the change does not need. Along such a cycle each atom gains one bond order and loses one,
+    so removing it keeps every atom's bond total, charge and lone pairs, and `reac + r` stays a
+    valid structure with the same sigma bonds; only entries on bonds of `reac` that stay bonds
+    (order >= 1 before and after) take part. Used on the resonance drawings of a reactant
+    (`arrows.drawings.kekule_closest`), not on the label candidates: there it would also make a
+    carbocation form as cheap as the iminium the dataset draws, which the label's cost (formal
+    charges, then entries) cannot tell apart (docs/decisions.md, 2026-10-26)."""
+    pi = {
+        (i, j): d
+        for i, j, d in r.bonds
+        if abs(d) == 1 and _order(reac, i, j) >= 1 and _order(reac, i, j) + d >= 1
+    }
+    removed: set[tuple[int, int]] = set()
+    while (cycle := _alternating_cycle(pi)) is not None:
+        removed.update(cycle)
+        for e in cycle:
+            del pi[e]
+    if not removed:
+        return r
+    return ReactionMatrix(tuple(b for b in r.bonds if (b[0], b[1]) not in removed), r.lone)
+
+
+def product_forms(prod: Chem.Mol) -> tuple[list[Chem.Mol], int]:
+    """(the resonance forms of the product with its H frozen, Kekule structures as drawn
+    (`resonance.resonance_forms`), the structures RDKit counted); none when the product does
+    not sanitize."""
     frozen = frozen_hydrogens(prod)
-    forms, n = ([], 0) if frozen is None else resonance_forms(frozen, RESONANCE_CAP)
-    for form in forms:
+    return ([], 0) if frozen is None else resonance_forms(frozen, RESONANCE_CAP)
+
+
+def _costs(reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix, structures) -> dict:
+    """R -> (formal charges of its product structure, entries), over `r_data` and the matrices
+    that take `reac` to each of `structures`."""
+    cost = {r_data: (_charges(prod), r_data.size)}
+    for form in structures:
         r = matrix_between(reac, form)
         cost[r] = min(cost.get(r, (_charges(form), r.size)), (_charges(form), r.size))
-    return cost, n
+    return cost
 
 
 def parsimonious_class(
-    reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix, accept=lambda r: True
+    reac: Chem.Mol,
+    prod: Chem.Mol,
+    r_data: ReactionMatrix,
+    accept=lambda r: True,
+    forms: tuple[list[Chem.Mol], int] | None = None,
+    extra: tuple[Chem.Mol, ...] = (),
 ) -> tuple[tuple[ReactionMatrix, ...], int, bool, int]:
     """(the parsimonious class sorted, structures enumerated, truncated, members rejected) of
-    `r_data`: the R of lowest cost (fewest formal charges in the product structure, then fewest
-    entries) that `accept` (the key check) accepts; `r_data` is always accepted."""
-    cost, n = _costs(reac, prod, r_data)
+    `r_data`: the elementary R (`ReactionMatrix.is_elementary`) of lowest cost (fewest formal
+    charges in the product structure, then fewest entries) that `accept` (the key check)
+    accepts; `r_data` is always accepted when it is elementary, and the class is empty when no
+    candidate is. The product structures are `forms` (`product_forms(prod)` unless given) and
+    `extra`, more resonance structures of the product. A drawing of the reactants with a triple
+    bond that the product needs single has only matrices with a -2 entry there."""
+    structures, n = product_forms(prod) if forms is None else forms
+    cost = _costs(reac, prod, r_data, (*structures, *extra))
     rejected = 0
     for level in sorted(set(cost.values())):
         members = sorted(r for r, c in cost.items() if c == level)
-        ok = [r for r in members if r == r_data or accept(r)]
+        ok = [r for r in members if r.is_elementary() and (r == r_data or accept(r))]
         rejected += len(members) - len(ok)
         if ok:
             return tuple(ok), n, n >= RESONANCE_CAP, rejected
-    raise AssertionError("r_data is always accepted")
+    return (), n, n >= RESONANCE_CAP, rejected
 
 
 def reproduces(step: ElementaryStep, mol: Chem.Mol, r: ReactionMatrix) -> bool:
@@ -220,20 +297,64 @@ def reproduces(step: ElementaryStep, mol: Chem.Mol, r: ReactionMatrix) -> bool:
     return match_products(ApplyResult(prod), want, step.products_smiles)[0] in MATCH_STATUSES
 
 
-def edit_label(step: ElementaryStep) -> EditLabel | EditSkip:
-    """The edit label of an annotated step on reactant-mol indices, or why it has none."""
+@dataclass(frozen=True)
+class StepEdit:
+    """The dataset's edit of a step: the reactants as drawn, the product, R_data and the
+    product's resonance forms (`product_forms`), enumerated once for every drawing."""
+
+    mol: Chem.Mol
+    prod: Chem.Mol
+    r_data: ReactionMatrix
+    forms: tuple[list[Chem.Mol], int]
+
+
+def step_edit(step: ElementaryStep) -> StepEdit | EditSkip:
     out = dataset_matrix(step)
     if isinstance(out, EditSkip):
         return out
-    mol, prod, r_data = out
+    return StepEdit(*out, product_forms(out[1]))
+
+
+def _label(step: ElementaryStep, mol: Chem.Mol, edit: StepEdit, r_data, extra=()):
     accept = lambda r: reproduces(step, mol, r)  # noqa: E731
-    variants, n, truncated, rejected = parsimonious_class(mol, prod, r_data, accept)
+    variants, n, truncated, rejected = parsimonious_class(
+        mol, edit.prod, r_data, accept, edit.forms, extra
+    )
+    if not variants:
+        return EditSkip.NOT_ELEMENTARY
     if variants[0].size == 0:
         return EditSkip.RESONANCE_STEP
     anchors = tuple(v.anchors() for v in variants)
     if not all(anchors):
         return EditSkip.NO_ANCHOR
     return EditLabel(variants, anchors, r_data in variants, n, truncated, rejected)
+
+
+def edit_label(step: ElementaryStep, edit: StepEdit | None = None) -> EditLabel | EditSkip:
+    """The edit label of an annotated step on reactant-mol indices, or why it has none."""
+    edit = step_edit(step) if edit is None else edit
+    if isinstance(edit, EditSkip):
+        return edit
+    return _label(step, edit.mol, edit, edit.r_data)
+
+
+def drawn_label(
+    step: ElementaryStep, edit: StepEdit, label: EditLabel, drawing: Chem.Mol
+) -> EditLabel | EditSkip:
+    """The edit label of `step` on another resonance drawing of its reactants (reactant-mol
+    indices; spec v9, "Resonance augmentation"): the parsimonious class with the drawing's B in
+    place of the drawn one. The drawn edit's product plays the part of R_data (the drawing
+    reaches it with `matrix_between`), and the structures that the members of the drawn
+    `label` reach from the drawing are candidates too: a drawing that differs far from the
+    reaction centre (a carboxylate written with its other O-) keeps the drawn class even
+    where RDKit's capped enumeration lacks the matching product structure."""
+    reached = []
+    for r in label.variants:
+        try:
+            reached.append(sanitize_product(apply_edit(drawing, r.to_edit())))
+        except ArrowApplyError:
+            continue
+    return _label(step, drawing, edit, matrix_between(drawing, edit.prod), tuple(reached))
 
 
 def to_global(label: EditLabel, global_atom: dict[int, int]) -> EditLabel | EditSkip:

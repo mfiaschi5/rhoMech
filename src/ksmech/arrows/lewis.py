@@ -5,7 +5,9 @@ The structure is the reactant side as drawn, in its Kekulé form: the edit label
 on it (`arrows.delta_be`). The token atoms are the QM record's, which carries every H as an
 atom; an H the drawing leaves implicit is bonded (order 1) to the record atom of its heavy atom.
 `reactant_lewis` gives the bonds (i < j, order), the lone pairs of every atom and the Wiberg
-index of every bond; `graph_distances` the bond-graph distances (-1 between molecules);
+index of every bond; `lewis_bonds` and `lewis_lone_pairs` the same for another resonance drawing
+of the side (`arrows.drawings`); `pair_bond_orders` the pair feature `bond_order` of the orbital
+pairs on a structure; `graph_distances` the bond-graph distances (-1 between molecules);
 `check_edit` whether every variant of an edit label is a valid edit of that structure and every
 anchor one the decoder's masks allow.
 """
@@ -13,6 +15,9 @@ anchor one the decoder's masks allow.
 from __future__ import annotations
 
 import numpy as np
+from rdkit import Chem
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import shortest_path
 
 from ksmech.arrows.apply import nonbonding_electrons
 from ksmech.arrows.delta_be import EditLabel, _order
@@ -25,11 +30,11 @@ class MissingBondIndex(ValueError):
     """A bond of the reactant has no Wiberg index in its fragment's sidecar."""
 
 
-def _drawn_bonds(rt: ReactantTokens) -> dict[tuple[int, int], int]:
+def _drawn_bonds(rt: ReactantTokens, mol: Chem.Mol) -> dict[tuple[int, int], int]:
     out = {}
-    for b in rt.mol.GetBonds():
+    for b in mol.GetBonds():
         i, j = rt.global_atom[b.GetBeginAtomIdx()], rt.global_atom[b.GetEndAtomIdx()]
-        out[(min(i, j), max(i, j))] = _order(rt.mol, b.GetBeginAtomIdx(), b.GetEndAtomIdx())
+        out[(min(i, j), max(i, j))] = _order(mol, b.GetBeginAtomIdx(), b.GetEndAtomIdx())
     return out
 
 
@@ -50,16 +55,30 @@ def _implicit_h_bonds(rt: ReactantTokens) -> dict[tuple[int, int], int]:
     return out
 
 
+def lewis_bonds(rt: ReactantTokens, mol: Chem.Mol | None = None) -> np.ndarray:
+    """(E, 3) int16 rows (i, j, order), i < j, on the global atoms of `rt`: the bonds of `mol`
+    (a drawing of `rt.mol` on its atom indices; `rt.mol` itself by default) and the single
+    bonds of the H atoms it leaves implicit."""
+    rows = {**_implicit_h_bonds(rt), **_drawn_bonds(rt, rt.mol if mol is None else mol)}
+    bonds = np.array([(i, j, o) for (i, j), o in sorted(rows.items())], dtype=np.int16)
+    return bonds.reshape(-1, 3)
+
+
+def lewis_lone_pairs(rt: ReactantTokens, mol: Chem.Mol | None = None) -> np.ndarray:
+    """(A,) int8 lone pairs of every global atom of `rt` in the drawing `mol` (`rt.mol` by
+    default); the implicit H atoms carry none."""
+    mol = rt.mol if mol is None else mol
+    lone = np.zeros(rt.n_atoms, dtype=np.int8)
+    for m, g in rt.global_atom.items():
+        lone[g] = nonbonding_electrons(mol.GetAtomWithIdx(m)) // 2
+    return lone
+
+
 def reactant_lewis(rt: ReactantTokens) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(bonds (E, 3) int16 rows (i, j, order) with i < j, lone pairs (A,) int8, Wiberg index
     (E,) float16 of every bond) on the global atoms of `rt`. Raises MissingBondIndex when a
     bond has no Wiberg index in its fragment's sidecar."""
-    rows = {**_implicit_h_bonds(rt), **_drawn_bonds(rt)}
-    bonds = np.array([(i, j, o) for (i, j), o in sorted(rows.items())], dtype=np.int16)
-    bonds = bonds.reshape(-1, 3)
-    lone = np.zeros(rt.n_atoms, dtype=np.int8)  # implicit H atoms carry none
-    for m, g in rt.global_atom.items():
-        lone[g] = nonbonding_electrons(rt.mol.GetAtomWithIdx(m)) // 2
+    bonds, lone = lewis_bonds(rt), lewis_lone_pairs(rt)
     wiberg = np.zeros(len(bonds), dtype=np.float16)
     for k, (i, j, _) in enumerate(bonds):
         w = rt.bond_index(int(i), int(j))
@@ -69,29 +88,44 @@ def reactant_lewis(rt: ReactantTokens) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return bonds, lone, wiberg
 
 
+def pair_bond_orders(
+    bonds: np.ndarray, incidence: np.ndarray, occupied: np.ndarray, n_atoms: int
+) -> np.ndarray:
+    """(n_occ, n_virt) float32 the pair feature `bond_order` on the structure `bonds`: the
+    largest bond order between a centre of the occupied token and a centre of the virtual one
+    (`physics.stage_a`, which reads it from the record's own Kekule structure). The centres are
+    the rows of `incidence` (orbital j, atom g, weight); atoms of two molecules share no bond."""
+    centre = np.zeros((len(occupied), n_atoms), dtype=np.float32)
+    centre[incidence[:, 0].astype(np.int64), incidence[:, 1].astype(np.int64)] = 1.0
+    order = np.zeros((n_atoms, n_atoms), dtype=np.int8)
+    i, j = bonds[:, 0].astype(np.int64), bonds[:, 1].astype(np.int64)
+    order[i, j] = order[j, i] = bonds[:, 2]
+    occ, virt = centre[occupied], centre[~occupied]
+    out = np.zeros((len(occ), len(virt)), dtype=np.float32)
+    for k in range(1, MAX_ORDER + 1):
+        out[occ @ (order >= k).astype(np.float32) @ virt.T > 0] = k
+    return out
+
+
 def graph_distances(bonds: np.ndarray, n_atoms: int) -> np.ndarray:
-    """(A, A) int16 bond-graph distances, -1 between atoms of different molecules."""
-    adj = np.zeros((n_atoms, n_atoms), dtype=np.uint8)
-    adj[bonds[:, 0], bonds[:, 1]] = adj[bonds[:, 1], bonds[:, 0]] = 1
-    dist = np.full((n_atoms, n_atoms), -1, dtype=np.int16)
-    np.fill_diagonal(dist, 0)
-    reached = np.eye(n_atoms, dtype=bool)
-    frontier, d = reached.copy(), 0
-    while frontier.any():
-        d += 1
-        frontier = ((frontier.astype(np.uint8) @ adj) > 0) & ~reached
-        dist[frontier] = d
-        reached |= frontier
-    return dist
+    """(A, A) int16 bond-graph distances, -1 between atoms of different molecules (breadth-first
+    search per atom: an integer matrix product per level took 0.8 s on a 411-atom pool)."""
+    i, j = bonds[:, 0].astype(np.int64), bonds[:, 1].astype(np.int64)
+    adj = csr_matrix((np.ones(len(i)), (i, j)), shape=(n_atoms, n_atoms))
+    d = shortest_path(adj, directed=False, unweighted=True)
+    return np.where(np.isfinite(d), d, -1).astype(np.int16)
 
 
 def check_edit(label: EditLabel, bonds: np.ndarray, lone_pairs: np.ndarray) -> str | None:
-    """Why `label` is not a valid edit of the structure (None when it is): every variant
+    """Why `label` is not a valid edit of the structure (None when it is): every variant is an
+    elementary step the decoder can write (NOT_ELEMENTARY, `ReactionMatrix.is_elementary`),
     conserves the electrons (CHARGE), keeps every bond order in [0, 3] (BOND_ORDER) and every
     lone-pair count non-negative (LONE_PAIRS); every forming anchor keeps its order at most 3
     and every breaking anchor is a bond (ANCHOR_MASK)."""
     order = {(int(i), int(j)): int(o) for i, j, o in bonds}
     for variant, anchors in zip(label.variants, label.anchors, strict=True):
+        if not variant.is_elementary():
+            return "NOT_ELEMENTARY"
         if sum(d for _, d in variant.lone) + 2 * sum(d for *_, d in variant.bonds) != 0:
             return "CHARGE"
         if any(not 0 <= order.get((i, j), 0) + d <= MAX_ORDER for i, j, d in variant.bonds):

@@ -10,7 +10,6 @@ dependencies = [
     "scipy",
     "pandas",
     "pyarrow",
-    "torch",
     "tblite",
     "morfeus-ml",
     "hydra-core",
@@ -34,6 +33,8 @@ ksmech-orbitals = "ksmech.orbitals.cli:main"
 ksmech-arrows = "ksmech.arrows.cli:main"
 ksmech-physics = "ksmech.physics.cli:main"
 ksmech-serve = "ksmech.serve.cli:main"
+ksmech-train = "ksmech.train.cli:main"
+ksmech-eval = "ksmech.eval.cli:main"
 
 [dependency-groups]
 dev = [
@@ -43,11 +44,35 @@ dev = [
     "pytest-xdist>=3.8.0",
     "httpx==0.28.1",
 ]
+# torch comes from one of two builds: ROCm (default here, AMD RX 6600 XT, run with
+# HSA_OVERRIDE_GFX_VERSION=10.3.0) or CUDA (NVIDIA hosts: uv sync --no-group rocm --group cuda).
+rocm = ["torch==2.14.1", "triton-rocm==3.8.0"]
+cuda = ["torch==2.14.1"]
 
 [tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+default-groups = ["dev", "rocm"]
+conflicts = [[{ group = "rocm" }, { group = "cuda" }]]
 # certifi (a dev-only transitive of httpx) resolved to 2026.10.19, released the day before; keep
 # the last release that is at least two weeks old
 constraint-dependencies = ["certifi<=2026.7.22"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-rocm", group = "rocm" },
+    { index = "pytorch-cu130", group = "cuda" },
+]
+triton-rocm = [{ index = "pytorch-rocm", group = "rocm" }]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [build-system]
 requires = ["uv_build>=0.12.16,<0.13.0"]

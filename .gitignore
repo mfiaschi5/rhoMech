@@ -37,3 +37,5 @@ apps/ui/public/vendor/
 apps/ui/test-results/
 apps/ui/playwright-report/
 apps/ui/.e2e-data/
+# Trained models (data/models/<source>/<run>/)
+data/models/

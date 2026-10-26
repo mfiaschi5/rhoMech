@@ -4826,3 +4826,618 @@ committed; the user kept two network views and all three step views.
   canonical pair in a two-level diagram.
 - The step type colour (substitution, addition, proton transfer, ...) in Pathways is a rough
   classification of the arrow reading for colour only, never a label.
+## 2026-10-25 — Training preparation: ROCm torch, the model, the trainer and the anchor floor (spec v9)
+
+- **Device (user decision).** Train on the AMD RX 6600 XT (8 GB, gfx1032) through ROCm, and
+  keep the CUDA path for NVIDIA cards.
+  - torch left the main dependencies for two conflicting uv groups:
+    - `rocm`, the default: torch 2.14.1+rocm7.2, with triton-rocm 3.8.0, from
+      download.pytorch.org/whl/rocm7.2. PyPI has only triton-rocm 3.0.0rc1, so the lock failed
+      until triton-rocm got the same index.
+    - `cuda`: cu130. An NVIDIA host runs `uv sync --no-group rocm --group cuda`.
+  - The lock covers linux x86_64 only (`tool.uv.environments`). The Windows fork failed on the
+    ROCm wheels.
+  - gfx1032 has no rocBLAS kernels of its own: run with HSA_OVERRIDE_GFX_VERSION=10.3.0 (the
+    gfx1030 kernels). Ollama on this host already ran ROCm 7.2 on the card that way.
+    `select_device` runs one small product, so a missing override fails at start with a hint
+    rather than mid-run.
+  - Mixed precision:
+    - ROCm: float16 with a GradScaler (RDNA2 has no fast bfloat16);
+    - CUDA: bfloat16 where supported;
+    - CPU: none.
+    - The attention logits, softmax and loss stay in float32.
+- **G^atom over the valid pairs (the user left it open; chosen here).** Eq. (Gatom) and the
+  pooled means of y_ij run over `pair_valid`:
+  - the store keeps no other cells, so pooling over all pairs would need the token files or a
+    schema bump;
+  - the donor's own antibond, which `pair_valid` drops, would inflate every bonded pair.
+  - The spec's equation now names the set.
+- **Model choices the spec leaves open** (`ksmech.model`):
+  - Token inputs are standardized with training statistics (`FeatureStats`, stored in every
+    checkpoint). A missing atom descriptor is 0 with its own flag.
+  - z enters the pair track on both cells of an (occupied, virtual) pair with an orientation
+    channel, so a virtual token's attention also sees its donors. Further channels: the centre
+    weight between an orbital and its atoms, and a one-hot pair kind (the spec's pair-track
+    paragraph now lists them).
+  - MLP_U has hidden width d_p, its first layer split over [p_ij, h_i, h_j].
+  - Each encoder layer, and MLP_P, is recomputed in the backward pass (`checkpoint`):
+    activation memory becomes about one layer's.
+  - The decoder reads the symmetrized atom-pair vectors (p_ij + p_ji) / 2, since R is
+    symmetric. The anchor context c holds:
+    - h_a + h_b;
+    - the sum of the pair vectors joining the entry's atoms to a and b;
+    - an embedding of the graph distances of i and j to the nearer anchor atom (0..6; 7 for
+      another molecule), as an unordered pair.
+  - y_ij = pooled standardized means (11), log1p(pooled weight), asinh(G^atom), WBI.
+  - The stop head is built after all (the entry "Three encoders behind one interface, and the
+    stop head", below); lambda_stop = 0 on PMechDB, which has no stop labels.
+- **Loss.** The exact marginal over the class variants and their admissible anchors (one
+  logsumexp per sample over the (variant, anchor) rows). A test recomputes it for every sample
+  with a Python loop over all entries. The anchor-only NLL and the greedy R (top anchor,
+  argmax entries, no beam) are reported beside it.
+- **Batches by a cell budget** (`train.batching`):
+  - Samples are pooled by 1,024, sorted by size inside a pool, and packed while
+    B x (N_max + 1)^2 <= `--cell-budget`; the batches are then shuffled. The order depends only
+    on (seed, epoch).
+  - Samples over `--max-tokens` (default 1,024) are skipped as TOO_LARGE and counted in
+    `run.json` and in every metrics line.
+- **Loader.**
+  - `lewis.graph_distances` is a breadth-first search (scipy csgraph). The integer matrix
+    product per level took about 0.8 s per collation of the 411-atom pool; the search takes
+    9 ms.
+  - The DataLoader workers fork, so the 4.4 GB of loaded training samples are shared. Spawned
+    workers would each reload them for 163 s.
+- **Distances.** `torch.cdist`'s matrix-product form lost about 2e-3 A near zero distance once
+  the molecule sat away from the origin; the rotation-invariance test caught it. The pair
+  channels use the direct difference.
+- **Physics floor** (`ksmech-eval floor`, molecule split). Each candidate pair is proposed
+  once, with the sign form when its order may rise and break otherwise.
+
+  | part | n | top-1 | top-3 | top-5 | median rank | unreachable |
+  |---|---|---|---|---|---|---|
+  | val | 1,239 | 15.2% | 25.8% | 30.8% | 26 | 39 |
+  | test | 1,182 | 17.1% | 27.2% | 31.5% | 26 | 77 |
+
+  `unreachable` counts steps whose only admissible anchors break a bond that could also form;
+  the floor never proposes them. These are anchor accuracies over atom pairs and cannot be
+  compared with the orbital-pair rankers of the first arrow (G 20.4% top-1), which rank
+  another candidate set.
+- **On the card (RX 6600 XT, ROCm 7.2, gfx1030 kernels).**
+  - Matrix products run at 5.6 TFLOPS in float32 and 8.0 in float16.
+  - Without the override, `torch.cuda.is_available()` is True but the first kernel segfaults
+    (exit 139), which no exception handler catches. So `ksmech-train` sets
+    HSA_OVERRIDE_GFX_VERSION=10.3.0 itself (`train.loop.rocm_override`), but only when:
+    - the build is ROCm;
+    - the variable is unset;
+    - a KFD node reports an RDNA2 target without kernels (gfx_target_version 100301-100306;
+      this card is 100302).
+- **Memory and speed, default model** (7.34 M parameters, d = 256, d_p = 64, L = 8, H = 8,
+  float16, per-layer recomputation). Molecule split, 9,994 training samples. 3 samples are
+  over 1,024 tokens and skipped as TOO_LARGE; the largest kept has 966 tokens (935k cells).
+
+  | cell budget | batches / epoch | peak, fullest batch | epoch (12-batch estimate) |
+  |---|---|---|---|
+  | 1.0 M | 460 | 3.2 GiB | ~7.7 min |
+  | 1.6 M | 319 | 4.9 GiB | ~6.7 min |
+  | 2.4 M | 248 | 7.1 GiB | ~4.9 min |
+
+  - From 1.6 M up the caching allocator logged failed allocations and retried; 2.4 M sits at
+    the 8 GiB limit.
+  - The default `--cell-budget` is 1.1 M: about 7.5 min per epoch, about 4 h for 30 epochs.
+- **Gradient scaler.** float16 starts at a scale of 2^10. At the default 2^16, the first
+  losses (~700 nats, a sum over every entry) overflowed the first ten backward passes, and
+  those steps were skipped.
+- **Smoke run** (`--limit 256 --epochs 2`). The forked loader workers, validation,
+  `metrics.jsonl`, `last.pt` / `best.pt` with provenance and the `step n / total` log all ran
+  on the card. A real run should start from a committed tree: `load_model` refuses a checkpoint
+  trained from a dirty one.
+
+## 2026-10-25 — Three encoders behind one interface, and the stop head (spec v9)
+
+- **One interface (user decision: keep the dense model, add flex and sparse).** The encoder is
+  `ModelConfig.encoder` (`--encoder dense|flex|sparse`, default `dense`). Every encoder takes
+  the same prepared inputs: the token inputs, z-hat and its defined flags. It returns:
+  - the token vectors (B, N + 1, d);
+  - the atom-pair vectors (B, A, A, d_p);
+  - a dict of auxiliary losses, which the trainer adds to the loss.
+
+  The decoder, the loss and the metrics are shared.
+  - `dense` is spec v9 with its pair track.
+  - `flex` and `sparse` keep no pair state. Their decoder input comes from `AtomPairHead`: a
+    linear map of the static atom-pair channels, plus h_a * h_b and h_a + h_b, then GELU to
+    d_p. The channels are RBF times the same-fragment flag, bonded, order, capped graph
+    distance, Wiberg index and the same-fragment flag.
+- **flex** (`model.flex`, FlexAttention). Each layer and head adds a learned bias, linear in
+  the pair features, inside `score_mod`:
+  - a radial function of the distance, within a fragment;
+  - on atom pairs, tables over bond order and graph distance, and a Wiberg weight;
+  - a same-fragment weight;
+  - z on the (occupied, virtual) cells, projected per head. This (B, R, C, H) block is the
+    only one materialized.
+
+  Padding is a block mask.
+  - *Tabulated radial function.* FlexAttention cannot index a tensor that requires gradients
+    more than once in a `score_mod`, and the 32-term sum over the RBF weights did. So each
+    head's sum_k w_hk RBF_k(d) is tabulated from the weights, 50 points per A up to 10 A, and
+    interpolated linearly from two tensors (the lower and the upper neighbour of each bin). The
+    table is built from the weights, so it stays differentiable.
+  - *An integer grid constant.* FlexAttention is compiled with dynamic shapes, one compile for
+    every batch shape. Under it, dynamo traced the float grid step 0.02 as a symbolic float, and
+    Inductor failed to lower the `score_mod` (`LoweringException: unbacked_bindings`).
+    - A term-by-term bisect showed that only the radial term failed. Every term passed with
+      `dynamic=False`, but then every new batch shape would recompile.
+    - The grid is now 50 bins per A, an int, and it compiles.
+  - *GPU only.* FlexAttention has no backward on the CPU. `FlexBias.dense` builds the same bias
+    as a (B, H, N + 1, N + 1) tensor for SDPA. It is a test oracle, not a training path (user:
+    "use only gpu"). The test compares, on the card, the outputs and the gradient of every
+    encoder parameter between the kernel and the reference.
+- **sparse** (`model.sparse`, after DeepSeek Sparse Attention). It selects single tokens, not
+  blocks, since the tokens are a set with no order.
+  - An indexer scores every key: I_ij = sum_h w_ih ReLU(q_ih . k_j), 4 heads of width 32, on
+    the token vectors detached. Each query attends to MECH, itself and its top-64 other real
+    keys.
+  - The pair bias is MLP_P of `inputs.pair_channels_at` on the selected cells only, projected
+    per head. These are the dense track's input channels, computed per cell, so no N^2 tensor
+    is built.
+  - The indexer is trained only by KL(main attention, averaged over heads and detached ||
+    indexer softmax over the same keys), returned as the auxiliary loss `indexer_kl`.
+  - *Dense warm-up.* During the LR warm-up (the first `--warmup` steps) the attention runs over
+    every key, with the bias on the full grid, and the indexer learns from it. Validation runs
+    in the mode of the last training step. With k >= N the two paths agree (a test).
+  - *Per-query copies of the small tables.* The first flex run took 7.6 s per batch, against
+    0.9 s for dense; its backward took 1.2-3.1 s against a 0.1 s forward. The term-by-term
+    timing on the card (6 batches with N >= 128) gave these backward times:
+
+    | score_mod term | backward |
+    |---|---|
+    | none | 0.09 s |
+    | radial table | 0.32 s |
+    | order, distance, Wiberg and fragment tables, read directly | 2.28 s |
+    | the same, one copy per (sample, head, query) | 0.30 s |
+    | z | 0.12 s |
+
+    - Read directly, every cell of a head adds its gradient to the same few addresses, and the
+      atomic adds serialize.
+    - The four small tables are now copied per (sample, head, query). That is
+      B x H x N x 14 numbers, and the copies' backward is a plain sum.
+    - The radial table gained little from copies (0.32 s to 0.26 s) and would cost
+      B x H x N x 500 numbers, so it is read directly.
+  - *Compiled variants.* Each of these compiles its own variant, 60-100 s on the card on a cold
+    Inductor cache: a batch of one, fewer than 128 queries (FlexAttention's decoding kernel),
+    and the forward without gradient used in validation.
+    - That makes 8 variants, dynamo's default limit; past it, dynamo would fall back to the slow
+      eager path. `compiled_flex` raises the limit to 16.
+    - A probe run hit 5 variants.
+- **Trainer wiring.** `train_epoch` adds the auxiliary losses and passes
+  `dense_warmup = step < --warmup`. Validation reports the same metrics for every encoder.
+- **Memory and speed per encoder** (default sizes, d = 256, L = 8, H = 8; float16, per-layer
+  recomputation, the stop head included). Molecule split, `--cell-budget` 1.1 M (425 batches
+  per epoch). The fullest batch is B = 24, N = 213. The time per batch is the mean of 12
+  random batches after the compiles.
+
+  | encoder | parameters | peak, fullest batch | s / batch | epoch |
+  |---|---|---|---|---|
+  | dense | 7.37 M | 3.14 GiB | 0.87 | ~6.2 min |
+  | flex | 7.11 M | 0.59 GiB | 0.54 | ~3.8 min |
+  | sparse, top-64 | 7.52 M | 1.23 GiB | 0.70 | ~5.0 min |
+  | sparse, dense warm-up | 7.52 M | 1.34 GiB | 0.52 | ~3.7 min |
+
+  - At PMechDB's sizes a query has a few hundred keys, so the top-64 selection saves memory,
+    not time. Its gathers cost more than the dense product.
+  - Flex adds the one-off compiles (above) to each run.
+- **The stop head (user request relayed by the review session; spec, "Stop head").** It
+  replaces "the stop head is not built" in the entry above.
+  - P(END_MECH) = sigmoid(MLP(h_MECH)). The MLP is d to `decoder_hidden` to 1, in
+    `EditDecoder`, so every encoder shares it.
+  - L = L_step + lambda_stop BCE, masked per sample. The optional batch key `stop_label` (B,)
+    is 1 when the mechanism ends after the step, 0 when it goes on, and -1 when unknown.
+  - The masked samples' targets are clamped to 0 before the BCE. Otherwise a NaN target would
+    leak a NaN gradient through the mask.
+  - lambda_stop is `--stop-weight`. Below 0 (the default) the source decides: 0.5, or 0 on
+    PMechDB, whose steps are isolated.
+  - With no label in the batch, or lambda_stop = 0, the term is not added, so the loss equals
+    L_step bit for bit (a test). A hand-computed case and a masked batch are tested too.
+  - P(END_MECH) is returned in the loss parts (`p_stop`). Its validation mean is `val_p_stop`
+    in `metrics.jsonl`.
+  - No source has stop labels yet. The sample store and `collate_samples` get the field with
+    the first source that has pathways.
+- **Smoke runs on the card**, one per encoder (`--limit 256 --epochs 2 --warmup 5`, so the
+  sparse encoder leaves its dense warm-up). Each ran training, validation, `metrics.jsonl`
+  (with `val_p_stop`), `last.pt` / `best.pt` and the log, with lambda_stop resolved to 0.
+  - Wall time was about 100 s each, mostly loading the samples; flex took 207 s with its
+    compiles. Peak RSS was 6 GB.
+  - The run directories were deleted.
+
+## 2026-10-26 — The anchor NLL counts an anchor once, however many variants share it
+
+- `anchor_nll` (and so `val_anchor_nll`) is -log P(any admissible anchor). `step_loss` took the
+  logsumexp over the (variant, anchor) rows, so an anchor that several variants of the label
+  class share was counted once per variant. Its probability could then add up past 1, and one
+  logged step of the first flex run showed an anchor NLL of -0.045.
+- The rows are now deduplicated on (sample, i, j, sign) for this metric only. The loss keeps one
+  path per (variant, anchor), since each path is a different R. A hand-computed test with two
+  variants on one anchor gives -log 1/5 (it gave -log 2/5 before).
+- Nothing else read it: the top-k ranks take the best anchor, and `best.pt` is chosen by
+  top-1, then by the loss. The run `flex_first` (pod, code 7b090cb) logged `val_anchor_nll` the
+  old way, slightly low wherever variants share an anchor.
+
+## 2026-10-26 — The first run: flex on the molecule split, on a RunPod RTX 3090 Ti
+
+- **Run (user decision: flex first, on a pod).** `ksmech-train fit --run flex_first --encoder
+  flex` with every default:
+  - 30 epochs, cell budget 1.1 M, batches of at most 64;
+  - AdamW at 3e-4 with weight decay 0.01, 2,000 warm-up steps, gradient clip 1;
+  - bfloat16 on CUDA.
+
+  The model has 7.11 M parameters. 9,994 training samples (3 skipped as TOO_LARGE) and 1,239
+  validation samples make 12,750 steps.
+  - Code 7b090cb, a clean clone on the pod, so the run's provenance is clean.
+  - The run directory is copied back to `data/models/pmechdb/flex_first/`, with the pod's
+    stdout as `stdout.log`; `load_model` reads `best.pt` here.
+- **Speed.** The RTX 3090 Ti (24 GB, driver 580.65, the cu130 build) ran 27 min wall for the
+  30 epochs.
+  - About 48 s of training per epoch at about 220 samples/s, plus a few seconds of validation.
+  - The first epoch took 111 s, of which about 60 s was the FlexAttention compiles.
+  - GPU memory stayed at 3.3 GB.
+  - On the RX 6600 XT the probe estimated 3.8 min per epoch, so this is about 4.7 times
+    faster.
+- **Validation per epoch** (anchor top-k over the candidate atom pairs with set
+  marginalization; R exact = the greedy R is a variant of the label class). The physics floor
+  is 15.2 / 25.8 / 30.8% (top-1 / 3 / 5).
+
+  | epoch | top-1 | top-3 | top-5 | R exact | val loss | train loss |
+  |---|---|---|---|---|---|---|
+  | 1 | 27.8% | 47.9% | 57.9% | 14.7% | 7.93 | 126.66 |
+  | 2 | 40.8% | 60.6% | 69.5% | 23.0% | 5.60 | 8.51 |
+  | 3 | 44.1% | 64.5% | 73.7% | 28.2% | 5.23 | 5.92 |
+  | 4 | 38.3% | 62.7% | 73.2% | 25.2% | 5.15 | 4.77 |
+  | 5 | 46.5% | 70.7% | 79.3% | 36.2% | 3.82 | 3.92 |
+  | 6 | 50.1% | 71.7% | 81.0% | 40.7% | 3.72 | 3.14 |
+  | 7 | 50.3% | 72.5% | 81.4% | 41.5% | 3.37 | 2.59 |
+  | 8 | 53.2% | 74.0% | 82.1% | 46.7% | 3.33 | 2.19 |
+  | 9 | 54.8% | 77.8% | 86.4% | 44.6% | 2.85 | 1.89 |
+  | 10 | 50.9% | 73.8% | 80.1% | 44.5% | 3.37 | 1.60 |
+  | 11 | 57.1% | 78.0% | 84.1% | 49.6% | 2.74 | 1.45 |
+  | 12 | 55.7% | 75.8% | 83.1% | 49.6% | 2.85 | 1.20 |
+  | 13 | 57.0% | 78.2% | 87.2% | 49.2% | 2.87 | 1.11 |
+  | 14 | 57.1% | 76.6% | 86.5% | 51.8% | 3.02 | 0.90 |
+  | 15 | 55.3% | 77.6% | 88.5% | 49.9% | 2.81 | 0.81 |
+  | 16 | 56.7% | 75.0% | 85.6% | 50.9% | 3.04 | 0.67 |
+  | 17 | 56.4% | 80.5% | 87.3% | 50.6% | 2.97 | 0.61 |
+  | 18 | 57.7% | 77.3% | 87.3% | 52.3% | 2.79 | 0.54 |
+  | 19 | 57.0% | 80.7% | 87.2% | 51.7% | 2.99 | 0.43 |
+  | 20 (best) | **60.9%** | **79.9%** | **87.3%** | **55.6%** | 2.93 | 0.40 |
+  | 21 | 58.2% | 79.7% | 86.3% | 53.3% | 3.25 | 0.34 |
+  | 22 | 58.4% | 79.3% | 86.4% | 52.9% | 3.30 | 0.31 |
+  | 23 | 59.0% | 80.3% | 86.8% | 53.8% | 3.41 | 0.26 |
+  | 24 | 58.8% | 78.5% | 86.4% | 53.8% | 3.53 | 0.23 |
+  | 25 | 58.8% | 79.3% | 86.4% | 53.4% | 3.77 | 0.20 |
+  | 26 | 59.2% | 79.6% | 86.0% | 53.8% | 3.89 | 0.19 |
+  | 27 | 59.6% | 79.3% | 85.7% | 54.6% | 4.13 | 0.17 |
+  | 28 | 58.6% | 79.0% | 85.5% | 53.4% | 4.29 | 0.16 |
+  | 29 | 58.6% | 79.0% | 85.6% | 53.8% | 4.36 | 0.15 |
+  | 30 | 58.7% | 78.8% | 85.7% | 53.8% | 4.37 | 0.14 |
+
+  - The dip at epoch 4 is the end of the warm-up, when the LR reaches its peak.
+  - The `val_anchor_nll` of this run uses the old definition (the entry above), so it reads
+    slightly low; it is left out of the table.
+- **It overfits from about epoch 11.**
+  - Validation loss is lowest at epoch 11 (2.74) and climbs to 4.37 by epoch 30, while the
+    training loss falls to 0.14.
+  - Top-1 still rises to 60.9% at epoch 20, then stays at 58-59%.
+  - `best.pt` is epoch 20 (by top-1, then loss).
+  - The next levers, none decided yet: the resonance augmentation (user decision: after a first
+    run), a shorter schedule or stopping on validation loss, and regularization. The model has
+    no dropout.
+  - The test split is not evaluated yet.
+- **Pod lessons.**
+  - *Check CUDA first.* Two RTX 3080 Ti pods, very likely the same host (same bus id), had
+    CUDA broken at host level: `nvidia-smi` fine, `cuInit` 999, `/dev/nvidia-uvm` failing to
+    open with EIO. That needs a host reboot, so the fix was another machine. On a new pod,
+    open `/dev/nvidia-uvm` and call `cuInit` before installing anything.
+  - *RunPod's proxy SSH* (`<pod>@ssh.runpod.io`) takes only PTY sessions. Commands work with
+    `ssh -tt` and stdin; scp and rsync do not. base64 through the PTY moved 18 KiB/s. Data
+    needs "SSH over exposed TCP".
+  - *uv on a CUDA host.* `uv run` re-synced to the default `rocm` group and began
+    reinstalling the ROCm build. `UV_NO_SYNC=1` after the CUDA sync (README, CLAUDE.md).
+  - *Threads on a 112-core host.* The unit suite with `-n 32` reached a load of 120 (each
+    worker's BLAS threads) and was stopped halfway. The run capped OMP, OpenBLAS and MKL at 8
+    threads.
+- **Transfer lessons.**
+  - *What the pod needs.* A run needs 20,642 files, 3.2 GiB:
+    - the views, split file, steps parquet and the 49 shards, 0.53 GB;
+    - 10,293 token files, 2.75 GB;
+    - 10,293 bond-index files, 16 MB.
+
+    The loaders verify every shard's inputs, so the token files must travel although training
+    reads only the shards.
+  - *Not through GitHub's public repo.* `rhoMech` is public, so the data went to a private
+    `rhoMech-data` repo, pushed with the account key and cloned on the pod with a read-only
+    deploy key, removed from the pod after use. GitHub refuses a deploy key that is already an
+    account key; "Hi user!" (account) against "Hi user/repo!" (deploy key) tells which.
+  - *Rates.*
+    - Uploads from here reached GitHub at 1.9 MB/s.
+    - The route to the pod's datacenter (RTT 135 ms, about 0.7% retransmissions) collapsed
+      each TCP stream to a congestion window of 2-3 packets. One rsync gave 0.8-1.4 MB/s,
+      four 1.8 MB/s at first and 0.13 MB/s once the losses grew, sixteen 0.39 MB/s.
+    - GitHub to the pod was just as lossy for one connection (0.3 MB/s). Eight parallel
+      partial clones (`--filter=blob:none` and a sparse checkout per eighth of the missing
+      files) reached 2.5 MB/s.
+    - In the end the direct rsync supplied 1.5 GB, and GitHub the remaining 1.7 GB (one push
+      of the missing tokens on top of the views and shards).
+  - Left to clean up: the private `rhoMech-data` repo and the 3.2 GB staging repository
+    `/home/jacopo/Documents/rhoMech-data-push.git`.
+
+## 2026-10-26 — Resonance augmentation: each pool drawn in its resonance forms, the label recomputed (schema 16)
+
+- **Why.** The formal charges of the atom tokens, the matrix B on which R is decoded and the
+  pair feature `bond_order` belong to one drawing of the reactant pool, while the wavefunction
+  does not. Without augmentation the model learns the dataset's choice of drawing (spec v9,
+  "Resonance augmentation"; user decision 2026-10-25: after a first run).
+- **Which forms (user decision).** A molecule is drawn in its resonance forms
+  (`resonance_forms`: H frozen, odd structures dropped) with no more formal charges (the sum
+  of |q|) than the molecule as drawn: an enolate's charge on C or O, a carboxylate's on either
+  O, the positions of a benzyl or allyl ion. The charge-separated minor forms are never drawn.
+  - On 600 random training steps (1,369 reactant molecules, 875 distinct), RDKit returns 50 or
+    more structures for 76 molecules, nearly all charge-separated, so uniform draws over every
+    form would mostly be zwitterions.
+  - With the charge rule, 18% of the molecules have another form, mostly 2 or 3.
+  - The drawn form had the fewest charges in all but one molecule.
+- **What follows the drawing** (`arrows.drawings`, `MechanismSample.drawn(k)`):
+  - the formal charge of every atom token;
+  - the bond orders, hence the decoder masks `can_break` and `can_form`;
+  - the lone pairs, hence `can_lose_pair`;
+  - the pair feature `bond_order`;
+  - the label class.
+
+  The sigma bonds, H counts, Wiberg indices, graph distances and every orbital token are
+  shared by all drawings.
+- **`bond_order` is read on the drawn B, for the dataset's drawing too** (`lewis.pair_bond_orders`,
+  in `reactant_sample`). It used to be read on the QM record's own Kekulé structure (RDKit's
+  kekulization of the aromatic cache key), which differed from the drawn B in 94 of 398
+  sampled steps. The textbook samples get the same rule.
+- **The label of a drawing** (`delta_be.drawn_label`). It is the parsimonious class of the spec
+  with the drawing's B in place of the drawn one, built as for the drawn step. The candidates
+  are:
+  - the product's resonance forms, enumerated once per step;
+  - the drawn edit's product, which the drawing reaches with `matrix_between` (it plays the
+    part of R_data and always passes);
+  - the structures that the drawn label's members reach from the drawing. A drawing that
+    differs far from the reaction centre then keeps the drawn class, even where the capped
+    enumeration lacks the matching product structure.
+- **Each form keeps the drawn Kekulé structure wherever it can** (`kekule_closest`).
+  - RDKit's structure of a delocalized cation also swaps rings the charge never reaches: in
+    three of the four forms of a 3-phenylbenzyl cation it swaps the phenyl, and in a trityl
+    cation it swaps the two other rings.
+  - The label then has to swap them back. On 398 sampled steps the label of a drawing grew by
+    up to 24 entries.
+  - A swap is an alternating cycle of ±1 pi-bond changes. Undoing it keeps every atom's bond
+    total, charge and lone pairs, so the structure stays valid (`without_kekule_cycles`;
+    bonds that form or break never take part, so a Diels-Alder ring is not undone).
+  - After the fix a drawing's label differs from the drawn one by -4 to +14 entries. The
+    largest are real: a cation drawn in the far ring of a naphthalene has to come back.
+- **Not used on the label candidates.** Undoing Kekulé cycles in RDKit's product structures
+  would change 22 of 1,000 dataset labels.
+  - 8 gain an equal-cost member.
+  - 14 are replaced by a smaller label, mostly an iminium (C=N+) written as its carbocation
+    form (C+ next to a neutral N), which has as many formal charges and two entries fewer.
+  - The label's cost (formal charges, then entries) cannot tell a sextet from an octet. Today
+    those steps keep the iminium only because RDKit's carbocation structure carries a ring
+    swap. That is left as it is, and it is an open question whether the cost should prefer full
+    octets.
+- **How many drawings.** Up to 8 per sample (`MAX_DRAWINGS`), the dataset's own included:
+  every combination of one form per molecule when there are no more, else 7 random ones, the
+  generator seeded by the step id, so a build is reproducible. A drawing whose label cannot
+  be recomputed or fails `check_edit` is dropped and counted (`drawing_skips`, the
+  `drawings` block of the reports).
+- **Measured** on 398 random training steps (`sample_for_step` on the token cache):
+  - 132 samples (33%) have other drawings, 274 in all.
+  - Drawings per sample 1 / 2 / 3 / 4 / 5 / 6 / 8: 266 / 75 / 18 / 21 / 4 / 7 / 7.
+  - None was dropped.
+  - Label size, drawing minus drawn: 0 in 120 drawings, +2 in 66, +4 in 31, -2 in 30, +6 in 16,
+    and 11 others between -4 and +14.
+  - Building a sample took 0.38 s per step (p95 1.6 s, max 4.5 s).
+- **Schema 16** (`SAMPLE_VERSION`). A sample stores its drawings as stacked int8 arrays
+  (`drawing_charges`, `drawing_orders`, `drawing_lone_pairs`) with their labels in the JSON.
+  The two fields kept only for schema 15, `pair_contact_sites` and `atom_coulomb`, are gone.
+- **Training** (`--resonance-draws`, on by default).
+  - Each epoch every training sample is drawn in a uniformly random one of its drawings, from
+    the seed and the epoch.
+  - The choice is made in the batch sampler, in the main process, so persistent DataLoader
+    workers see each epoch's draw.
+  - Validation and test always read the dataset's drawing.
+- **Resonance pairs: later (user decision).** The 471 pairs need a consistency term of their
+  own, since they have no step label. They wait until a run with the augmentation shows
+  whether drawing invariance is still lacking.
+- **Rebuild** (code d172272, 14 workers, 590 s, store 1.2 GB).
+  - 12,418 samples from 12,464 training steps, 46 skipped as MISSING_TOKENS, as before.
+  - The dataset's label classes are unchanged: 11,733 / 619 / 59 / 7.
+  - 3,622 samples (29%) have other drawings, 7,864 in all, and none was dropped.
+  - Drawings per sample 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8: 8,796 / 1,932 / 636 / 474 / 136 / 201
+    / 12 / 231.
+  - In `molecule_train`, 3,111 of 9,997 samples have other drawings, 6,955 in all.
+- **Downstream, re-run on the new samples.**
+  - *Anchor floor:* unchanged, val 15.2 / 25.8 / 30.8% and test 17.1 / 27.2 / 31.5%. It reads
+    the dataset's drawing and no bond order.
+  - *LightGBM,* `--n-jobs 2` as before. The only input change is `bond_order` read on the
+    drawn B.
+
+    | split, part | top-1 / 3 / 5 before | after | trees before | after |
+    |---|---|---|---|---|
+    | molecule val | 44.1 / 60.5 / 69.6% | 44.1 / 62.0 / 70.8% | 467 | 638 |
+    | molecule test | 46.6 / 67.0 / 73.8% | 48.8 / 67.7 / 75.1% | | |
+    | scaffold val | 40.3 / 59.9 / 69.7% | 40.8 / 58.2 / 68.3% | 1,273 | 1,202 |
+    | scaffold test | 45.3 / 64.7 / 75.6% | 45.1 / 66.1 / 75.2% | | |
+
+    Loading the samples took 72 s instead of 300 s.
+  - *Textbook* (expected pair in the top 3): untrained gap kernel 3 / 5; the molecule model
+    2 / 2 on the cases it did not see; the textbook-held-out model 4 / 5.
+  - The `predict` worktree's server checks its LightGBM model against these files, so it saw
+    the model as stale between the sample build and the `gbdt` run.
+- **Smoke runs** (`--limit 64 --epochs 2`, RX 6600 XT).
+  - 17 of the 64 training samples have other drawings, 40 in all.
+  - Dense: training loss 48.8 to 36.2, validation loss 39.8 to 24.4.
+  - Flex in float16 overflows in its first steps (`grad inf` or `nan`, losses in the
+    thousands, steps skipped by the scaler). It does the same without the draws: validation
+    loss 516.96 after the first epoch in both, 19.46 against 19.51 after the second. So this
+    is the float16 start of the flex encoder, not the augmentation. The pod trains in
+    bfloat16.
+- **To do.** Push the schema-16 views and shards to `rhoMech-data` before a pod run; then a
+  full run with the augmentation.
+
+## 2026-10-26 — A drawing's label must be an elementary step (the first augmented run crashed)
+
+- **What happened.** `flex_resonance` on a RunPod RTX 5080 crashed early in its second epoch
+  with a CUDA device-side assert: an index out of range in the gather of `_entry_sums` (the
+  loss). The first epoch had ended with val top-1 31.2%.
+- **Why.** The label of a resonance drawing can change a bond order by 2: a drawing with a
+  triple bond that the product needs single (pmechdb-023f2470184b934b: one bond -2). The
+  decoder writes {-1, 0, +1} per pair and {-2, 0, +2} per atom, so `r_pairs + 1` indexed
+  outside the three classes.
+  - `check_edit` checked conservation and ranges, not this.
+  - 5 of the 7,864 drawings of the schema-16 store have such a class (2 in `molecule_train`).
+    None of the dataset's own labels has.
+  - The first epoch drew neither of the two; the second drew one.
+- **Fix.**
+  - A class holds only elementary steps (`ReactionMatrix.is_elementary`: every bond order
+    changes by 1, every atom's non-bonding electrons by 2), at the cheapest level that has one.
+    R_data is always accepted only when it is elementary. A class left empty is
+    NOT_ELEMENTARY: the drawing is dropped and counted, or the step is skipped.
+  - `check_edit` refuses a non-elementary variant (NOT_ELEMENTARY), so no sample or drawing
+    reaches the decoder with one.
+  - The trainer drops such drawings from a store built before this
+    (`drop_undecodable_drawings`), logs each one, and counts them in the run's `skipped`. So
+    the schema-16 store, here and on `rhoMech-data`, needs no rebuild. The next rebuild drops
+    them at the source.
+
+## 2026-10-26 — QMugs for encoder pretraining: GFN2-xTB single points at its own geometries
+
+- **Why.** The spec names QMugs for encoder pretraining. The tokens are built from the GFN2-xTB
+  wavefunction (S, C, the orbital energies, the N+-1 charges for the Fukui features), and no
+  public dataset found ships GFN2 matrices. QMugs has GFN2-optimized geometries, GFN2 and DFT
+  properties, and DFT wavefunctions.
+  - The survey: QMugs, nablaDFT, QCML, OMol25, SPICE, GEOM, PubChemQC, QM7-X, Transition1x and
+    Halo8.
+  - User decision: download QMugs and run single points at its geometries, not new
+    optimizations.
+- **Data.** Downloaded `summary.csv` and `structures.tar.gz` (9.2 GB, sha256 in
+  `data/raw/qmugs/SHA256SUMS`). The 7 TB of wavefunctions were not downloaded. The layout and
+  the SD tags are in `docs/data_schema.md` ("QMugs").
+  - 664,303 molecules, 20,350 with a charge in their SMILES.
+  - Median 30 heavy atoms, at most 100.
+- **Method** (`QMConfig(given_geometry=True)`, `qm.given`, `ksmech-qm qmugs`).
+  - The QMugs geometry is taken as it is; a bond of the Lewis structure stretched past 1.3
+    times the covalent radii is CONNECTIVITY_CHANGED.
+  - Then the same single point in ALPB water as the PMechDB records, the N+-1 Fukui and %Vbur.
+  - The method string is `GFN2-xTB/ALPB-water/given`, so these records never share a key with
+    optimized ones. They have their own cache, `data/cache/qmugs/qm`.
+  - The molfile's atoms are put in the record order of the canonical SMILES with the
+    reactants' `record_correspondence`.
+  - QMugs's energies are gas-phase (CHEMBL1: -117.4268 Ha, against -117.4473 Ha in ALPB water
+    here). Its geometries are therefore gas-phase minima, not ALPB ones; the electronic
+    structure is in water like PMechDB's.
+- **Pilot** (500 conformers, 14 workers, from an uncommitted tree, deleted afterwards).
+  - 500 / 500 ok, no warnings.
+  - 3.9 s per conformer on one thread (median; p95 9.8 s, max 39 s), so 2.94 conformers/s
+    with 14 workers.
+  - 564 KB per record.
+- **Scope (user decision).** Conformer 0 of the first 100,000 molecules in archive order
+  (ChEMBL ids sorted as strings): about 56 GB and 9.5 h here. Kept local.
+  - All 664k would be about 375 GB as records are now, or about 186 GB without `H_core` (read
+    by nothing downstream) and `fock` (rebuilt from S, C and the orbital energies). 93 GB were
+    free here.
+  - GitHub takes 2 GB per push and wants repositories under 5 GB, so later only compact
+    pretraining samples, or a subset, can go to `rhoMech-data`.
+- **Code.**
+  - `batch.execute` runs any worker on the spawned pool (the QMugs driver reuses it).
+  - Two new reason codes: SDF_UNREADABLE and RECORD_ORDER.
+- **Not settled yet.** The pretraining objective (the spec does not define one). The QMugs
+  path for tokens and bond indices: `ksmech-orbitals build` and `ksmech-qm bond-index` read
+  the molecules of a steps parquet and the main cache.
+
+## 2026-10-26 — Label classes closed under the pool's symmetry; a tie no longer counts as a hit (schema 17)
+
+- **Why (the analysis of the ~60% top-1 plateau).** Per-sample predictions of
+  `flex_resonance/best.pt` (val top-1 63.4% in training) and `flex_first/best.pt` on the 1,239
+  molecule-split val samples:
+  - In 267 val samples (21.5%) the label names one of several atoms that are equivalent by
+    symmetry: one H of H3O+, of a CH3 or of an NH3+, an atom of either of two identical molecules.
+    A dataset step names its atoms by atom maps; the model reads the pool. The equivalence was
+    checked with real automorphisms of the pool graph (96 of 99 rank-based calls confirmed; the
+    other 3 hit the enumeration cap).
+  - The model learns the symmetry: it gives each of the three H of H3O+ P = 0.34. So top-1 on
+    those samples is a coin toss: 18% in float32, against 71% on the other samples. In 99 of the
+    505 wrong val answers the top-1 is an equivalent atom. Counted up to symmetry, top-1 is 67.2%.
+    The loss also keeps a floor of log k on such samples, in training as well.
+  - `anchor_ranks` counted only strictly higher candidates. In bfloat16 equivalent atoms tie
+    exactly, so 5.1% of val samples (63, all but one of them symmetric) were hits only through a
+    tie: the same `best.pt` scores 63.4% in bfloat16 and 59.2% in float32, and 67.3% / 67.2% up
+    to symmetry. The training metric, and the choice of `best.pt`, depended on the precision.
+  - Not a cause: identical reactant pools with different answers. One answer per pool would still
+    allow 99.1% of val.
+  - What remains (406 val errors, 33%) is mostly near misses and generalization:
+    - 68% share an atom with the true anchor, 17% have the right molecules and other atoms, 15%
+      one wrong molecule;
+    - top-1 is 80% on non-symmetric pools of one molecule, 71% of two, about 50% of three or
+      four;
+    - train top-1 86% (top-5 99.5%) against val 59%;
+    - 65% of val pools have Tanimoto < 0.4 to the nearest training pool, and top-1 there is 56%
+      against 64-79% on closer pools.
+- **The closure** (`arrows.symmetry.symmetric_closure`, in `steps.edit_target` for the dataset's
+  label and in `drawings.drawing_of` for each drawing's).
+  - Every automorphism of the pool's Lewis structure on the token atoms (elements, formal
+    charges, bond orders, every H an atom; no stereo) maps each variant to an equivalent one, and
+    the images join the class with their anchors.
+  - The structure is the drawing's: a Kekulé ring keeps only the symmetry its alternation has
+    (protonating Kekulé benzene: 6 attacks, not 12), and a localized charge breaks what it breaks
+    in B, as for the label.
+  - The automorphism group is not enumerated. Every H with a single heavy neighbour is folded
+    into it; `placements` enumerates the distinct images of the label's atoms by backtracking
+    within RDKit's symmetry classes (`CanonicalRankAtoms` without tie breaking), each completed
+    once to a full automorphism. The folded H's then go to every choice of distinct H's on the
+    image of their atom. Enumerating whole groups had capped 9 of 398 pools (TBS groups,
+    phenyls) and taken 1.2 s a step; placements cap none and take 0.6 s a step (0.38 s
+    before the closure).
+  - Limits: 1,000 placements, 200,000 candidate checks, 32 members a class; a closure cut short
+    is flagged `symmetry_capped`. `EditLabel` gains `n_symmetric` (members added) and
+    `symmetry_capped`. The loss already marginalizes over the class, so it needs no change.
+- **The metric** (`model.loss.anchor_ranks`, `eval.floor.floor_ranks`). The rank counts the
+  candidates outside the label that score at least as high, so a tie with such a candidate is a
+  miss. With symmetric classes, equivalent anchors are all in the label and their ties cannot
+  matter.
+- **Measured on 400 random training steps.**
+  - 92 of 398 classes (23%) gain members, 165 in all.
+  - Class sizes after the closure 1 / 2 / 3 / 4 / 6 / 8 / 9: 281 / 73 / 26 / 12 / 4 / 1 / 1.
+  - No closure was cut short.
+  - Drawings' classes: 1 / 2 / 3 / 4 / 6: 209 / 51 / 6 / 5 / 2.
+- **Schema 17** (`SAMPLE_VERSION`): the classes change, so a schema-16 store is refused. Any
+  checkpoint's val metrics must be recomputed on schema 17 to compare.
+- **Rebuild** (code 81aeaff, 14 workers, 660 s).
+  - 12,418 samples, 46 skipped as MISSING_TOKENS, as before.
+  - 3,132 classes (25.2%) gained members, 4,968 in all, and no closure was cut short. On val,
+    280 of 1,239.
+  - Class sizes 1 / 2 / 3 / 4+: 8,737 / 2,514 / 682 / 485 (before: 11,733 / 619 / 59 / 7).
+    26 classes have 9 or more members.
+  - The 5 drawings whose label is not elementary are now dropped at the source
+    (NOT_ELEMENTARY).
+- **`flex_first/best.pt` on the schema-17 val, without retraining.**
+
+  | labels | top-1 | top-3 | top-5 | R exact |
+  |---|---|---|---|---|
+  | schema 16, float32 | 55.9% | 79.3% | 87.2% | 51.8% |
+  | schema 17, float32 | 63.9% | 81.3% | 88.0% | 59.1% |
+  | schema 17, float16 | 63.9% | 81.3% | 88.0% | 59.1% |
+
+  float32 and float16 agree on every sample. In float16, 40 hits have tied admissible anchors,
+  which are equivalent and all in the label.
+- **Downstream, re-run on the new samples.**
+  - *Anchor floor:* val 15.6 / 26.0 / 31.1% (was 15.2 / 25.8 / 30.8%), test 17.8 / 27.3 / 31.6%
+    (was 17.1 / 27.2 / 31.5%). Its |G^atom| now also gets credit for an equivalent atom.
+  - *LightGBM:* the same results and trees on both splits. It ranks orbital pairs on the
+    ArrowLabels, which the closure does not touch; only its inputs, the views, changed.
+  - *Textbook:* unchanged (3 / 5, 2 / 2, 4 / 5).
+- **To do.**
+  - Push the schema-17 views and shards to `rhoMech-data` before a pod run. The runs queued on
+    the pod read schema 16, so their numbers compare only with schema-16 evaluations.
+  - A batch's label tensors are (B, V, A, A) and V now reaches 32: watch memory in the first
+    training run.
