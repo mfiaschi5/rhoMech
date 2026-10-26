@@ -12,8 +12,11 @@ written atomically after every node expansion, throttled to 1 s, and at the end)
 Every write is atomic (tmp file in the same directory, fsync, os.replace).
 
 Exactly one "batch" thread runs predict, override, recheck and export jobs in FIFO order (it
-is the only writer of networks; each network also has its own lock), and one "background"
-thread runs index jobs. Inline mode (tests) runs a job in the submitting thread.
+is the only writer of networks; each network also has its own lock), one "background"
+thread runs index jobs and one "trace" thread runs embedding jobs (they read a pool and write
+only under `data/serve/embedding/`, so they never wait behind a long prediction on the API
+side; their worker task still queues behind the running task). Inline mode (tests) runs a job
+in the submitting thread.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ JOB_ID_RE = re.compile(r"^j[0-9a-f]{16}$")
 PROGRESS_INTERVAL_S = 1.0
 NETWORK_INTERVAL_S = 1.0
 RETENTION = 200
-THREADS = ("batch", "background")
+THREADS = ("batch", "background", "trace")
 JOIN_TIMEOUT_S = 5.0
 
 Handler = Callable[[JobContext, dict], dict | None]
@@ -66,6 +69,7 @@ class JobKind(StrEnum):
     RECHECK = "recheck"
     EXPORT = "export"
     INDEX = "index"
+    EMBEDDING = "embedding"
 
 
 class JobStatus(StrEnum):

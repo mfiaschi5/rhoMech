@@ -538,8 +538,12 @@ def test_disabled_capabilities_are_503(synthetic_app, monkeypatch, method, path,
 
 
 def test_meta_lists_the_capabilities(synthetic_app):  # noqa: F811
+    from ksmech.serve.capabilities import status
+
     m = S.MetaOut.model_validate(synthetic_app.get("/api/meta").json())
     assert set(m.capabilities) == set(CAPABILITIES)
-    for name, (on, reason) in CAPABILITIES.items():
+    settings = services(synthetic_app).settings
+    for name in CAPABILITIES:
+        on, reason = status(name, settings)  # embedding also depends on the local checkpoints
         assert m.capabilities[name].enabled is on and m.capabilities[name].reason == reason
     assert m.spec_label == "v9"

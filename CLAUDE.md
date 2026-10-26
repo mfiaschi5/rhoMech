@@ -195,7 +195,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `uv run ksmech-serve recheck`, `uv run ksmech-serve export --out FILE` (curated steps as
   PMechDB raw records, never training data); Predict and Correct work on spec-v9 reaction
   matrices (predictors floor, gbdt, network; contract in `docs/serve_v9_contract.md`; the
-  v3 panels candidates and physics are off, `serve/capabilities.py`, also in `/api/meta`)
+  v3 panels candidates and physics are off, `serve/capabilities.py`, also in `/api/meta`);
+  embedding traces of a pool through a local checkpoint: `GET /api/models`, `POST /api/embedding`
+  (a job in the worker; pages under `data/serve/embedding/`), the step panel's Embedding view
+  and the Workbench's Model trace
 - UI: `npm --prefix apps/ui run build | dev | e2e` (e2e: Playwright with the system Chrome,
   `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]

@@ -5504,3 +5504,43 @@ committed; the user kept two network views and all three step views.
   - These are readings, not changes. Open questions:
     - whether the spectral set should be averaged rather than summed;
     - what the fragment embedding contributes beyond the same-fragment bias.
+
+## 2026-10-26 — Serve: the embedding trace in the web app; the network predictor still has no decoder
+
+- **Capability `embedding`.** On when torch, `ksmech.model.net`, `ksmech.train.loop` and
+  `ksmech.eval.embedding` are importable (checked with `find_spec`, nothing imported) and one
+  usable local checkpoint exists. The checkpoint part depends on the app's settings, so
+  `capabilities.status(name, settings)` adds it to the import-time `CAPABILITIES`, and
+  `require` reads the settings of the app serving the request. The API process never imports
+  torch (tested in a subprocess).
+- **Checkpoints** (`serve/models.py`). `data/models/<source>/<run>/<file>.pt` under the shared
+  root, then the data root. The listing reads only `run.json` (encoder, model size, clean or
+  dirty) and `metrics.jsonl` (the epoch and metrics of `best`: the trainer's rule, largest val
+  top-1 then smallest val loss; of `last`: the last line). A dirty run is listed with its reason
+  and refused (CHECKPOINT_REFUSED, 409); the worker's `load_model` checks the checkpoint's own
+  header again and refuses with the same code.
+- **The trace is a job**, kind `embedding`, on its own runner thread (`trace`), so it does not
+  wait behind a long prediction on the API side; its worker task still queues behind the running
+  task. The job featurizes missing fragments with the existing `featurize` task (serve's token
+  layer under `data/serve/`, never the shared caches) rather than `ensure_pool`, which would
+  write into the shared QM cache. The worker builds the sample from the state's own tokens
+  (`reactant_sample` plus `reactant_lewis`, as `sample_from_smiles` does) and keeps one model in
+  memory per (path, mtime, size); a file that changed since it was hashed is CHECKPOINT_CHANGED.
+- **Key.** The brief said checkpoint sha + pool key. The id is sha256 of the checkpoint sha256,
+  the pool **state** id and the token digest: two Lewis forms of one pool key are different
+  inputs whose pages number the atoms differently, and rebuilt tokens are a different input.
+  Files `<id>.html`, `<id>.json` (NaN as null), `<id>.meta.json` (written last) under
+  `data/serve/embedding/`, which is gitignored with the rest of `data/serve/`.
+- **Page.** Written once by `eval.embedding_page.write_page` in the worker and served as stored;
+  `?theme=light|dark` sets `data-theme` on its root (the template already themes on it), so the
+  iframe follows the app's override. The UI reads the page's view hash from the same-origin
+  iframe once a second, stores it per trace in sessionStorage and puts it on "open in new tab".
+- **Network predictor.** Not wired. `ksmech.model` has the encoder, the anchor pointer and the
+  entry classifiers, and checkpoints exist, but no step decoder: spec "Decoding a step" asks for
+  the B most probable anchors, each completed into reaction matrices that conserve charge and
+  respect every valence, ranked by the joint log P(R) and merged by product.
+  `model.loss.greedy_edit` gives the top anchor with the argmax class of every other entry, no
+  beam and no conservation or valence check. Serve does not write the decoder. The predictor's
+  reason text was left unchanged: `serve/predictors.py` is part of the physics fingerprint, and
+  editing it would re-key every pool analysis and mark curated mechanisms predictor-stale for a
+  message.

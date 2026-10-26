@@ -184,6 +184,7 @@ TASKS: dict[str, str | Callable[[Any, dict], dict]] = {
     "wb_orbital_set": "ksmech.serve.orbital_sets:t_wb_orbital_set",
     "wb_cube": "ksmech.serve.densities:t_wb_cube",
     "wb_properties": "ksmech.serve.properties:t_wb_properties",
+    "embedding": "ksmech.serve.embedding:t_embedding",
 }
 
 

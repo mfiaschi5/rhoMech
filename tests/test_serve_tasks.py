@@ -155,6 +155,7 @@ def test_task_registry_is_fixed():
         "wb_orbital_set",
         "wb_cube",
         "wb_properties",
+        "embedding",
     }
     lazy = {k: v for k, v in tasks.TASKS.items() if isinstance(v, str)}
     assert lazy["expand"] == "ksmech.serve.expansion:t_expand"

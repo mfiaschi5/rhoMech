@@ -544,9 +544,78 @@ class StepCheckOut(_Out):
     readings_status: Literal["ready", "pending", "unavailable"]
 
 
+# ---- embedding traces (serve.embedding, serve.models)
+
+
+class CheckpointOut(_Out):
+    """One local checkpoint `data/models/<source>/<run>/<file>.pt`. `epoch` and `metrics` come
+    from the run's metrics.jsonl (the line the trainer kept for best, the last for last);
+    `clean` from its run.json (None without one); `usable` is false for a dirty run, whose
+    checkpoint `load_model` refuses (`reason`)."""
+
+    source: str
+    run: str
+    file: str
+    path: str
+    size_bytes: int
+    modified_at: datetime
+    encoder: str | None
+    model: dict[str, int | float | str]
+    epoch: int | None
+    metrics: dict[str, float | None]
+    clean: bool | None
+    usable: bool
+    reason: str | None
+    built_at: str | None
+
+
+class ModelsOut(_Out):
+    roots: list[str]  # the directories searched, in order
+    checkpoints: list[CheckpointOut]
+    embedding: CapabilityOut  # the embedding capability with these checkpoints
+
+
+class EmbeddingIn(_In):
+    """Exactly one of `state_id` (a saved pool state) and `smiles` (one molecule or a pool,
+    '.'-separated); the checkpoint `<source>/<run>/<file>.pt` (source needed only when two
+    sources have the run)."""
+
+    state_id: str | None = None
+    smiles: str | None = None
+    run: str
+    file: str = "best"
+    source: str | None = None
+
+
+class EmbeddingResultOut(_Out):
+    """A stored trace (`GET /api/embedding/{id}` the payload, `/page` the HTML page)."""
+
+    embedding_id: str
+    state_id: str
+    pool_key: str
+    source: str
+    run: str
+    file: str
+    checkpoint_sha256: str
+    encoder: str
+    epoch: int | None
+    n_atoms: int
+    n_orbitals: int
+    n_layers: int
+    heads: int
+    max_error: float | None  # largest deviation of the rebuilt layers from the model
+    top_anchor: dict[str, Any] | None  # {i, j, side, p, logit, ...} on the trace's token atoms
+    page_bytes: int
+    page_url: str
+    payload_url: str
+    created_at: datetime
+    cached: bool  # true when the trace was already stored
+    seconds: float  # the trace task's time (0 for a cached trace)
+
+
 class JobOut(_Out):
     job_id: str
-    kind: Literal["predict", "override", "expand", "recheck", "export", "index"]
+    kind: Literal["predict", "override", "expand", "recheck", "export", "index", "embedding"]
     status: Literal["queued", "running", "done", "failed", "cancelled"]
     created_at: datetime
     started_at: datetime | None
@@ -558,9 +627,15 @@ class JobOut(_Out):
     partial: bool
     unchanged: bool = False
     provenance: Provenance | None
-    result_kind: Literal["network", "expand", "export", "recheck", "index"] | None
+    result_kind: Literal["network", "expand", "export", "recheck", "index", "embedding"] | None
     result: (
-        NetworkOut | ExpandResultOut | ExportReportOut | RecheckReportOut | IndexStatusOut | None
+        NetworkOut
+        | ExpandResultOut
+        | ExportReportOut
+        | RecheckReportOut
+        | IndexStatusOut
+        | EmbeddingResultOut
+        | None
     )
 
 

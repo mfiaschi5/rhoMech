@@ -308,5 +308,5 @@ def meta(ctx: ApiContext) -> dict:
         "limits": ctx.settings.limits.to_dict(),
         "worker": ctx.scheduler.status().to_dict(),
         "data_root": str(ctx.settings.data_root),
-        "capabilities": capabilities.as_meta(),
+        "capabilities": capabilities.as_meta(ctx.settings),
     }

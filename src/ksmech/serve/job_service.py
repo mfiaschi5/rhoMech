@@ -40,6 +40,7 @@ from ksmech.serve.network import (
 )
 from ksmech.serve.schemas import (
     EdgeOut,
+    EmbeddingResultOut,
     ExpandIn,
     ExpandResultOut,
     ExportReportOut,
@@ -68,6 +69,7 @@ RESULT_MODELS = {
     JobKind.EXPORT: ExportReportOut,
     JobKind.RECHECK: RecheckReportOut,
     JobKind.INDEX: IndexStatusOut,
+    JobKind.EMBEDDING: EmbeddingResultOut,
 }
 
 

@@ -125,6 +125,11 @@ class ServeSettings:
         return self.workbench / "properties"
 
     @property
+    def embedding(self) -> Path:
+        """Embedding traces of pools through local checkpoints (payload, page, meta)."""
+        return self.serve / "embedding"
+
+    @property
     def jobs(self) -> Path:
         return self.serve / "jobs"
 

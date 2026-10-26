@@ -80,8 +80,28 @@ canonical MO pair (k, m) with its energies) and the product SMILES and sigma key
 - `gbdt`: the geometry-free LightGBM ranker of `ksmech-physics gbdt`
   (`gbdt_lgbm_molecule_geomfree.npz` under the shared processed directory), ranking orbital
   pairs that are completed the same way; a ranking score.
-- `network`: the spec-v9 model, through an adapter; unavailable until `ksmech.model.net` and a
-  checkpoint `data/models/<source>/<run>/best.pt` exist (the reason is in the listing).
+- `network`: the spec-v9 model, through an adapter; unavailable (the reason is in the listing).
+  The model code and checkpoints exist, but upstream has no step decoder yet: spec "Decoding a
+  step" needs a constrained beam search over R (the B best anchors, each completed into reaction
+  matrices that conserve charge and respect every valence, ranked by log P(R)), and
+  `ksmech.model` has only `loss.greedy_edit` (top anchor, argmax entries). Serve does not write
+  one.
+
+**Embedding trace** (capability `embedding`: torch and the model code importable and one usable
+local checkpoint). `GET /api/models` lists the checkpoints `data/models/<source>/<run>/<file>.pt`
+of the shared root and the data root, with the encoder and the model size from `run.json`, the
+epoch and validation metrics from `metrics.jsonl`, and whether the run is clean (a dirty run is
+listed with its reason and refused, as `load_model` refuses it). `POST /api/embedding
+{state_id | smiles, run, file?, source?}` is a job (kind `embedding`): it featurizes missing
+fragments, then the compute worker loads the model on the CPU (kept per file version), traces
+the pool (`ksmech-eval embedding`: h(0) by parts, every layer's attention and updates, the
+anchor logits by term) and stores the page, the payload and a meta under `data/serve/embedding/`
+(gitignored), keyed by the checkpoint's sha256, the pool state and its token digest, so a second
+request answers at once. `GET /api/embedding/{id}` is the payload, `GET
+/api/embedding/{id}/page[?theme=light|dark]` the self-contained page. In the UI: the step
+panel's **Embedding** view (the step's parent state, a checkpoint picker, the page in an iframe
+whose view hash is kept, "open in new tab") and the Workbench's **Model trace** button for the
+computed molecule; both greyed with the reason while the capability is off.
 
 Correct: `POST /api/step/check {state_id, matrix}` validates an edited R live (issue codes with
 the atoms involved, the product, the arrows and readings); `POST /api/jobs/{id}/override
