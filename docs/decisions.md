@@ -6052,3 +6052,8 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   frontier window, each drawn at full width. Groups whose drawn levels lie within 6 px of the
   previous group's now share one row of side-by-side slots in both columns, each line at its own
   energy; zooming in splits the row. The degeneracy (the `deg` column, data-group) is unchanged.
+- **Corrected the same day, at the user's request: by energy only.** Placing levels side by side
+  must not depend on the zoom: only the members of one degenerate group (the energy threshold)
+  share a row; distinct groups each span the column, and zoomed out near levels may be drawn on
+  top of each other. `levelSlots` no longer clusters by pixel distance; raise the threshold to
+  put the toluene C-H groups (0.13 eV apart) side by side.

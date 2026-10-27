@@ -158,32 +158,19 @@ export function sideBySide(n: number, x0: number, x1: number, maxW: number, gap:
 export interface Slot {
   x: number;
   w: number;
-  /** The visual cluster of the orbital's group (levelSlots). */
-  cluster: number;
 }
 
-/** The px apart below which two drawn levels would overlap: their groups share a row. */
-export const CLUSTER_PX = 6;
-
-/** Side-by-side slots of every orbital (index -> slot) in [x0, x1]: the members of a group, and
- *  the groups (ascending energy) whose drawn levels `y(energy)` lie within `px` of the previous
- *  group's, share one row of slots, so near but distinct levels (beyond the degeneracy
- *  threshold, a few px apart at this zoom) sit beside each other instead of on top; each keeps
- *  its own height, and zooming in separates them. The gap shrinks for a crowded row. */
-export function levelSlots(groups: readonly LevelGroup[], y: (e: number) => number, x0: number, x1: number, maxW: number, gap: number, px = CLUSTER_PX): Map<number, Slot> {
+/** Side-by-side slots of every orbital (index -> slot) in [x0, x1]: the members of one
+ *  degenerate group (the energy threshold) share a row; distinct groups each span the column,
+ *  whatever the zoom (zoomed out, near levels may be drawn on top of each other). The gap
+ *  shrinks for a crowded group. */
+export function levelSlots(groups: readonly LevelGroup[], x0: number, x1: number, maxW: number, gap: number): Map<number, Slot> {
   const out = new Map<number, Slot>();
-  const sorted = [...groups].sort((a, b) => a.energy - b.energy);
-  const rows: LevelGroup[][] = [];
-  sorted.forEach((g, i) => {
-    if (i > 0 && Math.abs(y(g.energy) - y(sorted[i - 1].energy)) <= px) rows[rows.length - 1].push(g);
-    else rows.push([g]);
-  });
-  rows.forEach((row, cluster) => {
-    const members = row.flatMap((g) => g.rows);
-    const n = members.length;
+  for (const g of groups) {
+    const n = g.rows.length;
     const { xs, w } = sideBySide(n, x0, x1, maxW, Math.min(gap, (x1 - x0) / (4 * n)));
-    members.forEach((r, k) => out.set(r.index, { x: xs[k], w: Math.max(1, w), cluster }));
-  });
+    g.rows.forEach((r, k) => out.set(r.index, { x: xs[k], w: Math.max(1, w) }));
+  }
   return out;
 }
 

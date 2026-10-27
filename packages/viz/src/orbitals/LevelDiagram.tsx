@@ -1,7 +1,6 @@
 // LevelDiagram: the canonical MO energy levels in hand-made SVG, at the panel's full size.
 // Degenerate MOs (within the degeneracy threshold, regrouped client-side: levels.ts) sit side by
-// side, and so do distinct levels that would be drawn within a few px of each other at the current
-// zoom (levelSlots: each keeps its own height; zoom in to separate them); occupations as half-arrows; the HOMO-1, HOMO, LUMO and LUMO+1 blocks labelled with their
+// side (levelSlots: by energy only, whatever the zoom); occupations as half-arrows; the HOMO-1, HOMO, LUMO and LUMO+1 blocks labelled with their
 // energies, the labels kept apart with leaders. Click a level to show that MO. When an LMO set
 // is shown, a second column holds the LMO energies E_r (click: show that LMO) and the selected
 // LMO's spectral weights are drawn as bars on the canonical levels. The LMOs are grouped at the
@@ -135,7 +134,7 @@ function OccArrows({ x, y, occ, h }: { x: number; y: number; occ: number; h: num
 
 interface LevelsProps {
   groups: LevelGroup[];
-  /** levelSlots of the groups at this zoom. */
+  /** levelSlots of the groups. */
   slots: Map<number, Slot>;
   frontier: Map<number, string>;
   s: Scale;
@@ -146,16 +145,10 @@ interface LevelsProps {
 }
 
 /** Half the free height (px) around group `i` (for the arrows), up to 7; 0 (no arrows) when
- *  the neighbours of other rows (groups side by side in one row do not count) are closer than
- *  8 px: zoom in to see them. */
-function roomAt(groups: LevelGroup[], i: number, s: Scale, slots: Map<number, Slot>): number {
+ *  the neighbours are closer than 8 px: zoom in to see them. */
+function roomAt(groups: LevelGroup[], i: number, s: Scale): number {
   const yy = s.y(groups[i].energy);
-  const row = (k: number) => slots.get(groups[k].rows[0].index)?.cluster;
-  let below = i - 1;
-  while (below >= 0 && row(below) === row(i)) below--;
-  let above = i + 1;
-  while (above < groups.length && row(above) === row(i)) above++;
-  const gaps = [below >= 0 ? s.y(groups[below].energy) - yy : 99, above < groups.length ? yy - s.y(groups[above].energy) : 99];
+  const gaps = [i > 0 ? s.y(groups[i - 1].energy) - yy : 99, i + 1 < groups.length ? yy - s.y(groups[i + 1].energy) : 99];
   const room = Math.min(7, Math.min(...gaps) / 2 - 1);
   return room < 3 ? 0 : room;
 }
@@ -167,7 +160,7 @@ function CanonicalLevels(p: LevelsProps) {
     <g>
       {visible.map(({ grp, i }) => {
         const yy = p.s.y(grp.energy);
-        const h = roomAt(p.groups, i, p.s, p.slots);
+        const h = roomAt(p.groups, i, p.s);
         return grp.rows.map((r) => {
           const { x, w } = p.slots.get(r.index) ?? { x: p.g.canX0, w: LEVEL_W };
           const wt = p.weights?.get(r.index) ?? 0;
@@ -234,7 +227,7 @@ function FrontierLabels({ groups, slots, frontier, s, g }: Pick<LevelsProps, "gr
 }
 
 /** The LMO column: degenerate LMOs (groupLmoLevels at the threshold) side by side at their mean
- *  E_r, like the canonical levels, and groups a few px apart side by side too (levelSlots). */
+ *  E_r, like the canonical levels. */
 function LmoLevels(p: { groups: LevelGroup[]; slots: Map<number, Slot>; s: Scale; g: Geometry; selected: number | null; onPick(i: number): void }) {
   const { lmoX0, lmoX1 } = p.g;
   return (
@@ -452,8 +445,8 @@ export function LevelDiagram(p: LevelDiagramProps) {
   const lmoGroups = useMemo(() => (p.lmos ? groupLmoLevels(p.lmos, threshold) : null), [p.lmos, threshold]);
   const lmo = p.lmos?.find((r) => r.index === p.selected);
   const weights = p.lmos ? spectralWeights(lmo) : null;
-  const slots = levelSlots(groups, s.y, g.canX0, g.canX1, LEVEL_W, LEVEL_GAP);
-  const lmoSlots = lmoGroups ? levelSlots(lmoGroups, s.y, g.lmoX0, g.lmoX1, g.lmoX1 - g.lmoX0, LMO_GAP) : null;
+  const slots = useMemo(() => levelSlots(groups, g.canX0, g.canX1, LEVEL_W, LEVEL_GAP), [groups, g.canX0, g.canX1]);
+  const lmoSlots = useMemo(() => (lmoGroups ? levelSlots(lmoGroups, g.lmoX0, g.lmoX1, g.lmoX1 - g.lmoX0, LMO_GAP) : null), [lmoGroups, g.lmoX0, g.lmoX1]);
   const gestures = useGestures(svgRef, view, s);
   const clip = useId().replace(/:/g, "");
   const span = view.range[1] - view.range[0];
