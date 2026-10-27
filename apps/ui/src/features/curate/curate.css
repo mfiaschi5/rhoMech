@@ -1,0 +1,229 @@
+/* Curate page: feature-local styles on the shared tokens of src/styles.css (prefix cu-). */
+
+.cu-page {
+  max-width: 1400px;
+}
+
+.cu-title {
+  margin: 0 0 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.cu-subhead {
+  margin: 12px 0 4px;
+}
+
+.cu-section {
+  margin-top: var(--gap);
+}
+
+.cu-section > h3 {
+  margin: 0 0 4px;
+}
+
+.cu-controls {
+  align-items: center;
+  margin: 6px 0;
+}
+
+.cu-steps {
+  list-style: none;
+  margin: var(--gap) 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap);
+}
+
+.cu-step {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cu-step-corrected {
+  border-color: var(--corrected);
+  box-shadow: inset 3px 0 0 var(--corrected);
+}
+
+.cu-product {
+  width: 320px;
+  justify-content: flex-start;
+}
+
+.cu-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.cu-badge-corrected {
+  border-color: var(--corrected);
+  color: var(--corrected);
+}
+
+.cu-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.cu-depiction,
+.cu-depiction-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cu-empty {
+  display: block;
+}
+
+.cu-original {
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cu-arrow-text {
+  margin: 0;
+  padding-left: 18px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.cu-kv {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.cu-hints {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cu-hint-warn,
+.cu-hint-error {
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--warn);
+  background: var(--warn-bg);
+}
+
+.cu-hint-error {
+  border-color: var(--error);
+  background: var(--error-bg);
+}
+
+.cu-notes-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+  max-width: 760px;
+}
+
+.cu-choices {
+  margin: 6px 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cu-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.cu-click-row {
+  cursor: pointer;
+}
+
+.cu-click-row:hover td {
+  background: var(--panel-2);
+}
+
+.cu-row-current td {
+  background: var(--panel-2);
+  font-weight: 600;
+}
+
+.cu-row-warn td {
+  background: var(--warn-bg);
+}
+
+.cu-smiles-cell,
+.cu-notes-cell {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.cu-notes-cell {
+  font-family: var(--font);
+}
+
+.cu-pager {
+  align-items: center;
+  margin: 6px 0;
+}
+
+.cu-job {
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.cu-job-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.cu-report {
+  margin-top: 6px;
+}
+
+.cu-report .kv {
+  word-break: break-all;
+}
+
+.cu-counts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.cu-paths {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.cu-details summary {
+  cursor: pointer;
+  color: var(--muted);
+}

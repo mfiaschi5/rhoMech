@@ -1,0 +1,456 @@
+/* ksmech UI: the shell and the shared components. The colour tokens (light + dark) are
+   @ksmech/viz's theme.css (main.tsx imports it first). Hand-written; no CSS framework. Feature
+   pages reuse these tokens and classes. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+a {
+  color: var(--accent);
+}
+
+code,
+.code,
+pre,
+.pre {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel-2);
+  padding: 8px;
+  border-radius: var(--radius);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---- shell */
+
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.brand {
+  font-weight: 700;
+  margin-right: 12px;
+  letter-spacing: 0.02em;
+}
+
+.nav-link {
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--fg);
+}
+
+.nav-link:hover {
+  background: var(--panel-2);
+}
+
+.nav-link.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* a page whose capability is off (/api/meta.capabilities): greyed, still reachable for its notice */
+.nav-link.disabled {
+  color: var(--muted);
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+
+.nav-link.disabled.active {
+  background: var(--panel-2);
+  color: var(--muted);
+}
+
+.capability-notice.compact {
+  padding: 6px 0;
+}
+
+.meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.app-main {
+  flex: 1;
+  padding: 16px;
+  min-width: 0;
+}
+
+/* ---- panels, buttons, forms, tables */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+}
+
+.panel + .panel {
+  margin-top: var(--gap);
+}
+
+.placeholder h2 {
+  margin-top: 0;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap);
+  align-items: flex-start;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.btn {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.btn-small {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+}
+
+textarea {
+  min-height: 64px;
+}
+
+table.table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+table.table th,
+table.table td {
+  border-bottom: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+table.table th {
+  background: var(--panel-2);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.diagnostic {
+  color: var(--diagnostic);
+  font-style: italic;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 6px 0;
+}
+
+.kv dt {
+  color: var(--muted);
+}
+
+.kv dd {
+  margin: 0;
+}
+
+/* ---- badges and banners */
+
+.badge {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.badge-warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.badge-error {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.badge-ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.banner {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.app-main .banner {
+  margin: 8px 0;
+}
+
+.banner-warn {
+  background: var(--warn-bg);
+  border-color: var(--warn);
+}
+
+.banner-error {
+  background: var(--error-bg);
+  border-color: var(--error);
+}
+
+.banner-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.banner-dismiss {
+  margin-left: auto;
+}
+
+.banner-message {
+  margin-top: 2px;
+  white-space: pre-wrap;
+}
+
+.provenance-badge {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.provenance-details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.pending-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- depictions and arrow overlays */
+
+.mol-depiction,
+.smiles-depiction {
+  position: relative;
+  flex: none;
+  background: var(--depiction-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.mol-svg,
+.mol-svg > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mol-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  text-align: center;
+  color: #5d6878;
+  font-size: 12px;
+}
+
+.mol-error {
+  color: #c0362c;
+}
+
+.arrow-overlay-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.arrow-overlay-layer.faded {
+  opacity: 0.4;
+}
+
+.arrow-line {
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.arrow-main .arrow-line {
+  stroke: var(--arrow);
+}
+
+.arrow-implied .arrow-line {
+  stroke: var(--arrow-implied);
+  stroke-width: 1.1;
+}
+
+.arrow-dataset .arrow-line {
+  stroke: var(--arrow-dataset);
+}
+
+.arrow-main.selected .arrow-line {
+  stroke: var(--arrow-selected);
+  stroke-width: 2.6;
+}
+
+.arrow-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.arrow-handle {
+  fill: var(--arrow);
+  fill-opacity: 0.25;
+  stroke: transparent;
+  stroke-width: 2;
+  pointer-events: all;
+  cursor: pointer;
+}
+
+.arrow-main.selected .arrow-handle {
+  fill: var(--arrow-selected);
+}
+
+.arrow-handle:hover,
+.arrow-handle:focus-visible {
+  stroke: var(--arrow);
+  outline: none;
+}
+
+.marker-main path {
+  fill: var(--arrow);
+}
+
+.marker-implied path {
+  fill: var(--arrow-implied);
+}
+
+.marker-dataset path {
+  fill: var(--arrow-dataset);
+}

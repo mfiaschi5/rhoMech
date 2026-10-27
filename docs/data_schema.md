@@ -284,6 +284,21 @@ One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cac
 `status` (`ok` / `failed`), `reason` (a `ReasonCode`, empty when ok), `detail`, `warnings`,
 `seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`.
 
+## Serve workbench: `data/serve/workbench/`
+
+Display-only artifacts of the molecule workbench (`ksmech-serve`, `src/ksmech/serve`), written
+by the serve worker; never read by training or evaluation. `<sha>` is sha256[:32] of the JSON
+of the cache key named below; every key includes the QM record's content sha (sha256[:16] of
+the file bytes), the QM method, the workbench version constants and the oriented fingerprint.
+
+| Path | Content | Key |
+|---|---|---|
+| `molecules/<molecule_id>.json` | registry entry: `molecule_id`, `key` (unmapped canonical SMILES), `method`, `failure` (the last featurize error body, or null), `first_posted`, `last_posted`, `version` | `molecule_id = "m" + sha256("molecule-v1|" + key)[:20]` |
+| `orbitals/<sha>.npz` | the tokens of a non-model orbital set, the upstream token format with its provenance header (QM record input, `token_config(PMConfig(method, start))`) | key, set, start |
+| `orbitals/<sha>.json` | the rows of one orbital set (`OrbitalSetOut` without `molecule_id`) | key, set, start, the model token file's digest (model set only) |
+| `cubes/<sha>.cube` | Gaussian cube (bohr): two comment lines with kind, key, set, start, index, units, integral, expected value and notes | key, kind, set, start, index, quality or spacing, padding, the model token digest (model-set orbitals only) |
+| `cubes/<sha>.json` | the cube's metadata: request, units, integral, expected, notes, spacing, grid shape, origin, min, max | as the cube |
+| `properties/<sha>.json` | `MoleculePropertiesOut` without `molecule_id` and `geometry`; NaN written as null | key, the model token digest |
 ## QMugs (encoder pretraining): `data/raw/qmugs/`
 
 Isert, Atz, Jiménez-Luna and Schneider, *Sci. Data* **9**, 273 (2022); CC BY-SA 4.0. Downloaded

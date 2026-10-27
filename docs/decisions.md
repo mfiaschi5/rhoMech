@@ -3901,6 +3901,592 @@ is now v7.5, sha256 6c6a023f66dd).
 - **Later (user decision).** Resonance augmentation will precompute a few forms per sample,
   each with its own Lewis structure and label class.
 
+## 2026-10-25 — Molecule workbench (serve), backend
+
+- **What.** `ksmech-serve` gains a display-only molecule workbench: draw (or paste) one
+  molecule, featurize it, and look at its geometry, properties, orbital sets and volumetric
+  surfaces. Routes under `/api/molecule`; capability `workbench`, always on.
+- **Adapters, all in `src/ksmech/serve` (upstream is consumed, never modified).**
+
+  | Module | Side | Upstream it reads |
+  |---|---|---|
+  | `molecule.py` | API | `data.chem.unmapped_canonical`, `qm.embed.prepare_mol`, `featurizer.preflight` |
+  | `orbital_sets.py` (`wb_orbital_set`) | worker | `orbitals.localize` (METHODS, STARTS, PMConfig, mulliken_populations), `orbitals.tokens.build_molecule_tokens` / `save_tokens` / `load_tokens`, `orbitals.frontier.frontier_blocks` |
+  | `densities.py` (`wb_cube`) | worker | `physics.gto.ao_values`, `serve.cubes` (grid, `on_grid`, `write_cube`) |
+  | `properties.py` (`wb_properties`) | worker | `orbitals.tokens.atom_tokens`, `qm.bond_index.wiberg_matrix`, `localize.is_fermi_smeared` |
+  | `workbench_service.py` | API | only the files the worker wrote, and `np.load` of the QM record for the geometry |
+  | `token_rows.py` | both | the orbital-row serialization moved out of `pool_service` |
+
+- **Version constants.** `WORKBENCH_VERSION`, `ORBITAL_SET_VERSION` and `DENSITY_VERSION`, all
+  1. They key the workbench caches together with the QM record's content sha (sha256 of the
+  file bytes) and the oriented fingerprint (token schema, localize.py, descriptors.py,
+  tokens.py, physics/*.py). None of them enters the physics fingerprint: the workbench decides
+  no score, validity or product.
+- **Identity.** A drawing's key is `unmapped_canonical(mol)`, the QM / token cache key, so a
+  drawn molecule shares its record and tokens with the pools. The id is
+  `"m" + sha256("molecule-v1|" + key)[:20]`, so the same molecule drawn twice (or typed as a
+  SMILES) is one molecule. The registry entry keeps the last featurize failure; a POST does
+  not run a recorded failure again unless `retry` is set (no silent loops, no silent skips).
+- **Sketch mapping by substructure match.** `prepare_mol(key).GetSubstructMatch(AddHs(drawn))`,
+  with chirality first and without it as a fallback (`chirality_matched` says which). The
+  drawing has the same graph as its own canonical key, so the match is an isomorphism; for a
+  symmetric molecule any of the equivalent matches is equally correct. An H the drawing left
+  implicit maps to its drawn heavy atom (`record_parent_sketch`). The mapping is returned with
+  the POST only: the drawing is the client's, and a GET cannot know it.
+- **Orbital sets.** `canonical` plus `localize.METHODS` (`ibo`, `pm_mulliken`) times
+  `localize.STARTS` (`cholesky`, `canonical`). The model set is `PMConfig()` (ibo/cholesky):
+  the existing token file when there is one, so the viewer shows exactly the orbitals the model
+  reads. The other sets are built with `build_molecule_tokens(rec, pm_config=...)` and saved
+  with upstream `save_tokens` and provenance (the QM record as input, `token_config(pm)`) under
+  `data/serve/workbench/orbitals/`. No Foster-Boys: tblite exposes no dipole integrals.
+- **QM records load only in the worker.** `qm.records.load_record` re-derives the AO layout
+  through `qm.ao`, which imports tblite and runs a single-atom tblite call per element. The
+  synthetic chemistry is read without that probe (its records were written with the current
+  layout; the provenance header is still verified); real records go through `load_record`.
+- **Densities are valence-only, minimal-basis.** The density is
+  `rowsum((A C_occ sqrt(n))^2)`, P = C diag(n) C^T over the valence MOs of GFN2's minimal
+  basis. The AOs on the grid are the STO-nG fit of GFN2's valence Slater functions
+  (`physics.gto`), which is not tblite's own basis evaluation: under real chemistry the grid
+  integral of the density differs a little from N_valence. Every cube therefore reports its
+  integral and the exact value (comment line, sidecar, `X-Cube-Integral` / `X-Cube-Expected`).
+  On the synthetic chemistry (whose S is the STO-nG overlap) |psi|^2, f+, f- integrate to 1
+  and the density to N_valence within 1% at 0.2 Angstrom with 5 Angstrom of padding.
+- **Fukui surfaces.** Frozen-orbital: the mean |psi|^2 over the HOMO (f-) or LUMO (f+)
+  degenerate block of `frontier_blocks` (0.05 eV), so each integrates to 1 and equivalent
+  atoms look alike, as `frozen_orbital_fukui_blocks` does for the condensed values. No block:
+  NO_FRONTIER.
+- **ESP approximation.** sum_A q_A / max(|r - R_A|, 0.2 bohr) over the Mulliken charges, in
+  hartree/e. It is not the electrostatic potential of the electron density: it is a cheap,
+  sign-correct picture (positive around NH4+, negative around acetate away from the nuclei,
+  Q/r far away), labelled approximate in the cube and the sidecar. The floor keeps it finite
+  at the nuclei.
+- **Grid policy.** One whole-molecule box, `cubes.grid_around(all atoms, spacing, padding)`,
+  default padding 3.0 Angstrom. The spacing is explicit or set by `quality` (draft / normal /
+  fine: about 120k / 350k / 1.2M points, rounded up to 0.001 Angstrom so the cache key is
+  stable); `cubes.MAX_POINTS` (4M) still applies (CUBE_TOO_LARGE). Set-independent kinds drop
+  set, start and index from the request, so they share one cache entry.
+- **Statuses and errors.** A molecule is missing, running, ready, qm_only (a QM record but no
+  tokens, e.g. cached chemistry: geometry, properties, canonical orbitals and surfaces still
+  work; the model set is then built by the workbench) or failed. New codes: INVALID_MOLFILE,
+  MULTIPLE_FRAGMENTS, ORBITAL_OUT_OF_RANGE, NO_FRONTIER, LOCALIZATION_FAILED (422),
+  MOLECULE_NOT_FOUND (404), MOLECULE_NOT_READY (409) and the report code MAPPING_FAILED.
+
+## 2026-10-25 — Molecule workbench (serve), frontend
+
+- **Page.** `apps/ui/src/features/workbench/` registers `#/workbench`, first in the nav and the
+  default page while predict is off. Features never import each other, so the 3Dmol helpers
+  moved to `src/chem/threed.ts` (the contact scene stays in predict as `contactScene.ts`), the
+  generic hooks (`usePendingCached`, `useDebounced`, `useLatest`) to `src/api/hooks.ts` and the
+  number formatting to `src/components/format.ts`.
+- **Linking the sketch.** Only the POST answer carries the sketch mapping, so the page keeps it
+  with the drawing that was posted. A selection highlights the drawn atom through
+  `record_parent_sketch` (an implicit H highlights its heavy atom) only while the sketch's
+  chemistry signature (elements, charges, bonds by atom position, orders, wedges; not the 2D
+  positions) equals the posted one; otherwise a note says the sketch changed. The posted
+  molblock and its id are kept in sessionStorage, so reloading `#/workbench?m=<id>` posts it
+  again (cheap, cached) and gets the mapping back; a bare id from another tab loads without it.
+- **Surface layers.** The hash keeps only what decides a fetch (`kind:set:start:index`); the look
+  (isovalue, opacity, mesh, colours, ESP range) is client state per spec. Parsed cubes sit in a
+  VolumeData LRU of 8; each layer's request has its own AbortController. The selected orbital is
+  a layer that follows the list and the diagram, and "pin" copies it into the hash. Changing
+  the orbital set clears the selected orbital, since an index means another orbital in another
+  set; computing another molecule drops the pinned orbital layers.
+- **ESP colouring.** `addIsosurface(density, {voldata: esp, volscheme: Gradient.RWB(-r, r)})`
+  (fallback: a VDW surface coloured by the same volume). The default r is the 95th percentile
+  of |ESP| at grid points near the density isovalue (both cubes share one grid per quality),
+  and the colour bar reproduces 3Dmol's RWB formula, so it matches the surface.
+- **e2e chemistry.** `e2e/serve.mjs` adds ethanol (the workbench test's molecule) to the
+  `probe-cache` species: cached chemistry never computes a new molecule, so the run falls back
+  to synthetic unless ethanol is cached too.
+
+## 2026-10-25 — Workbench sketcher: 3D -> 2D projection, crossing breaks, layout fix
+
+(Superseded the same day for the layout: the client-side projection layout and the "Fix layout"
+relaxation were replaced by server-side RDKit depiction, see "Sketcher 2D layout" below; the
+view convention, the depth storage, the linking rule and the crossing breaks still hold.)
+
+- **Projection convention.** The sketcher's "3D→2D" (Shift+D) draws the record geometry of each
+  drawn atom (`sketch_to_record`) as the 3D view shows it now: `v = R(q) p` with `q` the
+  rotationGroup quaternion of 3Dmol's `getView()` (indices 4-7, x y z w) and R the matrix of
+  3Dmol's `setRotationFromQuaternion` (the renderer's; note that 3Dmol's own
+  `Vector3.applyQuaternion` rotates by the conjugate, so it is not used). View x is screen right,
+  y screen up, z towards the viewer; the projection is orthographic (the translation is dropped,
+  the drawing is centred on its old centroid). Checked twice: a node test against 3Dmol's matrix
+  formula and the axes' handedness, and in the browser on every projection, by fitting 3Dmol's
+  `modelToScreen` of the same atoms with a scale and a translation only (no rotation, no
+  mirror; a negative scale counts as a failure): the RMS residual over the screen spread is
+  exposed as `data-projection-residual` (0.024 for the e2e camphor view; 3Dmol's perspective,
+  fov 20 deg, accounts for it). Scale: the median 3D bond becomes BOND_LENGTH (a projection is
+  a uniform scale of the 3D picture; foreshortened bonds are then restored by the fix). The
+  sketch module never imports 3Dmol: the page passes a `ProjectionSource` (why it is off, or
+  the rotated coordinates).
+- **Depth storage.** `SketchAtom.z` (model units, + towards the viewer), display data like
+  explicitH: kept by edits, undo and the session store (sessionStorage now holds
+  `{molblock, extras}`; a bare molblock still reads), never written to molfile coordinates
+  (z = 0, header 2D, so RDKit always reads a 2D drawing; only RDKit's 3D stereo reading of a
+  projection writes it, with a 3D header). RDKit's clean-up drops it (a new layout is no
+  projection). `SketchModel.breakCrossings` is stored the same way.
+- **Linking after a projection.** A projection changes coordinates and wedges only, so the page
+  no longer compares a signature that includes wedges by bond direction: it unlinks on another
+  topology (elements, charges, unordered bonds, orders), or on wedges that draw neither the
+  computed drawing's isomeric SMILES nor the record's (RDKit canonical SMILES of the 3D
+  geometry molblock, chirality from 3D). Wedges that redraw the record's configuration keep
+  the link.
+- **Stereo rule.** Centres and the target come from RDKit's reading of the projected x, y, z
+  (heavy atoms with implicit H; JSON `stereo` cw/ccw plus CIP labels), which equals the
+  record's isomeric SMILES in every orientation tested. A configuration is the sign of a
+  volume over the drawn neighbours in id order (3: det(v1, v2, v3); 4: det(v2-v1, v3-v1,
+  v4-v1)), with depth (true) or with a pseudo-depth +-|v| behind a wedge/hash whose narrow end
+  is the centre (drawn). One mark per centre, on the single bond that draws the true sign and
+  scores best: acyclic +4, terminal neighbour +2, neighbour not a centre +3, |V| up to +1,
+  depth: +2|dz|/L and +3 when the mark follows the depth (wedge in front, hash behind) else
+  -3; a degenerate volume (|V| < 0.08) or an ambiguous four-neighbour mark (the three other
+  neighbours within 170 deg, where RDKit's pseudo-3D reading need not follow the volume) is
+  -20. All other marks are cleared. RDKit then reads the drawing back and flips any centre
+  whose CIP label differs (never needed on the six fixtures x 66 orientations of the tests and
+  the sweep: alanine, CHFClBr, camphor, 2-methylcyclohexanol, menthol, cocaine).
+- **Layout fix.** "Fix layout" (Shift+G, also after every projection): Gauss-Seidel position
+  corrections in a fixed order, at most 300 sweeps, stopping when the net motion of a sweep is
+  below 1e-4 L. Terms: bond length to L (stiffness 1; a bond under 0.05 L is first opened along
+  growthAngle); angles under 40 deg open (0.3); non-bonded atoms under 0.68 L part (0.5); an
+  atom under 0.36 L from a bond it is not on moves off (0.5); label boxes (drawing.labelBox:
+  symbol, H count on its side, charge; 3 px padding at 25 px/unit) part from other labels,
+  atoms and bonds (0.5); an anchor to the start positions, 0.02 after a projection, 0.005 for a
+  hand drawing. Metrics use stricter thresholds (contacts 0.6 L, atom on bond 0.3 L, angles 35
+  deg, no padding) so a converged layout reports zero. The wedge configurations drawn before
+  are drawn again afterwards (the same scoring, the old mark +5). A projection also tries 12
+  slightly tilted views (8 and 15 deg about the screen axes, the depth is known) when the exact
+  view leaves defects, scoring 10 x label overlaps + 5 x contacts + 5 x atom-on-bond + 2 x
+  small angles + 0.5 x crossings + 20 x bond RMS + 0.15 per degree of tilt: local relaxation
+  cannot untangle an atom lined up behind a cage. On the six fixtures x 30 orientations this
+  leaves one case (cocaine) with a contact and an atom on a bond; bond RMS <= 0.045.
+- **Crossing breaks.** Render-time only (drawing.ts): where two bonds cross (no shared atom,
+  ends excluded) the one behind (interpolated depth at the crossing; without depth on all four
+  atoms the bond drawn later is in front) loses BREAK_GAP_PX = 3.2 px plus the front bond's
+  half-width on each side, divided by the sine of the crossing angle (at least 0.35), on every
+  stroke; wedges split in two, hashes lose the ticks inside. On by default after a projection,
+  a toolbar toggle (Shift+X) otherwise.
+
+## 2026-10-25 — Sketcher 2D layout: server-side RDKit depiction and perspective templates
+
+- **Why the relaxation went.** The 3D->2D projection followed by the home-made "Fix layout"
+  relaxation (bond-length, angle, contact and label terms, tilted views) was judged awful by eye:
+  a projection of a cage lines atoms up behind each other, and a local relaxation only smears
+  the result. It is removed (sketch/layoutFix.ts, projectLayout.ts, stereo.ts and their tests),
+  with its button (Shift+G). Both layouts now come from RDKit on the server:
+  `POST /api/depict2d` (serve/depiction2d.py, API process, RDKit only, no worker). Kept from the
+  old code: the 3Dmol view convention (the quaternion is sent as is; the page still checks it
+  against `modelToScreen`, `data-projection-residual`), the depth-based wedge choice and the
+  render-time crossing breaks, now fed by the server's depth.
+- **Request and answer.** `{molblock, mode: clean | match3d, style: textbook | perspective,
+  molecule_id?, view?: {quaternion [x, y, z, w], convention "3dmol-rotationGroup"}}`. The
+  answer keeps EXACTLY the molblock's atom and bond order: `coords[i]` (bond 1.5), `depth[i]`
+  (+ towards the viewer, or null), wedges by bond index with the narrow-end atom, the molblock
+  (written here: the input's Kekule form and charges, narrow end first), the canonical isomeric
+  SMILES RDKit reads back, `stereo` none / kept / mismatch, the defect report and every
+  candidate's score. Errors: EMPTY_INPUT, INVALID_MOLFILE, LIMIT_EXCEEDED (250 atoms),
+  REQUEST_INVALID (match3d without id or view, a zero quaternion), MOLECULE_NOT_FOUND,
+  MOLECULE_NOT_READY (no QM record; never featurizes), MAPPING_FAILED (the sketch is another
+  molecule or does not map onto the record), DEPICTION_FAILED (new, 500: RDKit could not lay it
+  out). The client applies the answer by index (sketch/depiction.ts); when the server cannot be
+  reached Clean falls back to RDKit.js's CoordGen with a notice in the info bar.
+- **No global RDKit state.** `SetPreferCoordGen` is process-wide and depict.py sets it, so every
+  RDKit depictor call passes `forceRDKit=True` and CoordGen is called by name
+  (`rdCoordGen.AddCoords`). RDKit's ring templates are global too (`SetRingSystemTemplates`
+  replaces them; reloading the defaults costs 0.4 s) and RDKit never applies a template to a
+  monocycle (checked: a deliberately distorted cyclohexane template is ignored, a norbornane one
+  is used, and template atoms/bonds match as SMARTS, so `*` and `~` make them generic). So the
+  textbook style uses RDKit's default templates (`useRingTemplates=True`), and the perspective
+  library is applied by our own matcher; `RDKIT_TEMPLATE_LOCK` guards the one test that loads
+  our file into RDKit to prove its format.
+- **Textbook.** RDKit with its ring templates and CoordGen, the lower defect score wins, but
+  CoordGen must win by 2 (the gallery favoured RDKit's templates: camphor, cubane, morphine,
+  pinene; CoordGen drew camphor's gem-dimethyl bridge as a cross inside the ring).
+- **Defect score** (serve/depiction_metrics.py, drawing units, bond L = 1.5): 10 label overlaps
+  (a labelled atom within 0.8 L of an atom it is not bonded to) + 8 close contacts (< 0.5 L) +
+  15 coincident atoms (< 0.25 L) + 6 atoms on a bond (< 0.2 L) + 10 atoms in no ring drawn
+  inside a ring + w_x crossings + w_s squashed rings (principal-spread ratio < 0.6) + 2 angles
+  under 35 deg + 20 bond-length RMS. By kind: flat layouts w_x 3, w_s 0; perspective templates
+  w_x 1, w_s 0 (their crossings and slanted rings are the point); the view template w_x 1.5,
+  w_s 6 (a slanted aromatic ring is just squashed). Calibrated on the gallery: the inside-ring
+  term was added when the first score preferred CoordGen's camphor, the coincident and squashed
+  terms when degenerate or slanted 3D views won.
+- **Template library** (serve/data/ring_templates.smi in RDKit's format: one generic CXSMILES
+  ring system with 2D coordinates and a name per line; ring_templates.json: title, depth per
+  atom, examples, source, convention, derivation). Ten templates: cyclohexane chair, norbornane
+  (camphor, borneol, norbornene), bicyclo[2.2.2]octane (quinuclidine, DABCO), tropane
+  (bicyclo[3.2.1]), adamantane, cubane, trans- and cis-decalin, the all-chair 5alpha steroid
+  core. Each is an orthographic picture of the lowest-energy MMFF structure of its parent (20
+  srETKDGv3 embeddings, seed 7), turned to a hand-chosen view (up and right axes from atoms,
+  then spin, tilt, roll; picked from a search over spin and tilt and checked in the gallery) and
+  scaled so the median drawn bond is 1.5: parallel bonds stay parallel, axial bonds are vertical.
+  A pinane template was dropped: RDKit's default pinane template already is the chemist's
+  drawing, ours crossed the double bond of alpha-pinene.
+- **Applying a template.** A template is a conformation, not a graph: it is matched (largest
+  first) only on a whole ring system (rings sharing two or more atoms) and its 3D shape (x, y
+  and the stored depth) is fitted to a 3D structure of the molecule, mirror allowed, accepted
+  under 0.12 bond lengths RMSD. So benzene is never a chair, cis- and trans-decalin pick their
+  own drawing and a boat is left alone. The 3D structure is the lowest-energy of 4 srETKDGv3 +
+  MMFF embeddings (plain ETKDGv3 gave only twist-boats for cis-4-tert-butylcyclohexanol), or
+  the record for match3d. Each exocyclic neighbour in no ring goes on the tetrahedral slot its
+  3D bond points to (axial / equatorial, exo / endo), one bond length along the slot's drawn
+  direction snapped onto vertical or a ring-bond direction within 8 deg (textbook chairs);
+  ring neighbours (spiro, ring substituents) are left to RDKit, which lays out the rest around
+  the locked atoms (`Compute2DCoords(coordMap=..., forceRDKit=True)`). The perspective drawing
+  is kept unless it scores more than 15 worse than the textbook one (cocaine's two esters crowd
+  on the tropane template; the spiro ketal squeezes): then the textbook layout, with a note.
+- **match3d.** The record geometry (sketch atom i = record atom sketch_to_record[i], recomputed
+  on the server from the posted molblock) is turned by R(q) (the same rotation as
+  projection.ts rotateByQuat; a test pins it) and scaled so the median 3D bond is 1.5. The
+  stereo target is read from that 3D structure (`AssignStereochemistryFrom3D`), keeping CIP
+  R / S everywhere and r / s only on atoms with at most two ring bonds: a cage's bridgehead
+  pseudo-stereo (adamantane, cubane) would only add wedges. Candidates:
+  `GenerateDepictionMatching3DStructure` (a 3D distance-matrix mimic, so the view only orients
+  it), `Compute2DCoordsMimicDistmat` on the projected distances, the view itself as a template
+  made on the spot (ring atoms where the view shows them, exocyclic atoms along their projected
+  bonds, RDKit for the rest), the textbook layout and, for style perspective, the template
+  layout. Each is turned onto the projection (flat ones may also be mirrored; a perspective
+  picture never, it would show the enantiomer) and ranked by defects + 20 x the fit residual
+  (RMS distance to the projection over its spread) + 50 for a stereo mismatch. The depth is the
+  view's (a template keeps its own).
+- **Wedges.** One mark per stereocentre on the single bond that scores best (acyclic +4,
+  terminal neighbour +2, neighbour not a centre +3; with depth +2 |dz| / L and +3 when a wedge
+  is in front or a hash behind, else -3), its kind from `Chem.WedgeBond(bond, centre, conf)`
+  (whose answer is for the given centre even when it is the bond's end atom; RDKit's own writer
+  then puts the wrong narrow end, hence our writer). RDKit reads the result back; on a
+  difference RDKit's `WedgeMolBonds` is tried, then `stereo: mismatch` is reported (never seen
+  on the gallery or the tests).
+- **Gallery.** `uv run --no-sync ksmech-serve gallery [--out DIR]` draws 22 hard molecules with
+  the old CoordGen clean-up, textbook, perspective and match3d from two fixed views of an
+  RDKit structure (no xTB) into one PNG + SVG grid per method, sheets of molecules x methods and
+  gallery.json. RDKit's drawer renders them, so the sketcher's crossing breaks are not shown.
+
+## 2026-10-25 — Perspective templates redrawn as textbook pictures
+
+- **Why.** The ten templates were orthographic pictures of MMFF minima. By eye the cages looked
+  wrong (camphor and borneol cramped; quinuclidine, adamantane and the decalins odd), and the
+  pictures broke basic drawing rules: bonds drawn 0.4 to 1.4 long, angles up to 180 deg (RDKit
+  prints a stray "C" there), atoms 0.1 bond from bonds they are not on.
+- **Picture and shape are now separate.** `ring_templates.smi` holds a hand-made picture in the
+  textbook style (Clayden, Eliel). `ring_templates.json` adds `fit`: the parent's MMFF structure
+  turned to the orthographic view that best reproduces the picture (`derive_template`). The JSON
+  also lists `front` atoms because a picture alone cannot tell a cage from its depth-reversed
+  twin. `depth` is the z of `fit`, so the crossing breaks and wedges agree with the picture.
+  Matching a molecule uses `fit`. The exocyclic slots are the tetrahedral directions of `fit`,
+  drawn through a per-atom linear map onto the picture. Each slot is turned to stay 38..160 deg
+  from the atom's other bonds, then snapped onto the vertical or a ring-bond direction (within
+  8 deg, 30 deg for the stylised chairs). A slot can also be set by hand (`slot_overrides`: the
+  V of the C7 / N8 substituents).
+- **Rules** (`depiction_metrics.rule_report`, tested on every template and on 13 substituted
+  examples): bonds within 15% of the median, except bonds listed as `foreshortened` (receding,
+  at least 0.55); angles 30..165 deg at atoms with two or three bonds (a four-bond cross is the
+  convention); no atom within 0.4 bond of a bond it is not on; atoms at least 0.6 apart; the
+  stated number of crossings, and no extra crossings from substituents.
+- **Conventions.**
+  - Chair: three bond directions (55, -20, 10 deg), each drawn twice at one length; axial bonds
+    vertical, equatorial bonds parallel to the ring bonds once removed.
+  - trans-Decalin and the steroid A/B/C: the same chair turned 180 deg about each shared bond.
+    The steroid is fused on the steep bond, so it reads as the natural 5alpha series with the
+    angular methyls up. D is a regular pentagon.
+  - cis-Decalin: a chair with the second chair rising through an axial bond.
+  - Norbornane, bicyclo[2.2.2]octane and tropane: seen from the front and above, bridgeheads left
+    and right, the back bridge inside and short, no crossing. The C7 / N8 bridge is a roof over
+    the boat, the barrel or the half-chair.
+  - Adamantane: a chair with three parallel bonds (80 deg) up to the apex, one central crossing.
+  - Cubane: a cabinet cube, two crossings.
+- **Symmetric fits.** A symmetric template fits a molecule equally well in several ways. Among
+  fits within 0.02 bond of the best RMSD, `_crowding` picks the one that puts substituents on
+  clear, drawn, front slots and keeps ring double bonds out of the back. So 1-adamantanol gets
+  its OH on the apex and camphor gets its carbonyl on the front bridge.
+- **Gallery.** It now also draws everything in the sketcher's own style (`app_scene`
+  reimplements sketch/drawing.ts + crossings.ts: bare carbons, broken rear bonds) and adds
+  templates.png / templates.json.
+- **Costs.** beta-D-glucopyranose falls back to the textbook layout: the chair's adjacent
+  equatorial OH labels overlap. The camphor match3d view residual bound went from 0.6 to 0.7
+  because the stylised picture is further from a true view. Twistane was tried and dropped: no
+  candidate view looked like a textbook figure.
+- **match3d-view depth.** That candidate now takes the view's depth scaled like the other
+  candidates (`view_frame`, the median bond), as documented. Its own scaling (mean bond) was 2%
+  off. This showed up once the new norbornane template stopped winning one of the test views.
+
+### 2026-10-25 — Workbench radicals, R/S, side-by-side orbitals, customizable layout
+
+- Radicals are chemistry, not display: the sketch stores 0, 1 or 2 unpaired electrons per atom
+  and writes them as V2000 `M  RAD` (2 doublet, 3 triplet; reads 1 and the old atom-block code
+  4 too), so RDKit's H counts, SMILES and formula follow. Compute is disabled with the reason
+  instead of left to fail, because the featurization is closed-shell (RADICAL_NOT_SUPPORTED).
+  The "." key is free on every layout and collides with no shortcut (tested).
+- CIP labels come from RDKit.js `get_stereo_tags` (new labeler) on the sketch's own molblock,
+  so they read the drawn wedges and 2D double-bond geometry; "?" marks a possible but
+  undefined stereocentre.
+- The layout is a pure reducer over columns (at most 3) plus a full-width row; hidden and
+  collapsed panels stay mounted. Layout and preferences live in localStorage
+  (`ksmech.workbench.layout.v1`, `ksmech.workbench.prefs.v1`) and are sanitized on read. The
+  default preset puts the orbitals full-width so the level diagram and the orbital list sit
+  side by side. Moving a panel to another column remounts it (the sketch keeps its drawing
+  but loses its undo history).
+
+## 2026-10-25 — Sketcher drawing styles and publication export
+
+- **Style model.** `apps/ui/src/features/workbench/sketch/style.ts`: a `DrawingStyle` holds
+  what a ChemDraw document style controls, in points: fixed bond length, line width, bold
+  (wedge) width, hash spacing and hash tick width, double-bond spacing (% of the fixed bond
+  length) with the inner-line shortening and the terminal C=X rule (ring doubles always go to
+  the ring centre), margin width, label font family / size / weight, subscript and charge size,
+  superscript or circled charges, colour or black and white, crossing gap, wedge shape (classic
+  wedge, or a bold bond with a tapered start), chain angle, labelled carbons and terminal
+  methyls, and whether sizes follow the zoom. The fixed bond length is the length of a standard
+  model bond (`BOND_LENGTH` = 1.5 units, what the tools draw and imports / Clean normalise to).
+  For the publication styles `pxPerPt = zoom * 1.5 / bondLengthPt`, so every size keeps its
+  proportion to the bonds at any zoom and the canvas is the exported picture scaled. Screen
+  keeps fixed pixels (1 pt = 4/3 px) as the sketcher always did (labels stay readable on a big
+  molecule fitted small); the font size, line width and atom-colour preferences set it, and its
+  values reproduce the former constants (13 px labels, 1.5 px lines, 4.5 px double gap, 3.6 px
+  wedge half-width, 3.2 px crossing gap).
+- **Presets and sources.**
+  - ACS Document 1996: bond 14.4 pt (0.508 cm), line 0.6 pt, bold 2.0 pt, margin 1.6 pt, hash
+    spacing 2.5 pt, bond spacing 18 % of length, chain angle 120°, Arial/Helvetica 10 pt, black
+    and white. Source: Revvity Signals (ChemDraw's vendor) support article 4408234173332 ("When
+    I print the structures, the line thickness for chemical bonds has increased ..."), which
+    lists the style sheet; the same numbers in the Middlebury science-writing guide
+    (sites.middlebury.edu/middsciwriting/?p=334) and in journal author guides that quote the ACS
+    settings. Not in the published list, so ours: hash tick width = line width, crossing gap =
+    margin, subscript and charge at 75 %, inner line shortened 12 % at each end.
+  - Total synthesis: no standard exists; the app's own preset for the bold look of synthesis
+    papers and graphical abstracts, said so in the tooltip: bond 15 pt, line 1.1 pt, bold
+    3.2 pt (tapered wedges), hash spacing 2.6 pt with 1.0 pt ticks, spacing 20 %, inner line
+    12 %, margin 2.2 pt, crossing gap 2.2 pt, Arial 11 pt, subscript 75 %, charge 80 %, black
+    and white.
+  - RSC and Wiley are not offered. No publisher page gives the numbers. The only RSC values
+    found are a third-party reading of ChemDraw 22's "RSC (1 Column) Document.cds" (12.2 pt
+    bonds, 0.45 pt lines, 1.6 pt bold, 1.75 pt hash spacing, 1.25 pt margin, 20 %, Helvetica
+    7 pt; github.com/JamesOBrien2/penzene pull 67); nothing for Wiley (Angewandte ships a
+    template file instead). A user with those style sheets can enter them as a Custom style.
+- **Labels.** Label widths come from Helvetica's AFM advance widths (= Arial's;
+  `fontMetrics.ts`) for the publication fonts, so the canvas, the SVG and the PDF place glyphs
+  identically. Bonds stop at the label's ink box (cap height, the H part on its side) plus the
+  margin, along the bond direction (ChemDraw's margin width). The H count goes right or left as
+  before, or above / below when bonds leave on both sides near the horizontal (an NH in a
+  chain). The charge takes the first free slot of upper right, upper left, lower right, lower
+  left (40° from every bond and the H).
+- **Chain angle.** It shapes only new bonds (growth from a one-neighbour atom, the chain tool's
+  zigzag), through one piece of module state in geometry.ts set by the Sketcher; every preset
+  uses 120°, so nothing changes unless a custom style sets another angle.
+- **"Apply bond length".** The ⋯ menu's existing "Reset bond length" already rescales the
+  drawing so its mean bond is the standard bond, which every style draws at its fixed length.
+  The editor adds "Actual size", a view change (zoom so a standard bond is the style's length
+  on a 96 dpi screen) that leaves the model alone. Changing the model's unit to the style's
+  bond length would desynchronise the tools, the server depiction and the molfile scale.
+- **Export sizing.** `exportImage.ts` builds the scene in points (a standard bond = the fixed
+  bond length) and turns it into primitives (lines, filled polygons, circles, text with
+  explicit baselines and start positions: no dominant-baseline, which Word and Inkscape read
+  differently). The box is the ink plus a 2 pt margin. SVG: width / height in pt and the viewBox
+  in pt (1 unit = 1 pt). PNG: the SVG rasterised at `round(pt / 72 * dpi)` px (150 to 1200 dpi)
+  with a pHYs chunk carrying the dpi, so Word and LaTeX place the file at its physical size.
+  PDF (`pdf.ts`, no dependency): one page whose MediaBox is the drawing in pt, round-capped
+  strokes, filled wedges, Bezier circles and text in the base-14 fonts (Helvetica,
+  Helvetica-Bold, Helvetica-Oblique; Times-Roman for the Times family, laid out with Helvetica
+  widths), WinAnsi with the minus as the en dash, nothing embedded, no dates (deterministic).
+  Checked: pdfinfo reports the page size, pdftoppm renders the SVG and PDF identically, and
+  pdflatex includes the PDF through graphicx.
+- **LaTeX.** "Copy LaTeX" gives a figure that includes scheme.pdf at its width in cm. "Copy
+  chemfig" writes chemfig code. Each bond gets its absolute angle from the 2D coordinates, plus
+  a length factor beyond 5 %. Branches go in parentheses and ring closures are hooks (`?[a]` ...
+  `?[a,{=^}]`). Ring doubles are offset to the ring side (`=^` / `=_`), wedges and hashes are
+  Cram bonds (`<`, `>`, `<:`, `>:`) and labels carry their H and charge (`{H_3N^{+}}`). atom
+  sep, widths and the font size come from the style. Compiled with chemfig 1.82 from CTAN and
+  pdflatex on camphor, carvone, zwitterionic alanine, the Boc-alanine ammonium salt, cholesterol
+  and benzene; the pictures match the sketch. Not supported: radical dots (dropped, with a
+  comment), crossing breaks, circled charges, element colours.
+- **Drag and copy: verified vs expected.** The files are rendered in the background, debounced,
+  so dragstart and the copy buttons attach them synchronously.
+  - Verified in Chromium (Chrome under Playwright):
+    - A dragstart on the handle fills the DataTransfer with scheme.png, scheme.pdf and
+      scheme.svg as File items, text/html (an `<img>` PNG data URL at the physical size) and
+      DownloadURL (`image/png:scheme.png:blob:...`). The e2e test checks this on a synthetic
+      DragEvent.
+    - In a real drag to a drop zone in the page (Playwright's drag interception), the zone saw
+      text/html, text/plain ("scheme.svg", Chromium's) and our marker type, but no Files and no
+      DownloadURL.
+    - "Copy image" writes image/png plus image/svg+xml (`ClipboardItem.supports` is true in
+      this Chrome). A paste into a contenteditable on another page receives an image.png File
+      and inserts the image. Chromium re-encodes the pasted PNG, though, and the dpi chunk is
+      lost, so a pasted PNG is sized by its pixels (96 dpi) unless the target takes the SVG.
+  - Expected only (no Word, Overleaf or desktop here):
+    - Word desktop and Word Online: paste of the PNG works (a plain clipboard image); Microsoft
+      365 may take the SVG at its true size. Otherwise set the size from the cm shown in the
+      panel.
+    - Word, a drop: works if Chrome hands the File items or the HTML image to the OS drag.
+    - Desktop or file manager, a drop: DownloadURL saves scheme.png (Chrome only).
+    - Overleaf file tree: a drop uploads only if real File items arrive, which the in-browser
+      test did not show. The reliable route is the PDF download plus Overleaf's upload, then
+      "Copy LaTeX", or "Copy chemfig" with no file at all.
+
+## 2026-10-25 — Workbench point-group calculator
+
+- **What.** `GET /api/molecule/{id}/symmetry?tolerance=` (`PointGroupOut`) gives the
+  Schoenflies point group of the QM record geometry (`serve/symmetry.py`, numpy + scipy's
+  kd-tree and assignment solver, no new dependency; in the API process, memoized per molecule,
+  tolerance and record digest; at most 1000 atoms, LIMIT_EXCEEDED above; a numerical failure is
+  SYMMETRY_FAILED). The Global tab shows the group, its order, the tolerance, the elements and
+  the equivalent-atom classes; the 3D view draws the elements and colours the classes.
+- **Tolerance semantics.** An operation counts when it maps every atom within the tolerance
+  (Å, 0.01–0.5, default 0.1) of a distinct atom of the same element. Each operation is the
+  Kabsch fit (determinant fixed) to the permutation it induces, so a slightly-off candidate
+  axis is corrected before the test; products formed by the closure must pass the same test,
+  so the reported group is consistent at the stated tolerance. The 0.1 default absorbs
+  MMFF/GFN2 noise; a per-coordinate noise of 0.02 Å already pushes a 60-atom C60 below Ih at
+  0.1 Å (pair residuals reach about 0.1 Å), which is the semantics, not a bug.
+- **Algorithm.** Candidates come from the inertia axes, each equivalent-atom set's axes and
+  centroid, atom directions and pair midpoints / differences / plane normals (sets above 16
+  atoms use only pairs with three anchors); C_n (n <= 12), mirrors, S_2n and i are tested with
+  a probe-atom kd-tree prefilter. The group is a greedy closure, best deviation first, from six
+  seeds (the largest wins), keyed by (determinant, permutation), which is unique for any
+  non-linear structure (a planar one has E and σh with the same permutation, told apart by the
+  determinant). Linear structures (every atom within the tolerance of the least-inertia axis)
+  are C∞v / D∞h by an inversion test, outside the closure. The decision tree runs on the
+  closed group (counts of high-order axes, the principal axis, perpendicular C2 axes, σh,
+  vertical mirrors, S_2n) and the order is checked against the name (a note if it differs).
+  Element subscripts follow the conjugacy classes: in Dnh / Cnv with even n the vertical class
+  holding more atoms is σv, the other σd (σv / σv′ for n = 2); perpendicular C2 classes are C2′
+  and C2″; Oh mirrors normal to a C4 are σh.
+- **Symmetrized structure.** The group average of each atom's images, operations refitted to
+  the average three times; its RMS and largest displacement are reported. The hint repeats the
+  search at 0.05, 0.1, 0.15, 0.2, 0.3, 0.4 and 0.5 Å (up to 300 atoms) and reports the highest
+  group and its smallest such tolerance ("would be C2v at 0.15 Å").
+- **Not done.** No icosahedral/cubic subgroup orientation conventions (D2h axes are not named
+  x / y / z); C_n is capped at n = 12 (D∞h / C∞v are handled separately); the Hungarian
+  matching minimizes the summed squared distance, not the largest one, so a borderline case can
+  miss a bijection that a bottleneck matching would find.
+
+## 2026-10-25: Collision-aware atom labels, tidy fragments, zoomable level diagram
+
+- **Label placement is a render pass, not a model edit** (`sketch/labelLayout.ts`, run by
+  `drawing.buildScene`, so the canvas, the SVG / PDF / PNG export and the chemfig hints agree).
+  Each labelled atom starts from ChemDraw's choice; only when its ink collides with another
+  label, a bond or itself are alternatives scored: overlap (ink boxes from Helvetica metrics at
+  the style's size, `sketch/labelGlyphs.ts`) times 10^4 plus a small preference cost, so any
+  overlap-free option beats any preference. Order of resort: H side (right, left, above, below)
+  and charge slot (the four corners, then above / below / right / left), then subscript and
+  charge shrunk to 85 % and 72 % (never under the style editor's 40 % of the font), then a
+  render-only displacement of up to 0.9 font with a leader, for terminal or isolated atoms only
+  (bonds must still meet at a symbol), else the overlap is reported (`Scene.issues`,
+  `data-label-issues`). Clearances: another label at least max(margin, 0.2 font), a charge sign
+  0.3 font (a sign next to a foreign symbol reads as its charge), a bond 0.75 margin.
+- **Bond ends trim against the final ink** with the margin as a round-cornered band around each
+  glyph box, for every line of a multiple bond and both edges of a wedge (laterals of the
+  bond's half-width), instead of one ray exit from a symbol box: no stroke ever enters a label,
+  and diagonal bonds are not over-trimmed by box corners.
+- **The test metric** (`sceneOverlaps`): label-label (two atoms' ink boxes), label-self
+  (non-adjacent runs of one label) and label-bond (a drawn stroke with its width or a wedge
+  outline in an ink box), any positive area / length counts. Checked on Boc-Ala NH4+, alanine
+  zwitterion, glucose (ring and open chain) and sodium tosylate in Screen, ACS 1996 and Total
+  synthesis at three zooms, from RDKit.js layouts and from the server's Clean layouts recorded
+  in the test.
+- **Tidy fragments moves whole fragments in the model** (`sketch/fragments.ts`): a translation
+  per fragment keeps every bond, wedge and depth, hence topology and stereo (the test checks
+  RDKit's canonical isomeric SMILES). Clearance: half a bond length, at least one font size,
+  between the default-placed ink of the fragments (labels as ChemDraw places them, not after
+  the collision pass, which may have moved an H out of the way only because the ion was
+  there). The largest fragment stays; the others are pushed along the nearest-point direction.
+  It is measured in the current style and also in ACS 1996 and Total synthesis, so a salt
+  tidied on screen does not touch in a publication export. Applied after every Clean as its own
+  undo step (one undo keeps Clean's placement) and by the Tidy button, which shows only with
+  two or more fragments (it would otherwise widen every toolbar).
+- **chemfig hints follow the placement**: the H run goes on the drawn side (above / below fall
+  back to the bonds' rule: chemfig has no such form); a charge off the upper right becomes
+  `\charge{<angle>=$\scriptstyle±$}{X}` only where the H run is not, else the usual
+  superscript (a `\charge` on the symbol's node would sit on the H).
+- **Level diagram degeneracy is regrouped client-side** (`orbitals/levels.ts`) with the
+  server's own rules: `degenerate_levels` (a new level when an MO lies more than the threshold
+  above the level's first MO, ascending energy; not chaining) and `frontier_blocks` (HOMO =
+  highest-index MO with occupation >= 0.5, blocks within the threshold of the anchor, HOMO−1 /
+  LUMO+1 the next distinct level). At 0.05 eV both match the server. At large thresholds a
+  frontier block can straddle two drawn groups (the two rules differ); the label then states
+  the block's own size and mean energy. The threshold (0.001–0.5 eV) is `Prefs.degeneracyEv`.
+  WorkbenchPage was not changed in this task: OrbitalPanel takes `degeneracyEv` /
+  `onDegeneracy` props, and without them keeps its own state and merges the field into the
+  stored preferences (the page's `usePrefs` then rewrites its own copy on its next preference
+  change until the page passes `prefs.degeneracyEv` / `setPrefs`).
+- **Zoom model**: the visible range is the window's until the user zooms or pans, and returns
+  to it when the molecule, the orbital set or the window changes. Wheel = zoom about the cursor
+  (a non-passive listener, so the page neither scrolls nor zooms), Shift+wheel and drag = pan,
+  a click after a drag is swallowed so it does not select a level. The span is kept between
+  0.05 eV and 4x the spectrum, the centre inside it. Occupation arrows are drawn as paths
+  (not 8 px glyphs) and dropped where neighbouring levels are closer than 8 px (zoom shows
+  them); frontier labels are spread at least 15 px apart with dashed leaders; below 380 px
+  width the labels drop their energies.
+
+## 2026-10-25 — Workbench metal complexes: coordination-template start geometry (serve adapter)
+
+- **Diagnosis** (real GFN2-xTB through the workbench featurizer in a scratch data root, 33
+  complexes; before: 19 right, 4 wrong, 8 failed, 2 rejected). Root causes, by weight:
+  1. *Embedding.* MMFF has no transition-metal parameters and UFF types no charged metal, so
+     every metal record carried EMBED_UFF_FALLBACK with raw ETKDG coordinates. ETKDG fails
+     (EMBED_FAILED) on every five- and six-coordinate metal without SMILES stereo
+     ([Co(NH3)6]3+, [Fe(CN)6]4-, Cr(CO)6, [Fe(H2O)6]2+, Fe(CO)5), hits an RDKit invariant
+     violation on ferrocene (UNEXPECTED), and embeds every four-coordinate metal tetrahedral,
+     square-planar d8 included (start angle RMS 6-33 degrees off square planar).
+  2. *GFN2 from a wrong start.* GFN2 recovers square planar for small complexes, but not for
+     RhCl(PPh3)3 or Pd(acac)2 (both stay tetrahedral, Wilkinson's with Rh-Cl 2.88 A and no
+     warning); cisplatin and Pd(acac)2 dissociated an M-L bond (1.38x, 1.90x) and needed the
+     walls (RESTRAINED_GEOM); a Grubbs-type Ru(=CHPh)Cl2(PMe3)2 ended with Cl trans to P;
+     PtCl2(NH3)2 without stereo came out cis or trans by chance.
+  3. *Spin.* The pipeline is closed-shell: [NiCl4]2- (a tetrahedral triplet) came out as a
+     square-planar singlet. d9 Cu(II) is already SPIN_PARITY (RDKit puts no radical on metals).
+  4. Not causes: dative bonds (`->`) parse and stay bonds; charge-separated forms
+     (`[NH3+][Pt-2]`) work; RDKit honours @SP/@TB/@OH, so stereo-tagged Co(III) isomers were
+     already right; tblite has GFN2 parameters for Z 1-86 (no UNSUPPORTED_ELEMENT). The 1.3x
+     connectivity check is not too strict for M-L bonds (final M-L bonds lie at 0.81-1.03x the
+     radii sum; the breaks it caught were real), and the flat-bottom walls did not distort
+     (restrained cisplatin = free cisplatin from the template). Ionic multi-fragment SMILES
+     (`[Fe+2].c1cc[cH-]c1.c1cc[cH-]c1`, `N.N.Cl[Pt]Cl`) fail; the workbench already refuses
+     them as MULTIPLE_FRAGMENTS.
+- **Adapter** (`serve/metal_geometry.py`, RDKit + numpy; `serve/metal_qm.py`, the GFN2 driver,
+  `qm/` untouched). Sites from the metal's bonds (mutually bonded neighbours form one eta-n
+  site); oxidation state = formal charge + covalent bond orders to non-metals (dative 0, M=C 0,
+  bonds to alkali/alkaline-earth/Al -1); polyhedron by site count, SMILES stereo first, d8
+  Pd/Pt/Au/Rh/Ir (Ni with C/P or all-N donors) square planar, five-coordinate d6 square
+  pyramidal; isomer from @SP/@TB/@OH (tables derived from RDKit's own embedder and re-derived
+  in the tests; handedness not enforced) or the stated default (chelates cis, then the most
+  like-ligand pairs trans); donors at r_M + r_L - 0.05 A (sp C 0.69); ETKDG of the metal-
+  stripped molecule with the template atoms in the coordMap and the bounds (metal floors
+  capped), ligands moved rigidly onto their donors, monodentates turned to point their lone
+  pair at the metal, eta-n substituents in the ring plane, the seed with the best
+  radius-scaled closest contact. Then `GFN2Calculator.run` (inherited) with a metal-aware
+  connectivity check: the M-L factor is its own knob, kept at 1.3 (walls 1.2) on the evidence
+  above, and walls only if a bond breaks. Mononuclear connected complexes with CN <= 6 only;
+  otherwise the standard embed and METAL_TEMPLATE_SKIPPED. METAL_POLYHEDRON_CHANGED /
+  METAL_ISOMER_CHANGED (best vertex assignment of the final geometry) and FERMI_SMEARED are
+  added to the record warnings.
+- **Open shells refused at preflight** with RADICAL_NOT_SUPPORTED (the workbench's
+  closed-shell code): Werner complexes (no C, P, Si, H or eta-n donor) with octahedral d2/d4/d8,
+  high-spin 3d d6 (not Co(III), not six aromatic N), or tetrahedral d2-d8. Deliberately
+  conservative: organometallic ligand fields are never refused.
+- **Method tag.** Records and tokens of the metal path use `<GFN2 method>+metal-geom-v1`,
+  applied by `metal_geometry.method_for` only to keys with a d-block metal and only to the GFN2
+  method (non-metal keys and the synthetic method are untouched). The cache key and the
+  provenance config differ (solvation unchanged), so they never collide with the batch's
+  records; the shared layer is still read first under the tagged method, so an upstream
+  adoption with the same tag is picked up. `orbital_sets.load_qm` verifies the record against
+  `method_for(key)`.
+- **After**: 27 right (every connected closed-shell case: polyhedron and isomer, no
+  RESTRAINED_GEOM), 4 refused (2 d9, [Fe(H2O)6]2+, [NiCl4]2-), 2 failed (the two ionic
+  multi-fragment SMILES). Wilkinson's catalyst: 167 s instead of 339 s. On 22 PMechDB metal
+  species (read-only comparison with the batch manifest): 6 of 8 SCF_NOT_CONVERGED TiCl4
+  carbonyl adducts now converge (square pyramidal, flagged METAL_POLYHEDRON_CHANGED from the
+  TBP start), bent ZnCl2 becomes linear, the clean ones are unchanged; the RESTRAINED_GEOM ones
+  are one-coordinate fragments the template cannot help.
+- **Upstream proposal** (not applied, for the user to decide): move `metal_geometry` to `qm/`;
+  `QMConfig.metal_template` (default off) and `QMConfig.method_for(smiles)`, used for the cache
+  path in `batch._compute/_is_done/build_manifest`, `orbitals.build.process_molecule` and
+  `arrows.reactants.TokenCache`; `embed()` dispatches metal molecules to the template; the M-L
+  factor in `GFN2Calculator._relax`; a failure code OPEN_SHELL_LIKELY. `provenance.verify`
+  compares kind, schema, config and inputs only (code hashes are tracing), so the change stales
+  no existing record; switching it on recomputes the 302 PMechDB metal molecules (179 records,
+  46 RESTRAINED_GEOM; 123 failures, 99 of them SPIN_PARITY) under the new method and re-runs
+  the samples of their steps. It must not be edited into the checkout while a batch runs
+  (records stamped `code_dirty`, refused by `require_clean`).
 ## 2026-10-25 — Phase-2 commands in parallel: sidecar, ks-rank, LightGBM; torch out of `arrows.steps`
 
 - **Why.** The phase-2 rebuild left the CPU mostly idle, and the user asked why it was slower
@@ -4129,6 +4715,117 @@ stay valid.
     can inflate it on bonded pairs. Decide whether it should run over `pair_valid` only before
     the floor is built.
 
+## 2026-10-25 — Serve on spec v9: merge of main, the vendored Gaussian basis, the contact view removed
+
+- **Merge.** `claude/predict` merges main at spec v9 (d566010). Main removed `physics/gto.py`,
+  `physics/ranking.py`, `physics/contact/`, `physics/contact_table.py`, `physics/repulsion.py`
+  and `arrows/contacts.py`; serve imported several of them.
+- **`serve/gto.py`.** The workbench's orbital and density surfaces (`cubes`, `densities`) and
+  the synthetic EHT chemistry (`synthetic`) evaluate AOs and overlaps with the GFN2 Gaussian
+  basis, so the module and its STO-nG table are vendored from 46adf6b into serve, bit-identical
+  below the docstring (`serve/data/sto_ng.json`, same sha256). `tests/test_serve_gto.py` pins
+  stored values (float.hex) and compares the code with the original. `cap_atoms` (the cube
+  grid's cap) is vendored into `cubes` from `physics/contact/legacy_fixed23`.
+- **Removed.** The contact placement replay (`serve/placement.py`, `serve/upstream.py`, the
+  contact routes and cubes, the oriented-block cache and its token-digest bookkeeping in the
+  worker), the site-pair view, and the spec-v3 KS panels (`serve/physics_view.py`,
+  `serve/candidates.py`, `/api/pool/{id}/candidates`, `/physics`, `/site_pairs`). The capabilities
+  `candidates` and `physics` stay listed, off, with the reason; `contact` and `site_pairs` are
+  gone. The `oriented` fingerprint became the `token` fingerprint (tokens, QM and basis code).
+
+## 2026-10-25 — Serve Predict and Correct on the reaction-matrix target (spec v9)
+
+- **Edges are reaction matrices.** A network edge is R on the pool atoms of its source state
+  (`parse_mapped(mapped_smiles)` indices, every H an atom), with its anchor, the arrow reading,
+  the orbital readings of the forming bonds, the product SMILES and sigma keys. B + R is
+  applied with `arrows.apply.apply_edit` and `sanitize_product`; an extra octet check (more than
+  8 valence electrons on H-Ne) catches what RDKit's valence table allows for charged atoms. A
+  product with the parent's pool key is a resonance interconversion (RESONANCE_ONLY_STEP),
+  never an edge. Networks are format v2; spec-v3 networks on disk are refused with a reason.
+- **Pooled gap in serve.** `serve/gatom.py` computes G_atom = sum over the valid (r, s) of
+  (w_i^r w_j^s + w_j^r w_i^s) G(r, s), G in float64 from the full spectra, w the token centre
+  weights; only the pairs `physics.pairs.valid_pairs` allows contribute (the donor's own
+  antibond is excluded, which answers the open question of the stage-B entry for the floor).
+  Move upstream when `model.inputs.pooled_gap` lands. The pool analysis npz now holds the
+  pair block and the weights instead of the KS components.
+- **The floor.** Anchors are atom pairs i < j ranked by |G_atom|: "form" while the order stays
+  at most 3, "break" on a bonded pair (both for a bonded pair below 3). The top `beam` anchors
+  are completed: a forming anchor from its two best channels in each direction through upstream
+  `apply_predicted_arrows` (private `_step` is used only to read `leaving_choices` on the state
+  after the arrow's source and new bond), one candidate per allowed leaving bond; a breaking
+  anchor as the heterolysis towards either atom. Every dropped completion is counted
+  (`COMPLETION_FAILED:<reason>`, `ANCHOR_NOT_COMPLETED`, `APPLY_FAILED:<issue>`) and shows in
+  the node's `apply_failures` and the network's `skipped`.
+- **Scores are not probabilities.** The floor reports |G_atom| (1/eV), the GBDT its lambdarank
+  score; `logp` is null for both and `scores_are_probabilities` is false. The beam and the
+  pathways use a log weight: the log of a child's share of the kept children's scores (floor)
+  or a softmax of the scores (GBDT); a pathway's `probability` is null unless the predictor
+  gives probabilities. Only the network adapter (`NetworkModel.decode -> (R, logp)`) does.
+- **GBDT.** The default file is `<shared>/data/processed/pmechdb/gbdt_lgbm_molecule_geomfree.npz`
+  (`ksmech-physics gbdt`), loaded with `physics.lgbm.load_lgbm` (provenance verified: a stale
+  model is unavailable with its reason). It ranks the valid orbital pairs; the best `beam`
+  are completed at the centres (a, b) with the largest w_a^r w_b^s.
+- **Network.** Available only through a `NetworkModel` adapter, which needs `ksmech.model.net`
+  and a checkpoint `data/models/<source>/<run>/best.pt`. Neither exists on this branch, so it is
+  listed unavailable with the reason; a fake-model test exercises the adapter.
+- **Arrow reading.** `serve/reading.py` decomposes R as a perfect matching of the pair sources
+  (lone-pair losses, breaking bonds) onto the sinks (forming bonds, lone-pair gains). Where
+  several exist, the spec asks for the largest |G_atom| of the forming bonds, but G_atom is
+  symmetric and the same in every reading, so the reading uses the directed part G_dir[a, b]
+  (donor on a, acceptor on b; G_atom = G_dir + G_dir^T) of each forming bond at the end the
+  pair comes from. Ties keep the first matching in sorted order. The orbital reading of a
+  forming bond is the channel with the largest term of G_atom, as the spec says.
+- **Correct.** `POST /api/step/check` validates R with issue codes and atoms and returns the
+  readings when the pool's analysis is ready (a 1 s wait; otherwise `readings_status`
+  "pending"). A user step (`override`) is synchronous and adds an edge of predictor "user"
+  (kind "corrected", weight 0) and a FRONTIER child; expansion of a node is an `expand` job.
+  `predictor: "user"` on `POST /api/predict` builds a root-only network for Correct.
+- **Curation.** StepDocs are format v2: R (`MatrixIO` and `ReactionMatrix.to_list()`), the
+  anchor, the reading (pool atoms, and map-number `dataset_arrows` for Browse), the orbital
+  readings and the sigma keys. A re-check ranks the curated product among the predictor's
+  distinct products by pool key (sorted sigma keys); the Recheck columns keep their names
+  (`first_arrow_rank` is that rank). A user's mechanism is re-checked with the floor and never
+  goes predictor-stale.
+- **Export.** The PMechDB-format export is a download only (`GET /api/curate/export/pmechdb`,
+  `ksmech-serve export --out`): mapped reactions and the reading's arrow code, each record
+  checked by parsing it back with `data.pmechdb.parse_arrow_code` and applying it. The
+  `user_curated` ingest export is gone: curated steps are never training data.
+- **Wiberg sidecars.** The geometry-free pair features need each fragment's Wiberg indices.
+  The serve token loader attaches the layer's sidecar (`data/cache/bond_index` for the shared
+  tokens, `data/serve/bond_index` for serve-built ones), and the synthetic and real
+  featurizers write the sidecar when they build tokens.
+
+## 2026-10-26 — Serve verifies the GBDT model against the shared root
+
+- `physics.lgbm.load_lgbm` resolves the model's relative `file:` inputs (its sample views)
+  against the checkout it runs from, so a serve worktree saw the shared
+  `gbdt_lgbm_molecule_geomfree.npz` as stale (input missing). Serve now runs the same checks
+  (`predictors.gbdt_problems`: kind, version, features, every input re-hashed, a clean build)
+  with the inputs resolved against `KSMECH_SHARED_CACHE_ROOT`, as the token loader does, and
+  reads the booster without upstream's verify. On the host the model is available and ranks
+  the MeO- + MeCl SN2 product first.
+
+## 2026-10-26 — Predict UI: network and step views (user choice among previews)
+
+Three versions of each viewport were built and compared on real jobs before anything was
+committed; the user kept two network views and all three step views.
+
+- Network: **Scheme** (default) and **Pathways**. The force-directed graph was dropped: past about
+  20 states its cycle edges tangle. Scheme is hand-rendered (HTML cards plus SVG curves), no
+  longer cytoscape: card sizes are computed first, each depth column is stacked with fixed gaps
+  in barycentre order (split into sub-columns past 7 states), so no card or caption can overlap;
+  unit tests assert it on two real networks and a synthetic 200-state one. Cycle back-edges are
+  hidden behind a "↺ n" chip unless hovered or toggled. Pathways merges shared prefixes into one
+  trunk and places cards depth-first at their parent's height.
+- Step: **Textbook** (default), **Animated**, **Orbitals**. Textbook uses ACS-1996 lines and fonts
+  with a 17 pt bond instead of 14.4 pt, because at 14.4 pt a bond between two labels shrinks to a
+  stub. Animated keeps atom identity by pool atom and relaxes the reactant drawing into the
+  product with springs instead of morphing to RDKit's product layout, so substituents do not swap
+  sides mid-animation; its last frame can therefore differ slightly from Textbook's product.
+  Orbitals shows the dominant channel's donor and acceptor LMOs over the pool geometry with the
+  canonical pair in a two-level diagram.
+- The step type colour (substitution, addition, proton transfer, ...) in Pathways is a rough
+  classification of the arrow reading for colour only, never a label.
 ## 2026-10-25 — Training preparation: ROCm torch, the model, the trainer and the anchor floor (spec v9)
 
 - **Device (user decision).** Train on the AMD RX 6600 XT (8 GB, gfx1032) through ROCm, and
@@ -4790,3 +5487,343 @@ stay valid.
   - Weights: `best.pt` hashes of sparse_resonance and dense_plain are in
     `data/models/pmechdb/<run>/SHA256SUMS.pod`; the `.pt` of flex_resonance and dense_resonance
     are still on the pod.
+
+## 2026-10-26 — `ksmech-eval embedding`: one sample through a trained model, as a page
+
+- **Why.** Scores say how often the model is right, not what it does with a pool. The tool
+  traces one sample through a checkpoint and draws every stage on one page, to read the model.
+- **What it records** (`eval/embedding.py`).
+  - h^(0) split into its additive parts (`embedding_parts`). Their sum is `TokenEmbedding`'s
+    output exactly, padding and MECH included (tested).
+  - Every encoder layer's inputs and output, recorded by forward hooks on `model.encode`. The
+    encoder loop is not re-implemented, so the page shows the forward pass that ran.
+  - Each layer's attention, rebuilt from the recorded inputs with the layer's own weights:
+    content q·k/√d_h plus the learned bias. The bias is the pair track (dense),
+    `FlexBias.dense` (flex), or the pair MLP on the full grid restricted to the keys the
+    indexer selects (sparse).
+  - The rebuild is checked: h + the attention update + the feed-forward update must equal the
+    layer's output. It holds within 1e-5 on real samples (the page shows the largest
+    deviation), and the tests check it at 1e-4 for the three encoders.
+  - The decoder's anchor logit split into site + pair + physics terms (`anchor_terms`); the sum
+    is checked against `anchor_logits`.
+- **The page** (`eval/embedding_page.py`, `embedding_page.html`).
+  - One self-contained HTML file with the data inlined and no external script.
+  - Token vectors after every layer, as float32.
+  - Attention as bytes, sqrt-scaled (p = (b/255)²), so small weights keep resolution. Every head
+    is kept while L·H·N² ≤ 8M cells, else only the head mean. The largest val pool
+    (489 tokens) gives a 9 MB page.
+  - Orbitals are named by the classifier's types (σ, π, n, ...). These are diagnostics from the
+    token files, and the page marks them as no model input.
+  - The 2D layout is RDKit's, on the Lewis structure of the token atoms with every H drawn.
+    `symmetry.lewis_mol` was factored out of `symmetry_classes` for it.
+  - Every layer has its own PCA, with signs aligned to the layer before.
+  - The current view is kept in the URL hash.
+- **Where the pages go.** Under `data/models/<source>/<run>/embedding/`, which is gitignored.
+  They hold PMechDB pools, so they never reach the public repository.
+- **SMILES mode.** Missing tokens and Wiberg sidecars are built the way `textbook` builds them:
+  GFN2-xTB at a force-field conformer, into the QM cache. Such a pool has no label.
+- **First reading of `flex_first/best.pt`** (200 random val samples, float32 on the CPU):
+  - *Orbital tokens enter mostly as their spectral sets.* Mean norms of the h^(0) parts:
+    - spectral set encoder 85.8 (cos with h^(0) 0.87);
+    - inherited atom vectors 22.5;
+    - fragment 16.0;
+    - MLP_O of the descriptors 10.8.
+
+    The set encoder sums its up to 8 entries rather than averaging them.
+  - *Atom tokens:* element 16.4, charge 15.7 and fragment 15.9. The descriptors (MLP_A) are the
+    smallest part, 9.4, with cos 0.22.
+  - *Fragment embedding:* it is as large as the element's on every token.
+  - *Through the layers:* the tokens drift gradually, with cos(h_l, h_0) going from 0.98 after
+    layer 1 to 0.76 after layer 8. The feed-forward updates exceed the attention updates in
+    layers 1–2 and 8.
+  - *Attention:* the bias carries 20–24% of the logit spread per layer (8–40% per head), so
+    attention is mostly by content.
+  - *Decoder:* the label's best anchor beats the mean candidate by the following margins (mean,
+    with the spread):
+    - pair +17.5 ± 5.4;
+    - site +3.9 ± 1.4;
+    - physics +1.4 ± 1.0.
+
+    In flex the pair term is `AtomPairHead`: the static atom-pair inputs plus products of the
+    two atoms' final vectors. The MLP_Y term over G^atom and the pooled orbital-pair features
+    separates the least.
+  - These are readings, not changes. Open questions:
+    - whether the spectral set should be averaged rather than summed;
+    - what the fragment embedding contributes beyond the same-fragment bias.
+
+## 2026-10-26 — Serve: the embedding trace in the web app; the network predictor still has no decoder
+
+- **Capability `embedding`.** On when torch, `ksmech.model.net`, `ksmech.train.loop` and
+  `ksmech.eval.embedding` are importable (checked with `find_spec`, nothing imported) and one
+  usable local checkpoint exists. The checkpoint part depends on the app's settings, so
+  `capabilities.status(name, settings)` adds it to the import-time `CAPABILITIES`, and
+  `require` reads the settings of the app serving the request. The API process never imports
+  torch (tested in a subprocess).
+- **Checkpoints** (`serve/models.py`). `data/models/<source>/<run>/<file>.pt` under the shared
+  root, then the data root. The listing reads only `run.json` (encoder, model size, clean or
+  dirty) and `metrics.jsonl` (the epoch and metrics of `best`: the trainer's rule, largest val
+  top-1 then smallest val loss; of `last`: the last line). A dirty run is listed with its reason
+  and refused (CHECKPOINT_REFUSED, 409); the worker's `load_model` checks the checkpoint's own
+  header again and refuses with the same code.
+- **The trace is a job**, kind `embedding`, on its own runner thread (`trace`), so it does not
+  wait behind a long prediction on the API side; its worker task still queues behind the running
+  task. The job featurizes missing fragments with the existing `featurize` task (serve's token
+  layer under `data/serve/`, never the shared caches) rather than `ensure_pool`, which would
+  write into the shared QM cache. The worker builds the sample from the state's own tokens
+  (`reactant_sample` plus `reactant_lewis`, as `sample_from_smiles` does) and keeps one model in
+  memory per (path, mtime, size); a file that changed since it was hashed is CHECKPOINT_CHANGED.
+- **Key.** The brief said checkpoint sha + pool key. The id is sha256 of the checkpoint sha256,
+  the pool **state** id and the token digest: two Lewis forms of one pool key are different
+  inputs whose pages number the atoms differently, and rebuilt tokens are a different input.
+  Files `<id>.html`, `<id>.json` (NaN as null), `<id>.meta.json` (written last) under
+  `data/serve/embedding/`, which is gitignored with the rest of `data/serve/`.
+- **Page.** Written once by `eval.embedding_page.write_page` in the worker and served as stored;
+  `?theme=light|dark` sets `data-theme` on its root (the template already themes on it), so the
+  iframe follows the app's override. The UI reads the page's view hash from the same-origin
+  iframe once a second, stores it per trace in sessionStorage and puts it on "open in new tab".
+- **Network predictor.** Not wired. `ksmech.model` has the encoder, the anchor pointer and the
+  entry classifiers, and checkpoints exist, but no step decoder: spec "Decoding a step" asks for
+  the B most probable anchors, each completed into reaction matrices that conserve charge and
+  respect every valence, ranked by the joint log P(R) and merged by product.
+  `model.loss.greedy_edit` gives the top anchor with the argmax class of every other entry, no
+  beam and no conservation or valence check. Serve does not write the decoder. The predictor's
+  reason text was left unchanged: `serve/predictors.py` is part of the physics fingerprint, and
+  editing it would re-key every pool analysis and mark curated mechanisms predictor-stale for a
+  message.
+
+## 2026-10-26 — The web app is an add-on to the engine (before the merge into main)
+
+User decision: merge the UI into main with minimal changes, the UI being something extra that
+talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` facade, a separate
+`ksmech_serve` package, an optional HTTP engine server) was proposed and deferred.
+
+- The web packages (fastapi, uvicorn, sqlmodel, sqlalchemy, starlette, pydantic) left
+  `[project] dependencies` for a `serve` dependency group, in `default-groups` so `uv sync` still
+  installs them for development; the locked versions are unchanged.
+- `tests/test_engine_boundary.py`: no module of `src/ksmech` outside `serve/` imports
+  `ksmech.serve`, and the engine's dependencies carry no web package.
+- The serve code still calls engine modules directly (about 40 of them) and keeps chemistry that
+  belongs to the engine (the arrow reading of R, the step check, G^atom, the floor completion, the
+  vendored GFN2 basis for cubes, the metal start geometries); moving it behind an engine API is the
+  deferred split.
+- Removed the unused cytoscape `NetworkView.tsx` and the probe test that imported it.
+
+## 2026-10-27 — Serve: the network predictor over the local checkpoints, with a serve decoder
+
+- **A decoder in serve.** Upstream has no inference decoder (only `model.loss.greedy_edit`), so
+  `serve/network_decode.py` implements spec "Decoding a step" / "Edit decoder" on top of
+  `KSMech.encode`, `EditDecoder.anchor_logits` and `entry_logits` (serve only imports the model).
+  **Move upstream to `ksmech.model` when the model session adds an inference decoder.** The pool
+  is encoded once (CPU, `torch.no_grad`, the worker's one torch thread; the flex encoder takes its
+  dense reference off the GPU, as the embedding tracer does); the B = beam most probable anchors
+  are each completed into at most `per_anchor` = beam distinct products; all are merged by the
+  product's pool key (sorted sigma keys), the best log P kept, best first.
+- **Completion search.** log P(R) = log P(e) + sum over every other entry of log P(R_x | e),
+  zeros included: the all-zero background plus, per changed entry, its gain log P(v) - log P(0).
+  The candidates are the 48 non-zero classes with the largest gains; a best-first branch and
+  bound (include / exclude each candidate in gain order; the bound adds the best positive gains
+  the remaining bond and atom capacity admits) yields the completions with at most 8 bond (the
+  anchor included) and 2 atom changes, one class per entry, in exact order of log P (tested
+  against a brute-force enumeration). A first version started from the greedy completion (every
+  entry's argmax) and enumerated deviations from it; on an untrained model about two thirds of
+  the entries have a non-zero argmax, and the budget went to completions over the change limit.
+  A breaking anchor's candidates exclude +1 entries (such an R's admissible anchors are its +1
+  entries). Budgets: 20,000 search nodes and 64 applications of B + R per anchor.
+- **Filters, every drop counted** (`DECODE_DROPPED:<code>` in the node's `apply_failures` and
+  the network's `skipped`): charge conservation (sum R_ii + 2 sum_{i<j} R_ij = 0), then B + R
+  through `stepapply.apply_matrix` (RDKit valence, the octet on H-Ne, sanitization, a resonance
+  interconversion), then FORMAL_CHARGE_RANGE: a non-metal the step touches left at |formal
+  charge| >= 2 that it did not carry. The first real runs produced [Cl-2], [O-2] and [C+2]
+  products that RDKit's valence table and the H-Ne octet check let through; in PMechDB 11 of
+  13,090 products hold an atom with |q| >= 2, all metals or a perchlorate carried from the
+  reactants (Li-2 5, Ti-2 4, Cl+3 2). The rule is the network's only, not `stepapply`'s: that
+  module is shared with the floor and the user's step check and is in the physics fingerprint.
+  `DECODE_MERGED` counts completions whose product another one already gave,
+  `DECODE_ANCHOR_UNCOMPLETED` anchors without a valid completion within the budgets.
+- **Path probability, not the marginal.** An edge's `logp` is the path through its anchor; the
+  training loss marginalizes over every admissible anchor of R, which would need one
+  `entry_logits` call per anchor of every completion. Merging keeps the best path.
+- **END_MECH ignored.** The stop head is untrained on PMechDB (lambda_stop = 0); a network job
+  stops at max_steps, a turnover, a recurring pool or an empty frontier, and its provenance notes
+  say so (`context.NOTE_NETWORK_STOP`).
+- **Checkpoints.** `PredictIn.checkpoint` / `ExpandIn.checkpoint` ({run, file, source?}); the
+  default is the best usable non-smoke run by val top-1 (`models.default_checkpoint`; a smoke run
+  is a `--limit` run or a run named `smoke*`, the default only when nothing else is usable). The
+  live server had shown the reason for `smoke_resonance_flex` because the old reason text named
+  the last `best.pt` in sorted order. The checkpoint is resolved and hashed at submission (404 /
+  409 at once), written into the stored request and the provenance (`Provenance.checkpoint`:
+  run, file, sha256, file version, epoch, val top-1). Expansions with the network's predictor
+  keep its checkpoint; the worker refuses a file that changed since it was hashed
+  (CHECKPOINT_CHANGED) and loads the model once per file version (`embedding.cached_model`).
+- **Reason texts.** TRANSFORMER_NOT_AVAILABLE (torch or the model code missing),
+  CHECKPOINT_NOT_FOUND, CHECKPOINT_REFUSED (every checkpoint dirty), NETWORK_ADAPTER_FAILED (every
+  usable checkpoint failed to load in the worker: the worker records the failure per file version
+  in `data/serve/network/adapter_failures.json`, and the API skips that checkpoint for 10 minutes
+  or until the file changes, so a transient failure is retried).
+- **Fingerprint.** The network code left `serve/predictors.py` for `serve/network_predictor.py`
+  and `serve/expansion.py` binds the request to the predictor (`Predictor.bind`, for the
+  checkpoint), so the physics fingerprint changes once: pool analyses are recomputed on demand
+  and curated mechanisms re-check as predictor-stale. The two network modules are not in the
+  fingerprint; the network's version names the checkpoint's sha and their code's sha instead
+  (`network/<source>/<run>/<file>@<sha12>/dec-<sha8>/<fp>`). A curated network mechanism predicted
+  with a checkpoint other than the default reads as predictor-stale (the registry's version is
+  the default's).
+- **Real check** (flex_first/best, epoch 19, val top-1 60.9%; cached GFN2 tokens, beam 5):
+  MeO- + MeCl: the SN2 first, P = 0.956 (next 7e-6). MeNH2 + AcCl: N adds to the carbonyl C
+  (the tetrahedral zwitterion), P = 0.9999. From that intermediate the model prefers the reverse
+  step (0.983), then the O-protonation by N-H (0.003); the loss of Cl- to the acylammonium is
+  2e-13. Cached chemistry never featurizes a new intermediate, so pathways stop at states whose
+  tokens are not cached (FEATURIZATION_DISABLED). About 20 s per job of 2-3 steps on the CPU.
+
+## 2026-10-27: The step decoder moves into the engine (`model.decode`, `ksmech-eval decode`)
+
+- `serve/network_decode.py` is now `src/ksmech/model/decode.py`, unchanged but for its docstring
+  and `NONMETALS` (the FORMAL_CHARGE_RANGE elements, which serve's `charge_issue` now imports).
+  B + R stays injected (`apply`), so the engine decodes without serve: serve passes
+  `stepapply.apply_matrix` on a pool, the engine `eval.decode.lewis_apply` on a stored sample.
+  The network's version keeps hashing the decoder's code (`dec-<sha8>`, now over
+  `model/decode.py`), so it changes once.
+- `lewis_apply` works on the sample's own Lewis structure (Kekulé bonds with every H, lone pairs,
+  formal charges): the bond orders stay in [0, 3], the lone pairs non-negative, no touched H-Ne
+  atom exceeds its octet (H and He 2), no touched non-metal becomes |q| >= 2, RDKit writes the
+  product, and the sigma keys with the atom maps differ (else RESONANCE_ONLY_STEP). The product
+  key is the map-free sigma key, so drawings of the same products merge, as serve's pool key
+  does. It is a lighter check than serve's `stepapply` (no RDKit sanitization of each product):
+  the two can disagree on exotic valences; the hit metric does not depend on the key, only the
+  merging does.
+- `ksmech-eval decode` scores the full reaction matrix: a hit at k when one of the k best
+  completions equals a variant of the label class (the class is closed under the pool's symmetry,
+  schema 17), so a symmetric image counts. First check, flex_first/best, molecule val, the first
+  20 samples, beam 5: top-1 60%, top-3 70%, top-5 75%, 1.2 s per sample on one CPU thread.
+
+## 2026-10-27: serve in sub-packages, one router per service
+
+- Before the merge into main and the online platform (CAD, 3D and orbitals, predict / correct,
+  curation, later a teaching wiki), the flat `ksmech.serve` (64 modules, one 900-line `api.py`)
+  became thirteen sub-packages: a foundation chain core, compute, chem, science, predict,
+  runtime; `depiction` on core; the features pool, workbench, embedding, browse, curate (one
+  `router.py` each, never importing one another); `app` wiring them. Map:
+  `docs/serve_architecture.md`; `tests/test_serve_layers.py` fails on a module-level import
+  against the layers. One process stays: a modular monolith, not separate HTTP services, because
+  the compute is already a separate worker process and the seams (routers, the `Services`
+  container, the worker's task table) are where a service would later be split off.
+- The move changed no behaviour: the OpenAPI schema is identical but for one description naming a
+  module path, and the serve tests pass unchanged but for import paths. Feature modules named after
+  their package became `service.py` (`browse/service.py`, not `browse/browse.py`).
+- `core/schemas.py` stays one module: it is the HTTP contract, mirrored into one generated
+  TypeScript file, and imports nothing from serve, so splitting it would add churn and no layer.
+- The token and physics fingerprints hash their files by relative path, so both change once:
+  orbital cubes, orbital sets, densities, properties and pool analyses are recomputed on demand,
+  and curated mechanisms read as predictor-stale until rechecked. Keeping the old paths as
+  hash labels would have kept them, at the price of names that no longer exist.
+
+## 2026-10-27: full-R decoding of flex_first on the molecule val part
+
+- `ksmech-eval decode --run flex_first --part val` (best.pt, epoch 19, beam 5, all 1239 val
+  samples): top-1 63.0%, top-3 82.6%, top-5 85.4%; 176 samples with no completion in the class
+  among the products kept; 1.2 s per sample on one CPU thread. The anchor top-1 the trainer logs
+  is 60.9%: the full-R top-1 is higher because a completion is checked against the whole label
+  class (any variant, any symmetric image) and the beam completes five anchors, so a hit can come
+  from an anchor other than the top one. Drops: CHARGE_NOT_CONSERVED dominates (1.03M), then
+  OCTET_EXCEEDED (312k); 119 anchors found no valid completion within the search limits.
+
+
+## 2026-10-27: serve `ml`, deployment profiles, an auth seam and an audit log
+
+- **`ml` sub-package.** `predict/models.py` became `ml/checkpoints.py`; `/api/models` moved to
+  `ml/router.py` unchanged; the lab gained `GET /api/ml/runs`, `/api/ml/runs/{source}/{run}` and
+  `/api/ml/reports`. Run and report JSON passes through unchanged inside a small typed envelope
+  (typed fields only where the checkpoint listing already reads them), so no field is invented;
+  reports over 4 MiB or unreadable carry `report: null` and a reason code and are logged. `ml`
+  stands on `core` alone in the layer map, so predict, runtime and embedding read the checkpoint
+  listing without a feature-to-feature import.
+- **Profiles.** `KSMECH_SERVE_PROFILE` = `lab` (default, everything) | `public`
+  (`ksmech-serve run --profile`). A profile is a set of admitted capabilities
+  (`core.capabilities.PROFILES`); `public` drops browse, curate, curate_edit, curate_recheck,
+  export, embedding (it traces stored dataset samples) and ml, gated per router with
+  `dependencies=` (503 FEATURE_DISABLED "not in the public profile"). In public, jobs other than
+  predict / override / expand are 404 and left out of `/api/jobs`. `/api/models` stays public
+  because the predict form needs it. `tests/test_serve_access.py` walks every OpenAPI route of
+  the public app against an explicit allow-list, so a new route is refused until it is allowed
+  on purpose: PMechDB data must never be reachable online. A public deployment uses its own data
+  root (pool states saved under a shared root would otherwise be readable by id).
+- **Auth seam without a user database.** `Principal(name, role, via)`, roles reader < user <
+  curator < admin. Tokens from an optional `KSMECH_SERVE_TOKENS` file (JSON, or TOML by suffix):
+  token sha256 → {name, role}; only hashes are stored, compared with `hmac.compare_digest` over
+  every entry; a malformed file stops the server at start. Without a token: `lab` is the local
+  admin (the UI and the tests need none), `public` the anonymous reader. Wrong token: 401
+  TOKEN_INVALID; a role too low: 401 AUTH_REQUIRED (anonymous) or 403 ROLE_INSUFFICIENT.
+  `X-Ksmech-Via` (cli, mcp) names the client. Least roles: workbench, reads, `GET /predictors`
+  → reader; predict, expand, cancel, correct, embedding submit → user; curate edit / recheck /
+  export, browse index, ml → curator. The anonymous public visitor gets the workbench (with its
+  xTB compute) and prediction reads; launching jobs needs a user token (open question for the
+  public launch: anonymous jobs with per-IP quotas).
+- **Audit log.** `core.audit.AuditLog` (pure ASGI, outside the same-origin guard and the auth
+  gate, so it records their refusals too) appends one JSON line per non-GET/HEAD request to
+  `data/serve/logs/audit.jsonl`: time, request id, principal, method, route template, path (200
+  characters at most), status. A failed write is logged and counted in `failures.jsonl` as
+  AUDIT_WRITE_FAILED and never fails the request.
+
+## 2026-10-27: HTTP client, `ksmech` CLI and `ksmech-mcp`
+
+- The HTTP API is the single contract: the web UI, the `ksmech` CLI (`ksmech.client.cli`) and
+  the MCP server (`ksmech.mcp.server`) all call it, so tokens, roles, quotas and the audit log
+  apply equally; requests carry `X-Ksmech-Via: cli|mcp` and the bearer token from
+  `KSMECH_TOKEN`. `ksmech.client.KsmechClient` (httpx) imports only httpx, pydantic and
+  `ksmech.serve.core.schemas` (a subprocess test checks `sys.modules`), parses answers with the
+  server's pydantic models and turns the error envelope into `KsmechAPIError(code, status)`.
+  `tests/test_engine_boundary.py`: the engine imports none of serve, client, mcp; serve imports
+  neither client nor mcp; client and mcp take only `ksmech.serve.core(.schemas)` from serve.
+- The MCP server is on the SDK's 1.x line (mcp 1.30.0, FastMCP): 2.x renamed FastMCP and moved to
+  httpx2 / httpcore2, all newer than the two-week rule allows. Two transitives are held back by
+  constraints (pydantic-settings <= 2.15.0, sse-starlette <= 3.5.0) for the same rule.
+- At start the MCP server registers only the tools whose `/api/meta` capability is on, so a
+  public server never offers dataset, curation or ML tools (`list_checkpoints` is gated on `ml`
+  although `/api/models` is public). Tools are not yet gated on the caller's role: on a public
+  server an anonymous reader is offered `predict_mechanism` and the call fails with the API's
+  401. Tools answer compact JSON summaries (`ksmech.client.summary`, shared with the CLI tables),
+  `detail=true` for more, because an LLM's context is small. Only `predict_mechanism` is not
+  read-only (it submits compute, non-destructive). No write tool for curation or datasets: those
+  changes will go through a review queue. The HTTP transport uses one `KSMECH_TOKEN` for every
+  MCP client and binds to 127.0.0.1 by default.
+
+## 2026-10-27: @ksmech/viz, the visualizations as a props-only source package, and scene format v1
+
+- **Why.** The online platform adds a teaching wiki (static HTML built from MDX) that must show
+  the same molecule 2D/3D, orbital, step (Textbook, Animated, Orbitals) and network (Scheme,
+  Pathways) views as the app, from precomputed data: reading a page never triggers QM compute.
+- **Package.** `packages/viz` (`@ksmech/viz`) holds the visualizations with a props-only API (no
+  component fetches, reads the app store or the router): the RDKit.js / 3Dmol.js wrappers and
+  depiction components, the sketcher's 2D renderer core (the editor stays in apps/ui), the pool
+  structure / R-matrix / arrow modules, the step views and helpers, the network views and
+  layouts, the 3D viewer core and the level diagram (82 files, `git mv`). Where a component
+  fetched it was split into a pure view in the package and a data hook in apps/ui
+  (`stepSidesOf` / `useStepSides`, `OrbitalData` / `useOrbitalData`, the network expansion as
+  SchemeView's `onExpand`, depiction tier 3 as a `fetchServer` prop). The colour tokens moved to
+  `viz/src/theme.css`.
+- **Wiring: an alias, not npm workspaces.** `apps/ui/scripts/viz-alias.mjs` feeds Vite (alias,
+  react `dedupe`, `fs.allow`), a node resolve hook (`npm test`, the exporter) and the Python UI
+  probe; `tsconfig.json` `paths` repeats it (react, @rdkit/rdkit, 3dmol included: the package has
+  no `node_modules`). Workspaces would move the lockfile to the repo root and break the
+  self-contained apps/ui that `e2e/serve.mjs`, the Python harness and `vendor.mjs` assume;
+  revisit when the wiki is a second consumer with its own `package.json`.
+- **API types.** `viz/src/apiTypes.ts` is a type-only re-export of `apps/ui/src/api/types.gen.ts`,
+  the one bridge to the app, erased at runtime. `viz/src/vizBoundary.test.ts` fails on any other
+  apps/ui import, a package outside the peer dependencies, a network call outside
+  `scene/load.ts`, or an `/api` URL.
+- **Scene format v1.** `{kind: "ksmech-scene", version: 1, scene: {type: molecule | step |
+  network, ...}, provenance}`; each type holds exactly what its views read, as API types narrowed
+  with `Pick`. Cubes are asset files referenced by relative path, byte size and sha256, checked
+  by the loader before a view reads them. Validation is hand-written (no schema library);
+  `scene.schema.json` (draft 2020-12) documents the same shape and a test keeps the two in
+  agreement; another version is refused. A step scene holds the predicted step only
+  (alternatives need POST `/step/check`).
+- **Exporter.** `npm run scene:export` reads a running server and writes the scene, its assets
+  and `index.json`; pool cubes at 0.35 Å spacing and 2.5 Å padding (about 6x smaller than the
+  default), workbench cubes thinned to every 2nd point per axis (`--cube-stride`). The committed
+  examples (SN2 step and network, acrolein; 688 KB) come from user-style input on the live
+  server, never from dataset samples: the repository is public.
+- **`#/scene`.** An embed page: no shell, no `/api/meta`, scenes from the page's own origin only;
+  its e2e aborts every `/api/` request and asserts none was attempted.
+- **Fix.** `useRDKit` missed RDKit when it finished loading between the first render and the
+  effect, so network cards never got their drawings; the effect now picks up the loaded module.

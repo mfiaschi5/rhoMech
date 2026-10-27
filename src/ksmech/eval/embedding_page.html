@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ksmech embedding trace</title>
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #ffffff; --ink: #1d232b; --muted: #5f6b7a; --line: #dfe3e8;
+  --accent: #6b46c1; --occ: #2b6cb0; --virt: #dd6b20; --bond: #4a5568;
+  --seq0: #edf0f4; --seq1: #fdd9b5; --seq2: #fc9d6c; --seq3: #e34a33; --seq4: #8f0d1a;
+  --neg: #2166ac; --pos: #b2182b; --form: #2f855a; --break: #c53030;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15181d; --panel: #1d2128; --ink: #e6e9ee; --muted: #9aa5b4; --line: #323843;
+    --accent: #b794f4; --occ: #63b3ed; --virt: #f6ad55; --bond: #a0aec0;
+    --seq0: #2a2f38; --seq1: #5b3a52; --seq2: #a8485a; --seq3: #e7704e; --seq4: #fdd49e;
+    --neg: #67a9cf; --pos: #ef8a62; --form: #68d391; --break: #fc8181;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15181d; --panel: #1d2128; --ink: #e6e9ee; --muted: #9aa5b4; --line: #323843;
+  --accent: #b794f4; --occ: #63b3ed; --virt: #f6ad55; --bond: #a0aec0;
+  --seq0: #2a2f38; --seq1: #5b3a52; --seq2: #a8485a; --seq3: #e7704e; --seq4: #fdd49e;
+  --neg: #67a9cf; --pos: #ef8a62; --form: #68d391; --break: #fc8181;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1400px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+h3 { font-size: 14px; margin: 14px 0 6px; }
+p { margin: 4px 0 8px; }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+.grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+@media (max-width: 900px) { .grid, .grid2 { grid-template-columns: minmax(0, 1fr); } }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 8px; }
+.controls label { display: flex; gap: 6px; align-items: center; }
+select, input[type=range] { accent-color: var(--accent); }
+select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
+svg { width: 100%; display: block; }
+#map { height: min(62vh, 640px); background: var(--panel); }
+#pca { height: 340px; }
+.legend { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.legend .bar { width: 140px; height: 10px; border-radius: 2px; }
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 2px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 12px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+.bars td { padding: 1px 6px; }
+.b { height: 9px; border-radius: 2px; background: var(--accent); display: inline-block; vertical-align: middle; }
+.b.ffn { background: var(--virt); }
+.b.att { background: var(--occ); }
+.link { cursor: pointer; color: var(--accent); }
+.link:hover { text-decoration: underline; }
+tr.pick { cursor: pointer; }
+tr.pick:hover td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+tr.on td { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.chip { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 12px; border: 1px solid var(--line); }
+.heads td { text-align: center; cursor: pointer; font-size: 12px; font-variant-numeric: tabular-nums; }
+.ok { color: var(--form); } .bad { color: var(--break); }
+details summary { cursor: pointer; color: var(--muted); }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Embedding trace</h1>
+  <div id="meta" class="muted"></div>
+  <details class="panel" style="margin-top:10px">
+    <summary>How the model reads a pool, and what each panel shows</summary>
+    <p><b>1. Tokens.</b> Every atom and every localized orbital of the pool is a token. An atom
+    token reads its element and formal charge (embedded) and its continuous descriptors (Mulliken
+    charge, f+, f−, dual descriptor, frontier weights, %Vbur, chirality). An orbital token reads only
+    continuous descriptors (occupation, centres and their weights, s/p/d shares, alignment, overlap
+    population, distance, radius) and its spectral set. The σ / π / n labels on the page are the
+    classifier's diagnostics, shown to name the orbitals; the model never reads them.</p>
+    <p><b>2. h(0).</b> The first vector of a token is a sum: E_Z + E_charge + MLP_A(inputs) for an
+    atom; MLP_O(inputs) + the spectral set encoder + the centre-weighted atom vectors it inherits for
+    an orbital; plus the fragment embedding. The learned MECH token, at position 0, will collect what
+    the decoder needs to choose the step. The token panel shows each part's norm and its alignment with h(0).</p>
+    <p><b>3. Layers.</b> Each layer is attention plus a feed-forward block. A logit is content
+    (q·k/√d) plus a learned bias from the pair inputs: the pair track (dense), a relative bias of
+    distance, bond order, graph distance, Wiberg index and the orbital-pair physics z (flex), or the
+    pair MLP on the keys a learned indexer selects (sparse). Colour the map by attention, by cosine
+    similarity to the selected token, or by how far each token moved from h(0). The heads table
+    compares the spread of the bias logits with the spread of the content logits: a head with a large
+    bias share follows the pair inputs more than what the tokens carry.</p>
+    <p><b>4. Readout.</b> The decoder scores every candidate anchor (a bond that forms or breaks) as
+    site terms (both atoms' final vectors against the step query read from MECH) + a pair term (the
+    atom-pair vector) + a physics term (MLP of the pooled orbital-pair features y_ij, with the gap
+    factor G). Given the top anchor, it fills in the rest of R greedily.</p>
+    <p class="muted">Every layer was rebuilt from its recorded inputs and checked against the model's
+    own output; the largest deviation is in the header.</p>
+  </details>
+
+  <div class="grid">
+    <section class="panel">
+      <div class="controls">
+        <label>Colour <select id="mode"></select></label>
+        <label>Layer <input id="layer" type="range" min="0" step="1"> <span id="layerTxt" class="mono"></span></label>
+        <label>Head <select id="head"></select></label>
+      </div>
+      <svg id="map" role="img" aria-label="Tokens of the pool on its Lewis structure"></svg>
+      <div class="legend" id="legend"></div>
+    </section>
+    <section class="panel" id="token"></section>
+  </div>
+
+  <div class="grid2">
+    <section class="panel">
+      <h2>Embedding space</h2>
+      <p class="muted" id="pcaTxt"></p>
+      <svg id="pca" role="img" aria-label="Token vectors projected on two principal components"></svg>
+    </section>
+    <section class="panel">
+      <h2>Heads: bias against content</h2>
+      <p class="muted">Share of the bias in the logit spread, std(bias) / (std(bias) + std(content)),
+      over the cells each head reads. Click a cell to show that layer and head.</p>
+      <div class="scroll"><table class="heads" id="heads"></table></div>
+    </section>
+  </div>
+
+  <section class="panel" style="margin-top:12px" id="readout"></section>
+</main>
+<script>
+const D = /*PAYLOAD*/null;
+const T = D.tokens, N = T.length;
+const [LP1, , DIM] = D.layers.h.shape, L = LP1 - 1;
+const AT = D.layers.attention, NH = AT.shape[1], HEADS = D.meta.heads;
+const bytes = s => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+const HV = new Float32Array(bytes(D.layers.h.data).buffer);
+const AV = bytes(AT.data);
+const top0 = D.readout.top[0];
+const S = { sel: 0, layer: L, head: -1, mode: 'attn_from', pair: top0 ? [top0.i, top0.j, top0.side] : null };
+
+const MODES = [
+  ['attn_from', 'attention from the selected token'],
+  ['attn_to', 'attention to the selected token'],
+  ['cos', 'cosine similarity to the selected token'],
+  ['change', 'change from h(0): |h_l − h_0| / |h_0|'],
+  ['anchor', 'P(the anchor involves the atom)'],
+  ['kind', 'token kind and element'],
+  ...D.parts.names.map(k => ['part:' + k, 'norm of the h(0) part ' + k]),
+];
+const ELEMENT = { H: '#c8ccd2', C: '#7d8590', N: '#3b5bdb', O: '#e03131', S: '#e6b800', P: '#f08c00',
+  F: '#37b24d', Cl: '#2f9e44', Br: '#a61e4d', I: '#862e9c', B: '#f783ac', Si: '#d9a066',
+  Li: '#9c36b5', Na: '#9c36b5', K: '#9c36b5', Mg: '#74b816' };
+
+// ---------- helpers ----------
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const NS = 'http://www.w3.org/2000/svg';
+function s(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function h(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === 'onclick') e.onclick = v; else if (k === 'text') e.textContent = v; else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k !== null && k !== undefined) e.append(k);
+  return e;
+}
+function tip(el, text) { s('title', {}, el).textContent = text; }
+const fmt = (x, d = 3) => (x === null || x === undefined) ? '–' : Number(x).toFixed(d);
+const pct = x => (100 * x).toFixed(x < 0.1 ? 2 : 1) + '%';
+function rgb(hex) { const v = parseInt(hex.slice(1), 16); return [v >> 16, (v >> 8) & 255, v & 255]; }
+function mix(a, b, t) { const x = rgb(a), y = rgb(b); return `rgb(${x.map((c, i) => Math.round(c + (y[i] - c) * t)).join(',')})`; }
+function seq(t) {
+  const stops = [0, 1, 2, 3, 4].map(i => css('--seq' + i));
+  t = Math.max(0, Math.min(1, t)) * 4; const i = Math.min(3, Math.floor(t));
+  return mix(stops[i], stops[i + 1], t - i);
+}
+function div(t) { return t < 0 ? mix(css('--seq0'), css('--neg'), -t) : mix(css('--seq0'), css('--pos'), t); }
+function ink(fill) {  // dark or light text on a hex or rgb() fill
+  const [r, g, b] = fill.startsWith('#') ? rgb(fill) : fill.match(/\d+/g).map(Number);
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? '#111' : '#fff';
+}
+
+// ---------- model quantities ----------
+function att(l, head, q, k) {
+  const base = (Math.max(1, l) - 1) * NH * N * N, off = q * N + k;
+  if (head >= 0 && NH > 1) { const b = AV[base + head * N * N + off] / 255; return b * b; }
+  let sum = 0; for (let x = 0; x < NH; x++) { const b = AV[base + x * N * N + off] / 255; sum += b * b; }
+  return sum / NH;
+}
+const vec = (l, t) => HV.subarray((l * N + t) * DIM, (l * N + t + 1) * DIM);
+function dot(a, b) { let x = 0; for (let i = 0; i < a.length; i++) x += a[i] * b[i]; return x; }
+const norm = a => Math.sqrt(dot(a, a));
+const cosv = (a, b) => dot(a, b) / Math.max(norm(a) * norm(b), 1e-12);
+function dist(a, b) { let x = 0; for (let i = 0; i < a.length; i++) x += (a[i] - b[i]) ** 2; return Math.sqrt(x); }
+const name = t => T[t].name;
+const atomName = g => T[g + 1].name;
+
+function values() {
+  const l = S.layer, v = new Array(N).fill(null);
+  if (S.mode === 'attn_from') for (let t = 0; t < N; t++) v[t] = att(l, S.head, S.sel, t);
+  else if (S.mode === 'attn_to') for (let t = 0; t < N; t++) v[t] = att(l, S.head, t, S.sel);
+  else if (S.mode === 'cos') { const a = vec(l, S.sel); for (let t = 0; t < N; t++) v[t] = cosv(a, vec(l, t)); }
+  else if (S.mode === 'change') for (let t = 0; t < N; t++) v[t] = dist(vec(l, t), vec(0, t)) / Math.max(norm(vec(0, t)), 1e-12);
+  else if (S.mode === 'anchor') D.readout.atom_probability.forEach((p, g) => { v[g + 1] = p; });
+  else if (S.mode.startsWith('part:')) { const k = D.parts.names.indexOf(S.mode.slice(5)); for (let t = 0; t < N; t++) v[t] = D.parts.norm[t][k] || null; }
+  return v;
+}
+function colourer(v) {
+  if (S.mode === 'kind') return { colour: t => kindColour(t), legend: null };
+  if (S.mode === 'cos') return { colour: t => div(v[t]), legend: ['−1', '+1', true] };
+  const max = Math.max(1e-12, ...v.filter(x => x !== null));
+  return { colour: t => v[t] === null ? css('--seq0') : seq(v[t] / max), legend: ['0', fmt(max, 3), false] };
+}
+function kindColour(t) {
+  const k = T[t].kind;
+  if (k === 'atom') return ELEMENT[T[t].el] || '#e64980';
+  if (k === 'occupied') return css('--occ');
+  if (k === 'virtual') return css('--virt');
+  return css('--accent');
+}
+
+// ---------- map ----------
+let VIEW = null;  // the map's viewBox [x, y, w, h] once the user zooms or pans
+function bounds() {
+  const xs = T.slice(1).map(t => t.x), ys = T.slice(1).map(t => t.y), pad = 0.8;
+  const x0 = Math.min(...xs) - pad, y0 = Math.min(...ys) - pad - 0.7;
+  return [x0, y0, Math.max(...xs) + pad - x0, Math.max(...ys) + pad - y0];
+}
+function renderMap() {
+  const svg = document.getElementById('map'); svg.textContent = '';
+  const B = bounds(), [x0, y0] = B, big = Math.max(1, B[2] / 14);
+  svg.setAttribute('viewBox', (VIEW || B).join(' '));
+  const v = values(), c = colourer(v), g = s('g', {}, svg);
+  for (const [i, j, o] of D.bonds) {
+    const a = T[i + 1], b = T[j + 1], dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len, offs = o === 1 ? [0] : o === 2 ? [-0.07, 0.07] : [-0.1, 0, 0.1];
+    for (const f of offs) s('line', { x1: a.x + nx * f, y1: a.y + ny * f, x2: b.x + nx * f, y2: b.y + ny * f,
+      stroke: css('--bond'), 'stroke-width': 0.035 }, g);
+  }
+  const sel = T[S.sel];
+  if (sel.centres) for (const [a, w] of sel.centres) s('line', { x1: sel.x, y1: sel.y, x2: T[a + 1].x, y2: T[a + 1].y,
+    stroke: css('--accent'), 'stroke-width': 0.02 + 0.05 * w, 'stroke-dasharray': '0.06 0.05' }, g);
+  if (S.pair) { const [i, j, side] = S.pair, a = T[i + 1], b = T[j + 1];
+    s('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: css(side === 'form' ? '--form' : '--break'),
+      'stroke-width': 0.09, 'stroke-dasharray': '0.14 0.08', opacity: 0.85 }, g); }
+  for (let t = 1; t < N; t++) drawToken(g, t, c.colour(t), v[t]);
+  for (const k of T) if (k.q) {  // charges last, over the orbital markers
+    const r = k.el === 'H' ? 0.19 : 0.3, q = s('text', { x: k.x + r * 0.75, y: k.y - r * 0.55, 'font-size': 0.26,
+      'font-weight': 700, fill: css('--ink'), stroke: css('--panel'), 'stroke-width': 0.07, 'paint-order': 'stroke', 'pointer-events': 'none' }, g);
+    q.textContent = (Math.abs(k.q) > 1 ? Math.abs(k.q) : '') + (k.q > 0 ? '+' : '−');
+  }
+  const chip = s('g', { cursor: 'pointer' }, g); chip.onclick = () => select(0);
+  const fill = c.colour(0);
+  s('rect', { x: x0 + 0.2, y: y0 + 0.15, width: 1.3 * big, height: 0.5 * big, rx: 0.12 * big, fill,
+    stroke: S.sel === 0 ? css('--ink') : css('--line'), 'stroke-width': (S.sel === 0 ? 0.06 : 0.02) * big }, chip);
+  const tx = s('text', { x: x0 + 0.2 + 0.65 * big, y: y0 + 0.15 + 0.35 * big, 'text-anchor': 'middle', 'font-size': 0.28 * big,
+    fill: ink(fill), 'font-weight': 600 }, chip);
+  tx.textContent = 'MECH'; tip(chip, `MECH ${v[0] === null ? '' : fmt(v[0], 4)}`);
+  renderLegend(c);
+}
+function drawToken(g, t, fill, val) {
+  const k = T[t], e = s('g', { cursor: 'pointer' }, g), on = t === S.sel;
+  e.onclick = () => select(t);
+  const ring = { stroke: on ? css('--ink') : css('--bond'), 'stroke-width': on ? 0.07 : 0.015 };
+  if (k.kind === 'atom') {
+    const r = k.el === 'H' ? 0.19 : 0.3;
+    s('circle', { cx: k.x, cy: k.y, r, fill, ...ring }, e);
+    const tx = s('text', { x: k.x, y: k.y + (k.el === 'H' ? 0.07 : 0.1), 'text-anchor': 'middle',
+      'font-size': k.el === 'H' ? 0.2 : 0.28, fill: ink(fill) }, e);
+    tx.textContent = k.el;
+  } else if (k.kind === 'occupied') {
+    s('circle', { cx: k.x, cy: k.y, r: 0.1, fill, ...ring }, e);
+  } else {
+    const r = 0.12;
+    s('path', { d: `M${k.x} ${k.y - r}L${k.x + r} ${k.y}L${k.x} ${k.y + r}L${k.x - r} ${k.y}Z`, fill, ...ring }, e);
+  }
+  tip(e, `${k.name}${val === null || val === undefined ? '' : '  ' + fmt(val, 4)}`);
+}
+function renderLegend(c) {
+  const el = document.getElementById('legend'); el.textContent = '';
+  const mode = MODES.find(m => m[0] === S.mode)[1];
+  if (!c.legend) {
+    for (const [lab, col] of [['occupied orbital ●', css('--occ')], ['virtual orbital ◆', css('--virt')], ['MECH', css('--accent')]])
+      el.append(h('span', {}, h('span', { class: 'chip', style: `background:${col};color:${ink(mix(col, col, 0))}` }, lab)));
+    el.append(h('span', { text: 'atoms by element · scroll to zoom, drag to pan, double-click to fit' }));
+    return;
+  }
+  const [lo, hi, diverging] = c.legend;
+  const grad = diverging ? `linear-gradient(90deg, ${css('--neg')}, ${css('--seq0')}, ${css('--pos')})`
+    : `linear-gradient(90deg, ${[0, .25, .5, .75, 1].map(seq).join(',')})`;
+  el.append(h('span', { text: lo }), h('span', { class: 'bar', style: `background:${grad}` }), h('span', { text: hi }),
+    h('span', { text: '· ' + mode + (S.mode.startsWith('attn') && S.layer === 0 ? ' (layer 1: h(0) has no attention)' : '') }));
+  el.append(h('span', { text: '· scroll to zoom, drag to pan, double-click to fit' }));
+}
+function zoomAndPan(svg) {
+  const at = e => { const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    return pt.matrixTransform(svg.getScreenCTM().inverse()); };
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    const v = VIEW || bounds(), p = at(e), f = e.deltaY > 0 ? 1.15 : 1 / 1.15;
+    VIEW = [p.x - (p.x - v[0]) * f, p.y - (p.y - v[1]) * f, v[2] * f, v[3] * f];
+    svg.setAttribute('viewBox', VIEW.join(' '));
+  }, { passive: false });
+  let drag = null, moved = false;
+  svg.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, v: VIEW || bounds() }; moved = false; });
+  svg.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!moved && Math.hypot(dx, dy) < 4) return;
+    moved = true;
+    const k = svg.getScreenCTM().a;
+    VIEW = [drag.v[0] - dx / k, drag.v[1] - dy / k, drag.v[2], drag.v[3]];
+    svg.setAttribute('viewBox', VIEW.join(' '));
+  });
+  addEventListener('pointerup', () => { drag = null; });
+  svg.addEventListener('click', e => { if (moved) { e.stopPropagation(); moved = false; } }, true);
+  svg.addEventListener('dblclick', () => { VIEW = null; renderMap(); });
+}
+
+// ---------- token panel ----------
+function bar(width, cls) { return h('span', { class: 'b ' + (cls || ''), style: `width:${Math.max(1, 120 * width)}px` }); }
+function renderToken() {
+  const el = document.getElementById('token'); el.textContent = '';
+  const t = S.sel, k = T[t];
+  const kind = { mech: 'MECH token (learned)', atom: 'atom token', occupied: 'occupied orbital token', virtual: 'virtual orbital token' }[k.kind];
+  el.append(h('h2', {}, k.name + ' ', h('span', { class: 'chip', text: kind })));
+  if (k.type) el.append(h('p', { class: 'muted', text: `Diagnostic type ${k.type} (not a model input).` }));
+  if (k.centres) el.append(h('p', { class: 'mono' }, 'centres: ', ...k.centres.flatMap(([a, w], i) =>
+    [i ? ', ' : '', h('span', { class: 'link', text: `${atomName(a)} ${w.toFixed(2)}`, onclick: () => select(a + 1) })])));
+  el.append(partsTable(t), layersTable(t), attentionLists(t));
+  if (k.kind !== 'mech') el.append(inputsTable(t));
+}
+function partsTable(t) {
+  const n = D.parts.norm[t], c = D.parts.cos[t], max = Math.max(...n, 1e-9);
+  const tb = h('table', { class: 'bars' }, h('tr', {}, h('th', { text: 'part of h(0)' }), h('th', { text: 'norm' }), h('th', { class: 'num', text: 'cos with h(0)' })));
+  D.parts.names.forEach((p, i) => { if (n[i] > 0) tb.append(h('tr', {}, h('td', { text: p }),
+    h('td', {}, bar(n[i] / max), ' ', h('span', { class: 'mono', text: fmt(n[i], 2) })), h('td', { class: 'num mono', text: fmt(c[i], 2) }))); });
+  return h('div', {}, h('h3', { text: 'h(0): the sum of these parts' }), tb,
+    h('p', { class: 'muted mono', text: `|h(0)| = ${fmt(norm(vec(0, t)), 2)}` }));
+}
+function layersTable(t) {
+  const da = D.layers.d_attn.map(r => r[t]), df = D.layers.d_ffn.map(r => r[t]);
+  const max = Math.max(...da, ...df, 1e-9), h0 = vec(0, t);
+  const tb = h('table', { class: 'bars' }, h('tr', {}, h('th', { text: 'layer' }), h('th', { text: '|attention update| / |feed-forward update|' }), h('th', { class: 'num', text: 'cos(h_l, h_0)' })));
+  for (let l = 1; l <= L; l++) {
+    const row = h('tr', { class: 'pick' + (l === S.layer ? ' on' : '') }, h('td', { class: 'mono', text: l }),
+      h('td', {}, bar(da[l - 1] / max, 'att'), ' ', h('span', { class: 'mono', text: fmt(da[l - 1], 2) }), h('br'),
+        bar(df[l - 1] / max, 'ffn'), ' ', h('span', { class: 'mono', text: fmt(df[l - 1], 2) })),
+      h('td', { class: 'num mono', text: fmt(cosv(vec(l, t), h0), 2) }));
+    row.onclick = () => { S.layer = l; sync(); };
+    tb.append(row);
+  }
+  return h('div', {}, h('h3', { text: 'Through the layers' }), tb);
+}
+function attentionLists(t) {
+  const l = Math.max(1, S.layer), from = [], to = [];
+  for (let x = 0; x < N; x++) { from.push([att(l, S.head, t, x), x]); to.push([att(l, S.head, x, t), x]); }
+  const list = arr => h('table', {}, ...arr.sort((a, b) => b[0] - a[0]).slice(0, 8).map(([w, x]) =>
+    h('tr', {}, h('td', {}, h('span', { class: 'link', text: name(x), onclick: () => select(x) })), h('td', { class: 'num mono', text: pct(w) }))));
+  const head = S.head < 0 ? 'mean of the heads' : 'head ' + S.head;
+  return h('div', {}, h('h3', { text: `Attention, layer ${l}, ${head}` }),
+    h('div', { class: 'cols' }, h('div', {}, h('p', { class: 'muted', text: 'reads most' }), list(from)),
+      h('div', {}, h('p', { class: 'muted', text: 'read most by' }), list(to))));
+}
+function inputsTable(t) {
+  const F = D.features, atom = T[t].kind === 'atom', r = atom ? t - 1 : t - 1 - D.meta.n_atoms;
+  const names = atom ? F.atom_names : F.orbital_names;
+  const raw = atom ? F.atom_raw[r] : F.orbital_raw[r], std = atom ? F.atom_std[r] : F.orbital_std[r];
+  const tb = h('table', {}, h('tr', {}, h('th', { text: 'input' }), h('th', { class: 'num', text: 'raw' }), h('th', { class: 'num', text: 'standardized' })));
+  names.forEach((n, i) => {
+    const miss = atom && F.atom_missing[r][i];
+    tb.append(h('tr', {}, h('td', { class: 'mono', text: n }), h('td', { class: 'num mono', text: miss ? 'missing' : fmt(raw[i], 3) }),
+      h('td', { class: 'num mono', text: miss ? '0 (flagged)' : fmt(std[i], 2) })));
+  });
+  const out = h('details', {}, h('summary', { text: 'Model inputs of this token' }));
+  if (atom) out.append(h('p', { class: 'muted mono', text: `embedded: element ${T[t].el}, formal charge ${T[t].q}` }));
+  out.append(tb);
+  if (!atom) {
+    const sp = h('table', {}, h('tr', {}, h('th', { text: 'spectral set: energy (eV)' }), h('th', { class: 'num', text: 'weight' })));
+    for (const [e, w] of F.spectra[r]) sp.append(h('tr', {}, h('td', { class: 'mono', text: fmt(e, 2) }), h('td', { class: 'num mono', text: fmt(w, 3) })));
+    out.append(sp);
+  }
+  return out;
+}
+
+// ---------- PCA, heads, readout ----------
+function renderPCA() {
+  const svg = document.getElementById('pca'); svg.textContent = '';
+  const P = D.layers.pca[S.layer], xs = P.map(p => p[0]), ys = P.map(p => -p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const w = Math.max(x1 - x0, 1e-6), hgt = Math.max(y1 - y0, 1e-6), pad = 0.06 * Math.max(w, hgt);
+  svg.setAttribute('viewBox', `${x0 - pad} ${y0 - pad} ${w + 2 * pad} ${hgt + 2 * pad}`);
+  const r = 0.012 * Math.max(w, hgt);
+  for (let t = 0; t < N; t++) {
+    const k = T[t], on = t === S.sel, e = s('circle', { cx: xs[t], cy: ys[t], r: (k.kind === 'mech' ? 2 : 1) * r * (on ? 1.6 : 1),
+      fill: kindColour(t), stroke: on ? css('--ink') : 'none', 'stroke-width': r * 0.5, cursor: 'pointer', 'vector-effect': 'non-scaling-stroke' }, svg);
+    e.onclick = () => select(t); tip(e, k.name);
+  }
+  document.getElementById('pcaTxt').textContent = `Layer ${S.layer}${S.layer === 0 ? ' (h(0))' : ''}: every token vector on the first two principal components of that layer `
+    + `(${pct(D.layers.pca_share[S.layer])} of the variance). Each layer has its own projection; colours as in "token kind".`;
+}
+function renderHeads() {
+  const tb = document.getElementById('heads'); tb.textContent = '';
+  const nh = D.layers.spread[0].length;
+  tb.append(h('tr', {}, h('th', { text: 'layer' }), ...Array.from({ length: nh }, (_, x) => h('th', { text: 'h' + x }))));
+  D.layers.spread.forEach((row, l) => {
+    const tr = h('tr', {}, h('td', { class: 'mono', text: l + 1 }));
+    row.forEach(([c, b], x) => {
+      const share = b / Math.max(b + c, 1e-9), on = S.layer === l + 1 && S.head === x;
+      const td = h('td', { style: `background:${seq(share)};color:${ink(seq(share))};${on ? 'outline:2px solid var(--ink)' : ''}`, text: Math.round(100 * share) });
+      tip(td, `layer ${l + 1}, head ${x}: std content ${fmt(c, 2)}, std bias ${fmt(b, 2)}`);
+      td.onclick = () => { S.layer = l + 1; if (AT.per_head) S.head = x; if (!S.mode.startsWith('attn')) S.mode = 'attn_from'; sync(); };
+      tr.append(td);
+    });
+    tb.append(tr);
+  });
+}
+function change(c) {
+  if (c[0] === 'bond') return `${atomName(c[1])}–${atomName(c[2])} ${c[3] > 0 ? '+1 (forms)' : '−1 (breaks)'}`;
+  return `${atomName(c[1])} lone pairs ${c[2] > 0 ? '+1' : '−1'}`;
+}
+const key = r => r.map(c => c.join(':')).sort().join('|');
+function renderReadout() {
+  const el = document.getElementById('readout'), R = D.readout; el.textContent = '';
+  el.append(h('h2', { text: 'Readout: the anchor and R' }));
+  const lab = R.label.length
+    ? `Label class: ${R.label.length} variant(s). Rank of its best anchor: ${R.label_rank} (0 = top-1). P(any of its anchors) = ${pct(R.label_probability)}.`
+    : 'No label: the pool was given as SMILES.';
+  el.append(h('p', { text: `${R.n_candidates} candidate anchors. ${lab}` }));
+  const tb = h('table', {}, h('tr', {}, ...['#', 'anchor', 'side', 'P', 'logit', '= site', '+ pair', '+ physics', 'in label'].map((x, i) => h('th', { class: i > 2 && i < 8 ? 'num' : '', text: x }))));
+  R.top.forEach((r, n) => {
+    const on = S.pair && S.pair[0] === r.i && S.pair[1] === r.j && S.pair[2] === r.side;
+    const tr = h('tr', { class: 'pick' + (on ? ' on' : '') }, h('td', { class: 'mono', text: n + 1 }), h('td', { class: 'mono', text: `${atomName(r.i)}–${atomName(r.j)}` }),
+      h('td', { class: r.side === 'form' ? 'ok' : 'bad', text: r.side }), h('td', { class: 'num mono', text: pct(r.p) }),
+      h('td', { class: 'num mono', text: fmt(r.logit, 2) }), h('td', { class: 'num mono', text: fmt(r.site, 2) }),
+      h('td', { class: 'num mono', text: fmt(r.pair, 2) }), h('td', { class: 'num mono', text: fmt(r.physics, 2) }),
+      h('td', { text: r.in_label ? '✓' : '' }));
+    tr.onclick = () => { S.pair = [r.i, r.j, r.side]; S.sel = r.i + 1; sync(); };
+    tb.append(tr);
+  });
+  el.append(h('div', { class: 'scroll' }, tb));
+  const hit = R.label.some(v => key(v) === key(R.greedy));
+  el.append(h('h3', { text: 'Greedy R of the top anchor' + (R.label.length ? (hit ? ' (matches the label class)' : ' (not in the label class)') : '') }),
+    h('p', { class: 'mono', text: R.greedy.map(change).join(';  ') || '(empty)' }));
+  if (R.label.length) {
+    const ul = h('ol', { class: 'mono' }, ...R.label.map(v => h('li', { text: v.map(change).join(';  ') })));
+    el.append(h('h3', { text: 'Label class' }), ul);
+  }
+}
+
+// ---------- wiring ----------
+function select(t) { S.sel = t; sync(); }
+function sync() {
+  document.getElementById('mode').value = S.mode;
+  document.getElementById('layer').value = S.layer;
+  document.getElementById('layerTxt').textContent = S.layer === 0 ? '0 · h(0)' : `${S.layer} / ${L}`;
+  document.getElementById('head').value = S.head;
+  renderMap(); renderToken(); renderPCA(); renderHeads(); renderReadout();
+  try { history.replaceState(null, '', '#' + new URLSearchParams({ sel: S.sel, mode: S.mode, layer: S.layer, head: S.head })); } catch (e) { /* a view without a URL */ }
+}
+function fromHash() {  // the view in the URL (#sel=5&mode=cos&layer=3&head=-1), so a view can be kept
+  const q = new URLSearchParams(location.hash.slice(1)), int = (k, lo, hi) => {
+    const v = parseInt(q.get(k), 10); return Number.isInteger(v) && v >= lo && v <= hi ? v : null; };
+  if (MODES.some(m => m[0] === q.get('mode'))) S.mode = q.get('mode');
+  S.sel = int('sel', 0, N - 1) ?? S.sel; S.layer = int('layer', 0, L) ?? S.layer;
+  S.head = AT.per_head ? (int('head', -1, HEADS - 1) ?? S.head) : -1;
+}
+function init() {
+  const M = D.meta, e = M.errors, worst = Math.max(e.embedding, ...e.layers);
+  const meta = document.getElementById('meta');
+  meta.append(h('div', { class: 'mono', text: `${M.sample}${M.reaction ? '  ·  ' + M.reaction : ''}` }),
+    h('div', { text: `${M.run} (${M.checkpoint}, ${M.encoder} encoder, d=${M.d}, ${L} layers × ${HEADS} heads) · ${M.n_atoms} atoms, ${N - 1 - M.n_atoms} orbitals · `
+      + `largest deviation of the rebuilt layers from the model: ${worst.toExponential(1)}` }));
+  const mode = document.getElementById('mode');
+  for (const [v, t] of MODES) mode.append(h('option', { value: v, text: t }));
+  mode.onchange = () => { S.mode = mode.value; sync(); };
+  const layer = document.getElementById('layer'); layer.max = L;
+  layer.oninput = () => { S.layer = +layer.value; sync(); };
+  const head = document.getElementById('head');
+  head.append(h('option', { value: -1, text: 'mean' }));
+  if (AT.per_head) for (let x = 0; x < HEADS; x++) head.append(h('option', { value: x, text: 'head ' + x }));
+  else head.disabled = true;
+  head.onchange = () => { S.head = +head.value; sync(); };
+  zoomAndPan(document.getElementById('map'));
+  fromHash();
+  sync();
+}
+init();
+</script>
+</body>
+</html>

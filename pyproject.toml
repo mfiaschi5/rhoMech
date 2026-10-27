@@ -24,8 +24,11 @@ ksmech-qm = "ksmech.qm.cli:main"
 ksmech-orbitals = "ksmech.orbitals.cli:main"
 ksmech-arrows = "ksmech.arrows.cli:main"
 ksmech-physics = "ksmech.physics.cli:main"
+ksmech-serve = "ksmech.serve.app.cli:main"
 ksmech-train = "ksmech.train.cli:main"
 ksmech-eval = "ksmech.eval.cli:main"
+ksmech = "ksmech.client.cli:main"
+ksmech-mcp = "ksmech.mcp.server:main"
 
 [dependency-groups]
 dev = [
@@ -33,7 +36,26 @@ dev = [
     "ruff",
     "pre-commit",
     "pytest-xdist>=3.8.0",
+    "httpx==0.28.1",
 ]
+# the optional web app (ksmech-serve, src/ksmech/serve + apps/ui): not a dependency of the engine,
+# installed by default for development; the engine never imports ksmech.serve
+serve = [
+    "fastapi==0.142.2",
+    "uvicorn==0.54.0",
+    "sqlmodel==0.0.47",
+    "sqlalchemy==2.0.54",
+    # the resolver picked starlette 1.9.0 (2026-10-18) and pydantic 2.14.1 (2026-10-11), both
+    # newer than the 2026-10-06 cutoff (releases at least two weeks old), so both are pinned back
+    "starlette<=1.7.0",
+    "pydantic==2.13.5",
+]
+# the HTTP client of the serve API (`ksmech`, src/ksmech/client) and the MCP server over it
+# (`ksmech-mcp`, src/ksmech/mcp): neither is a dependency of the engine, and the client imports no
+# server package. httpx is the version of the dev group; mcp stays on the 1.x line (FastMCP; 2.x
+# renamed it MCPServer and moved to httpx2)
+client = ["httpx==0.28.1"]
+mcp = ["mcp==1.30.0"]
 # torch comes from one of two builds: ROCm (default here, AMD RX 6600 XT, run with
 # HSA_OVERRIDE_GFX_VERSION=10.3.0) or CUDA (NVIDIA hosts: uv sync --no-group rocm --group cuda).
 rocm = ["torch==2.14.1", "triton-rocm==3.8.0"]
@@ -41,8 +63,17 @@ cuda = ["torch==2.14.1"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-default-groups = ["dev", "rocm"]
+default-groups = ["dev", "rocm", "serve", "client", "mcp"]
 conflicts = [[{ group = "rocm" }, { group = "cuda" }]]
+# certifi (a dev-only transitive of httpx) resolved to 2026.10.19, released the day before; keep
+# the last release that is at least two weeks old. The same for two transitives of mcp
+# (2026-10-27): pydantic-settings 2.16.1 (2026-10-20) and sse-starlette 3.6.0 (2026-10-25) are
+# held at 2.15.0 (2026-08-07) and 3.5.0 (2026-09-28)
+constraint-dependencies = [
+    "certifi<=2026.7.22",
+    "pydantic-settings<=2.15.0",
+    "sse-starlette<=3.5.0",
+]
 
 [tool.uv.sources]
 torch = [
@@ -80,4 +111,6 @@ markers = [
     "realdata: runs on the real raw files in data/raw (skipped when absent)",
     "slow: runs GFN2 geometry optimizations (deselect with -m \"not slow\")",
     "diagnostic: checks the classifier's labels (lone pair, sigma, ...), which are never model input",
+    "serve: serve app tests: stubs or synthetic chemistry, never xTB",
+    "e2e: Playwright wrapper, skipped unless KSMECH_E2E=1",
 ]

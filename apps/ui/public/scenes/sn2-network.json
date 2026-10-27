@@ -1,0 +1,1689 @@
+{
+ "kind": "ksmech-scene",
+ "version": 1,
+ "scene": {
+  "type": "network",
+  "title": "Methoxide + chloromethane: the floor predictor's network, two steps deep",
+  "network": {
+   "network_id": "j4183047bae41b2e4",
+   "revision": 6,
+   "complete": true,
+   "root": "pdef88013fdea3879ec7e",
+   "nodes": [
+    {
+     "id": "pdef88013fdea3879ec7e",
+     "pool_key": "[CH3][Cl]|0.[CH3][O]|-1",
+     "state_id": "s187ab3f19a88fa83ed9a",
+     "alias_state_ids": [
+      "s5a34c93087f9154c0101"
+     ],
+     "species": [
+      {
+       "species_key": "[CH3][Cl]|0",
+       "token_keys": [
+        "CCl"
+       ],
+       "display_smiles": "CCl",
+       "count": 1,
+       "charge": 0,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[CH3][O]|-1",
+       "token_keys": [
+        "C[O-]"
+       ],
+       "display_smiles": "C[O-]",
+       "count": 1,
+       "charge": -1,
+       "resonance_flag": "OK"
+      }
+     ],
+     "display_smiles": "CCl.C[O-]",
+     "depth": 0,
+     "best_logp": 0,
+     "best_parent_edge": null,
+     "status": "expanded",
+     "terminal_reason": null,
+     "failure": null,
+     "is_root": true,
+     "n_valid": 22,
+     "scanned_mass": null,
+     "unscanned_mass": null,
+     "apply_failures": {},
+     "fermi_smeared": false,
+     "warnings": []
+    },
+    {
+     "id": "p7c0eae9a8508a2227d2a",
+     "pool_key": "[CH3][O][CH3]|0.[Cl]|-1",
+     "state_id": "s9e72f4c950615f13820b",
+     "alias_state_ids": [],
+     "species": [
+      {
+       "species_key": "[CH3][O][CH3]|0",
+       "token_keys": [
+        "COC"
+       ],
+       "display_smiles": "COC",
+       "count": 1,
+       "charge": 0,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[Cl]|-1",
+       "token_keys": [
+        "[Cl-]"
+       ],
+       "display_smiles": "[Cl-]",
+       "count": 1,
+       "charge": -1,
+       "resonance_flag": "OK"
+      }
+     ],
+     "display_smiles": "COC.[Cl-]",
+     "depth": 1,
+     "best_logp": -0.6931471805599453,
+     "best_parent_edge": "e1f5c1328d8a9d330",
+     "status": "expanded",
+     "terminal_reason": null,
+     "failure": null,
+     "is_root": false,
+     "n_valid": 8,
+     "scanned_mass": null,
+     "unscanned_mass": null,
+     "apply_failures": {},
+     "fermi_smeared": false,
+     "warnings": []
+    },
+    {
+     "id": "pf9e77493e460c1a4a3f9",
+     "pool_key": "[CH3][O][CH2][Cl]|0.[H]|-1",
+     "state_id": "s3b861f0ef8ffd726759c",
+     "alias_state_ids": [
+      "s462da4070db8c695680d"
+     ],
+     "species": [
+      {
+       "species_key": "[CH3][O][CH2][Cl]|0",
+       "token_keys": [
+        "COCCl"
+       ],
+       "display_smiles": "COCCl",
+       "count": 1,
+       "charge": 0,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[H]|-1",
+       "token_keys": [
+        "[H-]"
+       ],
+       "display_smiles": "[H-]",
+       "count": 1,
+       "charge": -1,
+       "resonance_flag": "OK"
+      }
+     ],
+     "display_smiles": "COCCl.[H-]",
+     "depth": 1,
+     "best_logp": -0.6931471805599453,
+     "best_parent_edge": "e895e343a3e292efd",
+     "status": "expanded",
+     "terminal_reason": null,
+     "failure": null,
+     "is_root": false,
+     "n_valid": 22,
+     "scanned_mass": null,
+     "unscanned_mass": null,
+     "apply_failures": {
+      "COMPLETION_FAILED:VALENCE": 2
+     },
+     "fermi_smeared": false,
+     "warnings": []
+    },
+    {
+     "id": "p08f23811876994ee3090",
+     "pool_key": "[CH2]1[CH2][O]1|0.[Cl]|-1.[H]|-1.[H]|1",
+     "state_id": "s5a632ff25a221d22c412",
+     "alias_state_ids": [],
+     "species": [
+      {
+       "species_key": "[CH2]1[CH2][O]1|0",
+       "token_keys": [
+        "C1CO1"
+       ],
+       "display_smiles": "C1CO1",
+       "count": 1,
+       "charge": 0,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[Cl]|-1",
+       "token_keys": [
+        "[Cl-]"
+       ],
+       "display_smiles": "[Cl-]",
+       "count": 1,
+       "charge": -1,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[H]|-1",
+       "token_keys": [
+        "[H-]"
+       ],
+       "display_smiles": "[H-]",
+       "count": 1,
+       "charge": -1,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[H]|1",
+       "token_keys": [
+        "[H+]"
+       ],
+       "display_smiles": "[H+]",
+       "count": 1,
+       "charge": 1,
+       "resonance_flag": "OK"
+      }
+     ],
+     "display_smiles": "C1CO1.[Cl-].[H-].[H+]",
+     "depth": 2,
+     "best_logp": -1.3862943611198906,
+     "best_parent_edge": "e9b1d81aee81af0b5",
+     "status": "terminal",
+     "terminal_reason": "MAX_STEPS",
+     "failure": null,
+     "is_root": false,
+     "n_valid": null,
+     "scanned_mass": null,
+     "unscanned_mass": null,
+     "apply_failures": {},
+     "fermi_smeared": false,
+     "warnings": []
+    },
+    {
+     "id": "p9ba6abaa2539f258b0c4",
+     "pool_key": "[H]|-1.[H]|1.[O][CH2][CH2][Cl]|-1",
+     "state_id": "s9650bb7a597bb20fc130",
+     "alias_state_ids": [],
+     "species": [
+      {
+       "species_key": "[H]|-1",
+       "token_keys": [
+        "[H-]"
+       ],
+       "display_smiles": "[H-]",
+       "count": 1,
+       "charge": -1,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[H]|1",
+       "token_keys": [
+        "[H+]"
+       ],
+       "display_smiles": "[H+]",
+       "count": 1,
+       "charge": 1,
+       "resonance_flag": "OK"
+      },
+      {
+       "species_key": "[O][CH2][CH2][Cl]|-1",
+       "token_keys": [
+        "[O-]CCCl"
+       ],
+       "display_smiles": "[O-]CCCl",
+       "count": 1,
+       "charge": -1,
+       "resonance_flag": "OK"
+      }
+     ],
+     "display_smiles": "[H-].[H+].[O-]CCCl",
+     "depth": 2,
+     "best_logp": -1.3862943611198906,
+     "best_parent_edge": "edca22ca4f1e17b3a",
+     "status": "terminal",
+     "terminal_reason": "MAX_STEPS",
+     "failure": null,
+     "is_root": false,
+     "n_valid": null,
+     "scanned_mass": null,
+     "unscanned_mass": null,
+     "apply_failures": {},
+     "fermi_smeared": false,
+     "warnings": []
+    }
+   ],
+   "edges": [
+    {
+     "id": "e1f5c1328d8a9d330",
+     "source": "pdef88013fdea3879ec7e",
+     "target": "p7c0eae9a8508a2227d2a",
+     "target_pool_key": "[CH3][O][CH3]|0.[Cl]|-1",
+     "kind": "predicted",
+     "status": "active",
+     "source_state_id": "s187ab3f19a88fa83ed9a",
+     "product_state_id": "s9e72f4c950615f13820b",
+     "source_mapped_smiles": "[C:1]([O-:2])([H:3])([H:4])[H:5].[C:6]([Cl:7])([H:8])([H:9])[H:10]",
+     "product_mapped_smiles": "[C:1]([O:2][C:6]([H:8])([H:9])[H:10])([H:3])([H:4])[H:5].[Cl-:7]",
+     "matrix": {
+      "bonds": [
+       [
+        1,
+        5,
+        1
+       ],
+       [
+        5,
+        6,
+        -1
+       ]
+      ],
+      "lone": [
+       [
+        1,
+        -2
+       ],
+       [
+        6,
+        2
+       ]
+      ]
+     },
+     "anchor": {
+      "i": 1,
+      "j": 5,
+      "sign": "form"
+     },
+     "arrows": [
+      {
+       "kind": "lone_pair_to_bond",
+       "source": [
+        1
+       ],
+       "target": [
+        1,
+        5
+       ]
+      },
+      {
+       "kind": "bond_to_lone_pair",
+       "source": [
+        5,
+        6
+       ],
+       "target": [
+        6
+       ]
+      }
+     ],
+     "readings": [
+      {
+       "i": 1,
+       "j": 5,
+       "g_atom": -1.2801494233795143,
+       "donor_token": 16,
+       "acceptor_token": 28,
+       "g_rs": -0.35124063705199843,
+       "term": -0.21902674933725186,
+       "donor_diag": "lone_pair(O)",
+       "acceptor_diag": "sigma_star(C-Cl)",
+       "canonical": {
+        "k": 6,
+        "m": 7,
+        "e_k_ev": -8.547926067737887,
+        "e_m_ev": -4.212112412174601,
+        "k_label": "HOMO",
+        "m_label": "LUMO",
+        "term": -0.2787913498219227,
+        "share": 0.7937331857778455,
+        "index_source": "qm_occupations"
+       }
+      }
+     ],
+     "pmechdb_code": "2=6;6,7=7",
+     "score": 1.2801494233795143,
+     "logp": null,
+     "weight": -0.6931471805599453,
+     "predictor": "floor",
+     "predictor_version": "floor/g-atom/72d7947e1dd5",
+     "rank": 1,
+     "product_smiles": [
+      "COC",
+      "[Cl-]"
+     ],
+     "sigma_keys": [
+      "[CH3][O][CH3]|0",
+      "[Cl]|-1"
+     ],
+     "formal_charges": [
+      [
+       1,
+       0
+      ],
+      [
+       5,
+       0
+      ],
+      [
+       6,
+       -1
+      ]
+     ],
+     "touched_maps": [
+      2,
+      6,
+      7
+     ],
+     "n_alternatives": 0,
+     "alternatives": [],
+     "channel": {
+      "acceptor_site": 5,
+      "acceptor_token": 28,
+      "donor_site": 1,
+      "donor_token": 16,
+      "leaving": 6,
+      "term": -0.21902674933725186
+     },
+     "superseded_by": null,
+     "recurrence": false,
+     "closes_cycle": false,
+     "cycle_ids": [],
+     "revision": 1
+    },
+    {
+     "id": "e895e343a3e292efd",
+     "source": "pdef88013fdea3879ec7e",
+     "target": "pf9e77493e460c1a4a3f9",
+     "target_pool_key": "[CH3][O][CH2][Cl]|0.[H]|-1",
+     "kind": "predicted",
+     "status": "active",
+     "source_state_id": "s187ab3f19a88fa83ed9a",
+     "product_state_id": "s3b861f0ef8ffd726759c",
+     "source_mapped_smiles": "[C:1]([O-:2])([H:3])([H:4])[H:5].[C:6]([Cl:7])([H:8])([H:9])[H:10]",
+     "product_mapped_smiles": "[C:1]([O:2][C:6]([Cl:7])([H:9])[H:10])([H:3])([H:4])[H:5].[H-:8]",
+     "matrix": {
+      "bonds": [
+       [
+        1,
+        5,
+        1
+       ],
+       [
+        5,
+        7,
+        -1
+       ]
+      ],
+      "lone": [
+       [
+        1,
+        -2
+       ],
+       [
+        7,
+        2
+       ]
+      ]
+     },
+     "anchor": {
+      "i": 1,
+      "j": 5,
+      "sign": "form"
+     },
+     "arrows": [
+      {
+       "kind": "lone_pair_to_bond",
+       "source": [
+        1
+       ],
+       "target": [
+        1,
+        5
+       ]
+      },
+      {
+       "kind": "bond_to_lone_pair",
+       "source": [
+        5,
+        7
+       ],
+       "target": [
+        7
+       ]
+      }
+     ],
+     "readings": [
+      {
+       "i": 1,
+       "j": 5,
+       "g_atom": -1.2801494233795143,
+       "donor_token": 16,
+       "acceptor_token": 28,
+       "g_rs": -0.35124063705199843,
+       "term": -0.21902674933725186,
+       "donor_diag": "lone_pair(O)",
+       "acceptor_diag": "sigma_star(C-Cl)",
+       "canonical": {
+        "k": 6,
+        "m": 7,
+        "e_k_ev": -8.547926067737887,
+        "e_m_ev": -4.212112412174601,
+        "k_label": "HOMO",
+        "m_label": "LUMO",
+        "term": -0.2787913498219227,
+        "share": 0.7937331857778455,
+        "index_source": "qm_occupations"
+       }
+      }
+     ],
+     "pmechdb_code": "2=6;6,8=8",
+     "score": 1.2801494233795143,
+     "logp": null,
+     "weight": -0.6931471805599453,
+     "predictor": "floor",
+     "predictor_version": "floor/g-atom/72d7947e1dd5",
+     "rank": 2,
+     "product_smiles": [
+      "COCCl",
+      "[H-]"
+     ],
+     "sigma_keys": [
+      "[CH3][O][CH2][Cl]|0",
+      "[H]|-1"
+     ],
+     "formal_charges": [
+      [
+       1,
+       0
+      ],
+      [
+       5,
+       0
+      ],
+      [
+       7,
+       -1
+      ]
+     ],
+     "touched_maps": [
+      2,
+      6,
+      8
+     ],
+     "n_alternatives": 2,
+     "alternatives": [
+      {
+       "matrix": {
+        "bonds": [
+         [
+          1,
+          5,
+          1
+         ],
+         [
+          5,
+          8,
+          -1
+         ]
+        ],
+        "lone": [
+         [
+          1,
+          -2
+         ],
+         [
+          8,
+          2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 1,
+        "j": 5,
+        "sign": "form"
+       },
+       "score": 1.2801494233795143,
+       "logp": null,
+       "rank": 3
+      },
+      {
+       "matrix": {
+        "bonds": [
+         [
+          1,
+          5,
+          1
+         ],
+         [
+          5,
+          9,
+          -1
+         ]
+        ],
+        "lone": [
+         [
+          1,
+          -2
+         ],
+         [
+          9,
+          2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 1,
+        "j": 5,
+        "sign": "form"
+       },
+       "score": 1.2801494233795143,
+       "logp": null,
+       "rank": 4
+      }
+     ],
+     "channel": {
+      "acceptor_site": 5,
+      "acceptor_token": 28,
+      "donor_site": 1,
+      "donor_token": 16,
+      "leaving": 7,
+      "term": -0.21902674933725186
+     },
+     "superseded_by": null,
+     "recurrence": false,
+     "closes_cycle": false,
+     "cycle_ids": [],
+     "revision": 1
+    },
+    {
+     "id": "e16678e338db40698",
+     "source": "p7c0eae9a8508a2227d2a",
+     "target": "pdef88013fdea3879ec7e",
+     "target_pool_key": "[CH3][Cl]|0.[CH3][O]|-1",
+     "kind": "predicted",
+     "status": "active",
+     "source_state_id": "s9e72f4c950615f13820b",
+     "product_state_id": "s5a34c93087f9154c0101",
+     "source_mapped_smiles": "[C:1]([O:2][C:6]([H:8])([H:9])[H:10])([H:3])([H:4])[H:5].[Cl-:7]",
+     "product_mapped_smiles": "[C:1]([H:3])([H:4])([H:5])[Cl:7].[O-:2][C:6]([H:8])([H:9])[H:10]",
+     "matrix": {
+      "bonds": [
+       [
+        0,
+        1,
+        -1
+       ],
+       [
+        0,
+        9,
+        1
+       ]
+      ],
+      "lone": [
+       [
+        1,
+        2
+       ],
+       [
+        9,
+        -2
+       ]
+      ]
+     },
+     "anchor": {
+      "i": 0,
+      "j": 9,
+      "sign": "form"
+     },
+     "arrows": [
+      {
+       "kind": "lone_pair_to_bond",
+       "source": [
+        9
+       ],
+       "target": [
+        9,
+        0
+       ]
+      },
+      {
+       "kind": "bond_to_lone_pair",
+       "source": [
+        0,
+        1
+       ],
+       "target": [
+        1
+       ]
+      }
+     ],
+     "readings": [
+      {
+       "i": 9,
+       "j": 0,
+       "g_atom": -0.9386260443616989,
+       "donor_token": 29,
+       "acceptor_token": 20,
+       "g_rs": -0.15156201687113469,
+       "term": -0.09179947433982057,
+       "donor_diag": "lone_pair(Cl)",
+       "acceptor_diag": "sigma_star(C-O)",
+       "canonical": {
+        "k": 1,
+        "m": 10,
+        "e_k_ev": -10.808093760069804,
+        "e_m_ev": 1.0376528122388258,
+        "k_label": "HOMO-2",
+        "m_label": "LUMO",
+        "term": -0.08149952819595445,
+        "share": 0.5377305599281464,
+        "index_source": "qm_occupations"
+       }
+      }
+     ],
+     "pmechdb_code": "7=1;1,2=2",
+     "score": 0.9386260443616989,
+     "logp": null,
+     "weight": -0.6931471805599453,
+     "predictor": "floor",
+     "predictor_version": "floor/g-atom/72d7947e1dd5",
+     "rank": 1,
+     "product_smiles": [
+      "CCl",
+      "C[O-]"
+     ],
+     "sigma_keys": [
+      "[CH3][Cl]|0",
+      "[CH3][O]|-1"
+     ],
+     "formal_charges": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       -1
+      ],
+      [
+       9,
+       0
+      ]
+     ],
+     "touched_maps": [
+      1,
+      2,
+      7
+     ],
+     "n_alternatives": 1,
+     "alternatives": [
+      {
+       "matrix": {
+        "bonds": [
+         [
+          1,
+          2,
+          -1
+         ],
+         [
+          2,
+          9,
+          1
+         ]
+        ],
+        "lone": [
+         [
+          1,
+          2
+         ],
+         [
+          9,
+          -2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 2,
+        "j": 9,
+        "sign": "form"
+       },
+       "score": 0.9386166922913515,
+       "logp": null,
+       "rank": 5
+      }
+     ],
+     "channel": {
+      "acceptor_site": 0,
+      "acceptor_token": 20,
+      "donor_site": 9,
+      "donor_token": 29,
+      "leaving": 1,
+      "term": -0.09179947433982057
+     },
+     "superseded_by": null,
+     "recurrence": true,
+     "closes_cycle": false,
+     "cycle_ids": [
+      "y616630552c7e"
+     ],
+     "revision": 4
+    },
+    {
+     "id": "ee89019549353ad81",
+     "source": "p7c0eae9a8508a2227d2a",
+     "target": "pf9e77493e460c1a4a3f9",
+     "target_pool_key": "[CH3][O][CH2][Cl]|0.[H]|-1",
+     "kind": "predicted",
+     "status": "active",
+     "source_state_id": "s9e72f4c950615f13820b",
+     "product_state_id": "s462da4070db8c695680d",
+     "source_mapped_smiles": "[C:1]([O:2][C:6]([H:8])([H:9])[H:10])([H:3])([H:4])[H:5].[Cl-:7]",
+     "product_mapped_smiles": "[C:1]([O:2][C:6]([H:8])([H:9])[H:10])([H:4])([H:5])[Cl:7].[H-:3]",
+     "matrix": {
+      "bonds": [
+       [
+        0,
+        6,
+        -1
+       ],
+       [
+        0,
+        9,
+        1
+       ]
+      ],
+      "lone": [
+       [
+        6,
+        2
+       ],
+       [
+        9,
+        -2
+       ]
+      ]
+     },
+     "anchor": {
+      "i": 0,
+      "j": 9,
+      "sign": "form"
+     },
+     "arrows": [
+      {
+       "kind": "lone_pair_to_bond",
+       "source": [
+        9
+       ],
+       "target": [
+        9,
+        0
+       ]
+      },
+      {
+       "kind": "bond_to_lone_pair",
+       "source": [
+        0,
+        6
+       ],
+       "target": [
+        6
+       ]
+      }
+     ],
+     "readings": [
+      {
+       "i": 9,
+       "j": 0,
+       "g_atom": -0.9386260443616989,
+       "donor_token": 29,
+       "acceptor_token": 20,
+       "g_rs": -0.15156201687113469,
+       "term": -0.09179947433982057,
+       "donor_diag": "lone_pair(Cl)",
+       "acceptor_diag": "sigma_star(C-O)",
+       "canonical": {
+        "k": 1,
+        "m": 10,
+        "e_k_ev": -10.808093760069804,
+        "e_m_ev": 1.0376528122388258,
+        "k_label": "HOMO-2",
+        "m_label": "LUMO",
+        "term": -0.08149952819595445,
+        "share": 0.5377305599281464,
+        "index_source": "qm_occupations"
+       }
+      }
+     ],
+     "pmechdb_code": "7=1;1,3=3",
+     "score": 0.9386260443616989,
+     "logp": null,
+     "weight": -0.6931471805599453,
+     "predictor": "floor",
+     "predictor_version": "floor/g-atom/72d7947e1dd5",
+     "rank": 2,
+     "product_smiles": [
+      "COCCl",
+      "[H-]"
+     ],
+     "sigma_keys": [
+      "[CH3][O][CH2][Cl]|0",
+      "[H]|-1"
+     ],
+     "formal_charges": [
+      [
+       0,
+       0
+      ],
+      [
+       6,
+       -1
+      ],
+      [
+       9,
+       0
+      ]
+     ],
+     "touched_maps": [
+      1,
+      3,
+      7
+     ],
+     "n_alternatives": 5,
+     "alternatives": [
+      {
+       "matrix": {
+        "bonds": [
+         [
+          0,
+          7,
+          -1
+         ],
+         [
+          0,
+          9,
+          1
+         ]
+        ],
+        "lone": [
+         [
+          7,
+          2
+         ],
+         [
+          9,
+          -2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 0,
+        "j": 9,
+        "sign": "form"
+       },
+       "score": 0.9386260443616989,
+       "logp": null,
+       "rank": 3
+      },
+      {
+       "matrix": {
+        "bonds": [
+         [
+          0,
+          8,
+          -1
+         ],
+         [
+          0,
+          9,
+          1
+         ]
+        ],
+        "lone": [
+         [
+          8,
+          2
+         ],
+         [
+          9,
+          -2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 0,
+        "j": 9,
+        "sign": "form"
+       },
+       "score": 0.9386260443616989,
+       "logp": null,
+       "rank": 4
+      },
+      {
+       "matrix": {
+        "bonds": [
+         [
+          2,
+          3,
+          -1
+         ],
+         [
+          2,
+          9,
+          1
+         ]
+        ],
+        "lone": [
+         [
+          3,
+          2
+         ],
+         [
+          9,
+          -2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 2,
+        "j": 9,
+        "sign": "form"
+       },
+       "score": 0.9386166922913515,
+       "logp": null,
+       "rank": 6
+      },
+      {
+       "matrix": {
+        "bonds": [
+         [
+          2,
+          4,
+          -1
+         ],
+         [
+          2,
+          9,
+          1
+         ]
+        ],
+        "lone": [
+         [
+          4,
+          2
+         ],
+         [
+          9,
+          -2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 2,
+        "j": 9,
+        "sign": "form"
+       },
+       "score": 0.9386166922913515,
+       "logp": null,
+       "rank": 7
+      },
+      {
+       "matrix": {
+        "bonds": [
+         [
+          2,
+          5,
+          -1
+         ],
+         [
+          2,
+          9,
+          1
+         ]
+        ],
+        "lone": [
+         [
+          5,
+          2
+         ],
+         [
+          9,
+          -2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 2,
+        "j": 9,
+        "sign": "form"
+       },
+       "score": 0.9386166922913515,
+       "logp": null,
+       "rank": 8
+      }
+     ],
+     "channel": {
+      "acceptor_site": 0,
+      "acceptor_token": 20,
+      "donor_site": 9,
+      "donor_token": 29,
+      "leaving": 6,
+      "term": -0.09179947433982057
+     },
+     "superseded_by": null,
+     "recurrence": false,
+     "closes_cycle": false,
+     "cycle_ids": [],
+     "revision": 4
+    },
+    {
+     "id": "e9b1d81aee81af0b5",
+     "source": "pf9e77493e460c1a4a3f9",
+     "target": "p08f23811876994ee3090",
+     "target_pool_key": "[CH2]1[CH2][O]1|0.[Cl]|-1.[H]|-1.[H]|1",
+     "kind": "predicted",
+     "status": "active",
+     "source_state_id": "s3b861f0ef8ffd726759c",
+     "product_state_id": "s5a632ff25a221d22c412",
+     "source_mapped_smiles": "[C:1]([O:2][C:6]([Cl:7])([H:9])[H:10])([H:3])([H:4])[H:5].[H-:8]",
+     "product_mapped_smiles": "[C:1]1([H:3])([H:4])[O:2][C:6]1([H:9])[H:10].[Cl-:7].[H+:5].[H-:8]",
+     "matrix": {
+      "bonds": [
+       [
+        0,
+        2,
+        1
+       ],
+       [
+        0,
+        8,
+        -1
+       ],
+       [
+        2,
+        3,
+        -1
+       ]
+      ],
+      "lone": [
+       [
+        3,
+        2
+       ]
+      ]
+     },
+     "anchor": {
+      "i": 0,
+      "j": 2,
+      "sign": "form"
+     },
+     "arrows": [
+      {
+       "kind": "bond_to_bond",
+       "source": [
+        0,
+        8
+       ],
+       "target": [
+        0,
+        2
+       ]
+      },
+      {
+       "kind": "bond_to_lone_pair",
+       "source": [
+        2,
+        3
+       ],
+       "target": [
+        3
+       ]
+      }
+     ],
+     "readings": [
+      {
+       "i": 0,
+       "j": 2,
+       "g_atom": -0.9336898246876792,
+       "donor_token": 19,
+       "acceptor_token": 23,
+       "g_rs": -0.17830874318972875,
+       "term": -0.05967331632196387,
+       "donor_diag": "sigma(C-H)",
+       "acceptor_diag": "sigma_star(C-Cl)",
+       "canonical": {
+        "k": 9,
+        "m": 13,
+        "e_k_ev": -12.888637709946861,
+        "e_m_ev": -4.636592269792389,
+        "k_label": "HOMO-3",
+        "m_label": "LUMO",
+        "term": -0.06444260155032479,
+        "share": 0.3614102168941591,
+        "index_source": "qm_occupations"
+       }
+      }
+     ],
+     "pmechdb_code": "1,5=1,6;6,7=7",
+     "score": 0.9336898246876792,
+     "logp": null,
+     "weight": -0.6931471805599453,
+     "predictor": "floor",
+     "predictor_version": "floor/g-atom/72d7947e1dd5",
+     "rank": 2,
+     "product_smiles": [
+      "C1CO1",
+      "[Cl-]",
+      "[H+]",
+      "[H-]"
+     ],
+     "sigma_keys": [
+      "[CH2]1[CH2][O]1|0",
+      "[Cl]|-1",
+      "[H]|1",
+      "[H]|-1"
+     ],
+     "formal_charges": [
+      [
+       0,
+       0
+      ],
+      [
+       2,
+       0
+      ],
+      [
+       3,
+       -1
+      ],
+      [
+       8,
+       1
+      ],
+      [
+       9,
+       -1
+      ]
+     ],
+     "touched_maps": [
+      1,
+      5,
+      6,
+      7
+     ],
+     "n_alternatives": 1,
+     "alternatives": [
+      {
+       "matrix": {
+        "bonds": [
+         [
+          0,
+          2,
+          1
+         ],
+         [
+          0,
+          7,
+          -1
+         ],
+         [
+          2,
+          3,
+          -1
+         ]
+        ],
+        "lone": [
+         [
+          3,
+          2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 0,
+        "j": 2,
+        "sign": "form"
+       },
+       "score": 0.9336898246876792,
+       "logp": null,
+       "rank": 6
+      }
+     ],
+     "channel": {
+      "acceptor_site": 2,
+      "acceptor_token": 23,
+      "donor_site": 0,
+      "donor_token": 19,
+      "leaving": 3,
+      "term": -0.05967331632196387
+     },
+     "superseded_by": null,
+     "recurrence": false,
+     "closes_cycle": false,
+     "cycle_ids": [],
+     "revision": 4
+    },
+    {
+     "id": "edca22ca4f1e17b3a",
+     "source": "pf9e77493e460c1a4a3f9",
+     "target": "p9ba6abaa2539f258b0c4",
+     "target_pool_key": "[H]|-1.[H]|1.[O][CH2][CH2][Cl]|-1",
+     "kind": "predicted",
+     "status": "active",
+     "source_state_id": "s3b861f0ef8ffd726759c",
+     "product_state_id": "s9650bb7a597bb20fc130",
+     "source_mapped_smiles": "[C:1]([O:2][C:6]([Cl:7])([H:9])[H:10])([H:3])([H:4])[H:5].[H-:8]",
+     "product_mapped_smiles": "[C:1]([O-:2])([H:3])([H:4])[C:6]([Cl:7])([H:9])[H:10].[H+:5].[H-:8]",
+     "matrix": {
+      "bonds": [
+       [
+        0,
+        2,
+        1
+       ],
+       [
+        0,
+        8,
+        -1
+       ],
+       [
+        1,
+        2,
+        -1
+       ]
+      ],
+      "lone": [
+       [
+        1,
+        2
+       ]
+      ]
+     },
+     "anchor": {
+      "i": 0,
+      "j": 2,
+      "sign": "form"
+     },
+     "arrows": [
+      {
+       "kind": "bond_to_bond",
+       "source": [
+        0,
+        8
+       ],
+       "target": [
+        0,
+        2
+       ]
+      },
+      {
+       "kind": "bond_to_lone_pair",
+       "source": [
+        2,
+        1
+       ],
+       "target": [
+        1
+       ]
+      }
+     ],
+     "readings": [
+      {
+       "i": 0,
+       "j": 2,
+       "g_atom": -0.9336898246876792,
+       "donor_token": 19,
+       "acceptor_token": 23,
+       "g_rs": -0.17830874318972875,
+       "term": -0.05967331632196387,
+       "donor_diag": "sigma(C-H)",
+       "acceptor_diag": "sigma_star(C-Cl)",
+       "canonical": {
+        "k": 9,
+        "m": 13,
+        "e_k_ev": -12.888637709946861,
+        "e_m_ev": -4.636592269792389,
+        "k_label": "HOMO-3",
+        "m_label": "LUMO",
+        "term": -0.06444260155032479,
+        "share": 0.3614102168941591,
+        "index_source": "qm_occupations"
+       }
+      }
+     ],
+     "pmechdb_code": "1,5=1,6;6,2=2",
+     "score": 0.9336898246876792,
+     "logp": null,
+     "weight": -0.6931471805599453,
+     "predictor": "floor",
+     "predictor_version": "floor/g-atom/72d7947e1dd5",
+     "rank": 1,
+     "product_smiles": [
+      "[O-]CCCl",
+      "[H+]",
+      "[H-]"
+     ],
+     "sigma_keys": [
+      "[O][CH2][CH2][Cl]|-1",
+      "[H]|1",
+      "[H]|-1"
+     ],
+     "formal_charges": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       -1
+      ],
+      [
+       2,
+       0
+      ],
+      [
+       8,
+       1
+      ],
+      [
+       9,
+       -1
+      ]
+     ],
+     "touched_maps": [
+      1,
+      2,
+      5,
+      6
+     ],
+     "n_alternatives": 1,
+     "alternatives": [
+      {
+       "matrix": {
+        "bonds": [
+         [
+          0,
+          2,
+          1
+         ],
+         [
+          0,
+          7,
+          -1
+         ],
+         [
+          1,
+          2,
+          -1
+         ]
+        ],
+        "lone": [
+         [
+          1,
+          2
+         ]
+        ]
+       },
+       "anchor": {
+        "i": 0,
+        "j": 2,
+        "sign": "form"
+       },
+       "score": 0.9336898246876792,
+       "logp": null,
+       "rank": 5
+      }
+     ],
+     "channel": {
+      "acceptor_site": 2,
+      "acceptor_token": 23,
+      "donor_site": 0,
+      "donor_token": 19,
+      "leaving": 1,
+      "term": -0.05967331632196387
+     },
+     "superseded_by": null,
+     "recurrence": false,
+     "closes_cycle": false,
+     "cycle_ids": [],
+     "revision": 4
+    }
+   ],
+   "cycles": [
+    {
+     "id": "y616630552c7e",
+     "kind": "recurrence",
+     "anchor": "pdef88013fdea3879ec7e",
+     "closing_edge": "e16678e338db40698",
+     "node_ids": [
+      "pdef88013fdea3879ec7e",
+      "p7c0eae9a8508a2227d2a"
+     ],
+     "edge_ids": [
+      "e1f5c1328d8a9d330",
+      "e16678e338db40698"
+     ],
+     "catalyst": {},
+     "consumed": {},
+     "produced": {},
+     "virtual_edge": null
+    }
+   ],
+   "pathways": [
+    {
+     "id": "w284105264c42",
+     "rank": 1,
+     "node_ids": [
+      "pdef88013fdea3879ec7e",
+      "p7c0eae9a8508a2227d2a",
+      "pdef88013fdea3879ec7e"
+     ],
+     "edge_ids": [
+      "e1f5c1328d8a9d330",
+      "e16678e338db40698"
+     ],
+     "logp": -1.3862943611198906,
+     "probability": null,
+     "n_steps": 2,
+     "n_corrected": 0,
+     "ends_with": "RECURRENCE",
+     "closes_cycle": true,
+     "cycle_ids": [
+      "y616630552c7e"
+     ]
+    },
+    {
+     "id": "wfb7396f0470d",
+     "rank": 2,
+     "node_ids": [
+      "pdef88013fdea3879ec7e",
+      "pf9e77493e460c1a4a3f9",
+      "p08f23811876994ee3090"
+     ],
+     "edge_ids": [
+      "e895e343a3e292efd",
+      "e9b1d81aee81af0b5"
+     ],
+     "logp": -1.3862943611198906,
+     "probability": null,
+     "n_steps": 2,
+     "n_corrected": 0,
+     "ends_with": "MAX_STEPS",
+     "closes_cycle": false,
+     "cycle_ids": []
+    },
+    {
+     "id": "w46158f126916",
+     "rank": 3,
+     "node_ids": [
+      "pdef88013fdea3879ec7e",
+      "pf9e77493e460c1a4a3f9",
+      "p9ba6abaa2539f258b0c4"
+     ],
+     "edge_ids": [
+      "e895e343a3e292efd",
+      "edca22ca4f1e17b3a"
+     ],
+     "logp": -1.3862943611198906,
+     "probability": null,
+     "n_steps": 2,
+     "n_corrected": 0,
+     "ends_with": "MAX_STEPS",
+     "closes_cycle": false,
+     "cycle_ids": []
+    },
+    {
+     "id": "wce23f627c498",
+     "rank": 4,
+     "node_ids": [
+      "pdef88013fdea3879ec7e",
+      "p7c0eae9a8508a2227d2a",
+      "pf9e77493e460c1a4a3f9",
+      "p08f23811876994ee3090"
+     ],
+     "edge_ids": [
+      "e1f5c1328d8a9d330",
+      "ee89019549353ad81",
+      "e9b1d81aee81af0b5"
+     ],
+     "logp": -2.0794415416798357,
+     "probability": null,
+     "n_steps": 3,
+     "n_corrected": 0,
+     "ends_with": "MAX_STEPS",
+     "closes_cycle": false,
+     "cycle_ids": []
+    }
+   ],
+   "failed_proposals": [],
+   "skipped": {
+    "COMPLETION_FAILED:VALENCE": 2
+   },
+   "params": {
+    "beam": 2,
+    "max_steps": 2,
+    "temperature": 1,
+    "stop_at_turnover": true,
+    "candidate_scope": "all",
+    "max_scan": 64,
+    "max_nodes": 12,
+    "n_pathways": 4
+   },
+   "request": {
+    "reactants_smiles": [
+     "C[O-]",
+     "CCl"
+    ],
+    "stoichiometry": [
+     1,
+     1
+    ],
+    "conditions": null,
+    "predictor": "floor",
+    "beam": 2,
+    "max_steps": 2,
+    "temperature": null,
+    "stop_at_turnover": true,
+    "candidate_scope": "all",
+    "max_nodes": 12,
+    "n_pathways": 4,
+    "checkpoint": null
+   },
+   "provenance": {
+    "predictor": "floor",
+    "predictor_version": "floor/g-atom/72d7947e1dd5",
+    "checkpoint_hash": null,
+    "checkpoint": null,
+    "spec_version": "v9+4d2aa237f885;tok9;smp17;qm1",
+    "physics_fingerprint": "72d7947e1dd5",
+    "artifact_versions": {
+     "tokens": 9,
+     "samples": 17,
+     "qm": 1,
+     "qm_method": "GFN2-xTB/ALPB-water/tblite-lbfgs"
+    },
+    "chemistry": "real",
+    "ks_params": {
+     "K": 1.75,
+     "eps": 4
+    },
+    "temperature": 1,
+    "candidate_scope": "all",
+    "candidate_config": {
+     "allow_d_acceptors": false,
+     "full": 1.5,
+     "empty": 0.5,
+     "exclude_fractional": true,
+     "fractional_band": [
+      0.2,
+      1.8
+     ],
+     "site_weight": 0.2
+    },
+    "notes": [
+     "the floor and gbdt have no END_MECH head: prediction stops at max_steps, a turnover or an empty frontier, never by a learned stop",
+     "scores rank candidates; they are not probabilities"
+    ]
+   },
+   "scores_are_probabilities": false
+  }
+ },
+ "provenance": {
+  "exporter": "ksmech scene-export 1",
+  "exported_at": "2026-10-27T17:36:43.870Z",
+  "server": {
+   "api_schema": 1,
+   "app_version": "0.1.0",
+   "spec_version": "v9+4d2aa237f885;tok9;smp17;qm1",
+   "physics_fingerprint": "72d7947e1dd5",
+   "chemistry": "real",
+   "qm_method": "GFN2-xTB/ALPB-water/tblite-lbfgs"
+  },
+  "request": {
+   "type": "network",
+   "job": "j4183047bae41b2e4",
+   "name": "sn2-network",
+   "title": "Methoxide + chloromethane: the floor predictor's network, two steps deep"
+  },
+  "predict": {
+   "predictor": "floor",
+   "predictor_version": "floor/g-atom/72d7947e1dd5",
+   "checkpoint_hash": null,
+   "checkpoint": null,
+   "spec_version": "v9+4d2aa237f885;tok9;smp17;qm1",
+   "physics_fingerprint": "72d7947e1dd5",
+   "artifact_versions": {
+    "tokens": 9,
+    "samples": 17,
+    "qm": 1,
+    "qm_method": "GFN2-xTB/ALPB-water/tblite-lbfgs"
+   },
+   "chemistry": "real",
+   "ks_params": {
+    "K": 1.75,
+    "eps": 4
+   },
+   "temperature": 1,
+   "candidate_scope": "all",
+   "candidate_config": {
+    "allow_d_acceptors": false,
+    "full": 1.5,
+    "empty": 0.5,
+    "exclude_fractional": true,
+    "fractional_band": [
+     0.2,
+     1.8
+    ],
+    "site_weight": 0.2
+   },
+   "notes": [
+    "the floor and gbdt have no END_MECH head: prediction stops at max_steps, a turnover or an empty frontier, never by a learned stop",
+    "scores rank candidates; they are not probabilities"
+   ]
+  },
+  "notes": []
+ }
+}
