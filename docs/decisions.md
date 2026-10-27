@@ -6073,3 +6073,43 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   panning where it starts on an atom or bond; Alt-drag on empty canvas and the middle button
   still pan. Clicking an atom still grows the bond at 120 degrees in the best free direction
   (zig-zag), unchanged.
+
+## 2026-10-27: ReactMech samples without arrows: R from the mapped sides, moving hydrogens as atoms
+
+- **The need (user request: prepare the ReactMech pilot for training).** ReactMech has no
+  arrows, so `delta_be.dataset_matrix` applied an empty edit and every step would have been
+  skipped as PRODUCT_MISMATCH.
+- **R from the two mapped sides** (`delta_be.mapped_matrix`). A step without arrows takes as
+  R_data the difference of its sides on the reactant indices: every mapped atom is read on its
+  product partner, and unmapped atoms (spectators such as triethylamine or CO2, in 3,294 steps)
+  are taken as unchanged. The product check that arrow steps pass (`match_products`) then
+  verifies the edit. The label is the parsimonious class of that R_data, as for PMechDB.
+- **Moving hydrogens as atoms** (`arrows.hydrogens.explicit_moving_hydrogens`).
+  - ReactMech writes every hydrogen as a count on its heavy atom. A proton that moves from O to
+    Cl reads `[OH+:5]` -> `[O:5]` and `[Cl-:1]` -> `[ClH:1]`. The difference of the heavy atoms
+    alone shows the two lone-pair changes and no bond change, so the step has no anchor, and the
+    spec's R covers the hydrogens.
+  - Each hydrogen that moves is written as a mapped atom on both sides, as PMechDB draws it
+    (`[H:20]`): one hydrogen of the donor (a mapped atom that loses hydrogens) in the
+    reactants, one on the acceptor (a mapped atom that gains them) in the products, with a fresh
+    map number. Which of a donor's hydrogens moves is arbitrary; the symmetric closure of the
+    label (schema 17) makes equivalent hydrogens one.
+  - The pairing is unique when the step has one donor or one acceptor. A step with several of
+    both is skipped as H_TRANSFER_AMBIGUOUS. In the pilot's 9,183 training steps: 4,729 move no
+    hydrogen, 4,443 one donor to one acceptor, 11 two donors to one acceptor; none is ambiguous.
+  - Steps with arrows are left as they are: their arrows name their hydrogens. Over the mini
+    fixture, R from the mapped sides with the arrows removed is the arrows' label class (a test).
+- **Coverage on the pilot.** All 9,183 training steps get a label; R_data itself is in the class
+  for 8,503 (elsewhere a resonance form with fewer charges, then fewer entries, wins). On 300
+  random steps with tokens, 293 are samples and 7 lack tokens (a molecule without a QM record);
+  each of the 140 steps that move a hydrogen anchors on the hydrogen's new bond.
+- **No ArrowLabels.** A sample of a step without arrows has `orbital_reading` `NO_ARROWS` and no
+  ArrowLabels: the network trains on R and its anchors. The LightGBM reference
+  (`ksmech-physics gbdt`) ranks ArrowLabels, so it has nothing to rank on ReactMech.
+- **The pilot's failed molecules are left for later (user decision).** The TIMEOUT retry was
+  stopped after 3 minutes, before a record came out. The QM manifest now lists all 20,185
+  molecules: 19,543 ok and 642 failed, after the 209 failures of the pod and extra runs, whose
+  rows had never been merged, were appended to it (backup
+  `qm_manifest.before_merge_2026-10-27.parquet`). The steps that use a failed molecule are
+  skipped as MISSING_TOKENS.
+

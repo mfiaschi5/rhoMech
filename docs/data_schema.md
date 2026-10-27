@@ -153,7 +153,10 @@ lowercase atoms, charges as drawn. Every line of the six files has `>>`.
 - Ingest of all six files (RDKit 2026.09.1): 114,046 accepted, 153 rejected (0.13%):
   `CHARGE_UNBALANCED` 70, `MAP_NOT_BIJECTIVE` 48, `UNBALANCED` 35. 6,528 resonance steps.
   Domain exclusions: `OPEN_SHELL_METAL` 1,251, `METAL_PLACEHOLDER` 1,122, `RADICAL_DRAWN` 792.
-- The reaction matrix comes from the two mapped sides; there are no arrows to apply.
+- The reaction matrix comes from the two mapped sides; there are no arrows to apply. A hydrogen
+  that moves is a count on both sides (`[OH+:5]` -> `[O:5]`, `[Cl-:1]` -> `[ClH:1]`): 4,454 of
+  the pilot's 9,183 training steps move one or two. `arrows.hydrogens` writes each as a mapped
+  atom before R is taken (docs/decisions.md, 2026-10-27).
 - d-metal species are drawn with charge-separated dative bonds to a neutral metal, e.g. a Pd(0)
   phosphine as `CC(C)(C)[P+]([Pd])(C(C)(C)C)C(C)(C)C`: an odd electron count, which the domain
   screen excludes as `OPEN_SHELL_METAL` (Pd is not among the d0 / d10 acceptors of rule R2).
@@ -246,7 +249,7 @@ token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
 | `product_key` | str | sigma key of the products (`data.resonance.sigma_key`) |
 | `edit_label` | EditLabel | the target: the parsimonious reaction-matrix class and its anchors on the global atoms (`arrows.delta_be`) |
 | `bonds`, `lone_pairs`, `wiberg` | int16 (E, 3) / int8 (A,) / float16 (E,) | the reactant's Lewis structure as drawn (Kekulé, implicit H included): (i, j, order) with i < j, lone pairs per atom, the Wiberg index of each bond (`arrows.lewis`) |
-| `orbital_reading` | str | `aligned`, `LABEL_FILTERED` or the first unaligned reason (e.g. `HETEROLYSIS_ONLY`) |
+| `orbital_reading` | str | `aligned`, `LABEL_FILTERED`, the first unaligned reason (e.g. `HETEROLYSIS_ONLY`), or `NO_ARROWS` for a source without arrows (ReactMech) |
 | `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` |
 | `label_filter` | dict[str, int] | labeled (donor, acceptor) cells that `pair_valid` rejects, by group |
 | `inputs` | dict[str, str] | provenance: every token file the sample was built from (`file:<path>` -> sha256) |

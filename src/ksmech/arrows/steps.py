@@ -61,6 +61,7 @@ from ksmech.arrows.delta_be import (
     to_global,
 )
 from ksmech.arrows.drawings import Drawing, resonance_drawings
+from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.arrows.lewis import (
     MissingBondIndex,
     check_edit,
@@ -107,12 +108,14 @@ class SkipReason(StrEnum):
     NO_ANCHOR = "NO_ANCHOR"
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
     NOT_ELEMENTARY = "NOT_ELEMENTARY"
+    H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
 
 
 READING_ALIGNED = "aligned"  # every arrow has its ArrowLabel
 READING_FILTERED = "LABEL_FILTERED"  # a label had no pair left that pair_valid allows
+READING_NO_ARROWS = "NO_ARROWS"  # the source has no arrows (ReactMech): R only, no ArrowLabels
 
 
 @dataclass
@@ -372,6 +375,9 @@ def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: Edi
 
 def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment) -> None:
     """The ArrowLabels restricted to valid pairs when every arrow aligns, and the reading."""
+    if alignment.n_arrows == 0:
+        sample.labels, sample.orbital_reading = [], READING_NO_ARROWS
+        return
     if not alignment.complete:
         sample.labels, sample.orbital_reading = [], str(alignment.unaligned[0].reason)
         return
@@ -386,7 +392,11 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
 def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
     """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
     the edit label, the other resonance drawings of the pool, and the ArrowLabels when every
-    arrow aligns (`orbital_reading`)."""
+    arrow aligns (`orbital_reading`). A step without arrows first has the hydrogens that move
+    written as atoms (`hydrogens.explicit_moving_hydrogens`)."""
+    step = explicit_moving_hydrogens(step)
+    if step is None:
+        return SkipReason.H_TRANSFER_AMBIGUOUS
     with prov.collecting() as used:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)

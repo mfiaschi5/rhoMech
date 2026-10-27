@@ -2,7 +2,9 @@
 parsimonious resonance class.
 
 `R_data` is the dataset's arrows applied as one bond-electron edit of the drawn reactants
-(`arrows.apply`), checked against the annotated products modulo resonance. The label is the
+(`arrows.apply`), checked against the annotated products modulo resonance; a source without
+arrows (ReactMech) gives it as the difference of its two mapped sides (`mapped_matrix`), with
+the hydrogens that move written as atoms first (`arrows.hydrogens`). The label is the
 parsimonious class of `R_data`: every R whose product `B_reac + R` is a resonance structure of
 the annotated product, chosen first by the fewest formal charges in that product structure (its
 dominant resonance contributor) and then by the fewest changed entries (`parsimonious_class`).
@@ -44,6 +46,7 @@ from ksmech.arrows.apply import (
     sanitize_product,
 )
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
+from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.data import chem
 from ksmech.data.resonance import frozen_hydrogens, resonance_forms
 from ksmech.data.schema import ElementaryStep
@@ -58,6 +61,8 @@ class EditSkip(StrEnum):
     NO_ANCHOR = "NO_ANCHOR"  # no bond order changes (never expected)
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"  # an edited atom has no token atom
     NOT_ELEMENTARY = "NOT_ELEMENTARY"  # no candidate is an elementary step (`is_elementary`)
+    H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"  # no unique donor -> acceptor pairing of the
+    #   hydrogens that move (`arrows.hydrogens`; steps without arrows only)
 
 
 def _order(mol: Chem.Mol, i: int, j: int) -> int:
@@ -173,15 +178,54 @@ class EditLabel:
         return cls(variants, anchors, *flags, *symmetry)
 
 
+def mapped_matrix(reac: Chem.Mol, prod: Chem.Mol) -> ReactionMatrix:
+    """R between the two mapped sides of a step without arrows, on the reactant indices: every
+    mapped atom is read on its product partner (the hydrogens that move must be mapped atoms:
+    `hydrogens.explicit_moving_hydrogens`). Unmapped atoms are taken as unchanged; the product
+    check of `dataset_matrix` rejects a step where they are not."""
+    partner = {a.GetAtomMapNum(): a.GetIdx() for a in prod.GetAtoms() if a.GetAtomMapNum()}
+    index = {
+        a.GetIdx(): partner[a.GetAtomMapNum()]
+        for a in reac.GetAtoms()
+        if a.GetAtomMapNum() in partner
+    }
+    back = {p: i for i, p in index.items()}
+    pairs = {tuple(sorted((b.GetBeginAtomIdx(), b.GetEndAtomIdx()))) for b in reac.GetBonds()}
+    pairs |= {
+        tuple(sorted((back[b.GetBeginAtomIdx()], back[b.GetEndAtomIdx()])))
+        for b in prod.GetBonds()
+        if b.GetBeginAtomIdx() in back and b.GetEndAtomIdx() in back
+    }
+    bonds = [
+        (i, j, _order(prod, index[i], index[j]) - _order(reac, i, j))
+        for i, j in sorted(pairs)
+        if i in index and j in index
+    ]
+    lone = [
+        (
+            i,
+            nonbonding_electrons(prod.GetAtomWithIdx(p))
+            - nonbonding_electrons(reac.GetAtomWithIdx(i)),
+        )
+        for i, p in sorted(index.items())
+    ]
+    return ReactionMatrix(tuple(b for b in bonds if b[2]), tuple(x for x in lone if x[1]))
+
+
 def dataset_matrix(step: ElementaryStep) -> tuple[Chem.Mol, Chem.Mol, ReactionMatrix] | EditSkip:
-    """(reactants, product, R_data) of an annotated step, or why it has none."""
+    """(reactants, product, R_data) of an annotated step, or why it has none: its arrows
+    applied as one edit, or for a step without arrows the edit between its mapped sides."""
     mol = chem.parse_mapped(step.reactants_smiles)
+    want = chem.parse_mapped(step.products_smiles)
     try:
-        moves = [m for arrow in step.arrows for m in arrow_moves(arrow)]
-        prod = sanitize_product(apply_edit(mol, edit_from_moves(moves, chem.map_to_index(mol))))
+        if step.arrows:
+            moves = [m for arrow in step.arrows for m in arrow_moves(arrow)]
+            edit = edit_from_moves(moves, chem.map_to_index(mol))
+        else:
+            edit = mapped_matrix(mol, want).to_edit()
+        prod = sanitize_product(apply_edit(mol, edit))
     except (ArrowApplyError, NotImplementedError):
         return EditSkip.EDIT_FAILED
-    want = chem.parse_mapped(step.products_smiles)
     if match_products(ApplyResult(prod), want, step.products_smiles)[0] not in MATCH_STATUSES:
         return EditSkip.PRODUCT_MISMATCH
     return mol, prod, matrix_between(mol, prod)
@@ -370,6 +414,9 @@ def step_label(step: ElementaryStep, loader) -> EditLabel | str:
     NO_BOND_INDEX (`MissingTokens.reason`) or CORRESPONDENCE)."""
     from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
 
+    step = explicit_moving_hydrogens(step)
+    if step is None:
+        return str(EditSkip.H_TRANSFER_AMBIGUOUS)
     label = edit_label(step)
     if isinstance(label, EditSkip):
         return str(label)
