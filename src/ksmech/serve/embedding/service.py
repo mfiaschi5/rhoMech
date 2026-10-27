@@ -3,7 +3,7 @@
 
 - `POST /api/embedding {state_id | smiles, run, file?, source?}` (`submit`) resolves the pool
   state (a SMILES becomes a saved root state, as `POST /api/pools` builds it) and the checkpoint
-  (`serve.predict.models`), then queues an `embedding` job.
+  (`serve.ml.checkpoints`), then queues an `embedding` job.
 - The job (`embedding_handler`, a runner thread of the API process) featurizes the fragments the
   token loader lacks with the `featurize` task (GFN2-xTB, or the synthetic chemistry, into
   `data/serve/`; the shared caches are read, never written), hashes the checkpoint, and looks the
@@ -40,8 +40,8 @@ if TYPE_CHECKING:
     from ksmech.serve.core.contracts import JobContext, Runtime
     from ksmech.serve.core.schemas import EmbeddingIn, JobCreatedOut
     from ksmech.serve.core.settings import ServeSettings
+    from ksmech.serve.ml.checkpoints import Checkpoint
     from ksmech.serve.predict.jobs import JobRunner
-    from ksmech.serve.predict.models import Checkpoint
     from ksmech.serve.runtime.context import ApiContext
 
 log = logging.getLogger(__name__)
@@ -143,8 +143,8 @@ def resolve_state(ctx: ApiContext, body: EmbeddingIn) -> PoolState:
 
 
 def usable_checkpoint(settings: ServeSettings, run: str, file: str, source: str | None):
-    """`models.find_checkpoint`, refused (CHECKPOINT_REFUSED, 409) when its run is dirty."""
-    from ksmech.serve.predict.models import find_checkpoint
+    """`checkpoints.find_checkpoint`, refused (CHECKPOINT_REFUSED, 409) when its run is dirty."""
+    from ksmech.serve.ml.checkpoints import find_checkpoint
 
     ck = find_checkpoint(settings, run, file, source)
     if not ck.usable:
@@ -220,7 +220,7 @@ def _task_payload(state: PoolState, ck: Checkpoint, sha: str, digest: str, eid: 
 
 def run_embedding(ctx: JobContext, request: dict, *, api: ApiContext) -> dict:
     """The `embedding` job (module docstring). Returns the `EmbeddingResultOut` fields."""
-    from ksmech.serve.predict.models import checkpoint_sha256
+    from ksmech.serve.ml.checkpoints import checkpoint_sha256
 
     state = PoolState.from_dict(request["state"])
     ck = usable_checkpoint(ctx.settings, request["run"], request["file"], request["source"])

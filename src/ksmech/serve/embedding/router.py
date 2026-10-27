@@ -1,4 +1,6 @@
-"""Routes of embedding traces: submit a trace job, read its payload and its page."""
+"""Routes of embedding traces: submit a trace job, read its payload and its page. The router is
+admitted by the profile (off in public: a trace reads stored dataset samples); submitting needs
+the `embedding` capability itself."""
 
 from __future__ import annotations
 
@@ -6,7 +8,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, Response
 
 from ksmech.serve.core import schemas as S
-from ksmech.serve.core.capabilities import require
+from ksmech.serve.core.capabilities import admit, require
 from ksmech.serve.core.http import (
     TRACE_CACHE,
     EmbeddingId,
@@ -15,7 +17,7 @@ from ksmech.serve.core.http import (
     check_id,
 )
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[admit("embedding")])
 
 
 @router.post(

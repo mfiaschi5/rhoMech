@@ -91,7 +91,7 @@ def model_roots(settings: ServeSettings) -> list[Path]:
     return out
 
 
-def _read_json(path: Path) -> dict | None:
+def read_json(path: Path) -> dict | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -134,9 +134,9 @@ def is_smoke(run: str, train: dict) -> bool:
     return limited or run.lower().startswith("smoke")
 
 
-def _run_facts(run_dir: Path) -> dict:
+def run_facts(run_dir: Path) -> dict:
     """encoder, model, clean, reason, built_at, smoke from `run.json`."""
-    doc = _read_json(run_dir / "run.json")
+    doc = read_json(run_dir / "run.json")
     header = (doc or {}).get("provenance")
     if not isinstance(header, dict):
         return {"reason": None, "clean": None, "smoke": is_smoke(run_dir.name, {})}
@@ -185,7 +185,7 @@ def list_checkpoints(settings: ServeSettings) -> list[Checkpoint]:
                 continue
             try:
                 found[key] = _checkpoint(
-                    source, run_dir, pt, _metrics_lines(run_dir), _run_facts(run_dir)
+                    source, run_dir, pt, _metrics_lines(run_dir), run_facts(run_dir)
                 )
             except OSError as exc:
                 log.warning("skipping %s [CHECKPOINT_UNREADABLE]: %s", pt, exc)

@@ -216,6 +216,15 @@ class MetaOut(_Out):
     dev: bool
     data_root: str
     capabilities: dict[str, CapabilityOut]  # capabilities.CAPABILITIES
+    profile: Literal["lab", "public"] = "lab"  # ServeSettings.profile (core.capabilities.PROFILES)
+
+
+class PrincipalOut(_Out):
+    """`GET /api/whoami`: the principal of the request (core.auth)."""
+
+    name: str
+    role: Literal["reader", "user", "curator", "admin"]
+    via: str | None  # the X-Ksmech-Via header (mcp, cli, ...)
 
 
 class PredictorInfoOut(_Out):
@@ -575,7 +584,7 @@ class StepCheckOut(_Out):
     readings_status: Literal["ready", "pending", "unavailable"]
 
 
-# ---- embedding traces (serve.embedding.service, serve.predict.models)
+# ---- embedding traces (serve.embedding.service, serve.ml.checkpoints)
 
 
 class CheckpointOut(_Out):
@@ -605,6 +614,66 @@ class ModelsOut(_Out):
     roots: list[str]  # the directories searched, in order
     checkpoints: list[CheckpointOut]
     embedding: CapabilityOut  # the embedding capability with these checkpoints
+
+
+# ---- ML runs and reports (serve.ml: lab only; the JSON files are passed through)
+
+
+class MlRunOut(_Out):
+    """One training run `data/models/<source>/<run>/`. The typed fields are read from run.json
+    (as `CheckpointOut`) and metrics.jsonl; `config` is run.json's `provenance.config` as it
+    is, `best` and `last` are metrics.jsonl lines as they are (the trainer's best epoch and the
+    last one)."""
+
+    source: str
+    run: str
+    path: str
+    encoder: str | None
+    model: dict[str, int | float | str]
+    clean: bool | None  # None without run.json
+    reason: str | None  # a dirty run: load_model refuses its checkpoints
+    built_at: str | None
+    smoke: bool
+    config: dict[str, Any] | None
+    n_epochs: int  # metrics lines with a validation top-1
+    best: dict[str, Any] | None
+    last: dict[str, Any] | None
+    checkpoints: list[str]  # the stems of the .pt files present ("best", "last")
+    reports: list[str]  # the *_report_*.json files beside them
+    logs: list[str]  # train.log, stdout.log when present
+    modified_at: datetime  # the newest of the run's files
+
+
+class MlRunsOut(_Out):
+    roots: list[str]  # the model directories searched, in order
+    runs: list[MlRunOut]
+
+
+class MlReportOut(_Out):
+    """One report JSON file, passed through in `report` (None with `reason` when it cannot be
+    read or exceeds the size limit)."""
+
+    source: str
+    name: str  # the file name
+    kind: str  # the part before "_report_": "decode", "anchor_floor", "gbdt_lgbm"
+    path: str
+    size_bytes: int
+    modified_at: datetime
+    report: dict[str, Any] | None
+    reason: str | None
+
+
+class MlRunDetailOut(_Out):
+    run: MlRunOut
+    run_json: dict[str, Any] | None  # run.json as it is
+    epochs: list[dict[str, Any]]  # every metrics.jsonl line, in file order
+    bad_lines: int  # metrics.jsonl lines that are not a JSON object
+    reports: list[MlReportOut]
+
+
+class MlReportsOut(_Out):
+    roots: list[str]  # the processed-data directories searched, in order
+    reports: list[MlReportOut]
 
 
 class EmbeddingIn(_In):

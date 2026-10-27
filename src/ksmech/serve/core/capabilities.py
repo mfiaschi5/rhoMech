@@ -13,14 +13,23 @@ and always on.
 `embedding` (the trace of one pool through a trained checkpoint, `serve.embedding.service`) also
 needs
 the machine: torch and the model code importable (checked without importing them) and one
-usable local checkpoint (`serve.predict.models.embedding_status`), so it is evaluated per request
+usable local checkpoint (`serve.ml.checkpoints.embedding_status`), so it is evaluated per request
 against the app's settings.
 
+`browse` (the PMechDB browser), `curate` (reading curated mechanisms) and `ml` (training runs and
+the physics / eval reports) are always on in the `lab` profile. A profile (`PROFILES`,
+`ServeSettings.profile`) is the set of capabilities a deployment admits: `public` drops every
+route that reads the dataset or the lab's work (browse, curate and its edit / recheck / export,
+embedding, which traces stored dataset samples, and ml), and those answer FEATURE_DISABLED with
+the reason "not in the public profile".
+
 `CAPABILITIES` is evaluated once at import: {name: (enabled, reason)}, reason None when on;
-for `embedding` it holds the import-time part only. `status(name, settings)` adds the
-settings-dependent part. `require(name)` is the FastAPI dependency of a gated route:
-ServeError FEATURE_DISABLED (503) with the reason. `/api/meta` lists them
-(`MetaOut.capabilities`) and the UI greys the pages.
+for `embedding` it holds the import-time part only. `status(name, settings)` adds the profile
+and the settings-dependent part. `require(name)` is the FastAPI dependency of a gated route:
+ServeError FEATURE_DISABLED (503) with the reason, then the least role of the capability
+(`core.auth.CAPABILITY_ROLES`, or `role=`). `admit(name)` checks the profile and the role only
+(a router of stored results that stays readable while the feature itself is off).
+`/api/meta` lists them (`MetaOut.capabilities`) and the UI greys the pages.
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from ksmech.serve.core.auth import CAPABILITY_ROLES, Role, authorize, principal_of
 from ksmech.serve.core.errors import Code, ServeError
 
 if TYPE_CHECKING:
@@ -53,19 +63,27 @@ ORDER = (
     "export",
     "workbench",
     "embedding",
+    "browse",
+    "curate",
+    "ml",
 )
 ALWAYS_ON = frozenset({"workbench"})  # display-only features that read molecules
+PROFILES: dict[str, frozenset[str]] = {
+    "lab": frozenset(ORDER),
+    "public": frozenset({"predict", "correct", "candidates", "physics", "workbench"}),
+}
+"""The capabilities each profile admits (`ServeSettings.profile`)."""
 
 
 def _embedding_imports() -> tuple[bool, str | None]:
-    from ksmech.serve.predict.models import missing_modules
+    from ksmech.serve.ml.checkpoints import missing_modules
 
     missing = missing_modules()
     return (not missing, f"not importable here: {', '.join(missing)}" if missing else None)
 
 
 def _embedding_settings(settings: ServeSettings) -> tuple[bool, str | None]:
-    from ksmech.serve.predict.models import embedding_status
+    from ksmech.serve.ml.checkpoints import embedding_status
 
     return embedding_status(settings)
 
@@ -91,9 +109,20 @@ def _evaluate() -> dict[str, tuple[bool, str | None]]:
 CAPABILITIES: dict[str, tuple[bool, str | None]] = _evaluate()
 
 
+def in_profile(name: str, settings: ServeSettings | None) -> tuple[bool, str | None]:
+    """Whether the settings' profile admits `name` (lab when there are no settings)."""
+    profile = getattr(settings, "profile", "lab")
+    if name in PROFILES[profile]:
+        return True, None
+    return False, f"not in the {profile} profile"
+
+
 def status(name: str, settings: ServeSettings | None = None) -> tuple[bool, str | None]:
-    """(enabled, reason) of `name`: `CAPABILITIES`, then, with settings, the part that depends
-    on them (the local checkpoints of `embedding`)."""
+    """(enabled, reason) of `name`: the profile, `CAPABILITIES`, then, with settings, the part
+    that depends on them (the local checkpoints of `embedding`)."""
+    admitted, why = in_profile(name, settings)
+    if not admitted:
+        return False, why
     on, reason = CAPABILITIES[name]
     if on and settings is not None and name in _DYNAMIC:
         return _DYNAMIC[name](settings)
@@ -104,28 +133,51 @@ def enabled(name: str, settings: ServeSettings | None = None) -> bool:
     return status(name, settings)[0]
 
 
+def _raise_off(name: str, reason: str | None) -> None:
+    detail = {"capability": name, "reason": reason}
+    raise ServeError(Code.FEATURE_DISABLED, f"{name} is disabled: {reason}", detail=detail)
+
+
 def check(name: str, settings: ServeSettings | None = None) -> None:
     """Raise FEATURE_DISABLED (503) when `name` is off."""
     on, reason = status(name, settings)
     if not on:
-        detail = {"capability": name, "reason": reason}
-        raise ServeError(Code.FEATURE_DISABLED, f"{name} is disabled: {reason}", detail=detail)
+        _raise_off(name, reason)
 
 
-def require(name: str) -> Any:
-    """`Depends` for `dependencies=[require(name)]`: runs before the body and the service,
-    against the settings of the app that serves the request."""
+def _dependency(name: str, role: Role | str | None, full: bool) -> Any:
     from fastapi import Depends, Request
 
     if name not in CAPABILITIES:
         raise KeyError(f"unknown capability {name!r}")
+    wanted = Role(role) if role is not None else CAPABILITY_ROLES[name]
 
     def _require(request) -> None:
         services = getattr(request.app.state, "services", None)
-        check(name, getattr(services, "settings", None))
+        settings = getattr(services, "settings", None)
+        if full:
+            check(name, settings)
+        else:
+            admitted, why = in_profile(name, settings)
+            if not admitted:
+                _raise_off(name, why)
+        authorize(principal_of(request), wanted, name)
 
     _require.__annotations__ = {"request": Request, "return": None}  # resolved, not a string
     return Depends(_require)
+
+
+def require(name: str, *, role: Role | str | None = None) -> Any:
+    """`Depends` for `dependencies=[require(name)]`: runs before the body and the service,
+    against the settings of the app that serves the request: FEATURE_DISABLED (503) when the
+    capability is off, then the least role (`CAPABILITY_ROLES[name]` unless `role`)."""
+    return _dependency(name, role, full=True)
+
+
+def admit(name: str, *, role: Role | str = Role.READER) -> Any:
+    """`Depends` of a whole router: FEATURE_DISABLED when the profile does not admit `name`,
+    then `role`; the capability's own state is left to the routes that need it."""
+    return _dependency(name, role, full=False)
 
 
 def as_meta(settings: ServeSettings | None = None) -> dict[str, dict[str, Any]]:

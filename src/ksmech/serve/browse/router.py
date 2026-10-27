@@ -1,4 +1,5 @@
-"""Routes of the dataset browser: index status and build, search, the step view."""
+"""Routes of the dataset browser: index status and build, search, the step view (the whole
+router is gated by the `browse` capability: off in the public profile)."""
 
 from __future__ import annotations
 
@@ -7,13 +8,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query
 
 from ksmech.serve.core import schemas as S
+from ksmech.serve.core.auth import Role, require_role
+from ksmech.serve.core.capabilities import require
 from ksmech.serve.core.http import (
     Svc,
     blank,
     check_id,
 )
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[require("browse")])
 
 
 @router.get("/browse/status", response_model=S.IndexStatusOut)
@@ -21,7 +24,12 @@ def browse_status(svc: Svc) -> S.IndexStatusOut:
     return svc.browse.status()
 
 
-@router.post("/browse/index", response_model=S.JobCreatedOut, status_code=202)
+@router.post(
+    "/browse/index",
+    response_model=S.JobCreatedOut,
+    status_code=202,
+    dependencies=[require_role(Role.CURATOR)],
+)
 def browse_index(svc: Svc) -> S.JobCreatedOut:
     return svc.browse.build_index()
 

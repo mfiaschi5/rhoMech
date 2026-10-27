@@ -1,4 +1,5 @@
-"""Routes of curation (static routes before /curate/{mid})."""
+"""Routes of curation (static routes before /curate/{mid}); the whole router is gated by the
+`curate` capability (off in the public profile), the writes by their own."""
 
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from ksmech.serve.core.http import (
     check_id,
 )
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[require("curate")])
 
 
 @router.post(

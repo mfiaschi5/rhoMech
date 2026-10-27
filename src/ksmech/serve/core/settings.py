@@ -5,6 +5,10 @@
 under `shared_cache_root`, default the data root) are read-only: serve writes only under
 `data/serve/` and `data/curation/`, and `assert_writable` refuses any write that resolves into a
 shared cache or the live PMechDB data.
+
+`profile` chooses the deployment (`KSMECH_SERVE_PROFILE`): `lab` (the default, everything) or
+`public` (the online platform: no dataset, curation or ML route, `core.capabilities.PROFILES`).
+`tokens_file` (`KSMECH_SERVE_TOKENS`) is the optional bearer-token table of `core.auth`.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ log = logging.getLogger(__name__)
 
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 CHEMISTRIES = ("real", "cached", "synthetic")
+PROFILES = ("lab", "public")
 _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("0", "false", "no", "off", "")
 _FAILURE_LOCK = threading.Lock()
@@ -56,6 +61,8 @@ class ServeSettings:
     max_nodes: int = 200
     frontend_dist: Path | None = None  # KSMECH_SERVE_DIST; default repo/apps/ui/dist
     dev: bool = False
+    profile: str = "lab"  # lab | public (KSMECH_SERVE_PROFILE)
+    tokens_file: Path | None = None  # KSMECH_SERVE_TOKENS: sha256 -> {name, role} (core.auth)
 
     # ---- shared, read-only
     @property
@@ -149,6 +156,11 @@ class ServeSettings:
     def failures_log(self) -> Path:
         return self.logs / "failures.jsonl"
 
+    @property
+    def audit_log(self) -> Path:
+        """One JSON line per non-GET request (`core.audit`)."""
+        return self.logs / "audit.jsonl"
+
     # ---- curation, models, frontend, spec
     @property
     def curation_db(self) -> Path:
@@ -208,8 +220,17 @@ _ENV = {
     "KSMECH_SHARED_CACHE_ROOT": ("shared_cache_root", Path),
     "KSMECH_SERVE_AUTO_INDEX": ("auto_index", bool),
     "KSMECH_SERVE_DIST": ("frontend_dist", Path),
+    "KSMECH_SERVE_PROFILE": ("profile", str),
+    "KSMECH_SERVE_TOKENS": ("tokens_file", Path),
 }
-_PATH_FIELDS = ("data_root", "repo_root", "gbdt_path", "shared_cache_root", "frontend_dist")
+_PATH_FIELDS = (
+    "data_root",
+    "repo_root",
+    "gbdt_path",
+    "shared_cache_root",
+    "frontend_dist",
+    "tokens_file",
+)
 
 
 def _from_env(env: Mapping[str, str]) -> dict[str, Any]:
@@ -246,6 +267,8 @@ def load_settings(env: Mapping[str, str] = os.environ, **overrides: Any) -> Serv
             values[name] = Path(values[name]).expanduser().resolve()
     if values.get("chemistry", "real") not in CHEMISTRIES:
         raise ValueError(f"chemistry must be one of {CHEMISTRIES}, got {values['chemistry']!r}")
+    if values.get("profile", "lab") not in PROFILES:
+        raise ValueError(f"profile must be one of {PROFILES}, got {values['profile']!r}")
     values["workers"] = min(2, max(1, int(values.get("workers", 1))))
     if values.get("shared_cache_root") is None:
         values["shared_cache_root"] = values["data_root"]

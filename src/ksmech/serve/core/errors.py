@@ -62,8 +62,13 @@ class Code(StrEnum):
     MOLECULE_NOT_FOUND = "MOLECULE_NOT_FOUND"
     CHECKPOINT_NOT_FOUND = "CHECKPOINT_NOT_FOUND"  # embedding: no such local checkpoint
     EMBEDDING_NOT_FOUND = "EMBEDDING_NOT_FOUND"  # embedding: no stored trace of that id
-    # 403: a cross-origin mutating request (api.SameOriginGuard)
+    RUN_NOT_FOUND = "RUN_NOT_FOUND"  # ml: no training run <source>/<run>
+    # 401: core.auth (a bearer token that matches no stored hash; a route above anonymous)
+    TOKEN_INVALID = "TOKEN_INVALID"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    # 403: a cross-origin mutating request (api.SameOriginGuard); a role below the route's
     REQUEST_FORBIDDEN = "REQUEST_FORBIDDEN"
+    ROLE_INSUFFICIENT = "ROLE_INSUFFICIENT"
     # 409
     PREDICTOR_UNAVAILABLE = "PREDICTOR_UNAVAILABLE"
     NETWORK_BUSY = "NETWORK_BUSY"
@@ -81,7 +86,7 @@ class Code(StrEnum):
     UNEXPECTED = "UNEXPECTED"
     WORKER_UNSTABLE = "WORKER_UNSTABLE"
     TOKENS_CHANGED = "TOKENS_CHANGED"  # transient: a token file was rebuilt mid-computation
-    FEATURE_DISABLED = "FEATURE_DISABLED"  # capabilities.CAPABILITIES: off under spec v8
+    FEATURE_DISABLED = "FEATURE_DISABLED"  # capabilities: off under spec v9 or the profile
     # predictor availability (PREDICTOR_UNAVAILABLE detail.code)
     TRANSFORMER_NOT_AVAILABLE = "TRANSFORMER_NOT_AVAILABLE"
     GBDT_MISSING = "GBDT_MISSING"
@@ -140,9 +145,10 @@ _BY_STATUS = {
     404: (
         "JOB_NOT_FOUND NODE_NOT_FOUND EDGE_NOT_FOUND PATHWAY_NOT_FOUND POOL_NOT_FOUND "
         "MECHANISM_NOT_FOUND STEP_NOT_FOUND EXPORT_NOT_FOUND MOLECULE_NOT_FOUND "
-        "CHECKPOINT_NOT_FOUND EMBEDDING_NOT_FOUND"
+        "CHECKPOINT_NOT_FOUND EMBEDDING_NOT_FOUND RUN_NOT_FOUND"
     ),
-    403: "REQUEST_FORBIDDEN",
+    401: "TOKEN_INVALID AUTH_REQUIRED",
+    403: "REQUEST_FORBIDDEN ROLE_INSUFFICIENT",
     409: (
         "PREDICTOR_UNAVAILABLE NETWORK_BUSY JOB_NOT_DONE POOL_NOT_ANALYZED "
         "PHYSICS_VERSION_MISMATCH INVALID_TRANSITION INDEX_NOT_READY MOLECULE_NOT_READY "

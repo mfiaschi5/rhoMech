@@ -34,8 +34,9 @@ def test_ts_models_cover_every_model_of_the_module():
     }
     public = {n for n in defined if not n.startswith("_")}
     assert {m.__name__ for m in schemas.TS_MODELS} == public
-    assert len(public) == 104  # spec v9: -20 v3 arrow and contact models, +9 R and readings;
-    # +4: point group; +4: checkpoints and embedding traces; +2: the network's checkpoint
+    assert len(public) == 110  # spec v9: -20 v3 arrow and contact models, +9 R and readings;
+    # +4: point group; +4: checkpoints and embedding traces; +2: the network's checkpoint;
+    # +6: the principal, the ML runs and reports
 
 
 def test_every_ts_model_is_an_interface():

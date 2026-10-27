@@ -2,14 +2,18 @@
 
     ksmech-serve [run] --port 8000 [--host 127.0.0.1|0.0.0.0|<address>]
                        [--chemistry real|cached|synthetic] [--dev] [--no-ui] [--index-on-start]
+                       [--profile lab|public]
     ksmech-serve recheck [--stale-only] [--predictor P] [--mechanism ID ...]
     ksmech-serve export --out FILE [--status validated corrected]
     ksmech-serve schema-ts [--out apps/ui/src/api/types.gen.ts]
     ksmech-serve probe-cache --smiles S [--smiles S ...]
     ksmech-serve gallery [--out DIR] [--only NAME ...] [--derive-templates]
 
-There is no authentication. By default the server binds 127.0.0.1 (reach it through
-`ssh -L 8000:localhost:8000 <server>`); `--host 0.0.0.0` (or one of this machine's addresses)
+`--profile` (`KSMECH_SERVE_PROFILE`) is `lab` (the default: every feature) or `public` (no
+dataset, curation or ML route). In `lab` without `KSMECH_SERVE_TOKENS` there is no
+authentication (every request is the local admin, `core.auth`). By default the server binds
+127.0.0.1 (reach it through `ssh -L 8000:localhost:8000 <server>`); `--host 0.0.0.0` (or one of
+this machine's addresses)
 opens it to the local network, and the Host / Origin checks then also accept this machine's
 addresses and host names (`lan_hosts`). A first token that is not a subcommand gets `run`
 inserted, so `ksmech-serve --port 8000` works. `run` and `recheck` hold
@@ -47,6 +51,7 @@ HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 COMMANDS = ("run", "recheck", "export", "schema-ts", "probe-cache", "gallery")
 CHEMISTRY_CHOICES = ("real", "cached", "synthetic")
+PROFILE_CHOICES = ("lab", "public")  # core.settings.PROFILES (stdlib-only module)
 _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 LOCK_HELD = {
     "run": "another ksmech-serve already runs on this data root ({path})",
@@ -80,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=CHEMISTRY_CHOICES,
         default=None,
         help="real (xTB on a cache miss), cached (caches only) or synthetic (EHT)",
+    )
+    run.add_argument(
+        "--profile",
+        choices=PROFILE_CHOICES,
+        default=None,
+        help="lab (default: everything) or public (no PMechDB, curation or ML route)",
     )
     run.add_argument("--dev", action="store_true", help="no static files: use Vite on :5173")
     run.add_argument("--no-ui", action="store_true", help="serve the API only")
@@ -240,7 +251,10 @@ def lan_hosts(host: str) -> list[str]:
 
 
 def _banner(host: str, port: int, settings: ServeSettings, names: list[str]) -> None:
-    where = f"chemistry {settings.chemistry}, data root {settings.data_root}"
+    where = (
+        f"profile {settings.profile}, chemistry {settings.chemistry}, "
+        f"data root {settings.data_root}"
+    )
     if not names:
         print(
             f"ksmech-serve on http://{host}:{port} ({where}); from your PC: "
@@ -272,7 +286,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"--host must be an IPv4 address, got {args.host!r}", file=sys.stderr)
         return 2
     settings = _settings(
-        chemistry=args.chemistry, dev=args.dev or None, auto_index=args.index_on_start or None
+        chemistry=args.chemistry,
+        dev=args.dev or None,
+        auto_index=args.index_on_start or None,
+        profile=args.profile,
     )
     if not _take_lock(settings, "run"):
         return 2
@@ -282,7 +299,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    app = create_app(settings, serve_ui=not args.no_ui, lan_hosts=names)
+    try:
+        app = create_app(settings, serve_ui=not args.no_ui, lan_hosts=names)
+    except ValueError as exc:  # a malformed tokens file (core.auth.load_tokens)
+        print(str(exc), file=sys.stderr)
+        return 2
     _banner(args.host, args.port, settings, names)
     try:
         uvicorn.run(app, host=args.host, port=args.port, workers=1, reload=False, log_level="info")

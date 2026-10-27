@@ -1,5 +1,6 @@
-"""The `network` predictor (spec v9): a local `ksmech-train fit` checkpoint (`serve.predict.models`)
-through the engine's step decoder (`model.decode`). Torch is imported only in the worker.
+"""The `network` predictor (spec v9): a local `ksmech-train fit` checkpoint
+(`serve.ml.checkpoints`) through the engine's step decoder (`model.decode`). Torch is imported
+only in the worker.
 
 - **Availability** (`network_status`), with the reason text of each state, in this order:
   TRANSFORMER_NOT_AVAILABLE (torch or the model code is not importable), CHECKPOINT_NOT_FOUND
@@ -43,7 +44,7 @@ from ksmech.serve.predict.predictors import Candidate, NetworkModel, NetworkStep
 if TYPE_CHECKING:
     from ksmech.serve.core.contracts import ExpandRequest
     from ksmech.serve.core.settings import ServeSettings
-    from ksmech.serve.predict.models import Checkpoint
+    from ksmech.serve.ml.checkpoints import Checkpoint
 
 log = logging.getLogger(__name__)
 
@@ -163,8 +164,8 @@ def _failure_text(ck: Checkpoint, rec: dict) -> str:
 
 def network_status(settings: ServeSettings) -> NetworkStatus:
     """The network's availability and default checkpoint (module docstring)."""
-    from ksmech.serve.predict.models import default_checkpoint, list_checkpoints, model_roots
-    from ksmech.serve.predict.models import missing_modules as _missing
+    from ksmech.serve.ml.checkpoints import default_checkpoint, list_checkpoints, model_roots
+    from ksmech.serve.ml.checkpoints import missing_modules as _missing
 
     missing = _missing()
     if missing:
@@ -225,7 +226,7 @@ class NetworkPredictor(Predictor):
         self.model = model
 
     def info(self) -> PredictorInfo:
-        from ksmech.serve.predict.models import checkpoint_sha256
+        from ksmech.serve.ml.checkpoints import checkpoint_sha256
 
         if self.model is not None:
             return _info(True, None, None, f"network/{self.model.version}", None, [])
@@ -252,7 +253,7 @@ class NetworkPredictor(Predictor):
         return st.default
 
     def make_ref(self, temperature: float | None, checkpoint=None) -> PredictorRef:
-        from ksmech.serve.predict.models import checkpoint_sha256
+        from ksmech.serve.ml.checkpoints import checkpoint_sha256
 
         t = 1.0 if temperature is None else float(temperature)
         if self.model is not None:

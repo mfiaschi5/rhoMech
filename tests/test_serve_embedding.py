@@ -1,4 +1,4 @@
-"""Embedding traces in serve (`serve.predict.models`, `serve.embedding.service`): the checkpoint
+"""Embedding traces in serve (`serve.ml.checkpoints`, `serve.embedding.service`): the checkpoint
 listing, the
 `embedding` capability, `POST /api/embedding` as a job through the worker task, the stored
 payload and page, the cache by checkpoint and pool state, the refusals with their codes, and
@@ -188,9 +188,10 @@ def test_the_worker_keeps_one_model_per_file_version(tmp_path):
 def test_the_api_modules_never_import_torch():
     code = (
         "import sys\n"
-        "import ksmech.serve.app.api, ksmech.serve.embedding.service, ksmech.serve.predict.models\n"
+        "import ksmech.serve.app.api, ksmech.serve.embedding.service, ksmech.serve.ml.checkpoints\n"
+        "import ksmech.serve.ml.runs, ksmech.serve.ml.router\n"
         "import ksmech.serve.predict.network_predictor, ksmech.model.decode\n"
-        "from ksmech.serve.predict.models import missing_modules\n"
+        "from ksmech.serve.ml.checkpoints import missing_modules\n"
         "missing_modules()\n"
         "assert 'torch' not in sys.modules, 'torch imported'\n"
     )

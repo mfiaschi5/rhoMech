@@ -1,5 +1,5 @@
 """Routes of prediction: predictors, predict jobs, overrides, expansions, the live step check,
-pathways and the local checkpoints."""
+pathways (the local checkpoints are `serve.ml`)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from ksmech.serve.core import schemas as S
+from ksmech.serve.core.auth import Role, require_role
 from ksmech.serve.core.capabilities import require
 from ksmech.serve.core.http import (
     JobId,
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/api")
 @router.get(
     "/predictors",
     response_model=list[S.PredictorInfoOut],
-    dependencies=[require("predict")],
+    dependencies=[require("predict", role=Role.READER)],
 )
 def predictors(svc: Svc) -> list[S.PredictorInfoOut]:
     spec = svc.ctx.spec_version
@@ -58,7 +59,9 @@ def get_job(
     return svc.jobs.get(check_id("job_id", job_id), since_revision=since_revision)
 
 
-@router.post("/jobs/{job_id}/cancel", response_model=S.JobOut)
+@router.post(
+    "/jobs/{job_id}/cancel", response_model=S.JobOut, dependencies=[require_role(Role.USER)]
+)
 def cancel_job(svc: Svc, job_id: JobId, force: bool = False) -> S.JobOut:
     return svc.jobs.cancel(check_id("job_id", job_id), force=force)
 
@@ -105,17 +108,3 @@ def job_pathways(
 ) -> list[S.PathwayOut]:
     check_id("job_id", job_id)
     return svc.jobs.pathways(job_id, limit=limit, include_pruned=include_pruned)
-
-
-@router.get("/models", response_model=S.ModelsOut)
-def list_models(svc: Svc) -> S.ModelsOut:
-    """The local checkpoints and the embedding capability they give (never gated)."""
-    from ksmech.serve.core import capabilities
-    from ksmech.serve.predict.models import list_checkpoints, model_roots
-
-    on, reason = capabilities.status("embedding", svc.settings)
-    return S.ModelsOut(
-        roots=[str(r) for r in model_roots(svc.settings)],
-        checkpoints=[S.CheckpointOut(**c.to_out()) for c in list_checkpoints(svc.settings)],
-        embedding=S.CapabilityOut(enabled=on, reason=reason),
-    )

@@ -5,19 +5,23 @@ not module-level and are not checked.
 
 The foundation is one chain, each layer free to import every layer before it: core, compute,
 chem, science, predict, runtime. `depiction` stands on core alone. The feature packages (pool,
-workbench, embedding, browse, curate) stand on the foundation and on depiction and never import
-one another; `app` wires them all."""
+workbench, embedding, browse, curate, ml) stand on the foundation and on depiction and never
+import one another, with one exception: `ml` stands on core alone, so that predict, runtime and
+the other features may read its checkpoint listing (`ml.checkpoints`); `app` wires them all."""
 
 import ast
 from pathlib import Path
 
 SERVE = Path(__file__).resolve().parents[1] / "src" / "ksmech" / "serve"
 FOUNDATION = ("core", "compute", "chem", "science", "predict", "runtime")
-FEATURES = ("pool", "workbench", "embedding", "browse", "curate")
+FEATURES = ("pool", "workbench", "embedding", "browse", "curate", "ml")
 ALLOWED: dict[str, set[str]] = {
     layer: set(FOUNDATION[:k]) for k, layer in enumerate(FOUNDATION)
 } | {"depiction": {"core"}}
-ALLOWED |= {f: {*FOUNDATION, "depiction"} for f in FEATURES}
+ALLOWED |= {f: {*FOUNDATION, "depiction", "ml"} for f in FEATURES}
+ALLOWED["ml"] = {"core"}  # the checkpoint listing: readable by the foundation above core
+for _layer in ("predict", "runtime"):
+    ALLOWED[_layer].add("ml")
 ALLOWED["app"] = {*FOUNDATION, "depiction", *FEATURES}
 
 

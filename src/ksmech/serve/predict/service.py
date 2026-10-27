@@ -8,6 +8,10 @@ A user step (`override`) is synchronous: R is checked and applied on the API sid
 (`serve.science.steps.check_step`, the same record the worker builds for a predicted edge), the edge
 and its child node are written to the network under the network's lock, and the child can then
 be expanded (`expand`, a job).
+
+In the public profile only the jobs of predict, override and expand (`PUBLIC_JOB_KINDS`) exist
+for the HTTP routes: another kind (a recheck, export, index or embedding job of a data root the
+lab shares) is JOB_NOT_FOUND and is left out of the list, so no dataset result is reachable.
 """
 
 from __future__ import annotations
@@ -56,6 +60,9 @@ from ksmech.serve.predict.network import (
     node_of_state,
     rank_pathways,
 )
+
+PUBLIC_JOB_KINDS = frozenset({JobKind.PREDICT, JobKind.OVERRIDE, JobKind.EXPAND})
+EVERY_JOB = 10**9  # a list limit above any job count
 
 if TYPE_CHECKING:
     from ksmech.serve.chem.chemistry import Chemistry
@@ -250,6 +257,17 @@ class JobService:
 
     # ---- endpoints
 
+    @property
+    def _public(self) -> bool:
+        return getattr(self.ctx.settings, "profile", "lab") == "public"
+
+    def _job(self, job_id: str) -> Job:
+        """`runner.get`, with the job kinds of the profile only (module docstring)."""
+        job = self.runner.get(job_id)
+        if self._public and job.kind not in PUBLIC_JOB_KINDS:
+            raise ServeError(Code.JOB_NOT_FOUND, f"no job {job_id}", status=404)
+        return job
+
     def predict(self, body: PredictIn) -> JobCreatedOut:
         """Preflight (input, predictor and checkpoint errors are immediate 422 / 404 / 409),
         then queue. The stored request names the checkpoint the network resolved to."""
@@ -271,7 +289,7 @@ class JobService:
         return JobCreatedOut(**job.created_out())
 
     def get(self, job_id: str, *, since_revision: int | None = None) -> JobOut:
-        job = self.runner.get(job_id)
+        job = self._job(job_id)
         out = self._job_base(job)
         if job.kind == JobKind.PREDICT:
             self._predict_result(job, out, since_revision)
@@ -292,10 +310,17 @@ class JobService:
                 network_id=j.network_id,
                 label=j.label,
             )
-            for j in self.runner.list(kind=kind, status=status, limit=limit)
+            for j in self._listed(kind, status, limit)
         ]
 
+    def _listed(self, kind: str | None, status: str | None, limit: int) -> list[Job]:
+        if not self._public:
+            return self.runner.list(kind=kind, status=status, limit=limit)
+        every = self.runner.list(kind=kind, status=status, limit=EVERY_JOB)
+        return [j for j in every if j.kind in PUBLIC_JOB_KINDS][: max(0, int(limit))]
+
     def cancel(self, job_id: str, *, force: bool = False) -> JobOut:
+        self._job(job_id)
         self.runner.cancel(job_id, force=force)
         return self.get(job_id)
 
@@ -308,7 +333,7 @@ class JobService:
         from ksmech.serve.chem.pools import save_state
         from ksmech.serve.science.steps import check_step, invalid_step
 
-        owner, _ = self._network_of_job(self.runner.get(job_id))
+        owner, _ = self._network_of_job(self._job(job_id))
         self._idle(owner.id)
         state = self.ctx.state(body.parent_state_id)
         rec = check_step(self.ctx, state, body.matrix.model_dump(), wait_s=None)
@@ -331,7 +356,7 @@ class JobService:
 
     def expand(self, job_id: str, body: ExpandIn) -> JobCreatedOut:
         """Queue the expansion of one node of the job's network (`steps` layers)."""
-        job = self.runner.get(job_id)
+        job = self._job(job_id)
         owner, net = self._network_of_job(job)
         if body.node_id not in net.nodes:
             msg = f"no node {body.node_id} in the network of {owner.id}"
@@ -371,7 +396,7 @@ class JobService:
         return self.ctx.settings
 
     def pathways(self, job_id: str, *, limit: int = 20, include_pruned: bool = False):
-        _, net = self._network_of_job(self.runner.get(job_id))
+        _, net = self._network_of_job(self._job(job_id))
         paths = rank_pathways(net, limit=int(limit), include_pruned=bool(include_pruned))
         return [PathwayOut.model_validate(p.to_dict()) for p in paths]
 

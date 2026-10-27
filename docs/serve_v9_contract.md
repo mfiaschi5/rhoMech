@@ -146,3 +146,38 @@ lambdarank score); `scores_are_probabilities` is true only for `network`.
   `DECODE_DROPPED:<code>` (`CHARGE_NOT_CONSERVED`, `VALENCE_EXCEEDED` and the other step-check
   issue codes, `FORMAL_CHARGE_RANGE`), `DECODE_MERGED` (another completion gave the same product)
   and `DECODE_ANCHOR_UNCOMPLETED`; a decoder error fails the node with `NETWORK_DECODE_FAILED`.
+
+## Profiles, tokens and the ML routes (2026-10-27)
+
+Additive: no existing request or response changes, except `MetaOut.profile` (new field).
+
+- **Profile** (`KSMECH_SERVE_PROFILE` = `lab` | `public`, `ksmech-serve run --profile`):
+  `MetaOut.profile` names it and `MetaOut.capabilities` gains `browse`, `curate` (reading
+  curated mechanisms) and `ml`. In `public`, `browse`, `curate`, `curate_edit`,
+  `curate_recheck`, `export`, `embedding` and `ml` are `{enabled: false, reason: "not in the
+  public profile"}` and every route of `/api/browse/*`, `/api/curate*`, `/api/embedding*` and
+  `/api/ml/*` answers **503** `FEATURE_DISABLED` (`detail: {capability, reason}`); `/api/jobs`
+  lists and `/api/jobs/{id}` serves only predict, override and expand jobs (another kind is 404
+  `JOB_NOT_FOUND`).
+- **Tokens**: `Authorization: Bearer <token>`, checked against the sha256 table of
+  `KSMECH_SERVE_TOKENS` (JSON or TOML: `{<sha256 hex>: {name, role}}`, top level or under
+  `tokens`). `X-Ksmech-Via: mcp | cli | ...` (`[a-z0-9][a-z0-9_.-]{0,31}`, else 422
+  `REQUEST_INVALID`) names the client. A token that matches nothing, or another scheme, is
+  **401** `TOKEN_INVALID` (with `WWW-Authenticate: Bearer`) on every route. Without a token:
+  `lab` is the local admin, `public` the anonymous reader. A route above the principal's role is
+  **401** `AUTH_REQUIRED` (anonymous) or **403** `ROLE_INSUFFICIENT` (a token's principal),
+  `detail: {required, role, for}`. Roles: see `docs/serve_architecture.md`.
+- **Audit**: every non-GET request appends a line to `data/serve/logs/audit.jsonl`.
+
+| Method | Path | Answer |
+|---|---|---|
+| GET | `/api/whoami` | `PrincipalOut {name, role: "reader"\|"user"\|"curator"\|"admin", via}` |
+| GET | `/api/models` | `ModelsOut` (unchanged; moved to `serve.ml`, open in both profiles) |
+| GET | `/api/ml/runs` | `MlRunsOut {roots, runs: MlRunOut[]}`: per `data/models/<source>/<run>/`: `encoder`, `model`, `clean`, `reason`, `built_at`, `smoke` (as `CheckpointOut`), `config` (run.json `provenance.config` as is), `n_epochs`, `best` / `last` (metrics.jsonl lines as is), `checkpoints` (stems of the `.pt` present), `reports` (`*_report_*.json` beside them), `logs`, `modified_at` |
+| GET | `/api/ml/runs/{source}/{run}` | `MlRunDetailOut {run, run_json, epochs: every metrics line, bad_lines, reports: MlReportOut[]}`; 404 `RUN_NOT_FOUND` |
+| GET | `/api/ml/reports` | `MlReportsOut {roots, reports}`: `data/processed/<source>/{anchor_floor,gbdt_lgbm}_report_*.json` of the shared root, then the data root |
+
+`MlReportOut {source, name, kind, path, size_bytes, modified_at, report, reason}`: `kind` is
+the file name before `_report_`; `report` is the file's JSON as is, or null with `reason`
+`REPORT_TOO_LARGE: ...` (over 4 MiB) or `REPORT_UNREADABLE: ...`. The `/api/ml/*` routes need
+the `ml` capability (lab only) and the curator role.

@@ -217,7 +217,7 @@ def _run(tmp_path, name, top1=None, limit=0, dirty=False):
 
 
 def test_the_default_checkpoint_is_the_best_real_run(tmp_path):
-    from ksmech.serve.predict.models import default_checkpoint, list_checkpoints
+    from ksmech.serve.ml.checkpoints import default_checkpoint, list_checkpoints
 
     s = _settings(tmp_path)
     _run(tmp_path, "real_a", top1=0.55)
@@ -235,7 +235,7 @@ def test_the_default_checkpoint_is_the_best_real_run(tmp_path):
 
 def test_reason_texts_in_every_state(tmp_path, monkeypatch):
     from ksmech.serve.core.errors import Code, ServeError
-    from ksmech.serve.predict import models
+    from ksmech.serve.ml import checkpoints
     from ksmech.serve.predict.network_predictor import NetworkPredictor, record_failure
 
     s = _settings(tmp_path)
@@ -251,7 +251,7 @@ def test_reason_texts_in_every_state(tmp_path, monkeypatch):
     info = p.info()
     assert info.available and info.reason is None and info.scores_are_probabilities
     assert info.version.startswith("network/pmechdb/good/best@") and info.checkpoint_hash
-    for ck in models.list_checkpoints(s):
+    for ck in checkpoints.list_checkpoints(s):
         if ck.usable:
             record_failure(s, ck, ServeError(Code.CHECKPOINT_LOAD_FAILED, "boom"))
     info = p.info()
@@ -260,7 +260,7 @@ def test_reason_texts_in_every_state(tmp_path, monkeypatch):
     later = time.time() + 3600
     monkeypatch.setattr(time, "time", lambda: later)
     assert p.info().available  # retried after RETRY_AFTER_S
-    monkeypatch.setattr(models, "missing_modules", lambda: ["torch"])
+    monkeypatch.setattr(checkpoints, "missing_modules", lambda: ["torch"])
     info = p.info()
     assert info.code == "TRANSFORMER_NOT_AVAILABLE" and "not importable here: torch" in info.reason
     assert dirty.is_dir()
@@ -356,7 +356,7 @@ def test_tiny_model_steps_apply_with_the_model_logp(tiny_net, synthetic_runtime,
 
 
 def _path_sig(pred, ref):
-    from ksmech.serve.predict.models import find_checkpoint
+    from ksmech.serve.ml.checkpoints import find_checkpoint
 
     ck = find_checkpoint(pred.settings, ref.checkpoint["run"], ref.checkpoint["file"])
     return ck.path, ck.signature

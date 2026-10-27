@@ -1,7 +1,7 @@
 """The FastAPI app of ksmech-serve (design 6): the error envelope, the wiring of every service
 (design 6.4) and the routers of the sub-packages under `/api` (`ROUTERS`: predict, pool,
-workbench, embedding, curate, browse; health and meta are here; the shared plumbing is
-`core.http`).
+workbench, embedding, curate, browse, ml; health, meta and whoami are here; the shared plumbing
+is `core.http`).
 
 Routes are thin. Each one checks its ids against the id table (a mismatch is a 404 with the
 endpoint's not-found code, before any service runs, so an id never reaches a file path), calls
@@ -15,12 +15,18 @@ carries the request id (also sent as the `X-Request-ID` header). JSON never carr
 `ProcessScheduler` unless injected), the `ApiContext`, the chemistry (`MolecularChemistry`
 unless injected), the curation database, the job store and runner, `JobService`,
 `BrowseService`, `CurateService`, the export / recheck / index job handlers, the routers, the
-same-origin guard, the handlers, gzip, the Host allow-list, and the frontend mount last.
-Shutdown closes the runner and the scheduler.
+auth gate, the same-origin guard, the audit log, the handlers, gzip, the Host allow-list, and
+the frontend mount last. Shutdown closes the runner and the scheduler.
 
-There is no authentication: by default the server binds 127.0.0.1 and is reached through an
-SSH tunnel; `ksmech-serve --host 0.0.0.0` opens it to the local network (`lan_hosts` then
-names this machine's addresses and host names). Two checks keep other web pages out. The Host
+The profile (`ServeSettings.profile`) chooses what is served: `lab` everything, `public` no
+dataset, curation or ML route (`core.capabilities.PROFILES`). `core.auth.AuthGate` names the
+principal of every request (a bearer token from `KSMECH_SERVE_TOKENS`, else the profile's
+anonymous principal: a local admin in `lab`, a reader in `public`) and the gated routes check
+its role; `core.audit.AuditLog` writes one line per non-GET request to
+`data/serve/logs/audit.jsonl`. In `lab` without a tokens file every request is the local
+admin, as before: by default the server binds 127.0.0.1 and is reached through an SSH tunnel;
+`ksmech-serve --host 0.0.0.0` opens it to the local network (`lan_hosts` then names this
+machine's addresses and host names). Two checks keep other web pages out. The Host
 allow-list (`LOCAL_HOSTS` plus `lan_hosts`, port ignored) answers 400 to any other Host, which
 defeats DNS rebinding, and `SameOriginGuard` answers 403 REQUEST_FORBIDDEN to a POST, PATCH,
 PUT or DELETE whose Origin header names another host (or is "null"), which defeats cross-site
@@ -49,8 +55,10 @@ import ksmech
 from ksmech.serve.app import static
 from ksmech.serve.browse import router as browse_router
 from ksmech.serve.core import schemas as S
+from ksmech.serve.core.audit import AuditLog
+from ksmech.serve.core.auth import Authenticator, AuthGate, principal_of
 from ksmech.serve.core.errors import Code, Pending, ServeError, jsonable
-from ksmech.serve.core.http import Services, Svc
+from ksmech.serve.core.http import Services, Svc, error_response
 from ksmech.serve.core.settings import (
     ServeSettings,
     TaskEnv,
@@ -60,6 +68,7 @@ from ksmech.serve.core.settings import (
 )
 from ksmech.serve.curate import router as curate_router
 from ksmech.serve.embedding import router as embedding_router
+from ksmech.serve.ml import router as ml_router
 from ksmech.serve.pool import router as pool_router
 from ksmech.serve.predict import router as predict_router
 from ksmech.serve.workbench import router as workbench_router
@@ -85,14 +94,6 @@ MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 
 def request_id_of(request: Request) -> str:
     return str(request.scope.get("state", {}).get("request_id", ""))
-
-
-def error_response(err: ServeError, request_id: str) -> JSONResponse:
-    body = err.body(request_id)
-    if body["detail"] is not None and not isinstance(body["detail"], dict):
-        body["detail"] = {"value": body["detail"]}
-    out = S.ErrorOut(error=S.ErrorBody(**body))
-    return JSONResponse(out.model_dump(mode="json"), status_code=err.status)
 
 
 def _validation_message(errors: list[dict]) -> str:
@@ -225,6 +226,17 @@ class SameOriginGuard:
         await self.app(scope, receive, send)
 
 
+def _install_guards(
+    app: FastAPI, settings: ServeSettings, authenticator: Authenticator, hosts: Sequence[str]
+) -> None:
+    """Added before `RequestContext`, so they run inside it (the request id exists), from the
+    outside in: the audit log (it sees every refusal below), the same-origin guard, the auth
+    gate."""
+    app.add_middleware(AuthGate, authenticator=authenticator)
+    app.add_middleware(SameOriginGuard, hosts=hosts)
+    app.add_middleware(AuditLog, settings=settings)
+
+
 def install_handlers(app: FastAPI) -> None:
     """The error envelope: ServeError, Pending (202), validation errors, HTTP errors, and the
     catch-all 500 with a request id."""
@@ -256,7 +268,18 @@ def meta(svc: Svc) -> S.MetaOut:
     from ksmech.serve.runtime.context import meta as context_meta
 
     body = context_meta(svc.ctx)
-    return S.MetaOut(**body, frontend_built=svc.frontend_built, dev=svc.settings.dev)
+    return S.MetaOut(
+        **body,
+        frontend_built=svc.frontend_built,
+        dev=svc.settings.dev,
+        profile=svc.settings.profile,
+    )
+
+
+@router.get("/whoami", response_model=S.PrincipalOut)
+def whoami(request: Request) -> S.PrincipalOut:
+    """The principal of this request (core.auth): what a token or its absence gives."""
+    return S.PrincipalOut(**principal_of(request).to_out())
 
 
 # ---- wiring (design 6.4)
@@ -269,6 +292,8 @@ ROUTERS = (
     embedding_router.router,
     curate_router.router,
     browse_router.router,
+    ml_router.router,
+    ml_router.lab,
 )
 
 
@@ -398,10 +423,12 @@ def create_app(
     lan_hosts: Sequence[str] = (),
 ) -> FastAPI:
     """The app (module docstring). `serve_ui=False` (`--no-ui`) serves the API only;
-    `lan_hosts` are the extra Host / Origin names accepted when serving the local network."""
+    `lan_hosts` are the extra Host / Origin names accepted when serving the local network.
+    ValueError for an unreadable or malformed tokens file."""
     hosts = (*LOCAL_HOSTS, *lan_hosts)
     pin_threads()
     settings = settings or load_settings()
+    authenticator = Authenticator.of(settings)
     svc = _services_of(settings, scheduler, chemistry, registry, jobs_inline)
     app = FastAPI(
         title="ksmech-serve",
@@ -414,16 +441,18 @@ def create_app(
     app.state.services = svc
     for r in ROUTERS:
         app.include_router(r)
-    app.add_middleware(SameOriginGuard, hosts=hosts)  # added before RequestContext: runs inside
+    _install_guards(app, settings, authenticator, hosts)
     install_handlers(app)
     app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES)
     allowed = [*hosts, TEST_HOST]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)  # outermost
     svc.frontend_built = _mount_ui(app, settings, serve_ui)
     log.info(
-        "ksmech-serve app: chemistry %s, data root %s, frontend %s",
+        "ksmech-serve app: profile %s, chemistry %s, data root %s, frontend %s, tokens %s",
+        settings.profile,
         svc.ctx.chemistry,
         settings.data_root,
         "built" if svc.frontend_built else "not served",
+        settings.tokens_file or "none",
     )
     return app

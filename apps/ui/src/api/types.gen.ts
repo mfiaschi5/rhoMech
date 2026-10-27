@@ -125,6 +125,13 @@ export interface MetaOut {
   dev: boolean;
   data_root: string;
   capabilities: Record<string, CapabilityOut>;
+  profile: "lab" | "public";
+}
+
+export interface PrincipalOut {
+  name: string;
+  role: "reader" | "user" | "curator" | "admin";
+  via: string | null;
 }
 
 export interface PredictorInfoOut {
@@ -475,6 +482,55 @@ export interface ModelsOut {
   roots: string[];
   checkpoints: CheckpointOut[];
   embedding: CapabilityOut;
+}
+
+export interface MlRunOut {
+  source: string;
+  run: string;
+  path: string;
+  encoder: string | null;
+  model: Record<string, number | string>;
+  clean: boolean | null;
+  reason: string | null;
+  built_at: string | null;
+  smoke: boolean;
+  config: Record<string, unknown> | null;
+  n_epochs: number;
+  best: Record<string, unknown> | null;
+  last: Record<string, unknown> | null;
+  checkpoints: string[];
+  reports: string[];
+  logs: string[];
+  modified_at: string;
+}
+
+export interface MlRunsOut {
+  roots: string[];
+  runs: MlRunOut[];
+}
+
+export interface MlReportOut {
+  source: string;
+  name: string;
+  kind: string;
+  path: string;
+  size_bytes: number;
+  modified_at: string;
+  report: Record<string, unknown> | null;
+  reason: string | null;
+}
+
+export interface MlRunDetailOut {
+  run: MlRunOut;
+  run_json: Record<string, unknown> | null;
+  epochs: Record<string, unknown>[];
+  bad_lines: number;
+  reports: MlReportOut[];
+}
+
+export interface MlReportsOut {
+  roots: string[];
+  reports: MlReportOut[];
 }
 
 export interface EmbeddingIn {

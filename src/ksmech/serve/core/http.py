@@ -1,6 +1,7 @@
 """HTTP plumbing shared by every router: the services one app holds (`Services`, the `Svc`
 dependency), the path-id types and their check (design 6.1: a mismatch is a 404 with the
-endpoint's not-found code before any service runs), and small response helpers."""
+endpoint's not-found code before any service runs), the error envelope of a `ServeError`
+(`error_response`, also used by the pure ASGI middlewares) and small response helpers."""
 
 from __future__ import annotations
 
@@ -9,8 +10,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import Depends, Path, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
+from ksmech.serve.core import schemas as S
 from ksmech.serve.core.errors import Code, ServeError
 
 if TYPE_CHECKING:
@@ -38,6 +40,8 @@ ID_RULES: dict[str, tuple[re.Pattern[str], Code]] = {
     "which": (re.compile(r"donor|acceptor"), Code.POOL_NOT_FOUND),
     "molecule_id": (re.compile(r"m[0-9a-f]{20}"), Code.MOLECULE_NOT_FOUND),
     "embedding_id": (re.compile(r"b[0-9a-f]{24}"), Code.EMBEDDING_NOT_FOUND),
+    # a source or run directory name of data/models (ml.checkpoints.NAME_RE)
+    "run_name": (re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"), Code.RUN_NOT_FOUND),
 }
 
 
@@ -49,6 +53,16 @@ def check_id(kind: str, value: str) -> str:
         shown = value if isinstance(value, str) and len(value) <= 64 else f"{str(value)[:64]}..."
         raise ServeError(code, f"no such {kind.replace('_', ' ')}: {shown!r}", status=404)
     return value
+
+
+def error_response(err: ServeError, request_id: str) -> JSONResponse:
+    """`ErrorOut` of `err` with its status; a 401 also names the scheme (`WWW-Authenticate`)."""
+    body = err.body(request_id)
+    if body["detail"] is not None and not isinstance(body["detail"], dict):
+        body["detail"] = {"value": body["detail"]}
+    out = S.ErrorOut(error=S.ErrorBody(**body))
+    headers = {"WWW-Authenticate": 'Bearer realm="ksmech"'} if err.status == 401 else None
+    return JSONResponse(out.model_dump(mode="json"), status_code=err.status, headers=headers)
 
 
 @dataclass
