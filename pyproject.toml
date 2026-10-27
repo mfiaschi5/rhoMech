@@ -27,6 +27,8 @@ ksmech-physics = "ksmech.physics.cli:main"
 ksmech-serve = "ksmech.serve.app.cli:main"
 ksmech-train = "ksmech.train.cli:main"
 ksmech-eval = "ksmech.eval.cli:main"
+ksmech = "ksmech.client.cli:main"
+ksmech-mcp = "ksmech.mcp.server:main"
 
 [dependency-groups]
 dev = [
@@ -48,6 +50,12 @@ serve = [
     "starlette<=1.7.0",
     "pydantic==2.13.5",
 ]
+# the HTTP client of the serve API (`ksmech`, src/ksmech/client) and the MCP server over it
+# (`ksmech-mcp`, src/ksmech/mcp): neither is a dependency of the engine, and the client imports no
+# server package. httpx is the version of the dev group; mcp stays on the 1.x line (FastMCP; 2.x
+# renamed it MCPServer and moved to httpx2)
+client = ["httpx==0.28.1"]
+mcp = ["mcp==1.30.0"]
 # torch comes from one of two builds: ROCm (default here, AMD RX 6600 XT, run with
 # HSA_OVERRIDE_GFX_VERSION=10.3.0) or CUDA (NVIDIA hosts: uv sync --no-group rocm --group cuda).
 rocm = ["torch==2.14.1", "triton-rocm==3.8.0"]
@@ -55,11 +63,17 @@ cuda = ["torch==2.14.1"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-default-groups = ["dev", "rocm", "serve"]
+default-groups = ["dev", "rocm", "serve", "client", "mcp"]
 conflicts = [[{ group = "rocm" }, { group = "cuda" }]]
 # certifi (a dev-only transitive of httpx) resolved to 2026.10.19, released the day before; keep
-# the last release that is at least two weeks old
-constraint-dependencies = ["certifi<=2026.7.22"]
+# the last release that is at least two weeks old. The same for two transitives of mcp
+# (2026-10-27): pydantic-settings 2.16.1 (2026-10-20) and sse-starlette 3.6.0 (2026-10-25) are
+# held at 2.15.0 (2026-08-07) and 3.5.0 (2026-09-28)
+constraint-dependencies = [
+    "certifi<=2026.7.22",
+    "pydantic-settings<=2.15.0",
+    "sse-starlette<=3.5.0",
+]
 
 [tool.uv.sources]
 torch = [

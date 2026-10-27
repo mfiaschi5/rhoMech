@@ -5681,3 +5681,62 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   from an anchor other than the top one. Drops: CHARGE_NOT_CONSERVED dominates (1.03M), then
   OCTET_EXCEEDED (312k); 119 anchors found no valid completion within the search limits.
 
+
+## 2026-10-27: serve `ml`, deployment profiles, an auth seam and an audit log
+
+- **`ml` sub-package.** `predict/models.py` became `ml/checkpoints.py`; `/api/models` moved to
+  `ml/router.py` unchanged; the lab gained `GET /api/ml/runs`, `/api/ml/runs/{source}/{run}` and
+  `/api/ml/reports`. Run and report JSON passes through unchanged inside a small typed envelope
+  (typed fields only where the checkpoint listing already reads them), so no field is invented;
+  reports over 4 MiB or unreadable carry `report: null` and a reason code and are logged. `ml`
+  stands on `core` alone in the layer map, so predict, runtime and embedding read the checkpoint
+  listing without a feature-to-feature import.
+- **Profiles.** `KSMECH_SERVE_PROFILE` = `lab` (default, everything) | `public`
+  (`ksmech-serve run --profile`). A profile is a set of admitted capabilities
+  (`core.capabilities.PROFILES`); `public` drops browse, curate, curate_edit, curate_recheck,
+  export, embedding (it traces stored dataset samples) and ml, gated per router with
+  `dependencies=` (503 FEATURE_DISABLED "not in the public profile"). In public, jobs other than
+  predict / override / expand are 404 and left out of `/api/jobs`. `/api/models` stays public
+  because the predict form needs it. `tests/test_serve_access.py` walks every OpenAPI route of
+  the public app against an explicit allow-list, so a new route is refused until it is allowed
+  on purpose: PMechDB data must never be reachable online. A public deployment uses its own data
+  root (pool states saved under a shared root would otherwise be readable by id).
+- **Auth seam without a user database.** `Principal(name, role, via)`, roles reader < user <
+  curator < admin. Tokens from an optional `KSMECH_SERVE_TOKENS` file (JSON, or TOML by suffix):
+  token sha256 → {name, role}; only hashes are stored, compared with `hmac.compare_digest` over
+  every entry; a malformed file stops the server at start. Without a token: `lab` is the local
+  admin (the UI and the tests need none), `public` the anonymous reader. Wrong token: 401
+  TOKEN_INVALID; a role too low: 401 AUTH_REQUIRED (anonymous) or 403 ROLE_INSUFFICIENT.
+  `X-Ksmech-Via` (cli, mcp) names the client. Least roles: workbench, reads, `GET /predictors`
+  → reader; predict, expand, cancel, correct, embedding submit → user; curate edit / recheck /
+  export, browse index, ml → curator. The anonymous public visitor gets the workbench (with its
+  xTB compute) and prediction reads; launching jobs needs a user token (open question for the
+  public launch: anonymous jobs with per-IP quotas).
+- **Audit log.** `core.audit.AuditLog` (pure ASGI, outside the same-origin guard and the auth
+  gate, so it records their refusals too) appends one JSON line per non-GET/HEAD request to
+  `data/serve/logs/audit.jsonl`: time, request id, principal, method, route template, path (200
+  characters at most), status. A failed write is logged and counted in `failures.jsonl` as
+  AUDIT_WRITE_FAILED and never fails the request.
+
+## 2026-10-27: HTTP client, `ksmech` CLI and `ksmech-mcp`
+
+- The HTTP API is the single contract: the web UI, the `ksmech` CLI (`ksmech.client.cli`) and
+  the MCP server (`ksmech.mcp.server`) all call it, so tokens, roles, quotas and the audit log
+  apply equally; requests carry `X-Ksmech-Via: cli|mcp` and the bearer token from
+  `KSMECH_TOKEN`. `ksmech.client.KsmechClient` (httpx) imports only httpx, pydantic and
+  `ksmech.serve.core.schemas` (a subprocess test checks `sys.modules`), parses answers with the
+  server's pydantic models and turns the error envelope into `KsmechAPIError(code, status)`.
+  `tests/test_engine_boundary.py`: the engine imports none of serve, client, mcp; serve imports
+  neither client nor mcp; client and mcp take only `ksmech.serve.core(.schemas)` from serve.
+- The MCP server is on the SDK's 1.x line (mcp 1.30.0, FastMCP): 2.x renamed FastMCP and moved to
+  httpx2 / httpcore2, all newer than the two-week rule allows. Two transitives are held back by
+  constraints (pydantic-settings <= 2.15.0, sse-starlette <= 3.5.0) for the same rule.
+- At start the MCP server registers only the tools whose `/api/meta` capability is on, so a
+  public server never offers dataset, curation or ML tools (`list_checkpoints` is gated on `ml`
+  although `/api/models` is public). Tools are not yet gated on the caller's role: on a public
+  server an anonymous reader is offered `predict_mechanism` and the call fails with the API's
+  401. Tools answer compact JSON summaries (`ksmech.client.summary`, shared with the CLI tables),
+  `detail=true` for more, because an LLM's context is small. Only `predict_mechanism` is not
+  read-only (it submits compute, non-destructive). No write tool for curation or datasets: those
+  changes will go through a review queue. The HTTP transport uses one `KSMECH_TOKEN` for every
+  MCP client and binds to 127.0.0.1 by default.

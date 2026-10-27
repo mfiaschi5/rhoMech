@@ -306,3 +306,25 @@ names; any other name is refused.
 run xTB; on a loaded host run them one file at a time with `OMP_NUM_THREADS=1`. The Playwright smoke test uses the system Chrome or Chromium (Playwright browsers are
 never downloaded): `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`, or `npm --prefix
 apps/ui run e2e`.
+
+### Command line and MCP server (ksmech, ksmech-mcp)
+
+The HTTP API is the single contract: the web UI, the `ksmech` CLI and the `ksmech-mcp` server
+(for LLM clients) all call it, so tokens, permissions, quotas and the audit log apply equally.
+Both are thin layers over `ksmech.client.KsmechClient` (httpx + the pydantic schemas only, no
+server package), installed by the default `client` and `mcp` dependency groups.
+
+```bash
+export KSMECH_URL=http://127.0.0.1:8000     # the default; KSMECH_TOKEN for a bearer token
+uv run ksmech predictors                    # compact tables; --json prints the API answer
+uv run ksmech predict 'C[O-]' CCl --predictor floor --beam 5      # waits for the job
+uv run ksmech jobs list && uv run ksmech jobs get <job_id> --detail
+uv run ksmech molecule props CCO            # GFN2 properties (SMILES or a molecule id)
+uv run ksmech ml runs                       # also: models, curate list, browse search ...
+claude mcp add ksmech -- "$PWD/.venv/bin/ksmech-mcp"              # Claude Code, stdio
+```
+
+Exit codes: 0 ok, 1 an API error (or a failed job, an invalid step), 2 a usage error. The MCP
+server registers only the tools the server's `/api/meta` capabilities enable (a `public`
+server offers no dataset, curation or ML tool) and has no write tools for curated mechanisms
+or datasets; `docs/mcp.md` lists the tools, the transports and the authentication.

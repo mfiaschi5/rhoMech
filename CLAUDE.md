@@ -229,3 +229,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
   of h(0), every layer's attention and token updates (rebuilt from the recorded layer inputs and
   checked against the model's own forward), the decoder's anchor logits split into site, pair
   and physics terms; CPU by default; `--smiles` builds missing tokens with GFN2-xTB)
+- API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
+  `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
+  `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]
+  [--beam 5] [--checkpoint RUN[/FILE]] [--no-wait]`, `jobs list|get|wait|cancel|pathways`,
+  `normalize`, `check STATE --bond I,J,D --lone I,D`, `pool create|get|svg`, `molecule
+  create|get|props|symmetry|orbitals`, `depict2d`, `models`, `ml runs|run|reports`, `embedding
+  create|get`, `curate list|get`, `browse status|search|step`; exit 0 ok, 1 API error, 2 usage)
+- MCP server: `uv run ksmech-mcp [--transport stdio|http] [--port 8765]` (FastMCP over the
+  client, `X-Ksmech-Via: mcp`; tools per `/api/meta` capability, read-only except
+  predict_mechanism; `docs/mcp.md`; Claude Code: `claude mcp add ksmech --
+  <repo>/.venv/bin/ksmech-mcp`)
