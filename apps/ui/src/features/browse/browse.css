@@ -1,0 +1,118 @@
+/* Browse page: feature-local styles on the shared tokens of src/styles.css (prefix br-). */
+
+.br-page {
+  max-width: 1400px;
+}
+
+.br-title {
+  margin: 0 0 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.br-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.br-query {
+  flex: 1 1 260px;
+  min-width: 200px;
+  font-family: var(--mono);
+}
+
+.br-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.br-index {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.br-index .banner {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+}
+
+.br-job {
+  font-size: 12px;
+}
+
+.br-pager {
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.br-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.br-click-row {
+  cursor: pointer;
+}
+
+.br-click-row:hover td {
+  background: var(--panel-2);
+}
+
+.br-row-current td {
+  background: var(--panel-2);
+  font-weight: 600;
+}
+
+.br-smiles {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.br-split {
+  margin-right: 4px;
+}
+
+.br-sides {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap);
+  margin: 8px 0;
+}
+
+.br-sides > div[data-testid] {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.br-arrow {
+  font-size: 28px;
+  color: var(--muted);
+}
+
+.br-mechanism {
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.br-step .kv {
+  word-break: break-all;
+}

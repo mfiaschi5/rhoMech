@@ -155,9 +155,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
-  codes), `uv run ksmech-qm bond-index`
+  codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,
+  and a later run of any source, or the web app, with the same settings and no larger budget
+  answers from it instead of rerunning xTB), `uv run ksmech-qm bond-index`
   (Wiberg bond indices of the Lewis bonds of every cached record, `data/cache/bond_index/`; the
-  token cache needs them, so re-run after the QM batch)
+  token cache needs them, so re-run after the QM batch), `uv run ksmech-qm index stats [--root
+  data/cache --root data/serve]` (the SQLite index `<root>/index.sqlite` of records, tombstones,
+  tokens and Wiberg sidecars, read from the file headers and refreshed incrementally first;
+  `index refresh [--rebuild]` only refreshes; the files stay the source of truth)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
   without a QM record are skipped and counted, so re-run after the QM batch), `uv run
@@ -189,6 +194,33 @@ Main CLI entry points are added phase by phase and listed here as they land:
   model's training marked; builds missing QM records and tokens). After a token rebuild:
   `ksmech-arrows samples` (geometry-free pair features and `pair_feature_stats_<strategy>.json`
   from each training part), then `ksmech-physics gbdt`, then `textbook`.
+- Serve (an optional add-on: the engine never imports `ksmech.serve`; its web packages are the
+  `serve` dependency group; seventeen sub-packages in layers, map in `docs/serve_architecture.md`,
+  checked by `tests/test_serve_layers.py`): `uv run ksmech-serve --port 8000` (web app on 127.0.0.1 only, `--host 0.0.0.0` for the
+  LAN; data under `data/serve/`, curation DB `data/curation/curation.sqlite`; one compute worker;
+  `--chemistry real|cached|synthetic`, `--dev`, `--no-ui`, `--index-on-start`), `uv run
+  ksmech-serve schema-ts` (regenerate `apps/ui/src/api/types.gen.ts`), `uv run ksmech-serve
+  probe-cache --smiles 'C[O-]'` (exit 0 when the shared token cache holds every species),
+  `uv run ksmech-serve users list | add LOGIN --name N --role admin --generate | set LOGIN
+  --role R` (accounts of `serve.accounts`: local passwords, OIDC sign-in through
+  `KSMECH_SERVE_AUTH`, sessions, job quotas, admins unlimited; `docs/accounts.md`),
+  `uv run ksmech-serve recheck`, `uv run ksmech-serve export --out FILE` (curated steps as
+  PMechDB raw records, never training data), `uv run ksmech-serve ocr-setup [--relock]
+  [--skip-env] [--skip-weights]` (the OCR engine MolScribe 1.1.1: its isolated environment
+  `tools/ocr` synced into `data/ocr/venv` and the sha256-checked checkpoint under
+  `data/ocr/weights/`, resumable; `ocr` is off until it has run; `POST /api/ocr`,
+  `docs/ocr.md`); the wiki is `content/wiki/*.md` (TOML front matter, rendered on the server:
+  `GET /api/wiki`, `/api/wiki/{slug}`, `/api/wiki/llms.txt`; format in `docs/wiki.md`); Predict and Correct work on spec-v9 reaction
+  matrices (predictors floor, gbdt, network; contract in `docs/serve_v9_contract.md`; the
+  v3 panels candidates and physics are off, `serve/core/capabilities.py`, also in `/api/meta`);
+  embedding traces of a pool through a local checkpoint: `GET /api/models`, `POST /api/embedding`
+  (a job in the worker; pages under `data/serve/embedding/`), the step panel's Embedding view
+  and the Workbench's Model trace
+- UI: `npm --prefix apps/ui run build | dev | e2e` (e2e: Playwright with the system Chrome,
+  `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`; `KSMECH_E2E_PORT=<p>` beside another
+  server). The app is branded ChemRho, in four nav sections: ChemPtah (`#/workbench`), ClotoMech
+  (`#/predict`, `#/correct`, `#/curate`), ChemThot (`#/browse`) and the Wiki (`#/wiki`); the
+  section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
   [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; each epoch every training
@@ -204,4 +236,25 @@ Main CLI entry points are added phase by phase and listed here as they land:
   run)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, no learned parameter, val and test
-  top-1/3/5, `anchor_floor_report_<split>.json`)
+  top-1/3/5, `anchor_floor_report_<split>.json`), `uv run ksmech-eval decode --run NAME
+  [--part val|test] [--limit N] [--beam 5] [--scope all|inter]` (the beam decoder of
+  `model.decode` on the stored samples, B + R checked on the sample's Lewis structure: full-R
+  top-1/3/5, a hit when a completion is a variant of the label class, the drop counts;
+  `decode_report_<split>_<part>[_n<limit>].json` beside the checkpoint), `uv run ksmech-eval embedding --run NAME
+  [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
+  [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
+  under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts
+  of h(0), every layer's attention and token updates (rebuilt from the recorded layer inputs and
+  checked against the model's own forward), the decoder's anchor logits split into site, pair
+  and physics terms; CPU by default; `--smiles` builds missing tokens with GFN2-xTB)
+- API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
+  `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
+  `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]
+  [--beam 5] [--checkpoint RUN[/FILE]] [--no-wait]`, `jobs list|get|wait|cancel|pathways`,
+  `normalize`, `check STATE --bond I,J,D --lone I,D`, `pool create|get|svg`, `molecule
+  create|get|props|symmetry|orbitals`, `depict2d`, `ocr IMAGE [--molfile OUT]`, `models`, `ml runs|run|reports`, `embedding
+  create|get`, `curate list|get`, `browse status|search|step`; exit 0 ok, 1 API error, 2 usage)
+- MCP server: `uv run ksmech-mcp [--transport stdio|http] [--port 8765]` (FastMCP over the
+  client, `X-Ksmech-Via: mcp`; tools per `/api/meta` capability, read-only except
+  predict_mechanism; `docs/mcp.md`; Claude Code: `claude mcp add ksmech --
+  <repo>/.venv/bin/ksmech-mcp`)

@@ -1,0 +1,658 @@
+/* The Predict step viewport (StepPanel and its variants: StepTextbook, StepAnimated,
+   StepOrbital; the Embedding variant styles itself, features/embedding/embedding.css). Theme tokens of styles.css only, so light and dark both read. */
+
+/* ---- header: the variant switch and the alternatives */
+
+.ss-seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+}
+
+.ss-seg-btn {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ss-seg-btn:hover {
+  color: var(--fg);
+}
+
+.ss-seg-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ss-seg-btn:disabled:hover {
+  color: var(--muted);
+}
+
+.ss-seg-btn.ss-seg-on {
+  background: var(--panel);
+  color: var(--fg);
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 18%, transparent);
+  font-weight: 600;
+}
+
+.ss-seg-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.ss-altnav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.ss-altnav .btn-small {
+  min-width: 26px;
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.ss-alt-index {
+  min-width: 74px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-note {
+  color: var(--warn);
+}
+
+/* ---- the drawing (all variants) */
+
+.ss-view {
+  min-width: 0;
+}
+
+.ss-frame {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel);
+  padding: 8px 12px 10px;
+}
+
+.ss-frame-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  margin-bottom: 2px;
+}
+
+.ss-canvas.sketch {
+  display: block;
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  user-select: none;
+  --pv-form: #1f9d55;
+  --pv-break: #d0342c;
+  --pv-arrow: var(--arrow);
+}
+
+.ss-svg {
+  display: block;
+  overflow: visible;
+}
+
+.ss-canvas .pv-arrow-line {
+  stroke-width: var(--ss-arrow-width, 1.6px);
+}
+
+.ss-canvas .pv-marks-hidden {
+  display: none;
+}
+
+.ss-lone circle {
+  fill: var(--sk-stroke);
+}
+
+.ss-halo-atom {
+  fill: color-mix(in srgb, var(--accent) 16%, transparent);
+  stroke: color-mix(in srgb, var(--accent) 70%, transparent);
+  stroke-width: 1.5;
+}
+
+.ss-halo-bond {
+  stroke: color-mix(in srgb, var(--accent) 26%, transparent);
+  stroke-linecap: round;
+}
+
+.ss-hit {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: all;
+  cursor: help;
+}
+
+.ss-rxn-line {
+  stroke: var(--sk-stroke);
+  stroke-width: 1.4;
+}
+
+.ss-rxn-head {
+  fill: var(--sk-stroke);
+}
+
+.ss-rxn-text {
+  fill: var(--muted);
+  font-family: var(--font);
+}
+
+.ss-rxn-sub {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- textbook: caption and export */
+
+.ss-export {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.ss-export-status {
+  font-size: 11px;
+  min-width: 0;
+}
+
+.ss-caption {
+  list-style: none;
+  margin: 6px auto 0;
+  padding: 6px 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  font-size: 13px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ss-caption li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 2px 6px;
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+
+.ss-caption li:hover {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.ss-caption li + li {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ss-cap-bond {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-cap-channel {
+  font-family: "Times New Roman", Times, "Liberation Serif", serif;
+  font-size: 1.12em;
+}
+
+.ss-cap-sep {
+  color: var(--muted);
+}
+
+.ss-cap-g,
+.ss-cap-mo {
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-cap-g i {
+  font-family: "Times New Roman", Times, "Liberation Serif", serif;
+  font-size: 1.1em;
+}
+
+.ss-cap-g sup {
+  font-size: 0.7em;
+}
+
+/* ---- facts under every variant */
+
+.ss-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 4px 18px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .ss-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ss-fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ss-fact-k {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  min-width: 52px;
+}
+
+.ss-arrow-list {
+  margin: 0;
+  padding-left: 18px;
+  min-width: 0;
+}
+
+details.ss-fact {
+  display: block;
+  grid-column: 1 / -1;
+}
+
+.ss-alt-on {
+  font-weight: 600;
+}
+
+.ss-link {
+  font: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ss-link:hover code {
+  border-color: var(--accent);
+}
+
+/* ---- animated: the stage, the player and the side card */
+
+.ss-animated {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 1180px) {
+  .ss-animated {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ss-stage-frame .ss-canvas {
+  min-height: 240px;
+}
+
+.ss-phase {
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  pointer-events: none;
+}
+
+.ss-player {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.ss-play {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ss-play:hover {
+  filter: brightness(1.08);
+}
+
+.ss-play:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.ss-scrub {
+  flex: 1 1 200px;
+  min-width: 120px;
+  accent-color: var(--accent);
+}
+
+.ss-card {
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel);
+  padding: 8px 12px 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.ss-card-h {
+  margin: 4px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ss-card-h + * {
+  margin-bottom: 6px;
+}
+
+.ss-card-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ss-card-table td {
+  padding: 3px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.ss-card-table tr:hover td,
+.ss-card-readings li:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.ss-delta {
+  width: 32px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.ss-pos {
+  color: var(--ok);
+}
+
+.ss-neg {
+  color: var(--error);
+}
+
+.ss-card-readings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ss-card-readings li {
+  padding: 4px;
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+
+/* ---- orbitals: scheme | energy diagram | 3D */
+
+.ss-orbital {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) auto minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: stretch;
+}
+
+@media (max-width: 1360px) {
+  .ss-orbital {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .ss-orb-scheme {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .ss-orbital {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ss-orb-scheme {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ss-orb-readings {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  font-size: 12px;
+}
+
+.ss-orb-readings li {
+  padding: 2px 4px;
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+
+.ss-orb-readings li:hover {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.ss-orb-readings label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  cursor: pointer;
+}
+
+.ss-orb-3d {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ss-orb-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+}
+
+.ss-viewer {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 300px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.ss-viewer-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.ss-viewer-note {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 30px;
+  font-size: 12px;
+}
+
+.ss-viewer-legend {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  padding: 2px 6px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.ss-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.ss-swatch + .ss-swatch {
+  margin-left: -2px;
+}
+
+.ss-energy {
+  margin: 0;
+  align-self: center;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel);
+  padding: 6px 4px;
+}
+
+.ss-energy svg {
+  display: block;
+  font-family: var(--font);
+}
+
+.ss-e-head {
+  font-size: 10px;
+  fill: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ss-e-occ line,
+.ss-e-virt line {
+  stroke: var(--fg);
+  stroke-width: 2;
+}
+
+.ss-e-virt line {
+  stroke-dasharray: 4 2;
+}
+
+.ss-e-donor line {
+  stroke: var(--donor);
+  stroke-width: 2.5;
+}
+
+.ss-e-acceptor line {
+  stroke: var(--acceptor);
+  stroke-width: 2.5;
+}
+
+.ss-e-label {
+  font-size: 11px;
+  fill: var(--fg);
+}
+
+.ss-e-donor .ss-e-label {
+  fill: var(--donor);
+}
+
+.ss-e-acceptor .ss-e-label {
+  fill: var(--acceptor);
+}
+
+.ss-e-sub {
+  font-size: 10px;
+  fill: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-e-link {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}
+
+.ss-e-electrons {
+  fill: none;
+  stroke: var(--fg);
+  stroke-width: 1.3;
+}
+
+.ss-e-gap {
+  stroke: var(--arrow);
+  stroke-width: 1.3;
+}
+
+.ss-e-marker {
+  fill: var(--arrow);
+}
+
+.ss-e-gaptext {
+  font-size: 10px;
+  fill: var(--arrow);
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-e-foot {
+  font-size: 9.5px;
+  fill: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* the stage's R marks: bond marks only (the card lists lone-pair and charge changes) */
+.ss-animated .pv-badge,
+.ss-animated .pv-charge {
+  display: none;
+}
+
+.ss-orb-scheme > .ss-canvas {
+  margin: auto 0;
+}
+
+.ss-orb-r {
+  color: var(--muted);
+}

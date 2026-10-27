@@ -35,7 +35,7 @@ def floor_ranks(batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
     admissible = (batch["r_anchors"] & batch["variant_mask"][:, :, None, None, None]).any(1)
     hit = torch.where(form, admissible[..., FORM], admissible[..., BREAK]) & cand
     best = score.masked_fill(~hit, float("-inf")).flatten(1).amax(1)
-    rank = (score.flatten(1) > best[:, None]).sum(1)
+    rank = ((score >= best[:, None, None]) & cand & ~hit).flatten(1).sum(1)  # ties count against
     reachable = hit.flatten(1).any(1)
     return torch.where(reachable, rank, cand.flatten(1).sum(1)), reachable
 

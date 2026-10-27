@@ -1,0 +1,74 @@
+/* EmbeddingView: the checkpoint bar over the trace page's iframe. */
+.emb-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.emb-view.emb-off .emb-bar {
+  opacity: 0.55;
+}
+
+.emb-bar {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.emb-picker {
+  gap: 6px;
+  align-items: center;
+}
+
+.emb-picker select {
+  max-width: 36em;
+}
+
+.emb-facts {
+  font-size: 12px;
+}
+
+.emb-frame {
+  display: block;
+  width: 100%;
+  height: max(560px, calc(100vh - 220px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.emb-placeholder {
+  padding: 24px 8px;
+}
+
+/* EmbeddingDialog: the Workbench's trace of one molecule, over the page. */
+.emb-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 3vh 16px;
+  background: color-mix(in srgb, #000 40%, transparent);
+  overflow-y: auto;
+}
+
+.emb-dialog {
+  width: min(1500px, 100%);
+  min-width: 0;
+}
+
+.emb-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.emb-dialog-head h3 {
+  margin: 0;
+  flex: 1 1 auto;
+  font-size: 15px;
+}

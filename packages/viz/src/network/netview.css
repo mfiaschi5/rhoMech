@@ -1,0 +1,585 @@
+/* The Predict network viewports (A. Scheme, B. Graph, C. Pathways): theme tokens of styles.css,
+   step-type colours with a dark set; structure cards stay on --depiction-bg in both themes. */
+
+:root {
+  --st-substitution: #2463c7;
+  --st-addition: #1f8a4c;
+  --st-elimination: #c25e00;
+  --st-proton-transfer: #7b3fb8;
+  --st-heterolysis: #c0362c;
+  --st-relay: #128a8a;
+  --st-other: #8a94a3;
+  --nv-band: color-mix(in srgb, var(--panel-2) 55%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --st-substitution: #6ea2ff;
+    --st-addition: #4cc38a;
+    --st-elimination: #f0a050;
+    --st-proton-transfer: #b78cf0;
+    --st-heterolysis: #ff7468;
+    --st-relay: #3cc9c9;
+    --st-other: #8f9aab;
+  }
+}
+
+:root[data-theme="dark"] {
+  --st-substitution: #6ea2ff;
+  --st-addition: #4cc38a;
+  --st-elimination: #f0a050;
+  --st-proton-transfer: #b78cf0;
+  --st-heterolysis: #ff7468;
+  --st-relay: #3cc9c9;
+  --st-other: #8f9aab;
+}
+
+/* ---- the switch */
+
+.nv-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+  background: var(--panel-2);
+}
+
+.nv-seg {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.nv-seg:hover {
+  color: var(--fg);
+}
+
+.nv-seg.on {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* ---- the stage every variant draws in */
+
+.nv-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+  outline: none;
+}
+
+.nv-stage:focus-visible {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 30%, transparent);
+}
+
+.nv-tools {
+  position: absolute;
+  top: 36px;
+  right: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  z-index: 3;
+}
+
+.nv-tools .btn {
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.nv-tooltip {
+  position: absolute;
+  z-index: 5;
+  max-width: 300px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 12px;
+  box-shadow: 0 6px 20px color-mix(in srgb, #000 18%, transparent);
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nv-wrap {
+  overflow-wrap: anywhere;
+}
+
+.nv-status {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 12px;
+}
+
+/* ---- A. scheme: a transformed world of bands, step curves and cards */
+
+.nv-scheme {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.nv-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.nv-world.nv-animate {
+  transition: transform 0.3s ease;
+}
+
+.nv-band {
+  position: absolute;
+  pointer-events: none;
+}
+
+.nv-edges {
+  position: absolute;
+  overflow: visible;
+}
+
+.nv-step-line {
+  fill: none;
+  stroke: var(--muted);
+  stroke-linecap: round;
+  transition: opacity 0.15s, stroke 0.15s;
+}
+
+.nv-arrowhead {
+  fill: var(--muted);
+}
+
+.nv-arrowhead-cycle {
+  fill: var(--cycle);
+}
+
+.nv-step.back .nv-step-line {
+  stroke: var(--cycle);
+  stroke-dasharray: 5 4;
+  opacity: 0.75;
+}
+
+.nv-step.inpath .nv-step-line,
+.nv-step.hl .nv-step-line {
+  stroke: var(--accent);
+  opacity: 0.95 !important;
+}
+
+.nv-step.selected .nv-step-line {
+  stroke: var(--arrow-selected);
+  opacity: 1 !important;
+}
+
+.nv-step.faded .nv-step-line {
+  opacity: 0.1 !important;
+}
+
+.nv-step-label {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--fg);
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  pointer-events: none;
+}
+
+.nv-tip-corner {
+  left: 8px;
+  bottom: 8px;
+}
+
+.nv-col-heads {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 30px;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(var(--panel) 70%, transparent);
+}
+
+.nv-col-head {
+  position: absolute;
+  top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 10px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.nv-col-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.nv-count {
+  font-size: 10.5px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+/* ---- the shared state card (A and C) */
+
+.nv-card-state {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--depiction-bg);
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 8%, transparent);
+  cursor: pointer;
+  overflow: hidden;
+  transition: opacity 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+
+.nv-card-state:hover {
+  box-shadow: 0 4px 14px color-mix(in srgb, #000 16%, transparent);
+}
+
+.nv-card-state.root {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent), 0 1px 2px color-mix(in srgb, #000 8%, transparent);
+}
+
+.nv-card-state.inpath,
+.nv-card-state.hl {
+  border-color: var(--accent);
+}
+
+.nv-card-state.selected {
+  border-color: var(--arrow-selected);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--arrow-selected) 32%, transparent);
+}
+
+.nv-card-state.focus {
+  outline: 2px dashed var(--focus);
+  outline-offset: 3px;
+}
+
+.nv-card-state.faded {
+  opacity: 0.22;
+}
+
+.nv-card-state.status-pruned .nv-card-body {
+  opacity: 0.7;
+}
+
+.nv-card-head {
+  display: flex;
+  gap: 4px;
+  min-height: 22px;
+  padding: 4px 6px 0;
+  overflow: hidden;
+}
+
+.nv-chip {
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: #eef1f5;
+  color: #5d6878;
+}
+
+.nv-chip-root {
+  background: color-mix(in srgb, #2463c7 14%, white);
+  color: #1d4f9e;
+}
+
+.nv-chip-terminal {
+  background: color-mix(in srgb, #1f8a4c 15%, white);
+  color: #186b3b;
+}
+
+.nv-chip-cycle {
+  background: color-mix(in srgb, #7b3fb8 14%, white);
+  color: #5f2f90;
+}
+
+.nv-chip-failed {
+  background: color-mix(in srgb, #c0362c 14%, white);
+  color: #9a2b23;
+}
+
+.nv-chip-corrected {
+  background: color-mix(in srgb, #e07b00 16%, white);
+  color: #9a5400;
+}
+
+.nv-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 10px;
+}
+
+.nv-card-body img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.nv-caption {
+  height: 20px;
+  line-height: 18px;
+  padding: 0 8px;
+  font-size: 10.5px;
+  color: #5d6878;
+  font-family: var(--mono);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-top: 1px solid #edf0f4;
+}
+
+.nv-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  height: 22px;
+  padding: 0 6px;
+  border-top: 1px solid #edf0f4;
+}
+
+.nv-ranks {
+  display: inline-flex;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.nv-rank {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #eef1f5;
+  color: #1c2330;
+}
+
+.nv-rank-more {
+  background: none;
+  color: #5d6878;
+}
+
+/* ---- the splitter under the viewport, the side column beside it */
+
+.nv-frame {
+  position: relative;
+  min-height: 0;
+}
+
+.nv-frame > .nv-stage {
+  height: 100%;
+}
+
+.nv-splitter {
+  height: 10px;
+  margin: 2px 0 4px;
+  cursor: ns-resize;
+  position: relative;
+  outline: none;
+}
+
+.nv-splitter::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 44px;
+  height: 4px;
+  margin-left: -22px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.nv-splitter:hover::after,
+.nv-splitter:focus-visible::after {
+  background: var(--accent);
+}
+
+.nv-band-alt {
+  background: var(--nv-band);
+}
+
+.nv-band {
+  overflow: hidden;
+}
+
+.nv-band-count {
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.nv-band-label {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  right: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.nv-minimap {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.nv-minimap:hover {
+  opacity: 1;
+}
+
+.nv-mini-node {
+  fill: var(--muted);
+  opacity: 0.55;
+}
+
+.nv-mini-view {
+  fill: color-mix(in srgb, var(--accent) 12%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1.2;
+}
+
+/* ---- C. pathways */
+
+.nv-explorer-stage {
+  display: flex;
+  flex-direction: column;
+}
+
+.nv-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  min-height: 34px;
+}
+
+.nv-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nv-crumb .legend-button {
+  width: auto;
+}
+
+.nv-crumb-step {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.nv-explorer {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.nv-explorer-canvas {
+  position: relative;
+}
+
+.nv-ribbons {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.nv-ribbon path {
+  fill: none;
+  opacity: 0.38;
+  stroke-linecap: round;
+  transition: opacity 0.15s;
+}
+
+.nv-ribbon.on path {
+  opacity: 0.85;
+}
+
+.nv-ribbon-label {
+  font-size: 10.5px;
+  fill: var(--muted);
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 3px;
+}
+
+.nv-fold {
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 14px;
+  min-width: 22px;
+  padding: 0 6px;
+  border: 1px solid #d5dbe3;
+  border-radius: 999px;
+  background: #f6f7f9;
+  color: #1c2330;
+  cursor: pointer;
+}
+
+.nv-fold:hover {
+  border-color: #2463c7;
+}
+
+.nv-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  cursor: pointer;
+  pointer-events: stroke;
+}

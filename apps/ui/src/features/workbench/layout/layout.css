@@ -1,0 +1,246 @@
+/* The workbench's customizable layout: columns and splitters, the wide row, the panel frames
+   with their header controls, the Layout menu. Theme tokens of styles.css only. Hidden and
+   collapsed parts stay mounted with the hidden attribute, which must beat the display rules. */
+
+.wb-col,
+.wb-wide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+.wb-col[hidden],
+.wb-panel[hidden],
+.wb-panel-body[hidden],
+.wb-orbital-info[hidden] {
+  display: none !important;
+}
+
+.workbench .wb-panel + .wb-panel {
+  margin-top: 0;
+}
+
+.wb-panel {
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.wb-panel-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  margin: -2px 0 6px;
+}
+
+.wb-panel[data-collapsed="true"] .wb-panel-head {
+  margin-bottom: -2px;
+}
+
+.wb-panel-title {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.wb-panel-title:hover {
+  border-color: var(--border);
+}
+
+.wb-caret {
+  width: 1em;
+  color: var(--muted);
+}
+
+.wb-panel-note {
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wb-panel-tools {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.wb-panel-tool {
+  font: inherit;
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.wb-panel-tool:hover:not(:disabled) {
+  border-color: var(--border);
+  color: var(--fg);
+  background: var(--panel-2);
+}
+
+.wb-panel-tool:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.wb-panel-body {
+  min-width: 0;
+}
+
+.wb-placeholder {
+  padding: 4px 2px;
+}
+
+/* splitters: between columns (a track of the grid) and under a panel with a height */
+.wb-splitter {
+  position: relative;
+  touch-action: none;
+  outline: none;
+}
+
+.wb-splitter::after {
+  content: "";
+  position: absolute;
+  border-radius: 2px;
+  background: var(--border);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.wb-splitter:hover::after,
+.wb-splitter:focus-visible::after,
+.wb-splitter[data-dragging="true"]::after {
+  opacity: 1;
+  background: var(--accent);
+}
+
+.wb-splitter-col {
+  align-self: stretch;
+  cursor: col-resize;
+  min-height: 80px;
+}
+
+.wb-splitter-col::after {
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  opacity: 0.6;
+}
+
+.wb-splitter-row {
+  height: 8px;
+  margin: 4px -12px -10px;
+  cursor: row-resize;
+}
+
+.wb-splitter-row::after {
+  left: 40%;
+  right: 40%;
+  top: 3px;
+  height: 2px;
+  opacity: 0.6;
+}
+
+@media (max-width: 999px) {
+  .wb-splitter-col {
+    display: none;
+  }
+}
+
+/* the layout bar and menu */
+.wb-layout-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.wb-menu-anchor {
+  position: relative;
+}
+
+.wb-layout-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(80vh, 720px);
+  overflow: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 6px 24px color-mix(in srgb, #000 22%, transparent);
+}
+
+.wb-menu-section {
+  margin: 0;
+  padding: 4px 8px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wb-menu-section legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.wb-menu-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wb-menu-buttons .btn.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-2));
+}
+
+.wb-pref {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.wb-pref select {
+  max-width: 12.5em;
+}
+
+.wb-restore {
+  border-style: dashed;
+}
+
+.wb-compute-wrap {
+  display: inline-flex;
+}

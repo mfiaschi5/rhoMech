@@ -136,8 +136,25 @@ def _size(sample) -> int:
     return sample.n_atoms + sample.n_orbitals
 
 
+def drop_undecodable_drawings(samples: list, part: str) -> int:
+    """Drop, in place, the resonance drawings whose label class holds a step the decoder cannot
+    write (`ReactionMatrix.is_elementary`: a bond order changing by 2). A store built before
+    the build checked this (2026-10-26, 5 of 7,864 drawings) still has them, and one such
+    drawing put the loss's gather out of range. Returns how many were dropped, each logged."""
+    dropped = 0
+    for s in samples:
+        keep = [d for d in s.drawings if all(v.is_elementary() for v in d.edit_label.variants)]
+        if len(keep) < len(s.drawings):
+            log.warning("%s %s: %d resonance drawing(s) dropped: NOT_ELEMENTARY",
+                        part, s.step_id, len(s.drawings) - len(keep))  # fmt: skip
+            dropped += len(s.drawings) - len(keep)
+            s.drawings = keep
+    return dropped
+
+
 def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[list, dict]:
-    """The samples of one part that fit the token cap, and the skip counts."""
+    """The samples of one part that fit the token cap, and the skip counts (samples too large,
+    drawings the decoder cannot write)."""
     path = samples_path(cfg.source, f"{cfg.split}_{part}", processed_dir)
     samples = load_samples(path)
     if cfg.limit:
@@ -147,6 +164,8 @@ def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[list, d
     for s in samples:
         if _size(s) + 1 > cfg.max_tokens:
             log.warning("%s %s skipped: %s (%d tokens)", part, s.step_id, TOO_LARGE, _size(s))
+    if n := drop_undecodable_drawings(keep, part):
+        skipped["drawings NOT_ELEMENTARY"] = n
     return keep, {"n": len(samples), "used": len(keep), "skipped": skipped, "path": str(path)}
 
 

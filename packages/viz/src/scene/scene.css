@@ -1,0 +1,46 @@
+/* The scene views (SceneView): a title, the view of the scene's type, a provenance line. */
+.scene-view {
+  max-width: 1280px;
+}
+
+.scene-title {
+  margin: 0;
+}
+
+.scene-molecule-grid {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(280px, 1fr) minmax(260px, 360px);
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .scene-molecule-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.viz-3d {
+  position: relative;
+  min-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.viz-3d-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.viz-3d-note {
+  position: absolute;
+  inset: auto 8px 8px 8px;
+}
+
+.scene-iso {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

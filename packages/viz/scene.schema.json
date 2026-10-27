@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ksmech.org/schemas/scene-1.json",
+  "title": "ksmech scene, version 1",
+  "description": "One precomputed view of @ksmech/viz (packages/viz/src/scene/types.ts): a molecule, an elementary step or a mechanism network, with the data its views read, taken from the ksmech-serve API responses (apps/ui/src/api/types.gen.ts). Large payloads are assets next to the file. validateScene (src/scene/validate.ts) checks the same shape by hand, plus the ids that must point into the document. API objects allow more fields than listed: only what a view reads is required here.",
+  "type": "object",
+  "required": ["kind", "version", "scene", "provenance"],
+  "properties": {
+    "kind": { "const": "ksmech-scene" },
+    "version": { "const": 1 },
+    "scene": {
+      "oneOf": [{ "$ref": "#/$defs/moleculeScene" }, { "$ref": "#/$defs/stepScene" }, { "$ref": "#/$defs/networkScene" }]
+    },
+    "provenance": { "$ref": "#/$defs/provenance" }
+  },
+  "$defs": {
+    "int": { "type": "integer" },
+    "intList": { "type": "array", "items": { "type": "integer" } },
+    "numberOrNull": { "type": ["number", "null"] },
+    "stringList": { "type": "array", "items": { "type": "string" } },
+    "assetRef": {
+      "description": "A file next to the scene: path relative to the scene file (no scheme, no leading slash, no '..' or empty segment), its byte size and lowercase hex sha256.",
+      "type": "object",
+      "required": ["path", "bytes", "sha256", "media_type"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*:)(?!/)(?!.*\\\\)(?!(.*/)?\\.\\.(/|$))(?!.*//)(?!.*/$).+$" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "media_type": { "type": "string" }
+      }
+    },
+    "cubeAsset": {
+      "description": "A Gaussian cube: index is an orbital index (molecule) or an orbital token id (step).",
+      "type": "object",
+      "required": ["index", "asset"],
+      "properties": { "index": { "type": "integer" }, "asset": { "$ref": "#/$defs/assetRef" } }
+    },
+    "depiction": {
+      "description": "DepictionOut (GET /pool/{state}/depiction).",
+      "type": "object",
+      "required": ["ref", "molblock", "atoms"],
+      "properties": {
+        "ref": { "type": "string" },
+        "molblock": { "type": "string" },
+        "atoms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["depiction_idx", "pool_atom", "map", "element", "hidden_h_atoms"],
+            "properties": {
+              "depiction_idx": { "type": "integer" },
+              "pool_atom": { "type": "integer" },
+              "map": { "type": "integer" },
+              "element": { "type": "string" },
+              "hidden_h_atoms": { "$ref": "#/$defs/intList" }
+            }
+          }
+        }
+      }
+    },
+    "poolGeometry": {
+      "description": "GeometryOut (GET /pool/{state}/geometry): each species' molblock and display offset.",
+      "type": "object",
+      "required": ["species"],
+      "properties": {
+        "species": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["molblock", "display_offset"],
+            "properties": {
+              "molblock": { "type": "string" },
+              "display_offset": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+            }
+          }
+        }
+      }
+    },
+    "matrix": {
+      "description": "MatrixIO: bond changes [i, j, delta] and lone-pair changes [i, delta] on pool atoms.",
+      "type": "object",
+      "required": ["bonds", "lone"],
+      "properties": {
+        "bonds": { "type": "array", "items": { "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 } },
+        "lone": { "type": "array", "items": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 } }
+      }
+    },
+    "edge": {
+      "description": "The EdgeOut fields the step views read (the whole EdgeOut in a network).",
+      "type": "object",
+      "required": ["id", "kind", "source_mapped_smiles", "product_mapped_smiles", "matrix", "arrows", "readings", "score", "logp", "predictor", "product_smiles", "sigma_keys", "formal_charges"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["predicted", "corrected"] },
+        "source_state_id": { "type": "string" },
+        "product_state_id": { "type": "string" },
+        "source_mapped_smiles": { "type": "string" },
+        "product_mapped_smiles": { "type": "string" },
+        "matrix": { "$ref": "#/$defs/matrix" },
+        "anchor": { "type": ["object", "null"] },
+        "arrows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "source", "target"],
+            "properties": {
+              "kind": { "enum": ["lone_pair_to_bond", "bond_to_bond", "bond_to_lone_pair"] },
+              "source": { "$ref": "#/$defs/intList" },
+              "target": { "$ref": "#/$defs/intList" }
+            }
+          }
+        },
+        "readings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["i", "j", "donor_token", "acceptor_token", "g_atom", "g_rs", "term"],
+            "properties": {
+              "i": { "type": "integer" },
+              "j": { "type": "integer" },
+              "donor_token": { "type": "integer" },
+              "acceptor_token": { "type": "integer" },
+              "g_atom": { "type": "number" },
+              "g_rs": { "type": "number" },
+              "term": { "type": "number" }
+            }
+          }
+        },
+        "score": { "$ref": "#/$defs/numberOrNull" },
+        "logp": { "$ref": "#/$defs/numberOrNull" },
+        "predictor": { "type": "string" },
+        "rank": { "type": "integer" },
+        "product_smiles": { "$ref": "#/$defs/stringList" },
+        "sigma_keys": { "$ref": "#/$defs/stringList" },
+        "formal_charges": { "type": "array", "items": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 } }
+      }
+    },
+    "moleculeScene": {
+      "type": "object",
+      "required": ["type", "smiles", "molecule", "geometry", "orbitals", "cubes"],
+      "properties": {
+        "type": { "const": "molecule" },
+        "title": { "type": "string" },
+        "smiles": { "type": "string" },
+        "molecule": { "type": "object", "required": ["molecule_id"], "properties": { "molecule_id": { "type": "string" } } },
+        "geometry": {
+          "description": "MoleculeGeometryOut (GET /molecule/{id}/geometry).",
+          "type": "object",
+          "required": ["molblock", "atoms"],
+          "properties": { "molblock": { "type": "string" }, "atoms": { "type": "array" } }
+        },
+        "orbitals": {
+          "description": "The canonical OrbitalSetOut (GET /molecule/{id}/orbitals): set, start, source, homo_index, orbitals.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["set", "homo_index", "orbitals"],
+              "properties": {
+                "set": { "type": "string" },
+                "homo_index": { "type": ["integer", "null"] },
+                "orbitals": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["index", "kind", "occupation", "energy_ev"],
+                    "properties": {
+                      "index": { "type": "integer" },
+                      "kind": { "enum": ["occupied", "virtual"] },
+                      "occupation": { "type": "number" },
+                      "energy_ev": { "type": "number" }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "cubes": { "type": "array", "items": { "$ref": "#/$defs/cubeAsset" } },
+        "selected": { "type": ["integer", "null"] }
+      }
+    },
+    "stepScene": {
+      "type": "object",
+      "required": ["type", "edge", "probabilities", "source", "product"],
+      "properties": {
+        "type": { "const": "step" },
+        "title": { "type": "string" },
+        "edge": { "$ref": "#/$defs/edge" },
+        "probabilities": { "type": "boolean" },
+        "source": {
+          "type": "object",
+          "required": ["depiction", "geometry", "cubes"],
+          "properties": {
+            "depiction": { "$ref": "#/$defs/depiction" },
+            "geometry": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/poolGeometry" }] },
+            "cubes": { "type": "array", "items": { "$ref": "#/$defs/cubeAsset" } }
+          }
+        },
+        "product": {
+          "oneOf": [{ "type": "null" }, { "type": "object", "required": ["depiction"], "properties": { "depiction": { "$ref": "#/$defs/depiction" } } }]
+        },
+        "variants": { "type": "array", "items": { "enum": ["textbook", "animated", "orbital"] } }
+      }
+    },
+    "networkScene": {
+      "type": "object",
+      "required": ["type", "network"],
+      "properties": {
+        "type": { "const": "network" },
+        "title": { "type": "string" },
+        "network": {
+          "description": "NetworkOut (GET /jobs/{id} result).",
+          "type": "object",
+          "required": ["root", "nodes", "edges", "pathways", "scores_are_probabilities"],
+          "properties": {
+            "root": { "type": "string" },
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "display_smiles", "depth", "species"],
+                "properties": { "id": { "type": "string" }, "display_smiles": { "type": "string" }, "depth": { "type": "integer" }, "species": { "type": "array" } }
+              }
+            },
+            "edges": {
+              "type": "array",
+              "items": { "allOf": [{ "$ref": "#/$defs/edge" }, { "type": "object", "required": ["source", "target"], "properties": { "source": { "type": "string" }, "target": { "type": "string" } } }] }
+            },
+            "pathways": {
+              "type": "array",
+              "items": { "type": "object", "required": ["node_ids", "edge_ids"], "properties": { "node_ids": { "$ref": "#/$defs/stringList" }, "edge_ids": { "$ref": "#/$defs/stringList" } } }
+            },
+            "scores_are_probabilities": { "type": "boolean" }
+          }
+        },
+        "variant": { "enum": ["layered", "explorer"] }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["exporter", "exported_at", "server", "request", "notes"],
+      "properties": {
+        "exporter": { "type": "string" },
+        "exported_at": { "type": "string", "format": "date-time" },
+        "server": {
+          "description": "The server's versions (GET /api/meta): api_schema, app_version, spec_version, physics_fingerprint, chemistry, qm_method.",
+          "type": "object"
+        },
+        "request": { "type": "object" },
+        "predict": { "description": "The predict job's Provenance (step and network scenes).", "type": ["object", "null"] },
+        "notes": { "$ref": "#/$defs/stringList" }
+      }
+    }
+  }
+}

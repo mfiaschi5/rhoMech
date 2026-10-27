@@ -337,3 +337,76 @@ SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
 One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cache_path`,
 `status` (`ok` / `failed`), `reason` (a `ReasonCode`, empty when ok), `detail`, `warnings`,
 `seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`.
+
+## Serve workbench: `data/serve/workbench/`
+
+Display-only artifacts of the molecule workbench (`ksmech-serve`, `src/ksmech/serve`), written
+by the serve worker; never read by training or evaluation. `<sha>` is sha256[:32] of the JSON
+of the cache key named below; every key includes the QM record's content sha (sha256[:16] of
+the file bytes), the QM method, the workbench version constants and the oriented fingerprint.
+
+| Path | Content | Key |
+|---|---|---|
+| `molecules/<molecule_id>.json` | registry entry: `molecule_id`, `key` (unmapped canonical SMILES), `method`, `failure` (the last featurize error body, or null), `first_posted`, `last_posted`, `version` | `molecule_id = "m" + sha256("molecule-v1|" + key)[:20]` |
+| `orbitals/<sha>.npz` | the tokens of a non-model orbital set, the upstream token format with its provenance header (QM record input, `token_config(PMConfig(method, start))`) | key, set, start |
+| `orbitals/<sha>.json` | the rows of one orbital set (`OrbitalSetOut` without `molecule_id`) | key, set, start, the model token file's digest (model set only) |
+| `cubes/<sha>.cube` | Gaussian cube (bohr): two comment lines with kind, key, set, start, index, units, integral, expected value and notes | key, kind, set, start, index, quality or spacing, padding, the model token digest (model-set orbitals only) |
+| `cubes/<sha>.json` | the cube's metadata: request, units, integral, expected, notes, spacing, grid shape, origin, min, max | as the cube |
+| `properties/<sha>.json` | `MoleculePropertiesOut` without `molecule_id` and `geometry`; NaN written as null | key, the model token digest |
+## QMugs (encoder pretraining): `data/raw/qmugs/`
+
+Isert, Atz, Jiménez-Luna and Schneider, *Sci. Data* **9**, 273 (2022); CC BY-SA 4.0. Downloaded
+on 2026-10-26 from ETH's libdrive share `X5vOBNSITAG5vzM` (the links OpenQDC's loader uses):
+`summary.csv` (2,026,848,085 bytes) and `structures.tar.gz` (7,180,016,346 bytes), with their
+sha256 in `SHA256SUMS`. The wavefunctions (over 7 TB) and the spectra were not downloaded.
+Inspected from the real files:
+
+- `structures.tar.gz` holds `structures/<CHEMBL id>/conf_00.sdf`, `conf_01.sdf` and
+  `conf_02.sdf`, in ChEMBL-id order sorted as strings. Each is one V2000 molfile: the title
+  line `QMugs: Quantum Mechanical Properties of Drug-like Molecules`, every H explicit, Kekulé
+  bonds, the GFN2-xTB-optimized geometry in Angstrom.
+- Its SD tags, read from `CHEMBL1/conf_00.sdf`. Vectors are `|`-separated, per atom or per bond
+  in molfile order.
+  - `CHEMBL_ID` and `CONF_ID`.
+  - GFN2-xTB:
+    - energies: `GFN2:TOTAL_ENERGY`, `ATOMIC_ENERGY`, `FORMATION_ENERGY`, `TOTAL_ENTHALPY`,
+      `TOTAL_FREE_ENERGY`;
+    - `DIPOLE` (x, y, z, total), `QUADRUPOLE` (6) and `ROT_CONSTANTS` (3);
+    - `ENTHALPY`, `HEAT_CAPACITY` and `ENTROPY` (vib, rot, transl, total);
+    - `HOMO_ENERGY`, `LUMO_ENERGY`, `HOMO_LUMO_GAP` and `FERMI_LEVEL` (Hartree);
+    - per atom: `MULLIKEN_CHARGES`, `COVALENT_COORDINATION_NUMBER`,
+      `DISPERSION_COEFFICIENT_ATOMIC` and `POLARIZABILITY_ATOMIC`;
+    - `DISPERSION_COEFFICIENT_MOLECULAR` and `POLARIZABILITY_MOLECULAR`;
+    - `WIBERG_BOND_ORDER` (per bond) and `TOTAL_WIBERG_BOND_ORDER` (per atom).
+  - DFT (wB97X-D/def2-SVP):
+    - energies: `DFT:TOTAL_ENERGY`, `ATOMIC_ENERGY`, `FORMATION_ENERGY`, `XC_ENERGY`,
+      `NUCLEAR_REPULSION_ENERGY`, `ONE_ELECTRON_ENERGY` and `TWO_ELECTRON_ENERGY`;
+    - per atom: `ESP_AT_NUCLEI`, `LOWDIN_CHARGES` and `MULLIKEN_CHARGES`;
+    - `ROT_CONSTANTS` and `DIPOLE`;
+    - `HOMO_ENERGY`, `LUMO_ENERGY` and `HOMO_LUMO_GAP`;
+    - more below; the full list is in the files.
+- `summary.csv`: one row per conformer.
+  - Identity: `chembl_id`, `conf_id` (`conf_00` ...) and `smiles` (every H explicit, stereo).
+  - Descriptors: `mw`, `atoms`, `heavy_atoms`, `heteroatoms`, `rotatable_bonds`,
+    `stereocenters`, `rings`, `hbond_acceptors` and `hbond_donors`.
+  - Flags: `significant_negative_wavenumbers` and `nonunique_smiles`.
+  - The scalar GFN2 and DFT properties above, as `GFN2_*` and `DFT_*` columns.
+  - Measured on the `conf_00` rows: 664,303 molecules. 20,350 have a charge in their SMILES.
+    Median 30 heavy atoms, at most 100.
+
+### Single points: `data/cache/qmugs/qm/` and `data/processed/qmugs/qm_manifest.parquet`
+
+`ksmech-qm qmugs` (`qm.given`) runs GFN2-xTB at the QMugs geometry of each conformer, without
+re-optimizing (method `GFN2-xTB/ALPB-water/given`). Each record has the fields of the QM cache
+above, with the QMugs geometry as `coords_ang`. Its atoms are in the record order of the
+map-free canonical SMILES, not the molfile's: `data.qmugs.record_mol` maps them with
+`arrows.reactants.record_correspondence`.
+
+The manifest has one row per (`chembl_id`, `conformer_id`, `method`):
+- `chembl_id`, `conformer_id`, `smiles` (the canonical key) and `n_atoms`;
+- `cache_path`, `status` (`ok` / `failed`), `reason` and `detail`;
+- `warnings`, `seconds` and `method`.
+
+Two QMugs-specific reason codes: `SDF_UNREADABLE` (RDKit cannot read the molfile) and
+`RECORD_ORDER` (its atoms do not all map onto the record's). A geometry in which a bond of the
+Lewis structure is longer than 1.3 times the covalent radii is `CONNECTIVITY_CHANGED`.

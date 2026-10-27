@@ -1,0 +1,17 @@
+[
+  {
+    "file": "sn2-step.json",
+    "type": "step",
+    "title": "SN2: methoxide + chloromethane → dimethyl ether + chloride"
+  },
+  {
+    "file": "sn2-network.json",
+    "type": "network",
+    "title": "Methoxide + chloromethane: the floor predictor's network, two steps deep"
+  },
+  {
+    "file": "acrolein.json",
+    "type": "molecule",
+    "title": "Acrolein: frontier orbitals"
+  }
+]

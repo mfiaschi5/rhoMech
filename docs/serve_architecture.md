@@ -1,0 +1,156 @@
+# ksmech-serve: the service map
+
+`ksmech.serve` is the web add-on of the engine (`uv sync` installs it with the `serve` group;
+`uv sync --no-group serve` gives the engine alone). The engine never imports it
+(`tests/test_engine_boundary.py`). Inside, one process holds seventeen sub-packages; the compute
+runs in one spawned worker process. The HTTP contract is `docs/serve_v9_contract.md`; this page
+is the code map.
+
+## Layers
+
+```
+app ─────────────► pool  workbench  embedding  browse  curate  ml  (features: one router each,
+                     │       │          │         │       │         never one another)
+                     ▼       ▼          ▼         ▼       ▼
+runtime ◄── predict ◄── science ◄── chem ◄── compute ◄── core       (foundation: each layer may
+                                                                     import every layer to its right)
+depiction ──► core                                                  (pool, workbench, browse use it)
+ml ─────────► core                    (a feature on core alone: predict, runtime and the features
+                                       read its checkpoint listing, ml.checkpoints)
+accounts ───► core                    (users, sessions, quotas: core reaches them only through the
+                                       session lookup and the quota hook the app injects)
+ocr ────────► core                    (image to structure: its engine is a separate process in its
+                                       own environment, data/ocr/venv)
+content ────► core                    (the wiki: Markdown files rendered on the server)
+```
+
+A module-level import between sub-packages must follow these arrows
+(`tests/test_serve_layers.py`). Imports inside a function (to keep torch and the heavy
+chemistry out of the API process, or to break a cycle) and under `TYPE_CHECKING` are not
+checked.
+
+## The packages
+
+| Package | What it holds | Routes |
+|---|---|---|
+| `core` | settings (the profile, the tokens file), error codes, service contracts, the curation DB, cache keys, versions and the token / physics fingerprints, capabilities and profiles, the auth seam (`auth.py`: principals, roles, bearer tokens, `AuthGate`), the audit log (`audit.py`), the HTTP schemas (`schemas.py`, mirrored to `apps/ui/src/api/types.gen.ts`), the shared HTTP plumbing (`http.py`: `Services`, `Svc`, the path-id checks, the error envelope), test fakes | |
+| `compute` | the worker process (`worker.py`) and its scheduler (`procsched.py`) | |
+| `chem` | a pool's chemistry: normalization, featurization (QM, tokens, the sample), pool states, geometry, metal geometries, the Gaussian basis (`gto.py`, `data/sto_ng.json`), orbital cubes, token rows | |
+| `science` | the spec-v9 readings: G^atom, the arrow and orbital readings of R, B + R (`stepapply.py`), the step check, the edge step | |
+| `predict` | the predictors (floor, gbdt, network over `ksmech.model.decode`), the mechanism network, prediction jobs and expansion | `/predictors`, `/predict`, `/jobs/*`, `/step/check` |
+| `runtime` | the shared context of the services (`context.py`) and the task table the worker runs (`tasks.py`) | |
+| `pool` | the view of one pool state | `/normalize`, `/pools`, `/pool/*` |
+| `workbench` | the molecule workbench: molecules, orbital sets, densities, properties, point groups | `/molecule/*`, `/depict2d` |
+| `depiction` | 2D drawing: RDKit depictions, ring templates (`data/`), the gallery and its metrics | |
+| `embedding` | the embedding trace of a sample through a checkpoint, as a page | `/embedding/*` |
+| `browse` | the dataset browser: the PMechDB index, search, the step view | `/browse/*` |
+| `curate` | curated mechanisms, recheck, export | `/curate/*` |
+| `ml` | the local checkpoints (`checkpoints.py`, read without torch), the training runs and the physics / eval reports on disk (`runs.py`, passed through) | `/models`, `/ml/*` |
+| `accounts` | users and their OIDC identities, browser sessions, password hashes (stdlib scrypt), the OIDC client (`oidc.py`), the job quotas (`quotas.py`), the auth file (`config.py`); its own database `data/serve/accounts/accounts.sqlite` (`docs/accounts.md`) | `/auth/*`, `/admin/users*` |
+| `ocr` | optical structure recognition: upload checks and the PNG for the engine (`images.py`), the engine protocol and MolScribe behind a persistent JSON-lines worker (`engine.py`, `tools/ocr/ocr_worker.py`), RDKit's check of the answer and the drawn layout (`structure.py`), the install paths and the capability (`install.py`), `ocr-setup` (`provision.py`); `docs/ocr.md` | `/ocr` |
+| `content` | the wiki: page files with TOML front matter (`pages.py`), the markdown-it-py render with heading ids, `[[slug]]` links and scene figures (`render.py`), the mtime cache, search and `llms.txt` (`service.py`); pages in `content/wiki/`, format in `docs/wiki.md` | `/wiki`, `/wiki/{slug}`, `/wiki/llms.txt` |
+| `app` | the FastAPI app (`api.py`: error handlers, middleware, wiring, `/health`, `/meta`, `/whoami`), the `ksmech-serve` CLI, the static frontend | |
+
+## Profiles, roles and the audit log
+
+One codebase, two deployments (`KSMECH_SERVE_PROFILE`, `ksmech-serve run --profile`):
+
+- `lab` (the default): every capability. Without `KSMECH_SERVE_TOKENS` every request is the
+  local admin (the private lab behind an SSH tunnel), so the UI and the tests need no token.
+- `public` (the online platform): the workbench, predict and correct on user input. The
+  `browse`, `curate`, `curate_edit`, `curate_recheck`, `export`, `embedding` and `ml`
+  capabilities are not in the profile (`core.capabilities.PROFILES`): their routers answer 503
+  FEATURE_DISABLED "not in the public profile" before any service runs, `/api/meta` reports them
+  off, and the jobs of other kinds than predict / override / expand are JOB_NOT_FOUND. A request
+  without a token or a session is the anonymous reader; signing in (`serve.accounts`) or a
+  bearer token raises the role. A public deployment takes its own data root: the profile hides
+  the lab's routes, not the lab's files.
+
+A request's principal comes, in this order, from a bearer token (`KSMECH_SERVE_TOKENS`), a
+session cookie (`serve.accounts`: a local password or an OIDC provider), else the profile's
+anonymous principal. In `lab` a request without a session stays the local admin. Job
+submissions (`POST /predict`, `/jobs/{id}/expand`, `/embedding`, `/ocr`) are charged to the role's
+quota (per day and per minute, QUOTA_EXCEEDED 429); admins have none.
+
+The routes of a dataset, curation or ML package are gated as a whole router
+(`APIRouter(dependencies=[require(name)])`, or `admit(name)` where the routes of stored results
+stay readable while the feature is off). `tests/test_serve_access.py` walks every route of the
+public app: a route off its explicit allow-list must answer FEATURE_DISABLED, so a new route
+cannot leak by accident.
+
+Roles are reader < user < curator < admin (`core.auth`):
+
+| Capability / route | Public profile | Least role |
+|---|---|---|
+| health, meta, whoami, `/models`, pools (`/normalize`, `/pools`, `/pool/*`), job reads | yes | reader |
+| `workbench` (`/molecule/*`, `/depict2d`) | yes | reader |
+| `predict`: `GET /predictors` | yes | reader |
+| `predict`: `POST /predict`, `/jobs/{id}/expand`; `POST /jobs/{id}/cancel` | yes | user |
+| `correct`: `/jobs/{id}/override`, `/step/check` | yes | user |
+| `embedding`: stored traces / `POST /embedding` | no | reader / user |
+| `browse` (`POST /browse/index`: curator) | no | reader |
+| `curate` (reads) | no | reader |
+| `curate_edit`, `curate_recheck`, `export` | no | curator |
+| `ml` (`/ml/*`) | no | curator |
+| `ocr`: `GET /ocr` (the engine's status) / `POST /ocr` (one image; a job of the quota) | yes | reader / user |
+| `wiki` (`/wiki`, `/wiki/{slug}`, `/wiki/llms.txt`) | yes | reader |
+| `/auth/*` (sign-in, sign-out, `me`, password) | yes | anyone |
+| `/admin/users*` | yes | admin |
+
+`core.audit.AuditLog` appends one JSON line per non-GET request (time, request id, principal,
+method, route template, path, status) to `data/serve/logs/audit.jsonl`. The middlewares run, from
+the outside in: Host allow-list, gzip, request context (id, 500 envelope), audit log,
+same-origin guard, auth gate, the routes.
+
+## Rules
+
+- A route is thin: it checks its ids (`core.http.check_id`), calls one service function and
+  returns its value. A new service is a new sub-package with a `router.py`, added to
+  `app.api.ROUTERS` and to `FEATURES` in `tests/test_serve_layers.py`; a route meant for the
+  public profile also goes on `PUBLIC_ROUTES` in `tests/test_serve_access.py`.
+- Science that the engine also needs moves into the engine and serve imports it: the step
+  decoder already lives in `ksmech.model.decode` (`ksmech-eval decode` uses it on stored
+  samples). `science` is the next candidate (G^atom, the readings, B + R).
+- The token and physics fingerprints hash their files by path (`core/versions.py`); moving one
+  of those files changes the fingerprint once, and the caches it keys are recomputed on demand.
+
+## The frontend and its visualizations (`@ksmech/viz`)
+
+The web app is `apps/ui` (Vite + React, served from `apps/ui/dist` by the `app` package). Its
+visualizations live in the source package `packages/viz` (`@ksmech/viz`, README there): the 2D
+renderer and molfile reader, RDKit.js and 3Dmol.js wrappers, the step views (Textbook, Animated,
+Orbitals), the network views (Scheme, Pathways), the molecule viewer and the orbital level
+diagram. They take props only: `apps/ui` keeps the API client, the data hooks that call the
+routes above (`usePool`, `useStepSides`, `useOrbitalData`, the expansion of a network state) and
+hands the views plain values; `packages/viz/src/vizBoundary.test.ts` fails when anything under
+`packages/viz` imports the app, a package outside react / react-dom / RDKit.js / 3Dmol, or
+fetches outside the scene loader. The package is resolved by alias (`apps/ui/scripts/viz-alias.mjs`
+for Vite and node, `paths` in `apps/ui/tsconfig.json`); there is no separate install or build.
+
+Static pages (the educational wiki) draw the same views from **scenes**: versioned JSON documents
+(`{kind: "ksmech-scene", version: 1, scene: {type: molecule | step | network, ...}, provenance}`,
+`packages/viz/scene.schema.json`) that hold exactly the API responses a view needs, with orbital
+cubes as asset files referenced by relative path, size and sha256. `npm --prefix apps/ui run
+scene:export` writes one from a running server (`GET /jobs/{id}`, `/pool/{state}/depiction`,
+`/geometry`, `/orbital/{token}`; `POST /molecule`, `/molecule/{id}/geometry`, `/orbitals`,
+`/cube`), so reading a page never triggers QM compute. In the app, `#/scene?src=scenes/<file>`
+draws a scene with no API call at all (no shell, no `/api/meta`); the examples are in
+`apps/ui/public/scenes/` and `apps/ui/e2e/scene.spec.ts` checks them with every `/api/` request
+aborted.
+
+### ChemRho: the sections of the app
+
+The UI calls itself **ChemRho** (brand, `<title>`, exported image metadata); the Python package,
+the CLIs, the code identifiers, the test ids and `@ksmech/viz` keep the name ksmech. The nav
+(`apps/ui/src/registry.ts` `NAV_SECTIONS`, drawn by `App.tsx`) has four sections; page ids and
+routes are unchanged, and the section names are hash aliases (`router.ts` `PAGE_ALIASES`):
+
+| Section | Pages (routes) | Alias | What it is |
+|---|---|---|---|
+| ChemPtah | `workbench` (`#/workbench`) | `#/chemptah` | the 2D sketcher (ChemDraw-like hotkeys, fixed lengths and angles, image import by OCR through `POST /api/ocr`), 3D structure and orbitals |
+| ClotoMech | `predict`, `correct`, `curate` | `#/clotomech` (= `#/predict`) | mechanisms; a second tab row (`subnav-<page>`) while one of the three is open, capability greying per tab |
+| ChemThot | `browse` (`#/browse`) | `#/chemthot` | the mechanism databases (PMechDB, curated steps) |
+| Wiki | `wiki` (`#/wiki`, `#/wiki/<slug>`) | | `GET /api/wiki`, `/api/wiki/{slug}`: server-rendered pages whose `<figure class="wiki-scene" data-scene-src>` are hydrated with the scene viewer (`apps/ui/src/components/SceneEmbed.tsx`, shared with `#/scene`) |
+
+The OCR and wiki types are written by hand in `apps/ui/src/api/ocr.ts` and `api/wiki.ts` to the
+backend contract until `types.gen.ts` carries them.

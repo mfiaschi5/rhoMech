@@ -1,0 +1,956 @@
+/* Predict and Correct pages: feature-local styles on the shared tokens of src/styles.css.
+   Hand-written; no CSS framework. */
+
+/* ---- form fields */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field-hint {
+  font-size: 11px;
+}
+
+.field-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+input.invalid,
+input[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+input[type="number"] {
+  width: 110px;
+}
+
+.smiles-input input[type="text"] {
+  width: 200px;
+  font-family: var(--mono);
+}
+
+.pv-form .field input[type="text"][data-testid="predict-conditions"] {
+  width: min(520px, 100%);
+}
+
+.reactant-row {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.preflight {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  max-width: 460px;
+  font-size: 12px;
+}
+
+.preflight-species {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.pv-predictor select {
+  min-width: 220px;
+  max-width: 100%;
+}
+
+.pv-unavailable {
+  font-size: 12px;
+  max-width: 640px;
+  overflow-wrap: anywhere;
+}
+
+.pv-recent {
+  margin: 0;
+  padding-left: 18px;
+}
+
+/* ---- job progress */
+
+.job-head,
+.job-header {
+  align-items: center;
+}
+
+.job-header h2 {
+  margin: 0;
+}
+
+.job-status-done {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.job-status-failed,
+.job-status-cancelled {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.job-status-running,
+.job-status-queued {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.progress-track {
+  height: 6px;
+  margin: 8px 0 4px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.progress-fill.indeterminate {
+  animation: progress-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.job-counts {
+  font-size: 12px;
+}
+
+.banner-ok {
+  background: var(--panel-2);
+  border-color: var(--ok);
+}
+
+/* ---- job view layout: the drawer has its own column and never covers the page */
+
+
+/* ---- network */
+
+.network-view {
+  position: relative;
+  width: 100%;
+  min-height: 300px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.network-legend-panel {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px 0 0;
+}
+
+.network-legend-panel > summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.network-legend,
+.pathway-list,
+.pv-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.legend-item {
+  border-left: 3px solid transparent;
+  border-radius: var(--radius);
+}
+
+.legend-button {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.legend-button:hover {
+  border-color: var(--accent);
+}
+
+.legend-button[aria-pressed="true"] {
+  border-color: var(--arrow-selected);
+  box-shadow: 0 0 0 1px var(--arrow-selected);
+}
+
+.legend-kind {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 2.5em;
+}
+
+.legend-main {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.legend-prob {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.legend-node.in-pathway,
+.legend-edge.in-pathway,
+.pathway-item.selected {
+  border-left-color: var(--accent);
+}
+
+.legend-node.status-failed .legend-button {
+  border-color: var(--error);
+}
+
+.legend-node.status-pruned .legend-button {
+  border-style: dashed;
+}
+
+.legend-status.status-failed {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.legend-status.status-terminal {
+  border-color: var(--cycle);
+  color: var(--cycle);
+}
+
+.legend-edge.kind-corrected .legend-button {
+  border-color: var(--corrected);
+  border-width: 2px;
+}
+
+.legend-edge.kind-corrected .legend-kind {
+  color: var(--corrected);
+  font-weight: 700;
+}
+
+.legend-edge.edge-superseded .legend-button {
+  border-style: dotted;
+  opacity: 0.6;
+}
+
+.legend-cycle {
+  border-color: var(--cycle);
+  color: var(--cycle);
+}
+
+.legend-cycle-item {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 6px;
+  color: var(--muted);
+}
+
+.badge-corrected {
+  border-color: var(--corrected);
+  color: var(--corrected);
+  font-weight: 600;
+}
+
+.legend-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.key {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 3px solid var(--muted);
+  margin-left: 6px;
+}
+
+.key-corrected {
+  border-top: 4px solid var(--corrected);
+}
+
+.key-superseded {
+  border-top: 3px dotted var(--superseded);
+}
+
+.key-turnover {
+  border-top: 2px dashed var(--turnover);
+}
+
+.key-cycle {
+  border-top: 3px solid var(--cycle);
+}
+
+/* ---- pathways */
+
+.pathway-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-left: 3px solid transparent;
+}
+
+.pathway-item .legend-button {
+  flex: 1;
+}
+
+
+/* the workbench's property table rows (PropertyTabs) rely on this shared rule */
+.kv-row {
+  display: contents;
+}
+
+/* ---- spec-v9 pages: panels like the workbench's (compact head, wrapping tools) */
+
+.pv-page {
+  min-width: 0;
+}
+
+.pv-page h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.pv-panel {
+  padding: 8px 12px 10px;
+  min-width: 0;
+}
+
+.pv-panel + .pv-panel,
+.pv-side .pv-panel + .pv-panel {
+  margin-top: 0;
+}
+
+.pv-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  margin: -2px 0 6px;
+}
+
+.pv-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 4px;
+}
+
+.pv-note {
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.pv-tools {
+  margin-left: auto;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pv-body {
+  min-width: 0;
+}
+
+.pv-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.pv-inline-row {
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.pv-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.pv-wrap {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.pv-link-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.pv-smiles-field {
+  max-width: 100%;
+}
+
+.pv-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ---- job view */
+
+.pv-job-header h2 {
+  margin: 0;
+}
+
+.pv-job-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(250px, 1fr);
+  gap: var(--gap);
+  align-items: stretch;
+}
+
+/* the pathway list takes the network panel's height and scrolls inside it */
+.pv-side-fill {
+  position: relative;
+  min-width: 0;
+}
+
+.pv-side-fill > .pv-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pv-side-fill > .pv-panel > .pv-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pv-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pv-path-button {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap !important;
+  padding: 2px 6px;
+}
+
+.pv-path-rank {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 2.4em;
+}
+
+.pv-path-main {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pv-path-score {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.pv-path-curate {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .pv-job-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pv-side-fill > .pv-panel {
+    position: static;
+    max-height: 50vh;
+  }
+}
+
+.pv-pathways-panel .pathway-item {
+  flex-direction: column;
+  align-items: stretch;
+  padding-left: 4px;
+}
+
+.pv-pathways-panel .pathway-list {
+  gap: 2px;
+}
+
+.pv-steps {
+  margin: 4px 0 4px 12px;
+}
+
+.pv-step.selected {
+  border-color: var(--arrow-selected);
+}
+
+/* ---- step view: the pool with R, then the product */
+
+.pv-step-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) auto minmax(0, 2fr);
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .pv-step-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pv-step-arrow {
+    display: none;
+  }
+}
+
+.pv-step-arrow {
+  align-self: center;
+  font-size: 28px;
+  color: var(--muted);
+}
+
+.pv-product {
+  min-width: 0;
+  gap: 4px;
+}
+
+.pv-product .smiles-depiction {
+  max-width: 100%;
+  background: var(--depiction-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pv-product .smiles-depiction svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.pv-product-empty {
+  padding: 16px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.pv-arrow-list {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 12px;
+}
+
+/* ---- the pool canvas (the sketch renderer) and its R layer */
+
+.pv-canvas {
+  --pv-form: #1f9d55;
+  --pv-break: #d0342c;
+  --pv-arrow: #c0362c;
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+
+.pv-canvas > .sketch-svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.pv-canvas-placeholder {
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.pv-layer {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.pv-layer.pv-tool-bond,
+.pv-layer.pv-tool-lone,
+.pv-layer.pv-tool-eraser {
+  cursor: pointer;
+}
+
+.pv-layer.pv-tool-arrow {
+  cursor: crosshair;
+}
+
+/* the marks never take the pointer (the layer's hit testing is geometric); only an arrow's hit
+   stroke does, with the eraser */
+.pv-overlay {
+  pointer-events: none;
+}
+
+.pv-hits circle {
+  fill: transparent;
+  stroke: none;
+}
+
+.pv-hit-atom:hover {
+  fill: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.pv-form-line {
+  stroke: var(--pv-form);
+  stroke-width: 2.2;
+  stroke-dasharray: 5 3.5;
+  stroke-linecap: round;
+}
+
+.pv-break-line {
+  stroke: var(--pv-break);
+  stroke-width: 4;
+  opacity: 0.45;
+  stroke-linecap: round;
+}
+
+.pv-cross {
+  stroke: var(--pv-break);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.pv-rbond.pv-selected .pv-form-line,
+.pv-rbond.pv-selected .pv-break-line {
+  stroke-width: 5;
+  opacity: 0.8;
+}
+
+.pv-mark-text {
+  font-size: 11px;
+  font-weight: 700;
+  fill: var(--pv-break);
+}
+
+.pv-badge rect {
+  stroke-width: 1.2;
+  fill: var(--panel);
+}
+
+.pv-badge text {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pv-badge.pv-form rect {
+  stroke: var(--pv-form);
+}
+
+.pv-badge.pv-form text {
+  fill: var(--pv-form);
+}
+
+.pv-badge.pv-break rect {
+  stroke: var(--pv-break);
+}
+
+.pv-badge.pv-break text {
+  fill: var(--pv-break);
+}
+
+.pv-badge.pv-selected rect {
+  stroke-width: 2.5;
+}
+
+.pv-charge circle {
+  fill: var(--panel);
+  stroke: var(--accent);
+  stroke-width: 1.2;
+}
+
+.pv-charge text {
+  font-size: 11px;
+  font-weight: 700;
+  fill: var(--accent);
+}
+
+.pv-halo {
+  fill: color-mix(in srgb, #f2c200 35%, transparent);
+  stroke: #d8a800;
+  stroke-width: 1.5;
+}
+
+.pv-pending {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 3 2;
+}
+
+.pv-arrow-line {
+  fill: none;
+  stroke: var(--pv-arrow);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.pv-arrow-head {
+  fill: var(--pv-arrow);
+}
+
+.pv-arrow-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: none;
+}
+
+.pv-tool-eraser .pv-arrow-hit {
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.pv-tool-eraser .pv-arrow:hover .pv-arrow-line {
+  stroke-width: 3;
+}
+
+.pv-arrows.pv-faded {
+  opacity: 0.4;
+}
+
+.pv-drag {
+  stroke: var(--pv-arrow);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+
+/* ---- correct page */
+
+.pv-correct-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .pv-correct-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.pv-side {
+  min-width: 0;
+}
+
+.pv-toolbar {
+  align-items: center;
+  gap: 6px 14px;
+}
+
+.pv-tgroup {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.pv-toolbar kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.pv-notice {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pv-entries select {
+  padding: 1px 4px;
+}
+
+.pv-atom-input {
+  width: 3.6em;
+  padding: 2px 4px;
+  margin-right: 4px;
+}
+
+.pv-row-selected td {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.pv-issues {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.pv-issues li:hover {
+  background: color-mix(in srgb, #f2c200 25%, transparent);
+}
+
+.pv-charges {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.pv-check-ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.pv-check-issues,
+.pv-check-error {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.pv-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.pv-crumb {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pv-crumb a {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pv-crumb a[aria-current="page"] {
+  font-weight: 700;
+}
+
+.pv-crumb-sep {
+  color: var(--muted);
+}
+
+.pv-crumb-edit {
+  color: var(--corrected);
+}
+
+/* ---- dialogs and the 3D orbital view */
+
+.pv-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 5vh 16px;
+  background: color-mix(in srgb, #000 40%, transparent);
+  overflow-y: auto;
+}
+
+.pv-modal {
+  width: min(760px, 100%);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.pv-modal-wide {
+  width: min(1100px, 100%);
+}
+
+.pv-modal-body {
+  min-width: 0;
+}
+
+.pv-modal-footer {
+  margin-top: 10px;
+  align-items: center;
+}
+
+.pv-viewer {
+  position: relative;
+  width: 100%;
+  height: 460px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.pv-viewer-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.pv-viewer-note {
+  position: absolute;
+  inset: auto 8px 8px;
+}
+
+.pv-small {
+  font-size: 12px;
+}
+
+.pv-readings-pending {
+  color: var(--warn);
+}

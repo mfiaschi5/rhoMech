@@ -1,0 +1,492 @@
+{
+ "kind": "ksmech-scene",
+ "version": 1,
+ "scene": {
+  "type": "step",
+  "title": "SN2: methoxide + chloromethane → dimethyl ether + chloride",
+  "edge": {
+   "id": "e1f5c1328d8a9d330",
+   "kind": "predicted",
+   "source_state_id": "s187ab3f19a88fa83ed9a",
+   "product_state_id": "s9e72f4c950615f13820b",
+   "source_mapped_smiles": "[C:1]([O-:2])([H:3])([H:4])[H:5].[C:6]([Cl:7])([H:8])([H:9])[H:10]",
+   "product_mapped_smiles": "[C:1]([O:2][C:6]([H:8])([H:9])[H:10])([H:3])([H:4])[H:5].[Cl-:7]",
+   "matrix": {
+    "bonds": [
+     [
+      1,
+      5,
+      1
+     ],
+     [
+      5,
+      6,
+      -1
+     ]
+    ],
+    "lone": [
+     [
+      1,
+      -2
+     ],
+     [
+      6,
+      2
+     ]
+    ]
+   },
+   "anchor": {
+    "i": 1,
+    "j": 5,
+    "sign": "form"
+   },
+   "arrows": [
+    {
+     "kind": "lone_pair_to_bond",
+     "source": [
+      1
+     ],
+     "target": [
+      1,
+      5
+     ]
+    },
+    {
+     "kind": "bond_to_lone_pair",
+     "source": [
+      5,
+      6
+     ],
+     "target": [
+      6
+     ]
+    }
+   ],
+   "readings": [
+    {
+     "i": 1,
+     "j": 5,
+     "g_atom": -1.2801494233795143,
+     "donor_token": 16,
+     "acceptor_token": 28,
+     "g_rs": -0.35124063705199843,
+     "term": -0.21902674933725186,
+     "donor_diag": "lone_pair(O)",
+     "acceptor_diag": "sigma_star(C-Cl)",
+     "canonical": {
+      "k": 6,
+      "m": 7,
+      "e_k_ev": -8.547926067737887,
+      "e_m_ev": -4.212112412174601,
+      "k_label": "HOMO",
+      "m_label": "LUMO",
+      "term": -0.2787913498219227,
+      "share": 0.7937331857778455,
+      "index_source": "qm_occupations"
+     }
+    }
+   ],
+   "score": 1.2801494233795143,
+   "logp": null,
+   "predictor": "floor",
+   "rank": 1,
+   "product_smiles": [
+    "COC",
+    "[Cl-]"
+   ],
+   "sigma_keys": [
+    "[CH3][O][CH3]|0",
+    "[Cl]|-1"
+   ],
+   "formal_charges": [
+    [
+     1,
+     0
+    ],
+    [
+     5,
+     0
+    ],
+    [
+     6,
+     -1
+    ]
+   ]
+  },
+  "probabilities": false,
+  "source": {
+   "depiction": {
+    "ref": "s187ab3f19a88fa83ed9a",
+    "molblock": "\n     RDKit          2D\n\n  4  2  0  0  0  0  0  0  0  0999 V2000\n   -0.5000   -0.5000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    0.5000   -0.5000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.5000    0.5000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    0.5000    0.5000    0.0000 Cl  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  3  4  1  0\nM  CHG  1   2  -1\nM  END\n",
+    "atoms": [
+     {
+      "depiction_idx": 0,
+      "pool_atom": 0,
+      "hidden_h_atoms": [
+       2,
+       3,
+       4
+      ],
+      "global_site": 0,
+      "map": 1,
+      "element": "C",
+      "fragment": 0,
+      "hidden_h": 3
+     },
+     {
+      "depiction_idx": 1,
+      "pool_atom": 1,
+      "hidden_h_atoms": [],
+      "global_site": 1,
+      "map": 2,
+      "element": "O",
+      "fragment": 0,
+      "hidden_h": 0
+     },
+     {
+      "depiction_idx": 2,
+      "pool_atom": 5,
+      "hidden_h_atoms": [
+       7,
+       8,
+       9
+      ],
+      "global_site": 5,
+      "map": 6,
+      "element": "C",
+      "fragment": 1,
+      "hidden_h": 3
+     },
+     {
+      "depiction_idx": 3,
+      "pool_atom": 6,
+      "hidden_h_atoms": [],
+      "global_site": 6,
+      "map": 7,
+      "element": "Cl",
+      "fragment": 1,
+      "hidden_h": 0
+     }
+    ],
+    "server_svg": null,
+    "server_coords": null
+   },
+   "geometry": {
+    "state_id": "s187ab3f19a88fa83ed9a",
+    "species": [
+     {
+      "fragment": 0,
+      "token_key": "C[O-]",
+      "species_key": "[CH3][O]|-1",
+      "atoms": [
+       {
+        "global_site": 0,
+        "record_index": 0,
+        "map": 1,
+        "Z": 6,
+        "symbol": "C",
+        "x": 0.010180603749612091,
+        "y": -0.001016890492062666,
+        "z": 0.0008822009856895193
+       },
+       {
+        "global_site": 1,
+        "record_index": 1,
+        "map": 2,
+        "Z": 8,
+        "symbol": "O",
+        "x": 1.3192927494880562,
+        "y": -0.13138427019295423,
+        "z": 0.11311370055423105
+       },
+       {
+        "global_site": 2,
+        "record_index": 2,
+        "map": 3,
+        "Z": 1,
+        "symbol": "H",
+        "x": -0.31052406244019803,
+        "y": 0.9285539642225394,
+        "z": -0.5575655602764246
+       },
+       {
+        "global_site": 3,
+        "record_index": 3,
+        "map": 4,
+        "Z": 1,
+        "symbol": "H",
+        "x": -0.4887878945464775,
+        "y": -0.853963391090941,
+        "z": -0.5489442721181385
+       },
+       {
+        "global_site": 4,
+        "record_index": 4,
+        "map": 5,
+        "Z": 1,
+        "symbol": "H",
+        "x": -0.5301613962510017,
+        "y": 0.057810587553420126,
+        "z": 0.9925139308546428
+       }
+      ],
+      "bonds": [
+       [
+        0,
+        1,
+        1
+       ],
+       [
+        0,
+        2,
+        1
+       ],
+       [
+        0,
+        3,
+        1
+       ],
+       [
+        0,
+        4,
+        1
+       ]
+      ],
+      "xyz": "5\nC[O-] charge=-1 mult=1 method=GFN2-xTB/ALPB-water/tblite-lbfgs warnings=none\nC 0.010181 -0.001017 0.000882\nO 1.319293 -0.131384 0.113114\nH -0.310524 0.928554 -0.557566\nH -0.488788 -0.853963 -0.548944\nH -0.530161 0.057811 0.992514\n",
+      "molblock": "\n     RDKit          3D\n\n  5  4  0  0  0  0  0  0  0  0999 V2000\n    0.0102   -0.0010    0.0009 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.3193   -0.1314    0.1131 O   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.3105    0.9286   -0.5576 H   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.4888   -0.8540   -0.5489 H   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.5302    0.0578    0.9925 H   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  1  3  1  0\n  1  4  1  0\n  1  5  1  0\nM  CHG  1   2  -1\nM  END\n",
+      "display_offset": [
+       0,
+       0,
+       0
+      ],
+      "frame_note": "the record frame of this species' own QM run (Angstrom); frames of separate runs are unrelated, so display_offset only lays the fragments out side by side"
+     },
+     {
+      "fragment": 1,
+      "token_key": "CCl",
+      "species_key": "[CH3][Cl]|0",
+      "atoms": [
+       {
+        "global_site": 5,
+        "record_index": 0,
+        "map": 6,
+        "Z": 6,
+        "symbol": "C",
+        "x": -0.16073085996300868,
+        "y": 0.004667518887355189,
+        "z": 0.0020576198821139905
+       },
+       {
+        "global_site": 6,
+        "record_index": 1,
+        "map": 7,
+        "Z": 17,
+        "symbol": "Cl",
+        "x": 1.630489792132619,
+        "y": -0.0474122692557502,
+        "z": -0.02072721363357819
+       },
+       {
+        "global_site": 7,
+        "record_index": 2,
+        "map": 8,
+        "Z": 1,
+        "symbol": "H",
+        "x": -0.49255149231817374,
+        "y": -0.4736583864947893,
+        "z": 0.916253289766786
+       },
+       {
+        "global_site": 8,
+        "record_index": 3,
+        "map": 9,
+        "Z": 1,
+        "symbol": "H",
+        "x": -0.5169018295812534,
+        "y": -0.5294777534802793,
+        "z": -0.8711931311541317
+       },
+       {
+        "global_site": 9,
+        "record_index": 4,
+        "map": 10,
+        "Z": 1,
+        "symbol": "H",
+        "x": -0.46030561027018746,
+        "y": 1.0458808903434635,
+        "z": -0.026390564861188594
+       }
+      ],
+      "bonds": [
+       [
+        0,
+        1,
+        1
+       ],
+       [
+        0,
+        2,
+        1
+       ],
+       [
+        0,
+        3,
+        1
+       ],
+       [
+        0,
+        4,
+        1
+       ]
+      ],
+      "xyz": "5\nCCl charge=0 mult=1 method=GFN2-xTB/ALPB-water/tblite-lbfgs warnings=none\nC -0.160731 0.004668 0.002058\nCl 1.630490 -0.047412 -0.020727\nH -0.492551 -0.473658 0.916253\nH -0.516902 -0.529478 -0.871193\nH -0.460306 1.045881 -0.026391\n",
+      "molblock": "\n     RDKit          3D\n\n  5  4  0  0  0  0  0  0  0  0999 V2000\n   -0.1607    0.0047    0.0021 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.6305   -0.0474   -0.0207 Cl  0  0  0  0  0  0  0  0  0  0  0  0\n   -0.4926   -0.4737    0.9163 H   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.5169   -0.5295   -0.8712 H   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.4603    1.0459   -0.0264 H   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  1  3  1  0\n  1  4  1  0\n  1  5  1  0\nM  END\n",
+      "display_offset": [
+       4.83619457906931,
+       0,
+       0
+      ],
+      "frame_note": "the record frame of this species' own QM run (Angstrom); frames of separate runs are unrelated, so display_offset only lays the fragments out side by side"
+     }
+    ]
+   },
+   "cubes": [
+    {
+     "index": 16,
+     "asset": {
+      "path": "sn2-step/orbital-16.cube",
+      "bytes": 68099,
+      "sha256": "a25d4bc41fe1a2509b2f4e67d1b8cc74b888233ac92001850e3063a4a4dd6920",
+      "media_type": "chemical/x-cube"
+     }
+    },
+    {
+     "index": 28,
+     "asset": {
+      "path": "sn2-step/orbital-28.cube",
+      "bytes": 122460,
+      "sha256": "f1707b83390b54b3e46372095fbfb5ce8c5b08ad85337ff8859fe6796718f3a7",
+      "media_type": "chemical/x-cube"
+     }
+    }
+   ]
+  },
+  "product": {
+   "depiction": {
+    "ref": "s9e72f4c950615f13820b",
+    "molblock": "\n     RDKit          2D\n\n  4  2  0  0  0  0  0  0  0  0999 V2000\n   -0.8666    0.0865    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    0.0012    0.5833    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0\n    0.8654    0.0801    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.0000   -0.7500    0.0000 Cl  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  2  3  1  0\nM  CHG  1   4  -1\nM  END\n",
+    "atoms": [
+     {
+      "depiction_idx": 0,
+      "pool_atom": 0,
+      "hidden_h_atoms": [
+       6,
+       7,
+       8
+      ],
+      "global_site": 0,
+      "map": 1,
+      "element": "C",
+      "fragment": 0,
+      "hidden_h": 3
+     },
+     {
+      "depiction_idx": 1,
+      "pool_atom": 1,
+      "hidden_h_atoms": [],
+      "global_site": 1,
+      "map": 2,
+      "element": "O",
+      "fragment": 0,
+      "hidden_h": 0
+     },
+     {
+      "depiction_idx": 2,
+      "pool_atom": 2,
+      "hidden_h_atoms": [
+       3,
+       4,
+       5
+      ],
+      "global_site": 2,
+      "map": 6,
+      "element": "C",
+      "fragment": 0,
+      "hidden_h": 3
+     },
+     {
+      "depiction_idx": 3,
+      "pool_atom": 9,
+      "hidden_h_atoms": [],
+      "global_site": 9,
+      "map": 7,
+      "element": "Cl",
+      "fragment": 1,
+      "hidden_h": 0
+     }
+    ],
+    "server_svg": null,
+    "server_coords": null
+   }
+  }
+ },
+ "provenance": {
+  "exporter": "ksmech scene-export 1",
+  "exported_at": "2026-10-27T17:36:42.909Z",
+  "server": {
+   "api_schema": 1,
+   "app_version": "0.1.0",
+   "spec_version": "v9+4d2aa237f885;tok9;smp17;qm1",
+   "physics_fingerprint": "72d7947e1dd5",
+   "chemistry": "real",
+   "qm_method": "GFN2-xTB/ALPB-water/tblite-lbfgs"
+  },
+  "request": {
+   "type": "step",
+   "job": "j4183047bae41b2e4",
+   "edge": "e1f5c1328d8a9d330",
+   "name": "sn2-step",
+   "title": "SN2: methoxide + chloromethane → dimethyl ether + chloride"
+  },
+  "predict": {
+   "predictor": "floor",
+   "predictor_version": "floor/g-atom/72d7947e1dd5",
+   "checkpoint_hash": null,
+   "checkpoint": null,
+   "spec_version": "v9+4d2aa237f885;tok9;smp17;qm1",
+   "physics_fingerprint": "72d7947e1dd5",
+   "artifact_versions": {
+    "tokens": 9,
+    "samples": 17,
+    "qm": 1,
+    "qm_method": "GFN2-xTB/ALPB-water/tblite-lbfgs"
+   },
+   "chemistry": "real",
+   "ks_params": {
+    "K": 1.75,
+    "eps": 4
+   },
+   "temperature": 1,
+   "candidate_scope": "all",
+   "candidate_config": {
+    "allow_d_acceptors": false,
+    "full": 1.5,
+    "empty": 0.5,
+    "exclude_fractional": true,
+    "fractional_band": [
+     0.2,
+     1.8
+    ],
+    "site_weight": 0.2
+   },
+   "notes": [
+    "the floor and gbdt have no END_MECH head: prediction stops at max_steps, a turnover or an empty frontier, never by a learned stop",
+    "scores rank candidates; they are not probabilities"
+   ]
+  },
+  "notes": [
+   "orbital cubes of GET /pool/{state}/orbital/{token} at spacing 0.35 Å, padding 2.5 Å",
+   "the predicted step only: alternatives with the same product need POST /step/check and are left out"
+  ]
+ }
+}

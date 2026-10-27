@@ -71,10 +71,21 @@ def test_the_best_epoch_line_ends_the_watch_and_errors_are_shown():
 
 def test_the_tails_run_over_ssh_or_locally():
     args = argparse.Namespace(
-        run="r", source="pmechdb", local=False, host="root@h", port=22, key="~/k", repo="/w"
+        run="r", source="pmechdb", local=False, host="root@h", port=2222, key="~/k", repo="/w"
     )
-    cmd = wt.tail_command(args)
-    assert cmd[:3] == ["ssh", "-p", "22"] and cmd[-2] == "root@h"
+    cmd, typed = wt.tail_command(args)
+    assert cmd[0] == "ssh" and cmd[-4:-1] == ["-p", "2222", "root@h"] and typed == ""
     assert "/w/data/models/pmechdb/r/metrics.jsonl" in cmd[-1] and "read -r _; kill 0" in cmd[-1]
+    args.host = "pod-1@ssh.runpod.io"  # the proxy takes terminal sessions only
+    cmd, typed = wt.tail_command(args)
+    assert cmd[-2:] == ["-tt", "pod-1@ssh.runpod.io"] and "-p" not in cmd
+    assert typed.startswith("stty -echo; tail ") and typed.endswith("kill 0\n")
     args.local = True
-    assert wt.tail_command(args)[:2] == ["bash", "-c"]
+    assert wt.tail_command(args)[0][:2] == ["bash", "-c"]
+
+
+def test_a_terminal_sessions_escape_codes_are_stripped():
+    w, screen, out = _watch()
+    wt.handle("\x1b[?2004h\x1b]0;root@pod: /\x07" + _metrics(0, 0.3, 5.0) + "\r", w, screen)
+    wt.handle(STEP.format(m="28", s=5400) + "\r", w, screen)
+    assert w.seen == {1} and w.step is not None

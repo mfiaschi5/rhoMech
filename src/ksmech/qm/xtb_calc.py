@@ -1,5 +1,10 @@
 """`GFN2Calculator`: optimize, single point, descriptors and sterics for one conformer.
 
+With `QMConfig.given_geometry` the conformer's geometry is taken as it is (a dataset's own
+GFN2-xTB optimization, e.g. QMugs): no optimization, only a check that every bond of the Lewis
+structure is still a bond there, then the same single point, N+-1 Fukui and sterics. Its method
+string ends in `given`, so those records never share a cache key with optimized ones.
+
 Charge and multiplicity come from RDKit: total charge = sum of formal charges, unpaired electrons
 = sum of radical electrons. tblite runs open-shell systems restricted with fractional occupations
 (no spin polarization), so the SOMO of a doublet has occupation 1.
@@ -47,6 +52,7 @@ class QMConfig:
     wall_factor: float = 1.2  # walls start at this x r_cov sum
     wall_k: float = 1.0  # Hartree / Bohr^2
     cache_dir: Path = DEFAULT_CACHE_DIR
+    given_geometry: bool = False  # single points at the conformer's own geometry, no optimizer
 
     def __post_init__(self) -> None:
         if self.optimizer not in _OPTIMIZERS:
@@ -57,7 +63,7 @@ class QMConfig:
         """Part of the cache key: results from different backends must not collide."""
         medium = f"ALPB-{self.solvent}" if self.solvent else "gas"
         opt = "tblite-lbfgs" if self.optimizer == "tblite" else "xtb-opt"
-        return f"GFN2-xTB/{medium}/{opt}"
+        return f"GFN2-xTB/{medium}/{'given' if self.given_geometry else opt}"
 
 
 @dataclass
@@ -169,7 +175,11 @@ class GFN2Calculator:
         z = np.array([a.GetAtomicNum() for a in mol.GetAtoms()], dtype=np.int32)
         start = mol.GetConformer(conf_id).GetPositions() / BOHR_ANG
         charge, unpaired = resolve_charge_spin(mol)
-        xyz_bohr, restrained = self._relax(mol, z, start, charge, unpaired)
+        if self.config.given_geometry:
+            check_connectivity(mol, start * BOHR_ANG, self.config.conn_cov_factor)
+            xyz_bohr, restrained = start, False
+        else:
+            xyz_bohr, restrained = self._relax(mol, z, start, charge, unpaired)
         xyz_ang = xyz_bohr * BOHR_ANG
         res = _single_point(
             z, xyz_bohr, charge, unpaired, self.config.solvent, True, self.config.scf_maxiter

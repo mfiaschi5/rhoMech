@@ -1,0 +1,107 @@
+/* @ksmech/viz colour tokens (light + dark), moved from apps/ui/src/styles.css: the views of the
+   package and the app read these custom properties. A page that embeds the views imports this
+   file (light / dark follows prefers-color-scheme, or :root[data-theme]). */
+
+:root {
+  color-scheme: light dark;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --fg: #1c2330;
+  --muted: #5d6878;
+  --border: #d5dbe3;
+  --accent: #2463c7;
+  --accent-fg: #ffffff;
+  --focus: #2463c7;
+
+  --ok: #1f8a4c;
+  --warn: #a86500;
+  --warn-bg: #fff4dc;
+  --error: #c0362c;
+  --error-bg: #fdecea;
+
+  --cycle: #7b3fb8; /* members of a selected cycle */
+  --turnover: #128a8a; /* turnover virtual edges */
+  --corrected: #e07b00; /* corrected edges */
+  --superseded: #8a94a3;
+  --diagnostic: #8a94a3; /* classifier names: display only, never model input */
+
+  --arrow: #c0362c; /* main token arrows */
+  --arrow-implied: #d9822b; /* implied sink arrows */
+  --arrow-dataset: #2463c7; /* dataset arrows (map mode) */
+  --arrow-selected: #7b3fb8;
+
+  --donor: #2463c7;
+  --acceptor: #1f8a4c;
+  --bar-pos: #c0362c;
+  --bar-neg: #2463c7;
+
+  --depiction-bg: #ffffff; /* RDKit draws on white; kept white in dark mode */
+  --radius: 6px;
+  --gap: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161d;
+    --panel: #1a2029;
+    --panel-2: #222a35;
+    --fg: #e3e8ef;
+    --muted: #98a3b3;
+    --border: #323c4a;
+    --accent: #6ea2ff;
+    --accent-fg: #0b1020;
+    --focus: #6ea2ff;
+    --ok: #4cc38a;
+    --warn: #e0a33a;
+    --warn-bg: #3a2c12;
+    --error: #ff7468;
+    --error-bg: #3a1a18;
+    --cycle: #b78cf0;
+    --turnover: #3cc9c9;
+    --corrected: #ffa040;
+    --superseded: #6c7685;
+    --diagnostic: #6c7685;
+    --arrow: #e0453a;
+    --arrow-implied: #e08a35;
+    --arrow-dataset: #3f7fe0;
+    --arrow-selected: #9b5fe0;
+    --donor: #6ea2ff;
+    --acceptor: #4cc38a;
+    --bar-pos: #ff7468;
+    --bar-neg: #6ea2ff;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #12161d;
+  --panel: #1a2029;
+  --panel-2: #222a35;
+  --fg: #e3e8ef;
+  --muted: #98a3b3;
+  --border: #323c4a;
+  --accent: #6ea2ff;
+  --accent-fg: #0b1020;
+  --focus: #6ea2ff;
+  --ok: #4cc38a;
+  --warn: #e0a33a;
+  --warn-bg: #3a2c12;
+  --error: #ff7468;
+  --error-bg: #3a1a18;
+  --cycle: #b78cf0;
+  --turnover: #3cc9c9;
+  --corrected: #ffa040;
+  --superseded: #6c7685;
+  --diagnostic: #6c7685;
+  --arrow: #e0453a;
+  --arrow-implied: #e08a35;
+  --arrow-dataset: #3f7fe0;
+  --arrow-selected: #9b5fe0;
+  --donor: #6ea2ff;
+  --acceptor: #4cc38a;
+  --bar-pos: #ff7468;
+  --bar-neg: #6ea2ff;
+}

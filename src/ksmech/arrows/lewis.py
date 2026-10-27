@@ -117,12 +117,15 @@ def graph_distances(bonds: np.ndarray, n_atoms: int) -> np.ndarray:
 
 
 def check_edit(label: EditLabel, bonds: np.ndarray, lone_pairs: np.ndarray) -> str | None:
-    """Why `label` is not a valid edit of the structure (None when it is): every variant
+    """Why `label` is not a valid edit of the structure (None when it is): every variant is an
+    elementary step the decoder can write (NOT_ELEMENTARY, `ReactionMatrix.is_elementary`),
     conserves the electrons (CHARGE), keeps every bond order in [0, 3] (BOND_ORDER) and every
     lone-pair count non-negative (LONE_PAIRS); every forming anchor keeps its order at most 3
     and every breaking anchor is a bond (ANCHOR_MASK)."""
     order = {(int(i), int(j)): int(o) for i, j, o in bonds}
     for variant, anchors in zip(label.variants, label.anchors, strict=True):
+        if not variant.is_elementary():
+            return "NOT_ELEMENTARY"
         if sum(d for _, d in variant.lone) + 2 * sum(d for *_, d in variant.bonds) != 0:
             return "CHARGE"
         if any(not 0 <= order.get((i, j), 0) + d <= MAX_ORDER for i, j, d in variant.bonds):

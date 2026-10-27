@@ -1,11 +1,15 @@
 """Stream a `ksmech-train fit` run to the terminal: one row per epoch as each validation lands
 (the best marked) and a live status line (step, loss, samples/s, ETA, time since the last log
 line). The run is read over ssh from a pod (default) or from this checkout (--local); the
-stream reconnects when the connection drops and ends with the run. Only the standard library,
-so `python3` runs it anywhere (on a CUDA host `uv run` would re-sync to the rocm group).
+stream reconnects when the connection drops and ends with the run. A host on RunPod's SSH
+proxy (`<pod>@ssh.runpod.io`), which takes only terminal sessions, gets one (`ssh -tt`) with
+the command typed into it, and the terminal's escape codes are stripped from what comes back;
+"SSH over exposed TCP" (`root@IP --port N`) runs the command directly. Only the standard
+library, so `python3` runs it anywhere (on a CUDA host `uv run` would re-sync to the rocm group).
 
-    python3 scripts/watch_training.py                        # flex_first on the pod
+    python3 scripts/watch_training.py                        # flex_resonance on the pod
     python3 scripts/watch_training.py --run NAME --host root@IP --port N
+    python3 scripts/watch_training.py --run NAME --host POD@ssh.runpod.io
     python3 scripts/watch_training.py --local --run NAME     # a run of this checkout
 """
 
@@ -27,12 +31,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-POD_HOST, POD_PORT, POD_KEY, POD_REPO = (
-    "root@174.94.157.109",
-    36836,
+POD_HOST, POD_PORT, POD_KEY, POD_REPO, POD_RUN = (
+    "gtf125z4nmms0u-64411a32@ssh.runpod.io",
+    22,
     "~/.ssh/id_ed25519_pod",
     "/workspace/ksmech",
+    "flex_resonance",
 )
+PROXY = "@ssh.runpod.io"  # RunPod's SSH proxy: terminal sessions only
+ANSI = re.compile(r"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-Za-z]")
 STAMP = r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ \w+ [\w.]+: "
 STEP = re.compile(
     STAMP + r"step (\d+) / (\d+) epoch (\d+) loss (\S+) anchor_nll (\S+) grad \S+ lr (\S+) "
@@ -84,9 +91,10 @@ class Screen:
         self.out.flush()
 
 
-def tail_command(args) -> list[str]:
-    """The two tails (every metrics row, the end of the log), stopped when this side closes
-    their stdin, so none lingers on the pod after ssh goes."""
+def tail_command(args) -> tuple[list[str], str]:
+    """(the command, what to type into it): the two tails (every metrics row, the end of the
+    log), stopped when this side closes their stdin, so none lingers on the pod after ssh
+    goes. Through RunPod's proxy the tails are typed into a terminal session without echo."""
     root = REPO if args.local else args.repo
     run = shlex.quote(f"{root}/data/models/{args.source}/{args.run}")
     sh = (
@@ -94,10 +102,12 @@ def tail_command(args) -> list[str]:
         f"tail -q -n 200 -F {run}/train.log 2>/dev/null & read -r _; kill 0"
     )
     if args.local:
-        return ["bash", "-c", sh]
+        return ["bash", "-c", sh], ""
     opts = ["BatchMode=yes", "ConnectTimeout=20", "ServerAliveInterval=15", "ServerAliveCountMax=4"]
-    ssh = ["ssh", "-p", str(args.port), "-i", os.path.expanduser(args.key)]
-    return ssh + [x for o in opts for x in ("-o", o)] + [args.host, sh]
+    ssh = ["ssh", "-i", os.path.expanduser(args.key)] + [x for o in opts for x in ("-o", o)]
+    if args.host.endswith(PROXY):
+        return [*ssh, "-tt", args.host], f"stty -echo; {sh}\n"
+    return [*ssh, "-p", str(args.port), args.host, sh], ""
 
 
 def row(r: dict, w: Watch, screen: Screen) -> None:
@@ -148,6 +158,7 @@ def render(w: Watch) -> str:
 
 
 def handle(line: str, w: Watch, screen: Screen) -> None:
+    line = ANSI.sub("", line).strip("\r")  # a terminal session's escape codes and CRs
     w.received = time.monotonic()
     if line.startswith("{"):
         with contextlib.suppress(ValueError, KeyError):
@@ -197,7 +208,7 @@ def stop(proc: subprocess.Popen) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    p.add_argument("--run", default="flex_first")
+    p.add_argument("--run", default=POD_RUN)
     p.add_argument("--source", default="pmechdb")
     p.add_argument("--local", action="store_true", help="a run under this checkout's data/models")
     p.add_argument("--host", default=POD_HOST)
@@ -210,9 +221,12 @@ def main(argv: list[str] | None = None) -> int:
     screen.line(f"{args.source}/{args.run} on {where}")
     try:
         while not w.done:
-            cmd = tail_command(args)
+            cmd, typed = tail_command(args)
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
             try:
+                if typed:
+                    proc.stdin.write(typed.encode())
+                    proc.stdin.flush()
                 pump(proc, w, screen)
             finally:
                 stop(proc)
