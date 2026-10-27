@@ -4,8 +4,9 @@
   bonded neighbours) +- `padding`, at `spacing` (default 0.2 / 4.0 Angstrom), so the box stays
   local to the LMO; `n_i = ceil((hi_i - lo_i) / spacing) + 1`. More than 4,000,000 points is
   `CUBE_TOO_LARGE` (422).
-- **Values**: `gto.ao_values(Z, xyz, points) @ coeff_vector` over every AO of the fragment, in
-  chunks of 20,000 points: the LMO exactly, in bohr^-3/2. The Pipek-Mezey phase is arbitrary.
+- **Values**: `gto.ao_values(Z, xyz, points) @ coeff_vector` over every AO of the fragment: the
+  LMO exactly, in bohr^-3/2, evaluated on the grid by the separability of the Gaussians
+  (`gto_grid`). The Pipek-Mezey phase is arbitrary.
 - **Cube file**: bohr throughout; two comment lines, the atom count and origin, three diagonal
   axis lines, one `Z Z.0 x y z` line per atom, then the values in %13.5E, six per line, x
   outermost and z innermost, a line break after each z column.
@@ -133,8 +134,13 @@ def lmo_values_at(t: MoleculeTokens, k: int, points_ang: np.ndarray) -> np.ndarr
 
 
 def lmo_values(t: MoleculeTokens, k: int, g: Grid) -> np.ndarray:
-    """`lmo_values_at` on every grid point, in chunks of `CHUNK_POINTS`."""
-    return on_grid(g, lambda pts: lmo_values_at(t, k, pts))
+    """`lmo_values_at` on every grid point (flat cube order), by the separable evaluation of
+    `gto_grid` (the same values to rounding, without evaluating every AO at every point)."""
+    from ksmech.serve.chem.gto_grid import columns_on_grid
+
+    z, xyz = fragment_arrays(t)
+    c = np.asarray(t.orbitals[k].coeff_vector, dtype=float)[:, None]
+    return columns_on_grid(z, xyz, c, g.origin_ang, g.n, g.spacing_ang)[0].ravel()
 
 
 def _one_line(text: str) -> str:

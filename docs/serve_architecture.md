@@ -35,7 +35,7 @@ checked.
 |---|---|---|
 | `core` | settings (the profile, the tokens file), error codes, service contracts, the curation DB, cache keys, versions and the token / physics fingerprints, capabilities and profiles, the auth seam (`auth.py`: principals, roles, bearer tokens, `AuthGate`), the audit log (`audit.py`), the HTTP schemas (`schemas.py`, mirrored to `apps/ui/src/api/types.gen.ts`), the shared HTTP plumbing (`http.py`: `Services`, `Svc`, the path-id checks, the error envelope), test fakes | |
 | `compute` | the worker process (`worker.py`) and its scheduler (`procsched.py`) | |
-| `chem` | a pool's chemistry: normalization, featurization (QM, tokens, the sample), pool states, geometry, metal geometries, the Gaussian basis (`gto.py`, `data/sto_ng.json`), orbital cubes, token rows | |
+| `chem` | a pool's chemistry: normalization, featurization (QM, tokens, the sample), pool states, geometry, metal geometries, the Gaussian basis (`gto.py`, `data/sto_ng.json`) and its separable evaluation on cube grids (`gto_grid.py`), orbital cubes, token rows | |
 | `science` | the spec-v9 readings: G^atom, the arrow and orbital readings of R, B + R (`stepapply.py`), the step check, the edge step | |
 | `predict` | the predictors (floor, gbdt, network over `ksmech.model.decode`), the mechanism network, prediction jobs and expansion | `/predictors`, `/predict`, `/jobs/*`, `/step/check` |
 | `runtime` | the shared context of the services (`context.py`) and the task table the worker runs (`tasks.py`) | |

@@ -94,6 +94,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 GZIP_MIN_BYTES = 1024
+# zlib level 4, not Starlette's 9: a 4.9 MB orbital cube compresses in 0.1 s instead of 1.3 s,
+# to 1.94 MB instead of 1.77 MB, on every download (cached cubes included)
+GZIP_LEVEL = 4
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 TEST_HOST = "testserver"  # the Host of Starlette's TestClient
 MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
@@ -466,7 +469,7 @@ def create_app(
         app.include_router(r)
     _install_guards(app, settings, authenticator, hosts)
     install_handlers(app)
-    app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES)
+    app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES, compresslevel=GZIP_LEVEL)
     allowed = [*hosts, TEST_HOST]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)  # outermost
     svc.frontend_built = _mount_ui(app, settings, serve_ui)

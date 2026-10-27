@@ -6,7 +6,7 @@
 // apart.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEGENERACY, clampRange, degenerateLevels, energyWindow, frontierBlocks, groupLevels, MIN_SPAN, panRange, sanitizeDegeneracy, spreadLabels, zoomRange } from "@ksmech/viz/orbitals/levels";
+import { DEGENERACY, clampRange, degeneracies, degenerateLevels, energyWindow, frontierBlocks, groupLevels, groupLmoLevels, MIN_SPAN, panRange, sanitizeDegeneracy, spreadLabels, zoomRange } from "@ksmech/viz/orbitals/levels";
 import { DEFAULT_PREFS, sanitizePrefs, updatePrefs } from "../layout/prefs.ts";
 
 const row = (index, energy_ev, occupation, level = null, frontier = null) => ({ index, energy_ev, occupation, level, frontier, label: "", kind: occupation > 0.5 ? "occupied" : "virtual", centres: [], centroid: null });
@@ -97,4 +97,15 @@ test("frontier labels are spread at least the gap apart, staying as near their l
   assert.equal(ys[2], 300, "a label with room stays on its level");
   const edge = spreadLabels([395, 398], 15, 0, 400);
   assert.ok(Math.max(...edge) <= 400 && Math.abs(edge[0] - edge[1]) >= 15 - 1e-9, "kept inside at the edge");
+});
+
+test("LMOs group at the threshold, occupied and virtual apart; degeneracies sizes the groups", () => {
+  const lmos = [row(0, -14.1, 2), row(1, -14.12, 2), row(2, -14.08, 2), row(3, -11.0, 2), row(4, 3.0, 0), row(5, 3.02, 0), row(6, 3.01, 2)];
+  const g = groupLmoLevels(lmos, 0.05);
+  assert.deepEqual(g.map((x) => x.rows.map((r) => r.index)), [[0, 1, 2], [3], [6], [4, 5]], "the occupied LMO 6 never joins the virtual pair");
+  assert.equal(new Set(g.map((x) => x.level)).size, g.length, "level ids are unique across the blocks");
+  assert.equal(groupLmoLevels(lmos, 0.001).length, 7);
+  const d = degeneracies(lmos, 0.05, true);
+  assert.deepEqual([0, 3, 4, 6].map((i) => d.get(i)), [3, 1, 2, 1]);
+  assert.equal(degeneracies(MOS, 0.05, false).get(5), 2, "canonical: the HOMO pair");
 });
