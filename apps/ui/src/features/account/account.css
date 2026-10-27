@@ -1,0 +1,23 @@
+.account-page {
+  max-width: 560px;
+}
+
+.account-signin {
+  max-width: 360px;
+}
+
+.account-field {
+  gap: 4px;
+}
+
+.account-or {
+  text-align: center;
+}
+
+.users-new input {
+  min-width: 120px;
+}
+
+.users-password input {
+  width: 140px;
+}

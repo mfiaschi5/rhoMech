@@ -34,9 +34,9 @@ def test_ts_models_cover_every_model_of_the_module():
     }
     public = {n for n in defined if not n.startswith("_")}
     assert {m.__name__ for m in schemas.TS_MODELS} == public
-    assert len(public) == 110  # spec v9: -20 v3 arrow and contact models, +9 R and readings;
+    assert len(public) == 119  # spec v9: -20 v3 arrow and contact models, +9 R and readings;
     # +4: point group; +4: checkpoints and embedding traces; +2: the network's checkpoint;
-    # +6: the principal, the ML runs and reports
+    # +6: the principal, the ML runs and reports; +9: accounts (sign-in, users, quotas)
 
 
 def test_every_ts_model_is_an_interface():
@@ -177,6 +177,10 @@ def test_input_models_are_the_request_bodies():
         "Depict2DViewIn",
         "EmbeddingIn",
         "CheckpointRefIn",
+        "LoginIn",
+        "PasswordChangeIn",
+        "UserCreateIn",
+        "UserPatchIn",
     }
 
 

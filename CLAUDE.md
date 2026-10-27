@@ -194,6 +194,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `--chemistry real|cached|synthetic`, `--dev`, `--no-ui`, `--index-on-start`), `uv run
   ksmech-serve schema-ts` (regenerate `apps/ui/src/api/types.gen.ts`), `uv run ksmech-serve
   probe-cache --smiles 'C[O-]'` (exit 0 when the shared token cache holds every species),
+  `uv run ksmech-serve users list | add LOGIN --name N --role admin --generate | set LOGIN
+  --role R` (accounts of `serve.accounts`: local passwords, OIDC sign-in through
+  `KSMECH_SERVE_AUTH`, sessions, job quotas, admins unlimited; `docs/accounts.md`),
   `uv run ksmech-serve recheck`, `uv run ksmech-serve export --out FILE` (curated steps as
   PMechDB raw records, never training data); Predict and Correct work on spec-v9 reaction
   matrices (predictors floor, gbdt, network; contract in `docs/serve_v9_contract.md`; the

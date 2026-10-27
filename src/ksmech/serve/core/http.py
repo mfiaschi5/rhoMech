@@ -18,6 +18,7 @@ from ksmech.serve.core.errors import Code, ServeError
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
+    from ksmech.serve.accounts.service import AccountService
     from ksmech.serve.browse.service import BrowseService
     from ksmech.serve.chem.chemistry import Chemistry
     from ksmech.serve.compute.worker import Scheduler
@@ -77,6 +78,7 @@ class Services:
     browse: BrowseService
     curate: CurateService
     frontend_built: bool = False
+    accounts: AccountService | None = None
 
 
 def _services(request: Request) -> Services:

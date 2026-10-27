@@ -13,11 +13,13 @@
 import { useSyncExternalStore, type ComponentType } from "react";
 import type { Route } from "./router";
 
-export type PageId = "workbench" | "predict" | "correct" | "curate" | "browse";
+export type PageId = "workbench" | "predict" | "correct" | "curate" | "browse" | "login" | "users";
 /** Pages outside the nav, drawn without the app shell and without /api/meta (#/scene). */
 export type EmbedPageId = "scene";
 
-export const PAGE_IDS: readonly PageId[] = ["workbench", "predict", "correct", "curate", "browse"];
+export const PAGE_IDS: readonly PageId[] = ["workbench", "predict", "correct", "curate", "browse", "login", "users"];
+/** The pages of the nav bar; "login" and "users" are reached from the header's user menu. */
+export const NAV_PAGE_IDS: readonly PageId[] = ["workbench", "predict", "correct", "curate", "browse"];
 export const EMBED_PAGE_IDS: readonly EmbedPageId[] = ["scene"];
 
 export interface PageProps {

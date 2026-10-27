@@ -29,6 +29,8 @@ and the settings-dependent part. `require(name)` is the FastAPI dependency of a 
 ServeError FEATURE_DISABLED (503) with the reason, then the least role of the capability
 (`core.auth.CAPABILITY_ROLES`, or `role=`). `admit(name)` checks the profile and the role only
 (a router of stored results that stays readable while the feature itself is off).
+A POST through `require` is then charged to the principal's job quota when the app installed
+one (`app.state.charge`, `serve.accounts.quotas`: predict and embedding jobs; QUOTA_EXCEEDED).
 `/api/meta` lists them (`MetaOut.capabilities`) and the UI greys the pages.
 """
 
@@ -161,7 +163,11 @@ def _dependency(name: str, role: Role | str | None, full: bool) -> Any:
             admitted, why = in_profile(name, settings)
             if not admitted:
                 _raise_off(name, why)
-        authorize(principal_of(request), wanted, name)
+        principal = principal_of(request)
+        authorize(principal, wanted, name)
+        charge = getattr(request.app.state, "charge", None)
+        if full and charge is not None and request.method == "POST":
+            charge(principal, name)
 
     _require.__annotations__ = {"request": Request, "return": None}  # resolved, not a string
     return Depends(_require)
