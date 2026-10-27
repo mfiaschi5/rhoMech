@@ -1,6 +1,6 @@
 """The step decoder of the spec-v9 network (spec v9, "Decoding a step" and "Edit decoder": the
 constrained beam search). B + R is checked by the caller's `apply`: `eval.decode.lewis_apply`
-on a stored sample's Lewis structure, `serve.stepapply.apply_matrix` on a serve pool.
+on a stored sample's Lewis structure, `serve.science.stepapply.apply_matrix` on a serve pool.
 
 `decode_pool(model, sample, cfg, apply, scope, skips)` on one pool (the sample's global atoms):
 

@@ -1,5 +1,7 @@
-"""The FastAPI app of ksmech-serve (design 6): every route under `/api`, the error envelope, and
-the wiring of every service (design 6.4).
+"""The FastAPI app of ksmech-serve (design 6): the error envelope, the wiring of every service
+(design 6.4) and the routers of the sub-packages under `/api` (`ROUTERS`: predict, pool,
+workbench, embedding, curate, browse; health and meta are here; the shared plumbing is
+`core.http`).
 
 Routes are thin. Each one checks its ids against the id table (a mismatch is a 404 with the
 endpoint's not-found code, before any service runs, so an id never reaches a file path), calls
@@ -28,18 +30,16 @@ form and no-body POSTs. A request without an Origin header (curl, the test clien
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Body, Depends, FastAPI, Path, Query, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
@@ -47,9 +47,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import ksmech
 from ksmech.serve.app import static
+from ksmech.serve.browse import router as browse_router
 from ksmech.serve.core import schemas as S
-from ksmech.serve.core.capabilities import require
 from ksmech.serve.core.errors import Code, Pending, ServeError, jsonable
+from ksmech.serve.core.http import Services, Svc
 from ksmech.serve.core.settings import (
     ServeSettings,
     TaskEnv,
@@ -57,21 +58,19 @@ from ksmech.serve.core.settings import (
     load_settings,
     pin_threads,
 )
-from ksmech.serve.pool import service as pool_service
-from ksmech.serve.pool import view3d
-from ksmech.serve.workbench import molecule
-from ksmech.serve.workbench import service as workbench_service
+from ksmech.serve.curate import router as curate_router
+from ksmech.serve.embedding import router as embedding_router
+from ksmech.serve.pool import router as pool_router
+from ksmech.serve.predict import router as predict_router
+from ksmech.serve.workbench import router as workbench_router
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
-    from ksmech.serve.browse.service import BrowseService
     from ksmech.serve.chem.chemistry import Chemistry
     from ksmech.serve.compute.worker import Scheduler
-    from ksmech.serve.curate.service import CurateService
     from ksmech.serve.predict.jobs import JobRunner
     from ksmech.serve.predict.predictors import PredictorRegistry
-    from ksmech.serve.predict.service import JobService
     from ksmech.serve.runtime.context import ApiContext
 
 log = logging.getLogger(__name__)
@@ -80,75 +79,6 @@ GZIP_MIN_BYTES = 1024
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 TEST_HOST = "testserver"  # the Host of Starlette's TestClient
 MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
-
-# ---- id validation (design 6.1): pattern and the 404 code of a mismatch
-
-ID_RULES: dict[str, tuple[re.Pattern[str], Code]] = {
-    "state_id": (re.compile(r"s[0-9a-f]{20}"), Code.POOL_NOT_FOUND),
-    "node_id": (re.compile(r"p[0-9a-f]{20}"), Code.NODE_NOT_FOUND),
-    "edge_id": (re.compile(r"[ec][0-9a-f]{16}"), Code.EDGE_NOT_FOUND),
-    "job_id": (re.compile(r"j[0-9a-f]{16}"), Code.JOB_NOT_FOUND),
-    "pathway_id": (re.compile(r"w[0-9a-f]{12}"), Code.PATHWAY_NOT_FOUND),
-    "ref": (
-        re.compile(r"pmechdb:pmechdb-[0-9a-f]{16}|curated:[0-9]+:[0-9]+"),
-        Code.STEP_NOT_FOUND,
-    ),
-    "which": (re.compile(r"donor|acceptor"), Code.POOL_NOT_FOUND),
-    "molecule_id": (re.compile(r"m[0-9a-f]{20}"), Code.MOLECULE_NOT_FOUND),
-    "embedding_id": (re.compile(r"b[0-9a-f]{24}"), Code.EMBEDDING_NOT_FOUND),
-}
-
-
-def check_id(kind: str, value: str) -> str:
-    """`value` if it matches the `kind` pattern (full match); else ServeError 404 with that
-    kind's not-found code. No service or file is touched before this check."""
-    pattern, code = ID_RULES[kind]
-    if not isinstance(value, str) or pattern.fullmatch(value) is None:
-        shown = value if isinstance(value, str) and len(value) <= 64 else f"{str(value)[:64]}..."
-        raise ServeError(code, f"no such {kind.replace('_', ' ')}: {shown!r}", status=404)
-    return value
-
-
-# ---- the services one app holds
-
-
-@dataclass
-class Services:
-    settings: ServeSettings
-    ctx: ApiContext
-    scheduler: Scheduler
-    chemistry: Chemistry
-    engine: Engine
-    runner: JobRunner
-    jobs: JobService
-    browse: BrowseService
-    curate: CurateService
-    frontend_built: bool = False
-
-
-def _services(request: Request) -> Services:
-    return request.app.state.services
-
-
-Svc = Annotated[Services, Depends(_services)]
-StateId = Annotated[str, Path(description="state id (s + 20 hex)")]
-JobId = Annotated[str, Path(description="job id (j + 16 hex)")]
-TokenId = Annotated[int, Path(ge=0)]
-Mid = Annotated[int, Path(ge=0)]
-MoleculeId = Annotated[str, Path(description="molecule id (m + 20 hex)")]
-EmbeddingId = Annotated[str, Path(description="embedding trace id (b + 24 hex)")]
-TRACE_CACHE = "private, max-age=86400"  # a trace id names immutable content
-
-
-def _blank(value: str | None) -> str | None:
-    """Query strings: an empty value means "not given"."""
-    return None if value is None or not value.strip() else value
-
-
-def _cube(text: str, filename: str) -> PlainTextResponse:
-    headers = {"Content-Disposition": f"inline; filename={filename}"}
-    return PlainTextResponse(text, headers=headers)
-
 
 # ---- error envelope (design 6.3)
 
@@ -305,7 +235,7 @@ def install_handlers(app: FastAPI) -> None:
     app.add_middleware(RequestContext)
 
 
-# ---- routes: health, meta, predictors, input
+# ---- routes of the app itself: health and meta
 
 router = APIRouter(prefix="/api")
 
@@ -329,430 +259,17 @@ def meta(svc: Svc) -> S.MetaOut:
     return S.MetaOut(**body, frontend_built=svc.frontend_built, dev=svc.settings.dev)
 
 
-@router.get(
-    "/predictors",
-    response_model=list[S.PredictorInfoOut],
-    dependencies=[require("predict")],
-)
-def predictors(svc: Svc) -> list[S.PredictorInfoOut]:
-    spec = svc.ctx.spec_version
-    return [
-        S.PredictorInfoOut(**info.to_dict(), spec_version=spec) for info in svc.ctx.registry.info()
-    ]
-
-
-@router.post("/normalize", response_model=S.NormalizeOut)
-def normalize(svc: Svc, body: S.NormalizeIn) -> S.NormalizeOut:
-    return pool_service.normalize(svc.ctx, body)
-
-
-@router.post(
-    "/predict",
-    response_model=S.JobCreatedOut,
-    status_code=202,
-    dependencies=[require("predict")],
-)
-def predict(svc: Svc, body: S.PredictIn) -> S.JobCreatedOut:
-    return svc.jobs.predict(body)
-
-
-# ---- jobs
-
-
-@router.get("/jobs", response_model=list[S.JobSummaryOut])
-def list_jobs(
-    svc: Svc,
-    kind: str | None = None,
-    status: str | None = None,
-    limit: Annotated[int, Query(ge=0, le=1000)] = 50,
-) -> list[S.JobSummaryOut]:
-    return svc.jobs.list(kind=_blank(kind), status=_blank(status), limit=limit)
-
-
-@router.get("/jobs/{job_id}", response_model=S.JobOut)
-def get_job(
-    svc: Svc, job_id: JobId, since_revision: Annotated[int | None, Query(ge=0)] = None
-) -> S.JobOut:
-    return svc.jobs.get(check_id("job_id", job_id), since_revision=since_revision)
-
-
-@router.post("/jobs/{job_id}/cancel", response_model=S.JobOut)
-def cancel_job(svc: Svc, job_id: JobId, force: bool = False) -> S.JobOut:
-    return svc.jobs.cancel(check_id("job_id", job_id), force=force)
-
-
-@router.post(
-    "/jobs/{job_id}/override",
-    response_model=S.OverrideResultOut,
-    dependencies=[require("correct")],
-)
-def override_job(svc: Svc, job_id: JobId, body: S.OverrideIn) -> S.OverrideResultOut:
-    """A user step R on one state of the job's network (synchronous); 422 STEP_INVALID with
-    the issues, 202 Pending while the state's analysis is computed."""
-    check_id("job_id", job_id)
-    check_id("state_id", body.parent_state_id)
-    return svc.jobs.override(job_id, body)
-
-
-@router.post(
-    "/jobs/{job_id}/expand",
-    response_model=S.JobCreatedOut,
-    status_code=202,
-    dependencies=[require("predict")],
-)
-def expand_job(svc: Svc, job_id: JobId, body: S.ExpandIn) -> S.JobCreatedOut:
-    check_id("job_id", job_id)
-    check_id("node_id", body.node_id)
-    return svc.jobs.expand(job_id, body)
-
-
-@router.post("/step/check", response_model=S.StepCheckOut, dependencies=[require("correct")])
-def step_check(svc: Svc, body: S.StepCheckIn) -> S.StepCheckOut:
-    """Live validation of a reaction matrix on a pool state (no job needed)."""
-    from ksmech.serve.science.steps import step_check as check
-
-    return S.StepCheckOut(**check(svc.ctx, check_id("state_id", body.state_id), body.matrix))
-
-
-@router.get("/jobs/{job_id}/pathways", response_model=list[S.PathwayOut])
-def job_pathways(
-    svc: Svc,
-    job_id: JobId,
-    limit: Annotated[int, Query(ge=1, le=200)] = 20,
-    include_pruned: bool = False,
-) -> list[S.PathwayOut]:
-    check_id("job_id", job_id)
-    return svc.jobs.pathways(job_id, limit=limit, include_pruned=include_pruned)
-
-
-# ---- pools and tokens
-
-
-@router.post("/pools", response_model=S.PoolOut)
-def create_pool(svc: Svc, body: S.NormalizeIn) -> S.PoolOut:
-    return pool_service.create_pool(svc.ctx, body)
-
-
-@router.get("/pool/{state_id}", response_model=S.PoolOut)
-def get_pool(svc: Svc, state_id: StateId) -> S.PoolOut:
-    return pool_service.pool_out(svc.ctx, check_id("state_id", state_id))
-
-
-@router.get("/pool/{state_id}/tokens", response_model=S.TokensOut)
-def pool_tokens(svc: Svc, state_id: StateId) -> S.TokensOut:
-    return pool_service.tokens_out(svc.ctx, check_id("state_id", state_id))
-
-
-# ---- geometry, cubes, depiction
-
-
-def _keep_maps(raw: str | None) -> set[int]:
-    """`keep_maps=1,7` -> {1, 7}; anything but non-negative integers is REQUEST_INVALID."""
-    if raw is None or not raw.strip():
-        return set()
-    try:
-        maps = {int(x) for x in raw.split(",") if x.strip()}
-    except ValueError as exc:
-        msg = f"keep_maps must be comma-separated integers, got {raw!r}"
-        raise ServeError(Code.REQUEST_INVALID, msg, status=422) from exc
-    if any(m < 0 for m in maps):
-        raise ServeError(Code.REQUEST_INVALID, f"keep_maps must be >= 0, got {raw!r}", status=422)
-    return maps
-
-
-@router.get("/pool/{state_id}/geometry", response_model=S.GeometryOut)
-def pool_geometry(svc: Svc, state_id: StateId) -> S.GeometryOut:
-    return view3d.geometry_out(svc.ctx, check_id("state_id", state_id))
-
-
-@router.get("/pool/{state_id}/orbital/{token_id}", response_class=PlainTextResponse)
-def pool_orbital_cube(
-    svc: Svc, state_id: StateId, token_id: TokenId, spacing: float = 0.2, padding: float = 4.0
-) -> PlainTextResponse:
-    sid = check_id("state_id", state_id)
-    text = view3d.orbital_cube_text(svc.ctx, sid, token_id, spacing=spacing, padding=padding)
-    return _cube(text, f"{sid}-{token_id}.cube")
-
-
-@router.get("/pool/{state_id}/depiction", response_model=S.DepictionOut)
-def pool_depiction(
-    svc: Svc, state_id: StateId, keep_maps: str | None = None, server_svg: bool = False
-) -> S.DepictionOut:
-    sid = check_id("state_id", state_id)
-    maps = _keep_maps(keep_maps)
-    return view3d.depiction_out(svc.ctx, sid, keep_maps=maps, server_svg=server_svg)
-
-
-# ---- molecule workbench (display only)
-
-_WB = [require("workbench")]
-
-
-@router.post("/molecule", response_model=S.MoleculeOut, dependencies=_WB)
-def create_molecule(svc: Svc, body: S.MoleculeIn) -> S.MoleculeOut:
-    return molecule.create_molecule(svc.ctx, body)
-
-
-@router.get("/molecule/{molecule_id}", response_model=S.MoleculeOut, dependencies=_WB)
-def get_molecule(svc: Svc, molecule_id: MoleculeId) -> S.MoleculeOut:
-    return molecule.molecule_out(svc.ctx, check_id("molecule_id", molecule_id))
-
-
-@router.get(
-    "/molecule/{molecule_id}/geometry", response_model=S.MoleculeGeometryOut, dependencies=_WB
-)
-def molecule_geometry(svc: Svc, molecule_id: MoleculeId) -> S.MoleculeGeometryOut:
-    return workbench_service.geometry_out(svc.ctx, check_id("molecule_id", molecule_id))
-
-
-@router.get(
-    "/molecule/{molecule_id}/properties",
-    response_model=S.MoleculePropertiesOut,
-    dependencies=_WB,
-)
-def molecule_properties(svc: Svc, molecule_id: MoleculeId) -> S.MoleculePropertiesOut:
-    return workbench_service.properties_out(svc.ctx, check_id("molecule_id", molecule_id))
-
-
-@router.get("/molecule/{molecule_id}/symmetry", response_model=S.PointGroupOut, dependencies=_WB)
-def molecule_symmetry(
-    svc: Svc,
-    molecule_id: MoleculeId,
-    tolerance: Annotated[float | None, Query(ge=0.01, le=0.5)] = None,
-) -> S.PointGroupOut:
-    mid = check_id("molecule_id", molecule_id)
-    return workbench_service.symmetry_out(svc.ctx, mid, tolerance)
-
-
-@router.get("/molecule/{molecule_id}/orbitals", response_model=S.OrbitalSetOut, dependencies=_WB)
-def molecule_orbitals(
-    svc: Svc,
-    molecule_id: MoleculeId,
-    set_: Annotated[str | None, Query(alias="set")] = None,
-    start: str | None = None,
-) -> S.OrbitalSetOut:
-    mid = check_id("molecule_id", molecule_id)
-    return workbench_service.orbitals_out(svc.ctx, mid, _blank(set_), _blank(start))
-
-
-@router.get("/molecule/{molecule_id}/cube", response_class=PlainTextResponse, dependencies=_WB)
-def molecule_cube(
-    svc: Svc,
-    molecule_id: MoleculeId,
-    kind: str,
-    set_: Annotated[str | None, Query(alias="set")] = None,
-    start: str | None = None,
-    index: Annotated[int | None, Query(ge=0)] = None,
-    quality: str | None = None,
-    spacing: float | None = None,
-    padding: float | None = None,
-    download: bool = False,
-) -> PlainTextResponse:
-    mid = check_id("molecule_id", molecule_id)
-    cube = workbench_service.cube_out(
-        svc.ctx,
-        mid,
-        kind,
-        set_=_blank(set_),
-        start=_blank(start),
-        index=index,
-        quality=_blank(quality),
-        spacing=spacing,
-        padding=padding,
-    )
-    headers = workbench_service.cube_headers(cube, download)
-    return PlainTextResponse(cube.text, headers=headers)
-
-
-@router.post("/depict2d", response_model=S.Depict2DOut, dependencies=_WB)
-def depict2d(svc: Svc, body: S.Depict2DIn) -> S.Depict2DOut:
-    if body.molecule_id is not None:
-        check_id("molecule_id", body.molecule_id)
-    return workbench_service.depict2d_out(svc.ctx, body)
-
-
-# ---- local checkpoints and embedding traces
-
-
-@router.get("/models", response_model=S.ModelsOut)
-def list_models(svc: Svc) -> S.ModelsOut:
-    """The local checkpoints and the embedding capability they give (never gated)."""
-    from ksmech.serve.core import capabilities
-    from ksmech.serve.predict.models import list_checkpoints, model_roots
-
-    on, reason = capabilities.status("embedding", svc.settings)
-    return S.ModelsOut(
-        roots=[str(r) for r in model_roots(svc.settings)],
-        checkpoints=[S.CheckpointOut(**c.to_out()) for c in list_checkpoints(svc.settings)],
-        embedding=S.CapabilityOut(enabled=on, reason=reason),
-    )
-
-
-@router.post(
-    "/embedding",
-    response_model=S.JobCreatedOut,
-    status_code=202,
-    dependencies=[require("embedding")],
-)
-def create_embedding(svc: Svc, body: S.EmbeddingIn) -> S.JobCreatedOut:
-    """Trace a pool state (or a SMILES) through a local checkpoint: an `embedding` job whose
-    result is `EmbeddingResultOut`."""
-    from ksmech.serve.embedding.service import submit
-
-    if body.state_id is not None:
-        check_id("state_id", body.state_id)
-    return submit(svc.ctx, svc.runner, body)
-
-
-@router.get("/embedding/{embedding_id}", response_class=Response)
-def get_embedding(svc: Svc, embedding_id: EmbeddingId) -> Response:
-    """The stored payload of a trace (what the page draws), as JSON."""
-    from ksmech.serve.embedding.service import payload_bytes
-
-    data = payload_bytes(svc.settings, check_id("embedding_id", embedding_id))
-    headers = {"Cache-Control": TRACE_CACHE}
-    return Response(data, media_type="application/json", headers=headers)
-
-
-@router.get("/embedding/{embedding_id}/page", response_class=HTMLResponse)
-def get_embedding_page(
-    svc: Svc, embedding_id: EmbeddingId, theme: str | None = None
-) -> HTMLResponse:
-    """The self-contained trace page (no external script), for an iframe or a tab; `theme`
-    light | dark sets its colour scheme, else it follows the browser's."""
-    from ksmech.serve.embedding.service import page_html
-
-    html = page_html(svc.settings, check_id("embedding_id", embedding_id), _blank(theme))
-    return HTMLResponse(html, headers={"Cache-Control": TRACE_CACHE})
-
-
-# ---- curation (static routes before /curate/{mid})
-
-
-@router.post(
-    "/curate",
-    response_model=S.MechanismOut,
-    status_code=201,
-    dependencies=[require("curate_edit")],
-)
-def curate_create(svc: Svc, body: S.CurateIn) -> S.MechanismOut:
-    check_id("job_id", body.job_id)
-    if body.pathway_id is not None:
-        check_id("pathway_id", body.pathway_id)
-    for edge in body.edge_ids or ():
-        check_id("edge_id", edge)
-    return svc.curate.create(body)
-
-
-@router.get("/curate", response_model=list[S.MechanismSummaryOut])
-def curate_list(
-    svc: Svc,
-    status: str | None = None,
-    predictor: str | None = None,
-    stale: bool | None = None,
-    limit: Annotated[int, Query(ge=0, le=500)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[S.MechanismSummaryOut]:
-    return svc.curate.list(
-        status=_blank(status), predictor=_blank(predictor), stale=stale, limit=limit, offset=offset
-    )
-
-
-@router.get(
-    "/curate/export/pmechdb", response_class=PlainTextResponse, dependencies=[require("export")]
-)
-def curate_export_pmechdb(
-    svc: Svc, status: Annotated[list[str] | None, Query()] = None
-) -> PlainTextResponse:
-    """The curated steps as PMechDB raw records (a file download, never training data); the
-    report (counts, skipped steps by reason) is in the X-Ksmech-Export-Report header."""
-    import json
-
-    text, report = svc.curate.export_pmechdb(status)
-    headers = {
-        "Content-Disposition": 'attachment; filename="ksmech_curated_pmechdb.csv"',
-        "X-Ksmech-Export-Report": json.dumps(report, sort_keys=True),
-    }
-    return PlainTextResponse(text, media_type="text/csv", headers=headers)
-
-
-@router.post(
-    "/curate/recheck",
-    response_model=S.JobCreatedOut,
-    status_code=202,
-    dependencies=[require("curate_recheck")],
-)
-def curate_recheck(svc: Svc, body: Annotated[S.RecheckIn | None, Body()] = None) -> S.JobCreatedOut:
-    return svc.curate.recheck(body or S.RecheckIn())
-
-
-@router.get("/curate/{mid}", response_model=S.MechanismOut)
-def curate_get(svc: Svc, mid: Mid) -> S.MechanismOut:
-    return svc.curate.get(mid)
-
-
-@router.patch("/curate/{mid}", response_model=S.MechanismOut, dependencies=[require("curate_edit")])
-def curate_patch(svc: Svc, mid: Mid, body: S.MechanismPatchIn) -> S.MechanismOut:
-    return svc.curate.patch(mid, body)
-
-
-@router.post(
-    "/curate/{mid}/recheck",
-    response_model=S.JobCreatedOut,
-    status_code=202,
-    dependencies=[require("curate_recheck")],
-)
-def curate_recheck_one(
-    svc: Svc, mid: Mid, body: Annotated[S.RecheckOneIn | None, Body()] = None
-) -> S.JobCreatedOut:
-    return svc.curate.recheck_one(mid, body or S.RecheckOneIn())
-
-
-# ---- browse
-
-
-@router.get("/browse/status", response_model=S.IndexStatusOut)
-def browse_status(svc: Svc) -> S.IndexStatusOut:
-    return svc.browse.status()
-
-
-@router.post("/browse/index", response_model=S.JobCreatedOut, status_code=202)
-def browse_index(svc: Svc) -> S.JobCreatedOut:
-    return svc.browse.build_index()
-
-
-@router.get("/browse/search", response_model=S.SearchOut)
-def browse_search(
-    svc: Svc,
-    q: str = "",
-    mode: str = "exact",
-    side: str = "either",
-    source: Annotated[list[str] | None, Query()] = None,
-    status: str | None = None,
-    resonance: bool | None = None,
-    limit: int = 50,
-    offset: int = 0,
-) -> S.SearchOut:
-    sources = tuple(s for s in (source or ()) if s.strip())
-    kwargs: dict[str, Any] = {"sources": sources} if sources else {}
-    return svc.browse.search(
-        q=q,
-        mode=mode,
-        side=side,
-        status=_blank(status),
-        resonance=resonance,
-        limit=limit,
-        offset=offset,
-        **kwargs,
-    )
-
-
-@router.get("/browse/step/{ref}", response_model=S.StepViewOut)
-def browse_step(svc: Svc, ref: str) -> S.StepViewOut:
-    return svc.browse.step(check_id("ref", ref))
-
-
 # ---- wiring (design 6.4)
+
+ROUTERS = (
+    router,
+    predict_router.router,
+    pool_router.router,
+    workbench_router.router,
+    embedding_router.router,
+    curate_router.router,
+    browse_router.router,
+)
 
 
 def _job_status(runner: JobRunner) -> Callable[[str], str | None]:
@@ -895,7 +412,8 @@ def create_app(
         openapi_url="/api/openapi.json",
     )
     app.state.services = svc
-    app.include_router(router)
+    for r in ROUTERS:
+        app.include_router(r)
     app.add_middleware(SameOriginGuard, hosts=hosts)  # added before RequestContext: runs inside
     install_handlers(app)
     app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES)
