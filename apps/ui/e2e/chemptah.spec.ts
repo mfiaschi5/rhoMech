@@ -2,7 +2,7 @@
 // page.route (the engine is the backend's; the UI's part is the three ways in and the import):
 //   OCR: an image dropped on the canvas, pasted (a synthetic paste event whose DataTransfer
 //   holds only a PNG File) and picked in the import panel's "Image (OCR)" each draw acetic acid
-//   from the mocked molfile (data-smiles CC(=O)O, one undo step back to the empty sketch); the
+//   from the mocked molfile (/api/meta's ocr capability mocked on) (data-smiles CC(=O)O, one undo step back to the empty sketch); the
 //   notice shows engine, confidence and warnings; with /api/meta's ocr capability turned off
 //   (mocked) a drop shows the reason instead.
 //   Shortcuts: Shift+6 on an atom (a spiro cyclohexane), w / h on a bond (wedge, hash), Enter on
@@ -42,8 +42,10 @@ const OCR_OUT = { smiles: "CC(=O)O", molfile: ACETIC_ACID, confidence: 0.91, eng
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 /** Mock POST /api/ocr; the number of calls so far. */
+/** Mock POST /api/ocr, and turn the capability on in /api/meta (the e2e server has no engine). */
 async function mockOcr(page: Page): Promise<{ calls: () => number }> {
   let calls = 0;
+  await mockOcrCapability(page, { enabled: true, reason: null });
   await page.route("**/api/ocr", async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     calls += 1;
@@ -51,6 +53,14 @@ async function mockOcr(page: Page): Promise<{ calls: () => number }> {
     await route.fulfill({ json: OCR_OUT });
   });
   return { calls: () => calls };
+}
+
+async function mockOcrCapability(page: Page, ocr: { enabled: boolean; reason: string | null }): Promise<void> {
+  await page.route("**/api/meta", async (route) => {
+    const meta = await (await route.fetch()).json();
+    meta.capabilities = { ...meta.capabilities, ocr };
+    await route.fulfill({ json: meta });
+  });
 }
 
 async function openSketch(page: Page): Promise<Locator> {
@@ -118,11 +128,7 @@ test("OCR: drop, paste and the file picker each draw the recognized structure", 
 
 test("OCR off: a dropped image shows the reason", async ({ page, request }) => {
   await skipUnless(request, "workbench");
-  await page.route("**/api/meta", async (route) => {
-    const meta = await (await route.fetch()).json();
-    meta.capabilities = { ...meta.capabilities, ocr: { enabled: false, reason: "no OCR engine installed (mocked)" } };
-    await route.fulfill({ json: meta });
-  });
+  await mockOcrCapability(page, { enabled: false, reason: "no OCR engine installed (mocked)" });
   const sketch = await openSketch(page);
   await sendImage(page, "drop");
   await expect(page.getByTestId("sketch-ocr")).toHaveAttribute("data-state", "off");

@@ -640,7 +640,8 @@ def test_the_setup_command(tmp_path, capsys, monkeypatch):
     assert "already verified" in out and "the ocr capability is on" in out
     assert status("ocr", settings) == (True, None)
     args = cli.build_parser().parse_args(["ocr-setup", "--skip-weights"])
-    assert ocr_cli.run(args, settings, run=FakeRun(paths, fail="lock")) == 1
+    # tools/ocr is locked, so the failing step is the sync (a lock runs only without uv.lock)
+    assert ocr_cli.run(args, settings, run=FakeRun(paths, fail="sync")) == 1
     assert "failed with exit code 2" in capsys.readouterr().err
 
 
