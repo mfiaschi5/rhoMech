@@ -110,6 +110,18 @@ pre,
   padding: 6px 0;
 }
 
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.user-name {
+  color: var(--fg);
+  font-weight: 600;
+}
+
 .meta-line {
   display: flex;
   flex-wrap: wrap;

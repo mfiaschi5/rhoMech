@@ -5827,3 +5827,43 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   its e2e aborts every `/api/` request and asserts none was attempted.
 - **Fix.** `useRDKit` missed RDKit when it finished loading between the first render and the
   effect, so network cards never got their drawings; the effect now picks up the loaded module.
+
+## 2026-10-27: accounts — sign-in, sessions, roles and job quotas (`serve.accounts`)
+
+- **Generic OIDC plus local passwords, no managed provider in the code.** ORCID and Google are
+  presets of one OIDC client (authorization code + PKCE + nonce + a state cookie). Auth0,
+  Clerk, Keycloak and Supabase are also OIDC issuers, so choosing one later, for email and
+  password sign-in run by someone else, is a section of the auth file, not code. Local accounts
+  with a password are kept for two reasons: admins are created from the shell (`ksmech-serve
+  users add`), and the LAN can be tested without OAuth credentials, which only the owner can
+  create.
+- **No new dependency.** Passwords use stdlib `hashlib.scrypt` (N=2^15, r=8, p=1, the
+  parameters stored with each hash). The ID token's signature is not verified, which OIDC Core
+  3.1.3.7 allows for a token received straight from the token endpoint over TLS: issuer and
+  endpoints must be https, and its claims are checked (iss, aud, exp, nonce). That avoids a
+  JWT/JWKS library. httpx, already pinned at 0.28.1 in the dev and client groups, joins the
+  serve group.
+- **Server-side sessions in an HttpOnly cookie.** A random 32-byte value; the database keeps
+  only its sha256. SameSite=Lax plus the existing same-origin guard on mutating requests covers
+  CSRF. Each request reads the user again, so a role change, a disabled account or a new
+  password (which ends every session) takes effect at once. A bearer token still wins over the
+  cookie: CLI and MCP are unchanged.
+- **Layering.** `accounts` stands on `core` alone. `core.auth` gets the session lookup and
+  `core.capabilities` the quota hook (`app.state.charge`) injected by the app, so core never
+  imports a feature. The users get their own SQLite database (`data/serve/accounts/`), not the
+  curation database.
+- **Admins have no limits.** Job quotas per role (user 100/day and 10/min, curator 1000/30,
+  reader 0) count POST predict, expand and embedding in the route dependency, before the body is
+  validated, so an invalid request counts too. Admins are never counted, and the auth file
+  cannot give them a quota. The per-request size limits (max_atoms, max_beam, ...) stay
+  server-wide: they protect the one compute worker, not a fairness budget.
+- **Lab unchanged.** Without a session a lab request is still the local admin. In `public` the
+  anonymous principal stays a reader: anonymous predictions with a per-IP quota were not added
+  and remain an open decision.
+- **Failed sign-ins** are throttled in memory: 10 per client address or per login in 15 min,
+  then 429 LOGIN_THROTTLED. An unknown login is checked against a dummy hash, so it takes the
+  same time as a wrong password.
+- **The last active admin** cannot be demoted or disabled (LAST_ADMIN 409).
+- **UI.** A user menu in the header (name, role, "no limits" for an admin, Sign in / Sign out,
+  Users for an admin), `#/login` (password form, provider buttons, then the account with its
+  quota and a password change) and `#/users` (the admins' user management).

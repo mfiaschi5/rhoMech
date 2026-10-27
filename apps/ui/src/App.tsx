@@ -3,8 +3,10 @@
 import { useEffect } from "react";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { SyntheticBanner } from "./components/SyntheticBanner";
-import { isEmbedPage, PAGE_IDS, usePage, type PageId } from "./registry";
+import { UserMenu } from "./components/UserMenu";
+import { isEmbedPage, NAV_PAGE_IDS, PAGE_IDS, usePage, type PageId } from "./registry";
 import { useHashRoute, type Route } from "./router";
+import { loadAuth } from "./state/auth";
 import { appErrorStore, capabilityOf, clearError, loadMeta, metaStore, useStore } from "./state/store";
 
 const NAV_LABELS: Record<PageId, string> = {
@@ -13,6 +15,8 @@ const NAV_LABELS: Record<PageId, string> = {
   correct: "Correct",
   curate: "Curate",
   browse: "Browse",
+  login: "Sign in",
+  users: "Users",
 };
 
 /** The capability a whole page needs (/api/meta.capabilities); off: greyed with the reason. */
@@ -27,7 +31,7 @@ function Nav({ current }: { current: string }) {
   return (
     <nav className="nav" aria-label="pages">
       <span className="brand">ksmech</span>
-      {PAGE_IDS.map((id) => {
+      {NAV_PAGE_IDS.map((id) => {
         const needs = PAGE_CAPABILITY[id];
         const cap = needs ? capabilityOf(meta, needs) : null;
         const off = cap !== null && !cap.enabled;
@@ -91,7 +95,10 @@ export function App() {
   const appError = useStore(appErrorStore);
   const embed = isEmbedPage(route.page);
   useEffect(() => {
-    if (!embed) void loadMeta();
+    if (!embed) {
+      void loadMeta();
+      void loadAuth();
+    }
   }, [embed]);
   if (embed) {
     return (
@@ -104,6 +111,7 @@ export function App() {
     <div className="app-shell" data-page={route.page}>
       <header className="app-header">
         <Nav current={route.page} />
+        <UserMenu />
         <MetaLine />
       </header>
       <SyntheticBanner meta={meta} />

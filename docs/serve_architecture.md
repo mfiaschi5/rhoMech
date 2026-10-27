@@ -2,7 +2,7 @@
 
 `ksmech.serve` is the web add-on of the engine (`uv sync` installs it with the `serve` group;
 `uv sync --no-group serve` gives the engine alone). The engine never imports it
-(`tests/test_engine_boundary.py`). Inside, one process holds fourteen sub-packages; the compute
+(`tests/test_engine_boundary.py`). Inside, one process holds fifteen sub-packages; the compute
 runs in one spawned worker process. The HTTP contract is `docs/serve_v9_contract.md`; this page
 is the code map.
 
@@ -17,6 +17,8 @@ runtime ◄── predict ◄── science ◄── chem ◄── compute ◄
 depiction ──► core                                                  (pool, workbench, browse use it)
 ml ─────────► core                    (a feature on core alone: predict, runtime and the features
                                        read its checkpoint listing, ml.checkpoints)
+accounts ───► core                    (users, sessions, quotas: core reaches them only through the
+                                       session lookup and the quota hook the app injects)
 ```
 
 A module-level import between sub-packages must follow these arrows
@@ -41,6 +43,7 @@ checked.
 | `browse` | the dataset browser: the PMechDB index, search, the step view | `/browse/*` |
 | `curate` | curated mechanisms, recheck, export | `/curate/*` |
 | `ml` | the local checkpoints (`checkpoints.py`, read without torch), the training runs and the physics / eval reports on disk (`runs.py`, passed through) | `/models`, `/ml/*` |
+| `accounts` | users and their OIDC identities, browser sessions, password hashes (stdlib scrypt), the OIDC client (`oidc.py`), the job quotas (`quotas.py`), the auth file (`config.py`); its own database `data/serve/accounts/accounts.sqlite` (`docs/accounts.md`) | `/auth/*`, `/admin/users*` |
 | `app` | the FastAPI app (`api.py`: error handlers, middleware, wiring, `/health`, `/meta`, `/whoami`), the `ksmech-serve` CLI, the static frontend | |
 
 ## Profiles, roles and the audit log
@@ -54,8 +57,15 @@ One codebase, two deployments (`KSMECH_SERVE_PROFILE`, `ksmech-serve run --profi
   capabilities are not in the profile (`core.capabilities.PROFILES`): their routers answer 503
   FEATURE_DISABLED "not in the public profile" before any service runs, `/api/meta` reports them
   off, and the jobs of other kinds than predict / override / expand are JOB_NOT_FOUND. A request
-  without a token is the anonymous reader; a bearer token raises the role. A public deployment
-  takes its own data root: the profile hides the lab's routes, not the lab's files.
+  without a token or a session is the anonymous reader; signing in (`serve.accounts`) or a
+  bearer token raises the role. A public deployment takes its own data root: the profile hides
+  the lab's routes, not the lab's files.
+
+A request's principal comes, in this order, from a bearer token (`KSMECH_SERVE_TOKENS`), a
+session cookie (`serve.accounts`: a local password or an OIDC provider), else the profile's
+anonymous principal. In `lab` a request without a session stays the local admin. Job
+submissions (`POST /predict`, `/jobs/{id}/expand`, `/embedding`) are charged to the role's
+quota (per day and per minute, QUOTA_EXCEEDED 429); admins have none.
 
 The routes of a dataset, curation or ML package are gated as a whole router
 (`APIRouter(dependencies=[require(name)])`, or `admit(name)` where the routes of stored results
@@ -77,6 +87,8 @@ Roles are reader < user < curator < admin (`core.auth`):
 | `curate` (reads) | no | reader |
 | `curate_edit`, `curate_recheck`, `export` | no | curator |
 | `ml` (`/ml/*`) | no | curator |
+| `/auth/*` (sign-in, sign-out, `me`, password) | yes | anyone |
+| `/admin/users*` | yes | admin |
 
 `core.audit.AuditLog` appends one JSON line per non-GET request (time, request id, principal,
 method, route template, path, status) to `data/serve/logs/audit.jsonl`. The middlewares run, from

@@ -63,9 +63,12 @@ class Code(StrEnum):
     CHECKPOINT_NOT_FOUND = "CHECKPOINT_NOT_FOUND"  # embedding: no such local checkpoint
     EMBEDDING_NOT_FOUND = "EMBEDDING_NOT_FOUND"  # embedding: no stored trace of that id
     RUN_NOT_FOUND = "RUN_NOT_FOUND"  # ml: no training run <source>/<run>
+    USER_NOT_FOUND = "USER_NOT_FOUND"  # accounts: no user of that id
+    PROVIDER_NOT_FOUND = "PROVIDER_NOT_FOUND"  # accounts: no configured OIDC provider
     # 401: core.auth (a bearer token that matches no stored hash; a route above anonymous)
     TOKEN_INVALID = "TOKEN_INVALID"
     AUTH_REQUIRED = "AUTH_REQUIRED"
+    LOGIN_FAILED = "LOGIN_FAILED"  # accounts: unknown user, wrong password, disabled account
     # 403: a cross-origin mutating request (api.SameOriginGuard); a role below the route's
     REQUEST_FORBIDDEN = "REQUEST_FORBIDDEN"
     ROLE_INSUFFICIENT = "ROLE_INSUFFICIENT"
@@ -80,6 +83,13 @@ class Code(StrEnum):
     MOLECULE_NOT_READY = "MOLECULE_NOT_READY"  # workbench: no QM record for the molecule
     CHECKPOINT_REFUSED = "CHECKPOINT_REFUSED"  # embedding: load_model refused it (dirty run)
     CHECKPOINT_CHANGED = "CHECKPOINT_CHANGED"  # embedding: the file changed while it was read
+    USER_EXISTS = "USER_EXISTS"  # accounts: the login name or email is taken
+    LAST_ADMIN = "LAST_ADMIN"  # accounts: the change would leave no active admin
+    # 429: accounts (a role's daily or per-minute job quota; repeated failed logins)
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    LOGIN_THROTTLED = "LOGIN_THROTTLED"
+    # 502: accounts (the OIDC provider refused the code or answered something unusable)
+    OIDC_FAILED = "OIDC_FAILED"
     # 500 / 503
     PLACEMENT_MISMATCH = "PLACEMENT_MISMATCH"
     CONSISTENCY_FAILED = "CONSISTENCY_FAILED"
@@ -145,15 +155,17 @@ _BY_STATUS = {
     404: (
         "JOB_NOT_FOUND NODE_NOT_FOUND EDGE_NOT_FOUND PATHWAY_NOT_FOUND POOL_NOT_FOUND "
         "MECHANISM_NOT_FOUND STEP_NOT_FOUND EXPORT_NOT_FOUND MOLECULE_NOT_FOUND "
-        "CHECKPOINT_NOT_FOUND EMBEDDING_NOT_FOUND RUN_NOT_FOUND"
+        "CHECKPOINT_NOT_FOUND EMBEDDING_NOT_FOUND RUN_NOT_FOUND USER_NOT_FOUND PROVIDER_NOT_FOUND"
     ),
-    401: "TOKEN_INVALID AUTH_REQUIRED",
+    401: "TOKEN_INVALID AUTH_REQUIRED LOGIN_FAILED",
     403: "REQUEST_FORBIDDEN ROLE_INSUFFICIENT",
     409: (
         "PREDICTOR_UNAVAILABLE NETWORK_BUSY JOB_NOT_DONE POOL_NOT_ANALYZED "
         "PHYSICS_VERSION_MISMATCH INVALID_TRANSITION INDEX_NOT_READY MOLECULE_NOT_READY "
-        "CHECKPOINT_REFUSED CHECKPOINT_CHANGED"
+        "CHECKPOINT_REFUSED CHECKPOINT_CHANGED USER_EXISTS LAST_ADMIN"
     ),
+    429: "QUOTA_EXCEEDED LOGIN_THROTTLED",
+    502: "OIDC_FAILED",
     500: (
         "PLACEMENT_MISMATCH CONSISTENCY_FAILED UNEXPECTED WORKER_CRASH DEPICTION_FAILED "
         "SYMMETRY_FAILED CHECKPOINT_LOAD_FAILED EMBEDDING_FAILED NETWORK_DECODE_FAILED"

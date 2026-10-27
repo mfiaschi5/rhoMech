@@ -440,6 +440,7 @@ rocm = [
 ]
 serve = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
     { name = "sqlmodel" },
@@ -479,6 +480,7 @@ rocm = [
 ]
 serve = [
     { name = "fastapi", specifier = "==0.142.2" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "pydantic", specifier = "==2.13.5" },
     { name = "sqlalchemy", specifier = "==2.0.54" },
     { name = "sqlmodel", specifier = "==0.0.47" },

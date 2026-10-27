@@ -225,6 +225,8 @@ class PrincipalOut(_Out):
     name: str
     role: Literal["reader", "user", "curator", "admin"]
     via: str | None  # the X-Ksmech-Via header (mcp, cli, ...)
+    authenticated: bool = False  # a bearer token or a session named it
+    user_id: int | None = None  # the accounts user of a session
 
 
 class PredictorInfoOut(_Out):
@@ -674,6 +676,87 @@ class MlRunDetailOut(_Out):
 class MlReportsOut(_Out):
     roots: list[str]  # the processed-data directories searched, in order
     reports: list[MlReportOut]
+
+
+# ---- accounts (serve.accounts): sign-in, sessions, users, job quotas
+
+RoleName = Literal["reader", "user", "curator", "admin"]
+LOGIN_PATTERN = r"^[a-z0-9][a-z0-9_.-]{1,39}$"
+
+
+class QuotaOut(_Out):
+    """The job quota of a principal's role (submitting predict, expand and embedding jobs);
+    None: no limit of that kind. `unlimited`: an admin, no quota at all."""
+
+    per_day: int | None
+    per_minute: int | None
+    used_today: int  # jobs this principal submitted in the last 24 h
+    unlimited: bool
+
+
+class ProviderOut(_Out):
+    """A configured OIDC sign-in provider (`serve.accounts.config`)."""
+
+    id: str  # orcid, google, ...
+    label: str
+    start_url: str  # GET it in the browser: redirects to the provider
+
+
+class UserOut(_Out):
+    id: int
+    login: str
+    name: str
+    email: str | None
+    role: RoleName
+    disabled: bool
+    has_password: bool  # a local password is set (else sign-in only through a provider)
+    providers: list[str]  # the linked OIDC providers
+    created_at: datetime
+    last_login_at: datetime | None
+
+
+class AuthStatusOut(_Out):
+    """`GET /api/auth/me`: who this request is, and how one signs in here."""
+
+    principal: PrincipalOut
+    user: UserOut | None  # the signed-in user (None: a token, the lab's local admin, anonymous)
+    providers: list[ProviderOut]
+    password_login: bool
+    quota: QuotaOut
+
+
+class LoginIn(_In):
+    login: str = Field(min_length=1, max_length=254)  # login name or email
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class PasswordChangeIn(_In):
+    current: str = Field(min_length=1, max_length=1024)
+    new: str = Field(min_length=10, max_length=1024)
+
+
+class UserCreateIn(_In):
+    """A local account (admin only); `password` is its first password."""
+
+    login: str = Field(pattern=LOGIN_PATTERN)
+    name: str = Field(min_length=1, max_length=120)
+    email: str | None = Field(None, max_length=254)
+    role: RoleName = "user"
+    password: str = Field(min_length=10, max_length=1024)
+
+
+class UserPatchIn(_In):
+    """Admin edits of one user; a field left out is kept. A new `password` signs the user out
+    everywhere, as does `disabled`."""
+
+    name: str | None = Field(None, min_length=1, max_length=120)
+    role: RoleName | None = None
+    disabled: bool | None = None
+    password: str | None = Field(None, min_length=10, max_length=1024)
+
+
+class UsersOut(_Out):
+    users: list[UserOut]
 
 
 class EmbeddingIn(_In):

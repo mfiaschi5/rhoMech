@@ -59,13 +59,25 @@ PUBLIC_ROUTES = {
     ("GET", "/api/molecule/{molecule_id}/orbitals"),
     ("GET", "/api/molecule/{molecule_id}/cube"),
     ("POST", "/api/depict2d"),
+    # serve.accounts: sign-in for everyone, user management for admins (test_serve_accounts.py)
+    ("GET", "/api/auth/me"),
+    ("POST", "/api/auth/login"),
+    ("POST", "/api/auth/logout"),
+    ("POST", "/api/auth/password"),
+    ("GET", "/api/auth/oidc/{provider}/start"),
+    ("GET", "/api/auth/oidc/{provider}/callback"),
+    ("GET", "/api/admin/users"),
+    ("POST", "/api/admin/users"),
+    ("PATCH", "/api/admin/users/{user_id}"),
 }
 # The dataset, curation and ML routes: refused in public whatever comes later.
 NEVER_PUBLIC = re.compile(r"^/api/(browse|curate|embedding|ml)(/|$)")
-INT_PARAMS = {"mid", "token_id"}
+INT_PARAMS = {"mid", "token_id", "user_id"}
 JOB = "j0123456789abcdef"
 
 READER, USER, CURATOR = "reader-token", "user-token", "curator-token"
+ANON = {"authenticated": False, "user_id": None}
+BY_TOKEN = {"authenticated": True, "user_id": None}
 
 
 def _tokens(role_of: dict[str, str]) -> dict:
@@ -190,7 +202,7 @@ def test_every_public_route_is_allowed_or_refused(public_app, monkeypatch):
 
 def test_public_roles(public_app):
     anon = public_app.get("/api/whoami").json()
-    assert anon == {"name": "anonymous", "role": "reader", "via": None}
+    assert anon == {"name": "anonymous", "role": "reader", "via": None} | ANON
     assert public_app.get("/api/predictors").status_code == 200  # a reader reads
     assert public_app.get("/api/models").status_code == 200
     err = _error(public_app.post(f"/api/jobs/{JOB}/cancel"), 401, "AUTH_REQUIRED")
@@ -205,7 +217,7 @@ def test_public_roles(public_app):
     r = public_app.post(f"/api/jobs/{JOB}/cancel", headers=_bearer(USER, "mcp"))
     _error(r, 404, "JOB_NOT_FOUND")  # past the gate
     me = public_app.get("/api/whoami", headers=_bearer(USER, "MCP")).json()
-    assert me == {"name": "user-1", "role": "user", "via": "mcp"}
+    assert me == {"name": "user-1", "role": "user", "via": "mcp"} | BY_TOKEN
 
 
 def test_wrong_tokens_are_401_everywhere(public_app, lab_app):
@@ -223,7 +235,9 @@ def test_wrong_tokens_are_401_everywhere(public_app, lab_app):
 
 
 def test_lab_roles_with_a_tokens_file(lab_app):
-    assert lab_app.get("/api/whoami").json() == {"name": "local", "role": "admin", "via": None}
+    assert (
+        lab_app.get("/api/whoami").json() == {"name": "local", "role": "admin", "via": None} | ANON
+    )
     patch = {"notes": "x"}
     r = lab_app.patch("/api/curate/1", json=patch, headers=_bearer(USER))
     _error(r, 403, "ROLE_INSUFFICIENT")
@@ -241,7 +255,7 @@ def test_lab_roles_with_a_tokens_file(lab_app):
 def test_lab_without_tokens_is_the_local_admin(tmp_path):
     with api_client(_settings(tmp_path)) as client:
         me = client.get("/api/whoami", headers=_bearer("anything", "cli")).json()
-        assert me == {"name": "local", "role": "admin", "via": "cli"}
+        assert me == {"name": "local", "role": "admin", "via": "cli"} | ANON
         assert client.get("/api/ml/runs").status_code == 200
 
 
@@ -319,7 +333,9 @@ def test_audit_lines(lab_app):
     ]
     assert lines[2]["method"] == "POST" and lines[2]["path"] == "/api/nowhere"
     assert lines[2]["status"] in (404, 405) and len(lines) == 3  # no route of the API
-    assert lines[0]["principal"] == {"name": "curator-1", "role": "curator", "via": "cli"}
+    assert (
+        lines[0]["principal"] == {"name": "curator-1", "role": "curator", "via": "cli"} | BY_TOKEN
+    )
     assert lines[0]["path"] == "/api/curate/7" and lines[0]["request_id"]
     assert lines[1]["principal"] is None  # refused before a principal was named
     assert set(lines[0]) == {"time", "request_id", "principal", "method", "route", "path", "status"}

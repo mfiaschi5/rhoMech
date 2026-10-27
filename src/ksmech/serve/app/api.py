@@ -21,8 +21,9 @@ the frontend mount last. Shutdown closes the runner and the scheduler.
 The profile (`ServeSettings.profile`) chooses what is served: `lab` everything, `public` no
 dataset, curation or ML route (`core.capabilities.PROFILES`). `core.auth.AuthGate` names the
 principal of every request (a bearer token from `KSMECH_SERVE_TOKENS`, else the profile's
-anonymous principal: a local admin in `lab`, a reader in `public`) and the gated routes check
-its role; `core.audit.AuditLog` writes one line per non-GET request to
+anonymous principal: a local admin in `lab`, a reader in `public`; between the two a session
+cookie of `serve.accounts`, whose lookup and job quota the app injects) and the gated routes
+check its role; `core.audit.AuditLog` writes one line per non-GET request to
 `data/serve/logs/audit.jsonl`. In `lab` without a tokens file every request is the local
 admin, as before: by default the server binds 127.0.0.1 and is reached through an SSH tunnel;
 `ksmech-serve --host 0.0.0.0` opens it to the local network (`lan_hosts` then names this
@@ -52,6 +53,8 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import ksmech
+from ksmech.serve.accounts import router as accounts_router
+from ksmech.serve.accounts.service import AccountService
 from ksmech.serve.app import static
 from ksmech.serve.browse import router as browse_router
 from ksmech.serve.core import schemas as S
@@ -294,6 +297,8 @@ ROUTERS = (
     browse_router.router,
     ml_router.router,
     ml_router.lab,
+    accounts_router.router,
+    accounts_router.admin,
 )
 
 
@@ -383,7 +388,10 @@ def _start_index(svc: Services) -> None:
 
 
 def _shutdown(svc: Services) -> None:
-    for name, close in (("runner", svc.runner.close), ("scheduler", svc.scheduler.close)):
+    closers = [("runner", svc.runner.close), ("scheduler", svc.scheduler.close)]
+    if svc.accounts is not None:
+        closers.append(("accounts", svc.accounts.close))
+    for name, close in closers:
         try:
             close()
         except Exception:  # noqa: BLE001 - shutdown must close both
@@ -428,8 +436,10 @@ def create_app(
     hosts = (*LOCAL_HOSTS, *lan_hosts)
     pin_threads()
     settings = settings or load_settings()
-    authenticator = Authenticator.of(settings)
+    accounts = AccountService.of(settings)
+    authenticator = Authenticator.of(settings, sessions=accounts.session_principal)
     svc = _services_of(settings, scheduler, chemistry, registry, jobs_inline)
+    svc.accounts = accounts
     app = FastAPI(
         title="ksmech-serve",
         version=str(ksmech.__version__),
@@ -439,6 +449,7 @@ def create_app(
         openapi_url="/api/openapi.json",
     )
     app.state.services = svc
+    app.state.charge = accounts.charge
     for r in ROUTERS:
         app.include_router(r)
     _install_guards(app, settings, authenticator, hosts)
@@ -448,11 +459,13 @@ def create_app(
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)  # outermost
     svc.frontend_built = _mount_ui(app, settings, serve_ui)
     log.info(
-        "ksmech-serve app: profile %s, chemistry %s, data root %s, frontend %s, tokens %s",
+        "ksmech-serve app: profile %s, chemistry %s, data root %s, frontend %s, tokens %s, "
+        "sign-in providers %s",
         settings.profile,
         svc.ctx.chemistry,
         settings.data_root,
         "built" if svc.frontend_built else "not served",
         settings.tokens_file or "none",
+        ", ".join(accounts.config.providers) or "none",
     )
     return app

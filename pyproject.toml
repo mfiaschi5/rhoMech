@@ -49,6 +49,8 @@ serve = [
     # newer than the 2026-10-06 cutoff (releases at least two weeks old), so both are pinned back
     "starlette<=1.7.0",
     "pydantic==2.13.5",
+    # the OIDC sign-in (serve.accounts.oidc): the version of the dev and client groups
+    "httpx==0.28.1",
 ]
 # the HTTP client of the serve API (`ksmech`, src/ksmech/client) and the MCP server over it
 # (`ksmech-mcp`, src/ksmech/mcp): neither is a dependency of the engine, and the client imports no

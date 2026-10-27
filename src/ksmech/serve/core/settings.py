@@ -8,7 +8,9 @@ shared cache or the live PMechDB data.
 
 `profile` chooses the deployment (`KSMECH_SERVE_PROFILE`): `lab` (the default, everything) or
 `public` (the online platform: no dataset, curation or ML route, `core.capabilities.PROFILES`).
-`tokens_file` (`KSMECH_SERVE_TOKENS`) is the optional bearer-token table of `core.auth`.
+`tokens_file` (`KSMECH_SERVE_TOKENS`) is the optional bearer-token table of `core.auth`;
+`auth_file` (`KSMECH_SERVE_AUTH`) the optional TOML of the accounts (OIDC providers, quotas,
+sessions: `serve.accounts.config`), whose users live in `data/serve/accounts/accounts.sqlite`.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ class ServeSettings:
     dev: bool = False
     profile: str = "lab"  # lab | public (KSMECH_SERVE_PROFILE)
     tokens_file: Path | None = None  # KSMECH_SERVE_TOKENS: sha256 -> {name, role} (core.auth)
+    auth_file: Path | None = None  # KSMECH_SERVE_AUTH: providers, quotas (serve.accounts.config)
 
     # ---- shared, read-only
     @property
@@ -161,6 +164,11 @@ class ServeSettings:
         """One JSON line per non-GET request (`core.audit`)."""
         return self.logs / "audit.jsonl"
 
+    @property
+    def accounts_db(self) -> Path:
+        """Users, sign-in identities, sessions and job usage (`serve.accounts.store`)."""
+        return self.serve / "accounts" / "accounts.sqlite"
+
     # ---- curation, models, frontend, spec
     @property
     def curation_db(self) -> Path:
@@ -222,6 +230,7 @@ _ENV = {
     "KSMECH_SERVE_DIST": ("frontend_dist", Path),
     "KSMECH_SERVE_PROFILE": ("profile", str),
     "KSMECH_SERVE_TOKENS": ("tokens_file", Path),
+    "KSMECH_SERVE_AUTH": ("auth_file", Path),
 }
 _PATH_FIELDS = (
     "data_root",
@@ -230,6 +239,7 @@ _PATH_FIELDS = (
     "shared_cache_root",
     "frontend_dist",
     "tokens_file",
+    "auth_file",
 )
 
 

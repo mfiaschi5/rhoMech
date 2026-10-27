@@ -1,4 +1,4 @@
-"""Who sends a request and what it may do: the auth seam of ksmech-serve (no user database yet).
+"""Who sends a request and what it may do: the auth seam of ksmech-serve.
 
 A `Principal` is a name, a role and the client it came through (`via`, from the `X-Ksmech-Via`
 header: `mcp`, `cli`, ...; `None` without one). Roles are ordered reader < user < curator <
@@ -12,7 +12,12 @@ token to `{name, role}`. The server never sees nor stores a token in clear: a re
 (`hmac.compare_digest`, no early exit). A token that matches none, or a malformed
 `Authorization` header, is 401 TOKEN_INVALID on any route.
 
-Without a token a request is the profile's anonymous principal: `local` admin in `lab` (the
+Without a token, a session cookie (`SESSION_COOKIE`, set by a sign-in of `serve.accounts`) names
+the signed-in user: the app injects the lookup (`Authenticator.sessions`, cookie value ->
+`Principal` or None), so this module never reads the accounts database. An unknown or expired
+session is no error: the request is anonymous. A bearer token wins over the cookie.
+
+Without either a request is the profile's anonymous principal: `local` admin in `lab` (the
 private lab behind an SSH tunnel; today's behaviour, so the UI needs no token) and `anonymous`
 reader in `public`, where a token raises the role. In `lab` without a tokens file a presented
 token is ignored (there is nothing to check it against); in `public` it is 401. Below the
@@ -30,13 +35,14 @@ import hmac
 import json
 import re
 import tomllib
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from starlette.datastructures import Headers
+from starlette.requests import cookie_parser
 
 from ksmech.serve.core.errors import Code, ServeError
 from ksmech.serve.core.http import error_response
@@ -75,6 +81,7 @@ ANONYMOUS = {"lab": ("local", Role.ADMIN), "public": ("anonymous", Role.READER)}
 VIA_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,31}")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 VIA_HEADER = "x-ksmech-via"
+SESSION_COOKIE = "ksmech_session"
 
 
 @dataclass(frozen=True)
@@ -82,14 +89,21 @@ class Principal:
     name: str
     role: Role
     via: str | None = None
-    authenticated: bool = False  # true when a bearer token named it
+    authenticated: bool = False  # true when a bearer token or a session named it
+    user_id: int | None = None  # the accounts user of a session (None: a token or anonymous)
 
     def at_least(self, role: Role) -> bool:
         return RANK[self.role] >= RANK[Role(role)]
 
     def to_out(self) -> dict:
         """`PrincipalOut` fields."""
-        return {"name": self.name, "role": str(self.role), "via": self.via}
+        return {
+            "name": self.name,
+            "role": str(self.role),
+            "via": self.via,
+            "authenticated": self.authenticated,
+            "user_id": self.user_id,
+        }
 
 
 def token_sha256(token: str) -> str:
@@ -131,11 +145,14 @@ class Authenticator:
 
     profile: str
     tokens: Mapping[str, tuple[str, Role]] | None = None  # None: no tokens file
+    sessions: Callable[[str], Principal | None] | None = None  # session cookie -> principal
 
     @classmethod
-    def of(cls, settings: ServeSettings) -> Authenticator:
+    def of(
+        cls, settings: ServeSettings, sessions: Callable[[str], Principal | None] | None = None
+    ) -> Authenticator:
         path = settings.tokens_file
-        return cls(settings.profile, None if path is None else load_tokens(path))
+        return cls(settings.profile, None if path is None else load_tokens(path), sessions)
 
     def anonymous(self, via: str | None = None) -> Principal:
         name, role = ANONYMOUS[self.profile]
@@ -149,11 +166,18 @@ class Authenticator:
                 found = entry
         return found
 
-    def resolve(self, authorization: str | None, via: str | None) -> Principal:
-        """The principal of the `Authorization` and `X-Ksmech-Via` header values."""
+    def _session(self, session: str | None, via: str | None) -> Principal:
+        found = self.sessions(session) if session and self.sessions is not None else None
+        return self.anonymous(via) if found is None else replace(found, via=via)
+
+    def resolve(
+        self, authorization: str | None, via: str | None, session: str | None = None
+    ) -> Principal:
+        """The principal of the `Authorization` and `X-Ksmech-Via` header values and of the
+        session cookie's value."""
         via = _via(via)
         if authorization is None or (self.tokens is None and self.profile == "lab"):
-            return self.anonymous(via)
+            return self._session(session, via)
         scheme, _, token = authorization.strip().partition(" ")
         token = token.strip()
         if scheme.lower() != "bearer" or not token:
@@ -189,8 +213,9 @@ class AuthGate:
         headers = Headers(scope=scope)
         state = scope.setdefault("state", {})
         try:
+            cookies = cookie_parser(headers.get("cookie", ""))
             principal = self.authenticator.resolve(
-                headers.get("authorization"), headers.get(VIA_HEADER)
+                headers.get("authorization"), headers.get(VIA_HEADER), cookies.get(SESSION_COOKIE)
             )
         except ServeError as err:
             await error_response(err, str(state.get("request_id", "")))(scope, receive, send)
@@ -216,7 +241,7 @@ def authorize(principal: Principal, role: Role | str, what: str) -> None:
         return
     detail = {"required": str(Role(role)), "role": str(principal.role), "for": what}
     if not principal.authenticated:
-        msg = f"{what} needs the {Role(role)} role: send Authorization: Bearer <token>"
+        msg = f"{what} needs the {Role(role)} role: sign in or send Authorization: Bearer <token>"
         raise ServeError(Code.AUTH_REQUIRED, msg, detail=detail)
     msg = f"{what} needs the {Role(role)} role; {principal.name} is {principal.role}"
     raise ServeError(Code.ROLE_INSUFFICIENT, msg, detail=detail)

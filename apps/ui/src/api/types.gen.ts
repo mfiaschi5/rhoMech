@@ -132,6 +132,8 @@ export interface PrincipalOut {
   name: string;
   role: "reader" | "user" | "curator" | "admin";
   via: string | null;
+  authenticated: boolean;
+  user_id: number | null;
 }
 
 export interface PredictorInfoOut {
@@ -531,6 +533,69 @@ export interface MlRunDetailOut {
 export interface MlReportsOut {
   roots: string[];
   reports: MlReportOut[];
+}
+
+export interface QuotaOut {
+  per_day: number | null;
+  per_minute: number | null;
+  used_today: number;
+  unlimited: boolean;
+}
+
+export interface ProviderOut {
+  id: string;
+  label: string;
+  start_url: string;
+}
+
+export interface UserOut {
+  id: number;
+  login: string;
+  name: string;
+  email: string | null;
+  role: "reader" | "user" | "curator" | "admin";
+  disabled: boolean;
+  has_password: boolean;
+  providers: string[];
+  created_at: string;
+  last_login_at: string | null;
+}
+
+export interface AuthStatusOut {
+  principal: PrincipalOut;
+  user: UserOut | null;
+  providers: ProviderOut[];
+  password_login: boolean;
+  quota: QuotaOut;
+}
+
+export interface LoginIn {
+  login: string;
+  password: string;
+}
+
+export interface PasswordChangeIn {
+  current: string;
+  new: string;
+}
+
+export interface UserCreateIn {
+  login: string;
+  name: string;
+  email?: string | null;
+  role?: "reader" | "user" | "curator" | "admin";
+  password: string;
+}
+
+export interface UserPatchIn {
+  name?: string | null;
+  role?: "reader" | "user" | "curator" | "admin" | null;
+  disabled?: boolean | null;
+  password?: string | null;
+}
+
+export interface UsersOut {
+  users: UserOut[];
 }
 
 export interface EmbeddingIn {
