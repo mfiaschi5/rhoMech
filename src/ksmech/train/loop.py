@@ -14,6 +14,12 @@ validation views, the pair statistics, both configurations), `train.log` (one ti
 (one line per epoch) and the checkpoints `last.pt` and `best.pt` (best validation anchor
 top-1). Samples too large for the cell budget are skipped with the reason TOO_LARGE and
 counted in `run.json` and in every metrics line.
+
+`--source pmechdb+reactmech` trains on several sources at once: their training parts are
+pooled, the pair statistics are fitted on the pool (each source's stored statistics were fitted
+on its own part), and validation runs on each source's part, reported per source
+(`val_<source>_top1`, ...) and pooled (`val_top1`, which picks `best.pt`). The run lives in
+`data/models/pmechdb+reactmech/<run>/`.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import logging
 import math
 import os
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -31,7 +38,13 @@ import numpy as np
 import torch
 
 from ksmech.arrows.batches import collate_samples
-from ksmech.arrows.steps import SAMPLE_VERSION, load_pair_stats, load_samples, samples_path
+from ksmech.arrows.steps import (
+    SAMPLE_VERSION,
+    load_pair_stats,
+    load_samples,
+    pair_stats,
+    samples_path,
+)
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir
 from ksmech.model.config import ModelConfig
@@ -50,7 +63,7 @@ TOO_LARGE = "TOO_LARGE"
 
 @dataclass(frozen=True)
 class TrainConfig:
-    source: str = "pmechdb"
+    source: str = "pmechdb"  # several joined by "+": pmechdb+reactmech
     split: str = "molecule"
     epochs: int = 30
     cell_budget: int = 1_100_000  # padded pair-track cells per batch
@@ -72,11 +85,17 @@ class TrainConfig:
 STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0}  # PMechDB: isolated steps, no stop labels
 
 
+def sources(cfg: TrainConfig) -> tuple[str, ...]:
+    """The sources of a run: `pmechdb+reactmech` names two."""
+    return tuple(cfg.source.split("+"))
+
+
 def stop_weight(cfg: TrainConfig) -> float:
-    """lambda_stop of the run: the configured value, else the source's default."""
+    """lambda_stop of the run: the configured value, else the smallest default of its
+    sources."""
     if cfg.stop_weight >= 0:
         return cfg.stop_weight
-    return SOURCE_STOP_WEIGHT.get(cfg.source, STOP_WEIGHT)
+    return min(SOURCE_STOP_WEIGHT.get(s, STOP_WEIGHT) for s in sources(cfg))
 
 
 KFD_NODES = Path("/sys/class/kfd/kfd/topology/nodes")
@@ -152,10 +171,12 @@ def drop_undecodable_drawings(samples: list, part: str) -> int:
     return dropped
 
 
-def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[list, dict]:
-    """The samples of one part that fit the token cap, and the skip counts (samples too large,
-    drawings the decoder cannot write)."""
-    path = samples_path(cfg.source, f"{cfg.split}_{part}", processed_dir)
+def load_source_part(
+    cfg: TrainConfig, source: str, part: str, processed_dir: Path
+) -> tuple[list, dict]:
+    """The samples of one source's part that fit the token cap, and the skip counts (samples
+    too large, drawings the decoder cannot write)."""
+    path = samples_path(source, f"{cfg.split}_{part}", processed_dir)
     samples = load_samples(path)
     if cfg.limit:
         samples = samples[: cfg.limit]
@@ -167,6 +188,25 @@ def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[list, d
     if n := drop_undecodable_drawings(keep, part):
         skipped["drawings NOT_ELEMENTARY"] = n
     return keep, {"n": len(samples), "used": len(keep), "skipped": skipped, "path": str(path)}
+
+
+def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[dict[str, list], dict]:
+    """Source -> the samples of its part (`load_source_part`), and the counts: one source's
+    as they are; for several, summed, with the views in `path` as a list and each source's
+    counts under `sources`."""
+    loaded = {s: load_source_part(cfg, s, part, processed_dir) for s in sources(cfg)}
+    samples = {s: x for s, (x, _) in loaded.items()}
+    infos = {s: info for s, (_, info) in loaded.items()}
+    if len(infos) == 1:
+        return samples, next(iter(infos.values()))
+    skipped = sum((Counter(i["skipped"]) for i in infos.values()), Counter())
+    return samples, {
+        "n": sum(i["n"] for i in infos.values()),
+        "used": sum(i["used"] for i in infos.values()),
+        "skipped": dict(skipped),
+        "path": [i["path"] for i in infos.values()],
+        "sources": infos,
+    }
 
 
 def make_loader(
@@ -215,6 +255,18 @@ def evaluate(
         sums["r_exact"] += int(exact.sum())
         n += len(rank)
     return {k: v / max(n, 1) for k, v in sums.items()} | {"n": n}
+
+
+def evaluate_sources(model: KSMech, loaders: dict, *args) -> dict:
+    """`evaluate` on each source's loader (`args` as there): the metrics pooled over every
+    sample, and with several sources each source's under `<source>_`."""
+    per = {s: evaluate(model, loader, *args) for s, loader in loaders.items()}
+    n = sum(r["n"] for r in per.values())
+    keys = [k for k in next(iter(per.values())) if k != "n"]
+    out = {k: sum(r[k] * r["n"] for r in per.values()) / max(n, 1) for k in keys} | {"n": n}
+    if len(per) > 1:
+        out |= {f"{s}_{k}": v for s, r in per.items() for k, v in r.items()}
+    return out
 
 
 def train_epoch(model, loader, opt, sched, scaler, device, dtype, cfg: TrainConfig, state: dict):
@@ -298,11 +350,23 @@ def _optimizer(model: KSMech, cfg: TrainConfig) -> torch.optim.AdamW:
     return torch.optim.AdamW(groups, lr=cfg.lr)
 
 
-def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_path: Path):
+def run_pair_stats(cfg: TrainConfig, train: list, processed_dir: Path):
+    """(the statistics file or None, the pair statistics): one source's stored
+    `pair_feature_stats_<split>.json`; for several, fitted here on the pooled training
+    samples, as `ksmech-arrows samples` fits one source's on its own."""
+    if len(sources(cfg)) == 1:
+        path = source_dir(cfg.source, processed_dir) / f"pair_feature_stats_{cfg.split}.json"
+        return path, load_pair_stats(path)
+    return None, pair_stats(train)
+
+
+def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_path: Path | None):
     inputs = {}
     for info in parts.values():
-        inputs |= prov.file_input(info["path"])
-    inputs |= prov.file_input(stats_path)
+        for path in info["path"] if isinstance(info["path"], list) else [info["path"]]:
+            inputs |= prov.file_input(path)
+    if stats_path is not None:
+        inputs |= prov.file_input(stats_path)
     config = {"train": asdict(cfg), "model": model_cfg.to_dict(), "sample_version": SAMPLE_VERSION}
     return prov.stamp("train_run", TRAIN_VERSION, inputs, config, extra={"parts": parts})
 
@@ -367,14 +431,15 @@ def fit(
     """Train one run; returns the best validation metrics."""
     torch.manual_seed(cfg.seed)
     dtype = amp_dtype(device, cfg.amp)
-    train, train_info = load_part(cfg, "train", processed_dir)
+    by_source, train_info = load_part(cfg, "train", processed_dir)
     val, val_info = load_part(cfg, "val", processed_dir)
-    stats_path = source_dir(cfg.source, processed_dir) / f"pair_feature_stats_{cfg.split}.json"
-    model = KSMech(model_cfg, fit_feature_stats(train), load_pair_stats(stats_path)).to(device)
+    train = [s for part in by_source.values() for s in part]
+    stats_path, stats = run_pair_stats(cfg, train, processed_dir)
+    model = KSMech(model_cfg, fit_feature_stats(train), stats).to(device)
     header = _run_header(cfg, model_cfg, {"train": train_info, "val": val_info}, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)
     train_loader = make_loader(train, cfg, True, cfg.resonance_draws)
-    val_loader = make_loader(val, cfg, False)
+    val_loaders = {s: make_loader(part, cfg, False) for s, part in val.items()}
     total = cfg.epochs * len(train_loader.batch_sampler)
     opt = _optimizer(model, cfg)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, cfg.warmup, total))
@@ -385,9 +450,9 @@ def fit(
     if resume and (run_dir / "last.pt").exists():
         state = _resume(run_dir / "last.pt", header, model, opt, sched, scaler)
     state |= {"total": total, "epochs": cfg.epochs}
-    n_params = sum(p.numel() for p in model.parameters())
+    n_params, n_val = sum(p.numel() for p in model.parameters()), val_info["used"]
     log.info("%d parameters, %d train / %d val samples, %d steps on %s (%s), lambda_stop %g",
-             n_params, len(train), len(val), total, device, dtype, stop_weight(cfg))  # fmt: skip
+             n_params, len(train), n_val, total, device, dtype, stop_weight(cfg))  # fmt: skip
     if cfg.resonance_draws:
         other = sum(s.n_drawings > 1 for s in train)
         log.info("resonance draws: %d of %d training samples have other drawings, %d in all",
@@ -398,8 +463,8 @@ def fit(
         train_loader.batch_sampler.set_epoch(epoch)
         metrics = train_epoch(model, train_loader, opt, sched, scaler, device, dtype, cfg, state)
         warm = state["step"] < cfg.warmup
-        val = evaluate(model, val_loader, device, dtype, warm, stop_weight(cfg))
-        metrics |= {f"val_{k}": v for k, v in val.items()}
+        res = evaluate_sources(model, val_loaders, device, dtype, warm, stop_weight(cfg))
+        metrics |= {f"val_{k}": v for k, v in res.items()}
         metrics |= {"epoch": epoch, "step": state["step"], "skipped": skipped}
         _end_epoch(run_dir, model, header, opt, sched, scaler, state, metrics)
     return state["best"]

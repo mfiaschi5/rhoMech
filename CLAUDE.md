@@ -223,7 +223,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
-  [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; each epoch every training
+  [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; `--source pmechdb+reactmech`
+  pools several sources' training parts, validates each and the pool, pair statistics fitted on the pool; each epoch every training
   sample in a random one of its resonance drawings unless `--no-resonance-draws`; `--encoder`: `dense` the pair track of spec v9,
   `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
   learned indexer, dense during the LR warm-up; `--stop-weight` is lambda_stop of the END_MECH head,

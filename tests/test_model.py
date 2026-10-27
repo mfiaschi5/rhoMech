@@ -42,6 +42,7 @@ from ksmech.train.loop import (
     checkpoint_payload,
     evaluate,
     load_model,
+    sources,
     stop_weight,
     train_epoch,
 )
@@ -589,3 +590,56 @@ def test_rocm_override_only_for_rdna2_cards_without_kernels(tmp_path, monkeypatc
     assert loop.rocm_override(tmp_path) is None
     monkeypatch.setattr(loop.torch.version, "hip", None)
     assert loop.rocm_override(tmp_path) is None
+
+
+def test_a_run_names_its_sources_and_the_smallest_stop_weight():
+    cfg = TrainConfig(source="pmechdb+reactmech")
+    assert sources(cfg) == ("pmechdb", "reactmech")
+    assert stop_weight(cfg) == 0.0  # PMechDB's: neither source has stop labels
+
+
+def _two_source_stores(samples, root) -> None:
+    """The fixture samples as two sources' stores under `root`, split `x`, each sample in
+    both the training and the validation view."""
+    from ksmech.arrows import store
+    from ksmech.arrows.steps import SAMPLE_VERSION, write_split_file
+
+    for source in ("pmechdb", "reactmech"):
+        d = root / source
+        d.mkdir()
+        parquet = d / "steps.parquet"
+        parquet.write_bytes(b"stand-in parquet")
+        by_id = {
+            f"{source}-{s.step_id}": replace(s, step_id=f"{source}-{s.step_id}") for s in samples
+        }
+        ids = sorted(by_id)
+        parts = {"x_train": ids, "x_val": ids}
+        split = write_split_file(d / "splits_x.json", "x", 0, parts, parquet)
+        index = store.write_store(d, by_id, {}, parquet, SAMPLE_VERSION)
+        for part in ("train", "val"):
+            config = {"split": f"x_{part}", "sample_version": SAMPLE_VERSION}
+            store.write_view(d / f"samples_x_{part}.json", ids, {}, index, split, config)
+
+
+def test_a_run_on_two_sources_pools_training_and_validates_each(samples, tmp_path):
+    import json
+
+    from ksmech.train.loop import fit
+
+    _two_source_stores(samples, tmp_path)
+    cfg = TrainConfig(
+        source="pmechdb+reactmech", split="x", epochs=1, workers=0, cell_budget=10**7, warmup=1
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    best = fit(cfg, TINY, run_dir, torch.device("cpu"), tmp_path)
+    n = len(samples)
+    assert best["val_n"] == 2 * n and best["val_pmechdb_n"] == best["val_reactmech_n"] == n
+    pooled = (best["val_pmechdb_top1"] + best["val_reactmech_top1"]) / 2
+    assert best["val_top1"] == pytest.approx(pooled)
+    header = json.loads((run_dir / "run.json").read_text())["provenance"]
+    views = [k for k in header["inputs"] if "samples_x_" in k]
+    assert len(views) == 4  # both sources' training and validation views
+    assert not any("pair_feature_stats" in k for k in header["inputs"])  # fitted on the pool
+    train = header["extra"]["parts"]["train"]
+    assert train["used"] == 2 * n and set(train["sources"]) == {"pmechdb", "reactmech"}

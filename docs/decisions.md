@@ -6106,10 +6106,42 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
 - **No ArrowLabels.** A sample of a step without arrows has `orbital_reading` `NO_ARROWS` and no
   ArrowLabels: the network trains on R and its anchors. The LightGBM reference
   (`ksmech-physics gbdt`) ranks ArrowLabels, so it has nothing to rank on ReactMech.
+- **The pilot's sample store** (`ksmech-arrows samples --source reactmech --workers 8` from the
+  clean tree at e58af8c, 22 min, 650 MB): 8,999 samples from 9,183 training steps, 184 skipped
+  as MISSING_TOKENS. Label classes of 1 / 2 / 3 / 4+ variants: 5,575 / 2,067 / 839 / 518;
+  anchors 8,943 form and 56 break. Molecule split 7,189 / 908 / 902 samples (scaffold
+  7,212 / 888 / 899). The five leave-one-class-out splits use only the 856 classified steps
+  (train 417-734 samples each). Val pools: median 213 tokens, at most 483. A one-epoch run on
+  64 samples (`ksmech-train fit --source reactmech --limit 64`) trains and validates on the GPU.
 - **The pilot's failed molecules are left for later (user decision).** The TIMEOUT retry was
   stopped after 3 minutes, before a record came out. The QM manifest now lists all 20,185
   molecules: 19,543 ok and 642 failed, after the 209 failures of the pod and extra runs, whose
   rows had never been merged, were appended to it (backup
   `qm_manifest.before_merge_2026-10-27.parquet`). The steps that use a failed molecule are
   skipped as MISSING_TOKENS.
+
+## 2026-10-28: PMechDB and ReactMech in one checkout; a run over several sources
+
+- **The request (user).** Two sparse-encoder runs on the molecule split: PMechDB and ReactMech
+  together, and ReactMech alone.
+- **One data tree.** Provenance resolves `file:` inputs against the checkout that runs the code,
+  and training reads only artifacts built from committed code, so both sources' samples, tokens,
+  bond indices and QM records must sit in one clean checkout: the `claude/reactmech` worktree.
+  - Main's `data/cache/{qm,bond_index,tokens}` and `data/processed/pmechdb` are hard-linked into
+    it (no disk space; main's files are never written in place, `prov.atomic_write`).
+  - 344 molecules are in both caches, computed by different runs (no file identical). Main's
+    copies win, so every PMechDB artifact stays valid as it is; the worktree's copies are kept
+    in `data/cache/overlap_reactmech/`. The ReactMech store was rebuilt on main's copies (e58af8c,
+    20 min): the same 8,999 samples and split counts.
+- **A run over several sources** (`--source pmechdb+reactmech`, `train.loop.sources`).
+  - The training parts are pooled. The pair statistics are fitted on the pool
+    (`arrows.steps.pair_stats`, as the samples build fits one source's on its part); a run of
+    one source still reads its stored `pair_feature_stats_<split>.json`.
+  - Validation runs on each source's part: `val_<source>_<metric>` per source and `val_<metric>`
+    pooled over every sample, which picks `best.pt`. The comparison with a ReactMech-only run is
+    `val_reactmech_*`.
+  - lambda_stop defaults to the smallest of the sources' defaults (0 with PMechDB); neither
+    source has stop labels, so the stop term is absent either way.
+  - The run lives in `data/models/pmechdb+reactmech/<run>/`; `run.json` lists every view.
+  - The evaluation CLIs still take one source.
 
