@@ -1,0 +1,1081 @@
+{
+ "kind": "ksmech-scene",
+ "version": 1,
+ "scene": {
+  "type": "molecule",
+  "title": "Acrolein: frontier orbitals",
+  "smiles": "C=CC=O",
+  "molecule": {
+   "molecule_id": "me70eb94dbb381f964ad0",
+   "key": "C=CC=O",
+   "charge": 0,
+   "multiplicity": 1,
+   "chemistry": "real",
+   "method": "GFN2-xTB/ALPB-water/tblite-lbfgs"
+  },
+  "geometry": {
+   "molecule_id": "me70eb94dbb381f964ad0",
+   "key": "C=CC=O",
+   "charge": 0,
+   "multiplicity": 1,
+   "atoms": [
+    {
+     "global_site": 0,
+     "record_index": 0,
+     "map": null,
+     "Z": 6,
+     "symbol": "C",
+     "x": -0.9910027211686343,
+     "y": 0.6378633178711585,
+     "z": -0.32074264208286113
+    },
+    {
+     "global_site": 1,
+     "record_index": 1,
+     "map": null,
+     "Z": 6,
+     "symbol": "C",
+     "x": -0.05136924631662209,
+     "y": 0.1574725739725465,
+     "z": 0.49006236317951685
+    },
+    {
+     "global_site": 2,
+     "record_index": 2,
+     "map": null,
+     "Z": 6,
+     "symbol": "C",
+     "x": 1.0007717169696146,
+     "y": -0.7224313606833297,
+     "z": 0.005037732546731949
+    },
+    {
+     "global_site": 3,
+     "record_index": 3,
+     "map": null,
+     "Z": 8,
+     "symbol": "O",
+     "x": 1.8865208172837855,
+     "y": -1.1953399089239574,
+     "z": 0.6875765040699359
+    },
+    {
+     "global_site": 4,
+     "record_index": 4,
+     "map": null,
+     "Z": 1,
+     "symbol": "H",
+     "x": -1.003165368647477,
+     "y": 0.38929348605099134,
+     "z": -1.3695400665267883
+    },
+    {
+     "global_site": 5,
+     "record_index": 5,
+     "map": null,
+     "Z": 1,
+     "symbol": "H",
+     "x": -1.7686730708708431,
+     "y": 1.288227752500285,
+     "z": 0.038356058218146416
+    },
+    {
+     "global_site": 6,
+     "record_index": 6,
+     "map": null,
+     "Z": 1,
+     "symbol": "H",
+     "x": -0.023680661440420053,
+     "y": 0.396167869162905,
+     "z": 1.5439753248510768
+    },
+    {
+     "global_site": 7,
+     "record_index": 7,
+     "map": null,
+     "Z": 1,
+     "symbol": "H",
+     "x": 0.9505985341908766,
+     "y": -0.9512537299505135,
+     "z": -1.0747252742561313
+    }
+   ],
+   "bonds": [
+    [
+     0,
+     1,
+     2
+    ],
+    [
+     1,
+     2,
+     1
+    ],
+    [
+     2,
+     3,
+     2
+    ],
+    [
+     0,
+     4,
+     1
+    ],
+    [
+     0,
+     5,
+     1
+    ],
+    [
+     1,
+     6,
+     1
+    ],
+    [
+     2,
+     7,
+     1
+    ]
+   ],
+   "xyz": "8\nC=CC=O charge=0 mult=1 method=GFN2-xTB/ALPB-water/tblite-lbfgs\nC -0.991003 0.637863 -0.320743\nC -0.051369 0.157473 0.490062\nC 1.000772 -0.722431 0.005038\nO 1.886521 -1.195340 0.687577\nH -1.003165 0.389293 -1.369540\nH -1.768673 1.288228 0.038356\nH -0.023681 0.396168 1.543975\nH 0.950599 -0.951254 -1.074725\n",
+   "molblock": "\n     RDKit          3D\n\n  8  7  0  0  0  0  0  0  0  0999 V2000\n   -0.9910    0.6379   -0.3207 C   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.0514    0.1575    0.4901 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.0008   -0.7224    0.0050 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.8865   -1.1953    0.6876 O   0  0  0  0  0  0  0  0  0  0  0  0\n   -1.0032    0.3893   -1.3695 H   0  0  0  0  0  0  0  0  0  0  0  0\n   -1.7687    1.2882    0.0384 H   0  0  0  0  0  0  0  0  0  0  0  0\n   -0.0237    0.3962    1.5440 H   0  0  0  0  0  0  0  0  0  0  0  0\n    0.9506   -0.9513   -1.0747 H   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  2  0\n  2  3  1  0\n  3  4  2  0\n  1  5  1  0\n  1  6  1  0\n  2  7  1  0\n  3  8  1  0\nM  END\n",
+   "frame_note": "the QM record's own frame (Angstrom), record atom order"
+  },
+  "orbitals": {
+   "set": "canonical",
+   "start": null,
+   "source": "canonical",
+   "homo_index": 10,
+   "orbitals": [
+    {
+     "index": 0,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -19.697818742668183,
+     "label": "HOMO-10",
+     "frontier": null,
+     "level": 0,
+     "centres": [
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.6502266112775742
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.3316852150588922
+      }
+     ],
+     "centroid": [
+      1.5622945828175057,
+      -1.0191186884208943,
+      0.45041821533321896
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 1,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -17.756903334614858,
+     "label": "HOMO-9",
+     "frontier": null,
+     "level": 1,
+     "centres": [
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.390767339192333
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.22997494920200454
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.2137830544764565
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.08497307287170838
+      }
+     ],
+     "centroid": [
+      0.14468017668748007,
+      -0.06000540411148784,
+      0.18169249572588103
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 2,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -16.68072926051757,
+     "label": "HOMO-8",
+     "frontier": null,
+     "level": 2,
+     "centres": [
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.2896029263444641
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.24203503113258248
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.1710385281121874
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.16808298865939536
+      }
+     ],
+     "centroid": [
+      0.40073243019288174,
+      -0.25874014612641627,
+      0.12638914142521715
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 3,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -15.953138538183701,
+     "label": "HOMO-7",
+     "frontier": null,
+     "level": 3,
+     "centres": [
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.2950990447020321
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.19892968458929153
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.15850018805662736
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.11538344288705073
+      },
+      {
+       "atom": 7,
+       "element": "H",
+       "weight": 0.10723251468963588
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.052196156884330366
+      }
+     ],
+     "centroid": [
+      0.5554537762386225,
+      -0.38140984909372144,
+      0.08243476898123235
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 4,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -14.790126553808172,
+     "label": "HOMO-6",
+     "frontier": null,
+     "level": 4,
+     "centres": [
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.4293745018432413
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.16998157662113134
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.16279704229768593
+      },
+      {
+       "atom": 5,
+       "element": "H",
+       "weight": 0.09802630201907529
+      },
+      {
+       "atom": 7,
+       "element": "H",
+       "weight": 0.06592403031285683
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.05861706505097198
+      }
+     ],
+     "centroid": [
+      0.6774247758233228,
+      -0.4436707623810829,
+      0.1881226413273333
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 5,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -14.77338797265718,
+     "label": "HOMO-5",
+     "frontier": null,
+     "level": 4,
+     "centres": [
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.5428828451012808
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.38694038897824956
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.059813903278085154
+      }
+     ],
+     "centroid": [
+      1.398056581582172,
+      -0.9124382776869849,
+      0.40121150858254107
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 6,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -14.61401612678552,
+     "label": "HOMO-4",
+     "frontier": null,
+     "level": 5,
+     "centres": [
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.25818014601051675
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.23889511128076804
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.1520211458119994
+      },
+      {
+       "atom": 4,
+       "element": "H",
+       "weight": 0.13746657037353663
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.11563588257628649
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.09415496260737406
+      }
+     ],
+     "centroid": [
+      -0.006360995093735248,
+      0.03932152451799253,
+      0.14133617861573464
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 7,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -13.291829842216606,
+     "label": "HOMO-3",
+     "frontier": null,
+     "level": 6,
+     "centres": [
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.3062782208259213
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.1901606738085464
+      },
+      {
+       "atom": 5,
+       "element": "H",
+       "weight": 0.16850462608675573
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.11327109456488288
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.09585501565495835
+      },
+      {
+       "atom": 7,
+       "element": "H",
+       "weight": 0.0649479552853787
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.06078990231108586
+      }
+     ],
+     "centroid": [
+      -0.24159652358712122,
+      0.20011090420714617,
+      0.1035759597745734
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 8,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -12.658951661339678,
+     "label": "HOMO-2",
+     "frontier": null,
+     "level": 7,
+     "centres": [
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.28640424656529195
+      },
+      {
+       "atom": 4,
+       "element": "H",
+       "weight": 0.20707143478186352
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.16537168282997824
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.15628721884038918
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.08868442234689579
+      },
+      {
+       "atom": 5,
+       "element": "H",
+       "weight": 0.07431804542915935
+      }
+     ],
+     "centroid": [
+      -0.44585332618436013,
+      0.32692663887991635,
+      0.01835735093904536
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 9,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -12.08000370867945,
+     "label": "HOMO-1",
+     "frontier": "homo_minus_1",
+     "level": 8,
+     "centres": [
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.43531320413531566
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.43489580980882314
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.1270273375579356
+      }
+     ],
+     "centroid": [
+      -0.21093917627351605,
+      0.19211660411571213,
+      0.16119591551225393
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 10,
+     "kind": "occupied",
+     "occupation": 2,
+     "energy_ev": -11.154801288995987,
+     "label": "HOMO",
+     "frontier": "homo",
+     "level": 9,
+     "centres": [
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.5275426027645976
+      },
+      {
+       "atom": 7,
+       "element": "H",
+       "weight": 0.16186334751126324
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.13694265072415884
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.10082362067729686
+      }
+     ],
+     "centroid": [
+      1.1789856463086572,
+      -0.7833741759415234,
+      0.28168511384051886
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 11,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": -8.258480193573877,
+     "label": "LUMO",
+     "frontier": "lumo",
+     "level": 10,
+     "centres": [
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.3447160079397066
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.3348165265820153
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.24719963058625988
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.07326783443899401
+      }
+     ],
+     "centroid": [
+      0.4560439438635325,
+      -0.30595017160395593,
+      0.09699605918716034
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 12,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": -4.993820267186473,
+     "label": "LUMO+1",
+     "frontier": "lumo_plus_1",
+     "level": 11,
+     "centres": [
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.4316050359670025
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.2754794159686165
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.2100253812222902
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.08289016601164417
+      }
+     ],
+     "centroid": [
+      0.2017590810314084,
+      -0.09616344966281255,
+      0.2025304099766665
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 13,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": 2.614267978336415,
+     "label": "LUMO+2",
+     "frontier": null,
+     "level": 12,
+     "centres": [
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.24432388570063773
+      },
+      {
+       "atom": 7,
+       "element": "H",
+       "weight": 0.21064296275651795
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.17661089149972503
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.139146184763792
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.09286244923729661
+      },
+      {
+       "atom": 4,
+       "element": "H",
+       "weight": 0.06586312094110157
+      },
+      {
+       "atom": 5,
+       "element": "H",
+       "weight": 0.05588178939739781
+      }
+     ],
+     "centroid": [
+      0.2031195637340967,
+      -0.15461751741053054,
+      -0.031521711777528105
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 14,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": 3.8881765539086404,
+     "label": "LUMO+3",
+     "frontier": null,
+     "level": 13,
+     "centres": [
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.21386500157442753
+      },
+      {
+       "atom": 5,
+       "element": "H",
+       "weight": 0.1889307368375836
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.17435034380920958
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.1668146747840125
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.13287942056110105
+      },
+      {
+       "atom": 4,
+       "element": "H",
+       "weight": 0.09917861943332876
+      }
+     ],
+     "centroid": [
+      -0.43616204700284644,
+      0.36656840868871055,
+      0.20849270467127384
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 15,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": 4.493762064090545,
+     "label": "LUMO+4",
+     "frontier": null,
+     "level": 14,
+     "centres": [
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.3016966434795573
+      },
+      {
+       "atom": 4,
+       "element": "H",
+       "weight": 0.2252085687470758
+      },
+      {
+       "atom": 7,
+       "element": "H",
+       "weight": 0.15634544950020943
+      },
+      {
+       "atom": 5,
+       "element": "H",
+       "weight": 0.14180542775415894
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.12117938550277157
+      }
+     ],
+     "centroid": [
+      -0.5002130912675627,
+      0.2292369332424246,
+      -0.5396232592730462
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 16,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": 6.5431231697436765,
+     "label": "LUMO+5",
+     "frontier": null,
+     "level": 15,
+     "centres": [
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.29192630506445355
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.27671690752937456
+      },
+      {
+       "atom": 7,
+       "element": "H",
+       "weight": 0.13475148674381143
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.12313901176285949
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.10037808408288133
+      }
+     ],
+     "centroid": [
+      0.2953364272903942,
+      -0.1833406455598695,
+      0.12307861479466645
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 17,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": 10.801685487794972,
+     "label": "LUMO+6",
+     "frontier": null,
+     "level": 16,
+     "centres": [
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.28670926905084837
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.18775137006427667
+      },
+      {
+       "atom": 5,
+       "element": "H",
+       "weight": 0.14252993961916544
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.13851525448904028
+      },
+      {
+       "atom": 4,
+       "element": "H",
+       "weight": 0.08299630705907445
+      },
+      {
+       "atom": 6,
+       "element": "H",
+       "weight": 0.07990334737568026
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.07950145972663131
+      }
+     ],
+     "centroid": [
+      -0.3404214026822054,
+      0.26293304597273454,
+      0.0683305891376893
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 18,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": 13.434357407049376,
+     "label": "LUMO+7",
+     "frontier": null,
+     "level": 17,
+     "centres": [
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.2930044778348128
+      },
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.2640332215719976
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.2601165462531105
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.1396993909794942
+      }
+     ],
+     "centroid": [
+      0.21892212270226247,
+      -0.1326413738077313,
+      0.10448328393783213
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    },
+    {
+     "index": 19,
+     "kind": "virtual",
+     "occupation": 0,
+     "energy_ev": 17.703589155609407,
+     "label": "LUMO+8",
+     "frontier": null,
+     "level": 18,
+     "centres": [
+      {
+       "atom": 2,
+       "element": "C",
+       "weight": 0.30574634074082924
+      },
+      {
+       "atom": 1,
+       "element": "C",
+       "weight": 0.2723409306393381
+      },
+      {
+       "atom": 0,
+       "element": "C",
+       "weight": 0.20201618109904051
+      },
+      {
+       "atom": 3,
+       "element": "O",
+       "weight": 0.17741764640475038
+      }
+     ],
+     "centroid": [
+      0.4234991541237205,
+      -0.253049731108285,
+      0.21661589242733412
+     ],
+     "model_input": null,
+     "spectral": null,
+     "retained_fraction": null,
+     "diagnostic": null
+    }
+   ]
+  },
+  "cubes": [
+   {
+    "index": 10,
+    "asset": {
+     "path": "acrolein/mo-10.cube",
+     "bytes": 214665,
+     "sha256": "6ed0ac21e77c6557f8b18e6ffd40f37709f9c6a4668dc87dc29e2ac7f776f6af",
+     "media_type": "chemical/x-cube"
+    }
+   },
+   {
+    "index": 11,
+    "asset": {
+     "path": "acrolein/mo-11.cube",
+     "bytes": 214665,
+     "sha256": "ed91863aba0dda8d3e0056cc765b4dfae7c8ec156056889422429c8c30f64e36",
+     "media_type": "chemical/x-cube"
+    }
+   }
+  ],
+  "selected": 10
+ },
+ "provenance": {
+  "exporter": "ksmech scene-export 1",
+  "exported_at": "2026-10-27T17:36:46.365Z",
+  "server": {
+   "api_schema": 1,
+   "app_version": "0.1.0",
+   "spec_version": "v9+4d2aa237f885;tok9;smp17;qm1",
+   "physics_fingerprint": "72d7947e1dd5",
+   "chemistry": "real",
+   "qm_method": "GFN2-xTB/ALPB-water/tblite-lbfgs"
+  },
+  "request": {
+   "type": "molecule",
+   "smiles": "C=CC=O",
+   "name": "acrolein",
+   "title": "Acrolein: frontier orbitals"
+  },
+  "predict": null,
+  "notes": [
+   "canonical MO cubes of GET /molecule/{id}/cube (quality draft), every 2. grid point kept"
+  ]
+ }
+}

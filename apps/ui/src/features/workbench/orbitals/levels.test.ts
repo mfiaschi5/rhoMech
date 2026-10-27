@@ -6,7 +6,7 @@
 // apart.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEGENERACY, clampRange, degenerateLevels, energyWindow, frontierBlocks, groupLevels, MIN_SPAN, panRange, sanitizeDegeneracy, spreadLabels, zoomRange } from "./levels.ts";
+import { DEGENERACY, clampRange, degenerateLevels, energyWindow, frontierBlocks, groupLevels, MIN_SPAN, panRange, sanitizeDegeneracy, spreadLabels, zoomRange } from "@ksmech/viz/orbitals/levels";
 import { DEFAULT_PREFS, sanitizePrefs, updatePrefs } from "../layout/prefs.ts";
 
 const row = (index, energy_ev, occupation, level = null, frontier = null) => ({ index, energy_ev, occupation, level, frontier, label: "", kind: occupation > 0.5 ? "occupied" : "virtual", centres: [], centroid: null });

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applyDepiction } from "./depiction.ts";
-import { addAtom, addBond, centroid, emptySketch, setBondStereo } from "./model.ts";
+import { addAtom, addBond, centroid, emptySketch, setBondStereo } from "@ksmech/viz/sketch/model";
 
 /** CH(OH)(F)CH3 drawn with ids that are not positions, and one old wedge. */
 function sketch() {

@@ -12,19 +12,15 @@
 //
 // The Sketcher applies it after Clean as its own undoable step, and on the "Tidy fragments"
 // button. Pure: runs under node --experimental-strip-types.
-import type { SketchModel } from "./model";
-import type { Vec, View } from "./geometry";
-import type { DrawingStyle } from "./style";
-import type { LabelStyle } from "./drawing";
-import type { Box } from "./labelGlyphs";
-// @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { buildScene } from "./drawing.ts";
-// @ts-ignore TS5097: see above
-import { atomInk } from "./labelLayout.ts";
-// @ts-ignore TS5097: see above
-import { BOND_LENGTH, moveAtoms, neighbors } from "./model.ts";
-// @ts-ignore TS5097: see above
-import { drawMetrics, pxPerPt, SCREEN_STYLE } from "./style.ts";
+import type { SketchModel } from "@ksmech/viz/sketch/model";
+import type { Vec, View } from "@ksmech/viz/sketch/geometry";
+import type { DrawingStyle } from "@ksmech/viz/sketch/style";
+import type { LabelStyle } from "@ksmech/viz/sketch/drawing";
+import type { Box } from "@ksmech/viz/sketch/labelGlyphs";
+import { buildScene } from "@ksmech/viz/sketch/drawing";
+import { atomInk } from "@ksmech/viz/sketch/labelLayout";
+import { BOND_LENGTH, moveAtoms, neighbors } from "@ksmech/viz/sketch/model";
+import { drawMetrics, pxPerPt, SCREEN_STYLE } from "@ksmech/viz/sketch/style";
 
 /** Pixels per model unit of the Screen style at 100 % (Sketcher.DEFAULT_SCALE). */
 const SCREEN_SCALE = 25;

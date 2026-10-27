@@ -4,7 +4,7 @@
 // selection, any tool; one commit on release), middle-button (or Alt) panning and Ctrl/Cmd +
 // wheel zoom.
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
-import { dist, inRect, rectFrom, toModel, toScreen, type Rect, type Vec, type View } from "./geometry";
+import { dist, inRect, rectFrom, toModel, toScreen, type Rect, type Vec, type View } from "@ksmech/viz/sketch/geometry";
 import { dragModel, finishMove, movedAtoms, type DragStart } from "./gestures";
 import { frameHandleAt, handleDragModel, type HandleDrag, type SelectionFrame } from "./frame";
 import { applyClick, hitTest, NO_SELECTION, selectInRect, type Hit, type Selection } from "./tools";

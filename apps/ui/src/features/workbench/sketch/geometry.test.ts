@@ -1,8 +1,8 @@
 // @ts-nocheck -- run by `node --experimental-strip-types --test` (see model.test.ts).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEG, angleOf, chainPoints, dist, growthAngle, largestGapDirection, normAngle, polygonOnEdge, sub } from "./geometry.ts";
-import { BOND_LENGTH, addAtom, addBond, atomById, emptySketch, findBond, neighbors } from "./model.ts";
+import { DEG, angleOf, chainPoints, dist, growthAngle, largestGapDirection, normAngle, polygonOnEdge, sub } from "@ksmech/viz/sketch/geometry";
+import { BOND_LENGTH, addAtom, addBond, atomById, emptySketch, findBond, neighbors } from "@ksmech/viz/sketch/model";
 import { addChain, addRing, bondBetweenPoints, bondFromPoint, growBond } from "./templates.ts";
 
 const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);

@@ -22,7 +22,7 @@ import {
   type DrawingStyle,
   type PresetId,
   type StyleId,
-} from "./style";
+} from "@ksmech/viz/sketch/style";
 
 export interface StyleControlProps {
   styleId: StyleId;

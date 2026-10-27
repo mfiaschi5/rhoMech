@@ -20,14 +20,14 @@ import { useEffect, useMemo, useState } from "react";
 import type { GLViewer } from "3dmol";
 import type { CubeQuality } from "../../../api/workbench";
 import type { MoleculeGeometryOut, MoleculePropertiesOut, OrbitalSetOut, PointGroupOut } from "../../../api/types.gen";
-import { atomPropDefs, findProp, propRange } from "../atomProps";
+import { atomPropDefs, findProp, propRange } from "@ksmech/viz/viewer/atomProps";
 import type { Rep } from "../params";
 import { setHover, toggleAtom, useSelection } from "../store";
 import { ColourBar } from "./ColourBar";
-import { MEASURE_ATOMS, measure, measureText, type Measurement, type P3 } from "./measure";
-import { useAtomClicks, useAtomLabels, useBondLabels, useCentroids, useHalos, useMeasurements, useModel, useStyle, type AtomColouring } from "./scene";
+import { MEASURE_ATOMS, measure, measureText, type Measurement, type P3 } from "@ksmech/viz/viewer/measure";
+import { useAtomClicks, useAtomLabels, useBondLabels, useCentroids, useHalos, useMeasurements, useModel, useStyle, type AtomColouring } from "@ksmech/viz/viewer/scene";
 import { classColourFn, drawnElements, useSymmetryElements, useSymmetryView } from "./symmetry";
-import { useGLViewer, type ViewerHandle } from "./useGLViewer";
+import { useGLViewer, type ViewerHandle } from "@ksmech/viz/viewer/useGLViewer";
 import { DEFAULT_VIEW, ViewerToolbar, type ViewOptions } from "./ViewerToolbar";
 
 export interface ViewerPanelProps {

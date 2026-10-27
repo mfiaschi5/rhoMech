@@ -1,8 +1,8 @@
 // @ts-nocheck -- run by `node --experimental-strip-types --test` (see model.test.ts).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEG, angleOf, dist, normAngle, sub } from "./geometry.ts";
-import { BOND_LENGTH, addAtom, emptySketch, findBond } from "./model.ts";
+import { DEG, angleOf, dist, normAngle, sub } from "@ksmech/viz/sketch/geometry";
+import { BOND_LENGTH, addAtom, emptySketch, findBond } from "@ksmech/viz/sketch/model";
 import { dragModel, finishMove } from "./gestures.ts";
 import { NO_SELECTION } from "./tools.ts";
 

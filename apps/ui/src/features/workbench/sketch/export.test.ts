@@ -7,12 +7,12 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { addAtom, addBond, emptySketch, setCharge } from "./model.ts";
-import { crc32, exportLayout, pixelSize, pngWithDpi, sizeCm, toSvg } from "./exportImage.ts";
+import { addAtom, addBond, emptySketch, setCharge } from "@ksmech/viz/sketch/model";
+import { crc32, exportLayout, pixelSize, pngWithDpi, sizeCm, toSvg } from "@ksmech/viz/sketch/exportImage";
 import { pdfBytes, toPdf } from "./pdf.ts";
 import { latexFigure, toChemfig } from "./latex.ts";
 import { importSketch } from "./rdkitSketch.ts";
-import { ACS_1996_STYLE, TOTAL_SYNTHESIS_STYLE } from "./style.ts";
+import { ACS_1996_STYLE, TOTAL_SYNTHESIS_STYLE } from "@ksmech/viz/sketch/style";
 
 const wasmJs = fileURLToPath(new URL("../../../../node_modules/@rdkit/rdkit/dist/RDKit_minimal.js", import.meta.url));
 const rdOpts = { skip: existsSync(wasmJs) ? false : "RDKit.js not installed (npm --prefix apps/ui install)" };

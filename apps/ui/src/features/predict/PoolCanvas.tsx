@@ -25,12 +25,12 @@ import { SketchCanvas } from "../workbench/sketch/SketchCanvas";
 import { NO_SELECTION } from "../workbench/sketch/tools";
 import type { SketchPointer } from "../workbench/sketch/useSketchPointer";
 import "../workbench/sketch/sketch.css";
-import type { Vec } from "./arrowPath";
-import type { PoolStructure } from "./poolStructure";
-import { arrowContext, hitPairs, hitTest, nearEnd, poolView, type PoolHit } from "./poolView";
-import { ROverlay } from "./ROverlay";
-import type { Endpoint } from "./rmatrix";
-import type { ArrowReadingOut, MatrixIO } from "./v9types";
+import type { Vec } from "@ksmech/viz/pool/arrowPath";
+import type { PoolStructure } from "@ksmech/viz/pool/poolStructure";
+import { arrowContext, hitPairs, hitTest, nearEnd, poolView, type PoolHit } from "@ksmech/viz/pool/poolView";
+import { ROverlay } from "@ksmech/viz/pool/ROverlay";
+import type { Endpoint } from "@ksmech/viz/pool/rmatrix";
+import type { ArrowReadingOut, MatrixIO } from "@ksmech/viz/v9types";
 
 /** The editor tool whose gestures the canvas reads (the Correct page's editor cycles them). */
 export type Tool = "bond" | "lone" | "arrow" | "eraser";

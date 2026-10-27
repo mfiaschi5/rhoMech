@@ -6,7 +6,7 @@
 // written as the en dash. Deterministic: no dates or ids, the same layout gives the same bytes.
 // The output is a string whose every char code is < 256 (one byte each); pdfBytes() makes the
 // Uint8Array for a Blob.
-import type { ExportLayout, Prim } from "./exportImage";
+import type { ExportLayout, Prim } from "@ksmech/viz/sketch/exportImage";
 
 const n = (x: number) => {
   const r = Math.round(x * 1000) / 1000;

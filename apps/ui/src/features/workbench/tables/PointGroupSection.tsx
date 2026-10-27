@@ -15,7 +15,7 @@ import type { ApiError } from "../../../api/http";
 import type { PendingCached } from "../../../api/hooks";
 import type { PointGroupOut, SymmetryElementOut } from "../../../api/types.gen";
 import { ErrorBanner } from "../../../components/ErrorBanner";
-import { fmt } from "../../../components/format";
+import { fmt } from "@ksmech/viz/format";
 import { PendingNote } from "../../../components/PendingNote";
 import { selectAtoms } from "../store";
 import { classColour, clampTolerance, setSymmetryView, TOLERANCE_MAX, TOLERANCE_MIN, useSymmetryView } from "../viewer/symmetry";

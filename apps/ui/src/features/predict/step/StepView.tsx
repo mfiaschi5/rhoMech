@@ -17,12 +17,12 @@
 //
 // DOM: <div data-testid="<prefix>"> with the PoolCanvas <prefix>-canvas, the arrow list
 // <prefix>-arrow-text-<k>, <prefix>-product (data-smiles) and <prefix>-sigma-<k>.
-import { SmilesDepiction } from "../../../components/SmilesDepiction";
 import { ErrorBanner } from "../../../components/ErrorBanner";
 import { useDrawnStructure, usePool } from "../hooks";
 import { PoolCanvas } from "../PoolCanvas";
-import { arrowText } from "../rmatrix";
-import type { ArrowReadingOut, MatrixIO } from "../v9types";
+import { arrowText } from "@ksmech/viz/pool/rmatrix";
+import { ProductView } from "@ksmech/viz/step/ProductView";
+import type { ArrowReadingOut, MatrixIO } from "@ksmech/viz/v9types";
 
 export interface StepViewProps {
   stateId: string;
@@ -34,21 +34,6 @@ export interface StepViewProps {
   highlight?: ReadonlySet<number>;
   prefix: string;
   height?: number;
-}
-
-export function ProductView({ smiles, sigmaKeys, prefix }: { smiles: readonly string[]; sigmaKeys?: readonly string[]; prefix: string }) {
-  const joined = smiles.join(".");
-  return (
-    <div className="pv-product stack" data-testid={`${prefix}-product`} data-smiles={joined}>
-      {smiles.length ? <SmilesDepiction smiles={joined} width={300} height={220} className="pv-product-svg" /> : <div className="muted pv-product-empty">no product yet</div>}
-      <code className="code pv-wrap">{joined || "–"}</code>
-      {sigmaKeys?.map((k, i) => (
-        <code key={i} className="code muted pv-wrap" data-testid={`${prefix}-sigma-${i}`} title="sigma key: the sigma skeleton with H counts frozen and charges zeroed">
-          σ {k}
-        </code>
-      ))}
-    </div>
-  );
 }
 
 export function StepView(props: StepViewProps) {

@@ -15,7 +15,7 @@ import { isTerminal } from "../api/poll";
 import type { ErrorBody, JobOut } from "../api/types.gen";
 import { ErrorBanner } from "./ErrorBanner";
 import { PendingNote } from "./PendingNote";
-import { fmtSeconds, shortId } from "./format";
+import { fmtSeconds, shortId } from "@ksmech/viz/format";
 
 export interface JobProgressProps {
   job: JobOut | null;

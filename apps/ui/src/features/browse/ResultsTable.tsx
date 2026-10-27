@@ -5,7 +5,7 @@
 // tr[data-testid=browse-result-{ref}][data-source][data-status].
 import { useMemo } from "react";
 import type { SearchOut, StepSummaryOut } from "../../api/types.gen";
-import { useRDKit } from "../../chem/rdkit";
+import { useRDKit } from "@ksmech/viz/chem/rdkit";
 import { navigate, type Route } from "../../router";
 import { browseHash, PAGE_SIZE, type SearchState } from "./searchParams";
 import { speciesCounts, speciesText } from "./smiles";

@@ -19,11 +19,11 @@ import type { ApiError } from "../../../api/http";
 import type { PendingCached } from "../../../api/hooks";
 import type { OrbitalRowOut, OrbitalSetOut } from "../../../api/types.gen";
 import { ErrorBanner } from "../../../components/ErrorBanner";
-import { fmt, moLabel } from "../../../components/format";
+import { fmt, moLabel } from "@ksmech/viz/format";
 import { PendingNote } from "../../../components/PendingNote";
 import { CANONICAL, FALLBACK_SETS, FALLBACK_STARTS } from "../params";
-import { LevelDiagram } from "./LevelDiagram";
-import { frontierLabel, sanitizeDegeneracy, type Window } from "./levels";
+import { LevelDiagram } from "@ksmech/viz/orbitals/LevelDiagram";
+import { frontierLabel, sanitizeDegeneracy, type Window } from "@ksmech/viz/orbitals/levels";
 import { PREFS_KEY, readJson, writeJson } from "../layout/storage";
 
 export interface OrbitalPanelProps {

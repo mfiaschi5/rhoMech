@@ -13,7 +13,7 @@ import { getMoleculeSymmetry } from "../../../api/workbench";
 import { useDebounced, usePendingCached, type PendingCached } from "../../../api/hooks";
 import type { PointGroupOut, SymmetryElementOut } from "../../../api/types.gen";
 import { createStore, useStore } from "../../../state/store";
-import { useOverlay, type Overlay } from "./useGLViewer";
+import { useOverlay, type Overlay } from "@ksmech/viz/viewer/useGLViewer";
 
 export const TOLERANCE_DEFAULT = 0.1;
 export const TOLERANCE_MIN = 0.01;

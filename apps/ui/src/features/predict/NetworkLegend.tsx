@@ -17,9 +17,9 @@
 //       data-recurrence data-source data-target><button/></li>
 // Root edges are the edge items whose data-source equals the root node's id. Cycles are listed
 // after the edges (data-testid="predict-network-cycle-{id}"); they are not edges.
-import { shortId } from "../../components/format";
-import { matrixText, rankLabel, rankOf, scoreText, speciesLabel } from "./network";
-import type { EdgeOut, NetworkOut, NodeOut, PathwayOut } from "./v9types";
+import { shortId } from "@ksmech/viz/format";
+import { matrixText, rankLabel, rankOf, scoreText, speciesLabel } from "@ksmech/viz/network/network";
+import type { EdgeOut, NetworkOut, NodeOut, PathwayOut } from "@ksmech/viz/v9types";
 
 export interface NetworkLegendProps {
   net: NetworkOut;

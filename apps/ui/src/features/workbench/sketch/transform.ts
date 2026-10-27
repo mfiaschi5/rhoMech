@@ -15,14 +15,12 @@
 // keep their front/back). Uniform scaling scales z with x and y.
 // Gap: a flip of a partial selection that cuts through the bonds of a stereocentre mirrors only
 // some of its neighbours, which is a geometric edit and may change that centre.
-import type { SketchAtom, SketchBond, SketchModel } from "./model";
+import type { SketchAtom, SketchBond, SketchModel } from "@ksmech/viz/sketch/model";
 import type { Selection } from "./tools";
-import type { Vec } from "./geometry";
+import type { Vec } from "@ksmech/viz/sketch/geometry";
+import { BOND_LENGTH } from "@ksmech/viz/sketch/model";
+import { DEG, angleOf, dist, rotate, snapAngle, sub } from "@ksmech/viz/sketch/geometry";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { BOND_LENGTH } from "./model.ts";
-// @ts-ignore TS5097: see above
-import { DEG, angleOf, dist, rotate, snapAngle, sub } from "./geometry.ts";
-// @ts-ignore TS5097: see above
 import { selectionAtoms } from "./tools.ts";
 
 export const TRANSFORM_ACTIONS = [

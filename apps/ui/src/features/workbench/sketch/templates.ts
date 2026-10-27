@@ -1,12 +1,10 @@
 // Drawing operations that need geometry: growing a bond at the best free angle, ring templates
 // (on empty canvas, spiro on an atom, fused on a bond) and zigzag chains. Pure; new atoms that
 // land on an existing atom (within MERGE_TOLERANCE bond lengths) reuse it.
-import type { BondOrder, BondStereo, SketchModel } from "./model";
-// @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { BOND_LENGTH, addAtom, addBond, atomAt, atomById, bondById, findBond, neighbors } from "./model.ts";
-// @ts-ignore TS5097: see above
-import { add, fromAngle, growthAngle, largestGapDirection, polygonAt, polygonFromVertex, polygonOnEdge, sideOf } from "./geometry.ts";
-import type { Vec } from "./geometry";
+import type { BondOrder, BondStereo, SketchModel } from "@ksmech/viz/sketch/model";
+import { BOND_LENGTH, addAtom, addBond, atomAt, atomById, bondById, findBond, neighbors } from "@ksmech/viz/sketch/model";
+import { add, fromAngle, growthAngle, largestGapDirection, polygonAt, polygonFromVertex, polygonOnEdge, sideOf } from "@ksmech/viz/sketch/geometry";
+import type { Vec } from "@ksmech/viz/sketch/geometry";
 
 export type RingKind = "benzene" | "cyclohexane" | "cyclopentane";
 export const RING_SIZE: Record<RingKind, number> = { benzene: 6, cyclohexane: 6, cyclopentane: 5 };

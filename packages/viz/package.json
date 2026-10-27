@@ -1,0 +1,19 @@
+{
+  "name": "@ksmech/viz",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ksmech visualizations as props-only React components (molecule 2D/3D, orbitals, step views, mechanism network) and the scene format that feeds them",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./scene.schema.json": "./scene.schema.json",
+    "./*": "./src/*"
+  },
+  "sideEffects": ["*.css"],
+  "peerDependencies": {
+    "3dmol": "2.5.5",
+    "@rdkit/rdkit": "2026.9.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

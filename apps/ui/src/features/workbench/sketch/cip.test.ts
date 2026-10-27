@@ -12,10 +12,10 @@ import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { importSketch, stereoLabels } from "./rdkitSketch.ts";
-import { cipItems, cipText, parseStereoTags } from "./cip.ts";
+import { cipItems, cipText, parseStereoTags } from "@ksmech/viz/sketch/cip";
 import { applyTransform } from "./transform.ts";
-import { buildScene } from "./drawing.ts";
-import { setBondStereo } from "./model.ts";
+import { buildScene } from "@ksmech/viz/sketch/drawing";
+import { setBondStereo } from "@ksmech/viz/sketch/model";
 
 const wasmJs = fileURLToPath(new URL("../../../../node_modules/@rdkit/rdkit/dist/RDKit_minimal.js", import.meta.url));
 const available = existsSync(wasmJs);

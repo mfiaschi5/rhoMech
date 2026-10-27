@@ -22,21 +22,22 @@
 // li[data-testid=predict-step-alternative-<k>], the ReadingTable "predict-step",
 // predict-correct-step.
 import { useEffect, useState } from "react";
-import { exact, fmt, fmtSig } from "../../../components/format";
+import { exact, fmt, fmtSig } from "@ksmech/viz/format";
 import { useCapability } from "../../../state/store";
 import { EmbeddingView } from "../../embedding/EmbeddingView";
 import { correctHash } from "../../../router";
-import { matrixText, rankOf, speciesLabel } from "../network";
+import { matrixText, rankOf, scoreWords, speciesLabel, stepCaptions } from "@ksmech/viz/network/network";
 import { Panel } from "../../../components/Panel";
 import { ReadingTable } from "../ReadingTable";
-import { arrowText } from "../rmatrix";
-import { StepAnimated } from "./StepAnimated";
-import { STEP_VARIANTS, STEP_VARIANT_TITLES, NO_HOVER, useShownStep, useStepSides, useStepVariant, type HoverSet, type ShownStep, type StepVariant } from "./stepHooks";
-import { StepOrbital } from "./StepOrbital";
-import { stepAlternative } from "./stepText";
-import { StepTextbook, type StepVariantProps } from "./StepTextbook";
-import type { EdgeOut, NetworkOut } from "../v9types";
-import "./step.css";
+import { arrowText } from "@ksmech/viz/pool/rmatrix";
+import { StepAnimated } from "@ksmech/viz/step/StepAnimated";
+import { STEP_VARIANTS, STEP_VARIANT_TITLES, useShownStep, useStepSides, useStepVariant, type StepVariant } from "./stepHooks";
+import { NO_HOVER, type HoverSet, type ShownStep } from "@ksmech/viz/step/stepSides";
+import { LiveStepOrbital } from "./useOrbitalData";
+import { stepAlternative } from "@ksmech/viz/step/stepText";
+import { StepTextbook, type StepVariantProps } from "@ksmech/viz/step/StepTextbook";
+import type { EdgeOut, NetworkOut } from "@ksmech/viz/v9types";
+import "@ksmech/viz/step/step.css";
 
 export interface StepPanelProps {
   jobId: string;
@@ -54,8 +55,6 @@ function Score({ edge, probabilities }: { edge: EdgeOut; probabilities: boolean 
     </span>
   );
 }
-
-const scoreWords = (s: { score: number | null; logp: number | null }, probabilities: boolean) => (probabilities && s.logp !== null ? `log p ${fmt(s.logp, 2)}` : `score ${fmtSig(s.score, 4)}`);
 
 function VariantSwitch({ value, onChange }: { value: StepVariant; onChange: (v: StepVariant) => void }) {
   const embedding = useCapability("embedding");
@@ -176,8 +175,7 @@ export function StepPanel({ jobId, edge, net, probabilities }: StepPanelProps) {
     productSmiles: edge.product_smiles,
     sigmaKeys: edge.sigma_keys,
     label,
-    above: edge.kind === "corrected" ? "user step" : edge.predictor,
-    below: [scoreWords(step, probabilities), step.index < 0 && rankOf(edge) !== null ? `rank ${rankOf(edge)}` : step.index >= 0 ? `alternative ${step.index + 1}` : null].filter(Boolean).join(" · "),
+    ...stepCaptions(edge, step, probabilities),
     hover,
     onHover: (h) => setHover(h ?? NO_HOVER),
   };
@@ -201,7 +199,7 @@ export function StepPanel({ jobId, edge, net, probabilities }: StepPanelProps) {
           <div className="ss-view" data-testid="predict-step" data-variant={variant}>
             {variant === "textbook" && <StepTextbook {...vp} />}
             {variant === "animated" && <StepAnimated {...vp} />}
-            {variant === "orbital" && <StepOrbital {...vp} stateId={edge.source_state_id} />}
+            {variant === "orbital" && <LiveStepOrbital {...vp} stateId={edge.source_state_id} />}
             {variant === "embedding" && <EmbeddingView target={{ stateId: edge.source_state_id }} testId="predict-step-embedding" />}
           </div>
           <StepFacts edge={edge} step={step} label={label} probabilities={probabilities} onAlt={setAlt} />

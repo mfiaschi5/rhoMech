@@ -9,10 +9,9 @@
 //   q       cube quality: draft, normal (default), fine
 // Pure functions only (no React), so they can be unit-checked in node.
 import type { CubeKind, CubeQuality } from "../../api/workbench";
+import { DEFAULT_REP, REPS, type Rep } from "@ksmech/viz/viewer/rep";
 
-export const REPS = ["ball-and-stick", "sticks", "spacefill", "wireframe", "lines"] as const;
-export type Rep = (typeof REPS)[number];
-export const DEFAULT_REP: Rep = "ball-and-stick";
+export { DEFAULT_REP, REPS, type Rep } from "@ksmech/viz/viewer/rep";
 
 export const QUALITIES: readonly CubeQuality[] = ["draft", "normal", "fine"];
 export const DEFAULT_QUALITY: CubeQuality = "normal";

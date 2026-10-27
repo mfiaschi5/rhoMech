@@ -3,8 +3,8 @@
 // SMILES ":<digits>]" occurs only as an atom-map class), then RDKit.js canonicalizes each fragment
 // and folds explicit H atoms into their parents. Without RDKit.js the stripped fragment is used
 // as is (still a valid SMILES). Repeated species are counted, so 2 x water gives n=2.
-import type { RDKitModule } from "../../chem/rdkit";
-import { withMol } from "../../chem/rdkit";
+import type { RDKitModule } from "@ksmech/viz/chem/rdkit";
+import { withMol } from "@ksmech/viz/chem/rdkit";
 import type { PrefillSpecies } from "../../router";
 
 export function stripMaps(smiles: string): string {

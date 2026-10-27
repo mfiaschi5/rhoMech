@@ -6,10 +6,10 @@ import { getDepiction } from "../../api/pool";
 import { useCached, type CachedState } from "../../api/cache";
 import { useDebounced } from "../../api/hooks";
 import type { DepictionOut } from "../../api/types.gen";
-import { poolStructure, touchedAtoms, touchedHydrogens, type PoolStructure, type StructureOptions } from "./poolStructure";
-import { inContractRange, isEmptyMatrix } from "./rmatrix";
+import { drawnOptions, poolStructure, type PoolStructure, type StructureOptions } from "@ksmech/viz/pool/poolStructure";
+import { inContractRange, isEmptyMatrix } from "@ksmech/viz/pool/rmatrix";
 import { checkStep, getPredictors } from "../../api/predict";
-import type { ArrowReadingOut, MatrixIO, PredictorOut, StepCheckOut } from "./v9types";
+import type { ArrowReadingOut, MatrixIO, PredictorOut, StepCheckOut } from "@ksmech/viz/v9types";
 
 export function usePredictors(): CachedState<PredictorOut[]> {
   return useCached<PredictorOut[]>("/predictors#v9", () => getPredictors());
@@ -44,15 +44,12 @@ function parse(dep: DepictionOut | undefined, opts: StructureOptions): { structu
  *  forms (default: R's; an editor passes its starting R so the layout holds still while editing). */
 export function useDrawnStructure(pool: PoolState, matrix: MatrixIO | null, arrows: readonly ArrowReadingOut[], allH = false, facingFrom: MatrixIO | null | undefined = matrix): PoolStructure | null {
   const dep = pool.depiction;
-  const hs = dep ? [...touchedHydrogens(dep, matrix, arrows)].sort((a, b) => a - b) : [];
-  const atoms = [...touchedAtoms(matrix, arrows)].sort((a, b) => a - b);
-  const facing = (facingFrom?.bonds ?? []).filter(([, , d]) => d > 0).map(([i, j]) => [i, j] as const);
-  const key = `${allH ? "all" : hs.join(",")}|${atoms.join(",")}|${facing.join(";")}`;
+  const drawn = dep ? drawnOptions(dep, matrix, arrows, allH, facingFrom) : null;
   return useMemo(() => {
-    if (!dep) return pool.structure;
-    return parse(dep, { show: allH ? "all" : new Set(hs), label: new Set(atoms), facing }).structure;
-    // key stands for allH, hs, atoms and facing
-  }, [dep, pool.structure, key]);
+    if (!dep || !drawn) return pool.structure;
+    return parse(dep, drawn.options).structure;
+    // drawn.key stands for drawn.options
+  }, [dep, pool.structure, drawn?.key]);
 }
 
 export const CHECK_DEBOUNCE_MS = 300;

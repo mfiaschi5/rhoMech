@@ -7,8 +7,8 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { analyzeSketch, badAtomIndices, cleanUpSketch, exportSketch, importSketch } from "./rdkitSketch.ts";
 import { applyClick, applyKey, NO_SELECTION } from "./tools.ts";
-import { BOND_LENGTH, emptySketch, meanBondLength, setBondStereo } from "./model.ts";
-import { toMolblock } from "./molfile.ts";
+import { BOND_LENGTH, emptySketch, meanBondLength, setBondStereo } from "@ksmech/viz/sketch/model";
+import { toMolblock } from "@ksmech/viz/sketch/molfile";
 
 const wasmJs = fileURLToPath(new URL("../../../../node_modules/@rdkit/rdkit/dist/RDKit_minimal.js", import.meta.url));
 const available = existsSync(wasmJs);

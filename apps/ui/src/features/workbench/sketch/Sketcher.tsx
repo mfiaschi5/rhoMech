@@ -71,9 +71,9 @@
 //   e2e: click tool-bond, click the canvas, click sketch-atom-2, hover the third atom, press
 //   "o"; expect sketch[data-smiles="CCO"].
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from "react";
-import { useRDKit, type RDKitModule } from "../../../chem/rdkit";
-import { setElement, type SketchModel } from "./model";
-import { fitView, type Vec, type View } from "./geometry";
+import { useRDKit, type RDKitModule } from "@ksmech/viz/chem/rdkit";
+import { setElement, type SketchModel } from "@ksmech/viz/sketch/model";
+import { fitView, type Vec, type View } from "@ksmech/viz/sketch/geometry";
 import { applyKey, NO_SELECTION, selectionAtoms } from "./tools";
 import { applyTransform, transformKey, transformTargets, type TransformAction } from "./transform";
 import { selectionFrame } from "./frame";
@@ -86,13 +86,13 @@ import { Toolbar, type SketchPanel } from "./Toolbar";
 import { ExportPanel, ImportPanel, readDroppedText } from "./ImportExport";
 import { InfoBar } from "./InfoBar";
 import { useLayoutActions, type LayoutActions, type ProjectionSource } from "./useLayoutActions";
-import { findCrossings } from "./crossings";
+import { findCrossings } from "@ksmech/viz/sketch/crossings";
 import { fragments, tidyFragments } from "./fragments";
-import { hasDepth, radicalElectrons } from "./model";
-import { cipItems } from "./cip";
-import type { LabelStyle } from "./drawing";
-import { actualSizeScale, drawMetrics, pxPerPt, resolveStyle, ACS_1996_STYLE, TOTAL_SYNTHESIS_STYLE, type DrawingStyle, type StyleId } from "./style";
-import { setChainAngle } from "./geometry";
+import { hasDepth, radicalElectrons } from "@ksmech/viz/sketch/model";
+import { cipItems } from "@ksmech/viz/sketch/cip";
+import type { LabelStyle } from "@ksmech/viz/sketch/drawing";
+import { actualSizeScale, drawMetrics, pxPerPt, resolveStyle, ACS_1996_STYLE, TOTAL_SYNTHESIS_STYLE, type DrawingStyle, type StyleId } from "@ksmech/viz/sketch/style";
+import { setChainAngle } from "@ksmech/viz/sketch/geometry";
 import type { StyleControlProps } from "./StyleControls";
 import { DEFAULT_IMAGE_OPTIONS, SCHEME_DRAG_TYPE, DragHandle, ImageExportSection, useSchemeFiles, type ImageOptions, type SchemeFiles } from "./ImageExport";
 import { restoreCleanStyle, saveCleanStyle, type CleanStyle, type Depictor } from "./depiction";

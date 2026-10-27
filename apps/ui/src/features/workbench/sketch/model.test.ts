@@ -13,10 +13,10 @@ import {
   removeBonds,
   setBondStereo,
   smallestRingThrough,
-} from "./model.ts";
+} from "@ksmech/viz/sketch/model";
 import { initHistory, pushHistory, undo, redo, HISTORY_CAP, canUndo, canRedo } from "./history.ts";
 import { applyClick, applyKey, NO_SELECTION, hitTest } from "./tools.ts";
-import { fallbackHCount, hillFormula } from "./elements.ts";
+import { fallbackHCount, hillFormula } from "@ksmech/viz/sketch/elements";
 
 const ethane = () => {
   let [m, a] = addAtom(emptySketch(), "C", 0, 0);

@@ -14,7 +14,7 @@
 // [data-testid=predict-predictor-reason-<name>].
 import type { ApiError } from "../../api/http";
 import { ErrorBanner } from "../../components/ErrorBanner";
-import type { PredictorOut } from "./v9types";
+import type { PredictorOut } from "@ksmech/viz/v9types";
 
 export interface PredictorSelectProps {
   value: string;

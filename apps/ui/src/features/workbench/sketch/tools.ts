@@ -2,14 +2,12 @@
 // on the hovered atom or bond (ChemDraw hotkeys), and the hit test that finds that object.
 // Radicals: the radical tool gives an atom one unpaired electron, the diradical (carbene) tool
 // two; a second click with the same tool clears them. The "." key cycles none -> one -> two.
-import type { BondOrder, SketchModel } from "./model";
-import type { Vec, View } from "./geometry";
+import type { BondOrder, SketchModel } from "@ksmech/viz/sketch/model";
+import type { Vec, View } from "@ksmech/viz/sketch/geometry";
 import type { RingKind } from "./templates";
+import { addAtom, adjustCharge, atomById, cycleBondOrder, cycleRadical, removeAtoms, removeBonds, removeSelection, setBondOrder, setBondStereo, setElement, toggleExplicitH, toggleRadical } from "@ksmech/viz/sketch/model";
+import { dist, segmentDistance, toScreen } from "@ksmech/viz/sketch/geometry";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { addAtom, adjustCharge, atomById, cycleBondOrder, cycleRadical, removeAtoms, removeBonds, removeSelection, setBondOrder, setBondStereo, setElement, toggleExplicitH, toggleRadical } from "./model.ts";
-// @ts-ignore TS5097: see above
-import { dist, segmentDistance, toScreen } from "./geometry.ts";
-// @ts-ignore TS5097: see above
 import { addRing, bondFromPoint, growBond } from "./templates.ts";
 
 export const TOOLS = [

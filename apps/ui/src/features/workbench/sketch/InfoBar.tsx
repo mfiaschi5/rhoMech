@@ -12,7 +12,7 @@
 // <span data-testid="sketch-radical-note" data-electrons>.
 import type { SketchInfo } from "./useSketchInfo";
 import type { LayoutReport } from "./useLayoutActions";
-import { cipText, type CipItem } from "./cip";
+import { cipText, type CipItem } from "@ksmech/viz/sketch/cip";
 
 function describe(r: LayoutReport): string {
   const what = r.kind === "project" ? "3D→2D" : "Clean";

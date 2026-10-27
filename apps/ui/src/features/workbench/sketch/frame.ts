@@ -2,11 +2,10 @@
 // corner handles (drag: scale about the selection's centroid, transform.pivotOf) and a
 // rotation handle above the top edge (drag: rotate about the centroid). Pure geometry plus the
 // model a handle drag produces; drawn by SketchCanvas, driven by useSketchPointer.
-import type { SketchModel } from "./model";
-import type { Rect, Vec, View } from "./geometry";
+import type { SketchModel } from "@ksmech/viz/sketch/model";
+import type { Rect, Vec, View } from "@ksmech/viz/sketch/geometry";
+import { dist, toModel, toScreen } from "@ksmech/viz/sketch/geometry";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { dist, toModel, toScreen } from "./geometry.ts";
-// @ts-ignore TS5097: see above
 import { dragAngle, dragScale, pivotOf, rotateAtoms, scaleAtoms } from "./transform.ts";
 
 /** Padding of the box around the atom centres, the rotation stalk and the handle hit radius (px). */

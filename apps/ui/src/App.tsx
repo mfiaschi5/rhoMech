@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { SyntheticBanner } from "./components/SyntheticBanner";
-import { PAGE_IDS, usePage, type PageId } from "./registry";
+import { isEmbedPage, PAGE_IDS, usePage, type PageId } from "./registry";
 import { useHashRoute, type Route } from "./router";
 import { appErrorStore, capabilityOf, clearError, loadMeta, metaStore, useStore } from "./state/store";
 
@@ -89,9 +89,17 @@ export function App() {
   const route = useHashRoute();
   const meta = useStore(metaStore, (s) => s.data);
   const appError = useStore(appErrorStore);
+  const embed = isEmbedPage(route.page);
   useEffect(() => {
-    void loadMeta();
-  }, []);
+    if (!embed) void loadMeta();
+  }, [embed]);
+  if (embed) {
+    return (
+      <main className="app-main app-embed" data-page={route.page}>
+        <Page route={route} />
+      </main>
+    );
+  }
   return (
     <div className="app-shell" data-page={route.page}>
       <header className="app-header">

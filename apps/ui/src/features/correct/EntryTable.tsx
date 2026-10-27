@@ -9,8 +9,8 @@
 // correct-add-j, correct-add-value, correct-add.
 import { useState, type Dispatch } from "react";
 import type { EditorAction, EditorState } from "./editor";
-import type { PoolStructure } from "../predict/poolStructure";
-import { entriesOf, entryKey, type Entry } from "../predict/rmatrix";
+import type { PoolStructure } from "@ksmech/viz/pool/poolStructure";
+import { entriesOf, entryKey, type Entry } from "@ksmech/viz/pool/rmatrix";
 
 const idOf = (e: Entry) => (e.kind === "bond" ? `b-${e.i}-${e.j}` : `l-${e.i}`);
 const VALUES = { bond: [-1, 0, 1], lone: [-2, 0, 2] } as const;

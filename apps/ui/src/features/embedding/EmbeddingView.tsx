@@ -22,7 +22,7 @@ import { useJobPoll } from "../../api/poll";
 import type { CheckpointOut, EmbeddingResultOut, JobOut } from "../../api/types.gen";
 import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";
-import { fmtSig } from "../../components/format";
+import { fmtSig } from "@ksmech/viz/format";
 import { useCapability } from "../../state/store";
 import { JobProgress } from "../../components/JobProgress";
 import { getModels } from "../../api/predict";

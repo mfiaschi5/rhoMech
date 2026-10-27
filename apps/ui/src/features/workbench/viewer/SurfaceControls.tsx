@@ -9,7 +9,7 @@ import type { GLViewer } from "3dmol";
 import { useState } from "react";
 import { moleculeCubeUrl, type CubeKind, type CubeQuality } from "../../../api/workbench";
 import { ErrorBanner } from "../../../components/ErrorBanner";
-import { fmt, fmtSig } from "../../../components/format";
+import { fmt, fmtSig } from "@ksmech/viz/format";
 import { PendingNote } from "../../../components/PendingNote";
 import { CUBE_KINDS, isOrbitalKind, KIND_LABELS, type LayerSpec } from "../params";
 import { ColourBar } from "./ColourBar";

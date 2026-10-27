@@ -4,8 +4,9 @@
 //    for a KSMECH_E2E_PORT other than 8765, so a parallel run has its own) unless
 //    KSMECH_E2E_KEEP=1.
 // 2. Build dist/ when dist/index.html is missing or older than the newest build input (BUILD_INPUTS:
-//    src/**, scripts/**, index.html, vite.config.ts, tsconfig.json, package.json,
-//    package-lock.json), logging the file that triggered it; exit non-zero when the build fails.
+//    src/**, scripts/**, public/scenes/**, index.html, vite.config.ts, tsconfig.json,
+//    package.json, package-lock.json, ../../packages/viz/**), logging the file that triggered it;
+//    exit non-zero when the build fails.
 //    KSMECH_E2E_REUSE_DIST=1 skips the staleness check (quick reruns) but never a missing dist/.
 // 3. Choose the chemistry: KSMECH_E2E_CHEMISTRY, default "auto". "auto" runs
 //    `ksmech-serve probe-cache --smiles "C[O-]" --smiles CCl --smiles CCO --smiles <camphor>`
@@ -34,8 +35,9 @@ const CHEMISTRIES = ["auto", "cached", "synthetic", "real"];
 // The smoke test's reactants, the workbench test's ethanol and the projection test's camphor
 // (e2e/workbench.spec.ts).
 const PROBE_SMILES = ["C[O-]", "CCl", "CCO", "CC1(C)[C@@H]2CC[C@@]1(C)C(=O)C2"];
-// What `npm run build` (tsc --noEmit && vite build, after scripts/vendor.mjs) reads besides node_modules.
-const BUILD_INPUTS = ["src", "scripts", "index.html", "vite.config.ts", "tsconfig.json", "package.json", "package-lock.json"];
+// What `npm run build` (tsc --noEmit && vite build, after scripts/vendor.mjs) reads besides
+// node_modules: the app, its public files (the example scenes) and the source package @ksmech/viz.
+const BUILD_INPUTS = ["src", "scripts", "public/scenes", "index.html", "vite.config.ts", "tsconfig.json", "package.json", "package-lock.json", "../../packages/viz"];
 
 const serveEnv = {
   ...process.env,

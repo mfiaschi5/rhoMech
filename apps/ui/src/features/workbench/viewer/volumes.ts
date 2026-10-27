@@ -6,7 +6,7 @@
 import type { VolumeData } from "3dmol";
 import { type RequestOptions } from "../../../api/http";
 import { getMoleculeCube, type CubeMeta, type CubeQuality } from "../../../api/workbench";
-import { parseCube, threeDmol } from "../../../chem/threed";
+import { parseCube, threeDmol } from "@ksmech/viz/chem/threed";
 import { normalizeSpec, specKey, type LayerSpec } from "../params";
 
 export const VOLUME_LRU_SIZE = 8;

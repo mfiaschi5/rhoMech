@@ -16,10 +16,10 @@ import {
   resolveStyle,
   sanitizeStyle,
   screenMetrics,
-} from "./style.ts";
-import { BREAK_GAP_PX, buildScene, wedgeHalf } from "./drawing.ts";
-import { addAtom, addBond, emptySketch, setBondStereo } from "./model.ts";
-import { dist, toScreen } from "./geometry.ts";
+} from "@ksmech/viz/sketch/style";
+import { BREAK_GAP_PX, buildScene, wedgeHalf } from "@ksmech/viz/sketch/drawing";
+import { addAtom, addBond, emptySketch, setBondStereo } from "@ksmech/viz/sketch/model";
+import { dist, toScreen } from "@ksmech/viz/sketch/geometry";
 import { DEFAULT_PREFS, sanitizePrefs } from "../layout/prefs.ts";
 
 test("ACS Document 1996 has ChemDraw's published values", () => {

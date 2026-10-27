@@ -7,13 +7,12 @@
 //
 // Theme: "auto" follows prefers-color-scheme (no data-theme on <html>); "light" / "dark" set
 // <html data-theme>, which styles.css already honours over the media query.
-import type { LabelStyle } from "../sketch/drawing";
+import type { LabelStyle } from "@ksmech/viz/sketch/drawing";
 import type { Rep } from "../params";
-import type { DrawingStyle, StyleId } from "../sketch/style";
+import type { DrawingStyle, StyleId } from "@ksmech/viz/sketch/style";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
 import { DEFAULT_REP, REPS } from "../params.ts";
-// @ts-ignore TS5097: see above
-import { ACS_1996_STYLE, sanitizeStyle, STYLE_IDS } from "../sketch/style.ts";
+import { ACS_1996_STYLE, sanitizeStyle, STYLE_IDS } from "@ksmech/viz/sketch/style";
 
 export const THEMES = ["auto", "light", "dark"] as const;
 export type ThemeChoice = (typeof THEMES)[number];

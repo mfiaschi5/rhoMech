@@ -11,10 +11,10 @@ import type { GLShape } from "3dmol";
 import { useEffect, useRef, useState } from "react";
 import { getGeometry, getOrbitalCube } from "../../api/pool";
 import { usePendingCached } from "../../api/hooks";
-import { addSurfaces, ISO_MAX, ISO_MIN, ISO_STEP, parseCube, removeShapes, SURFACE_COLORS, threeDmol } from "../../chem/threed";
+import { addSurfaces, ISO_MAX, ISO_MIN, ISO_STEP, parseCube, removeShapes, SURFACE_COLORS, threeDmol } from "@ksmech/viz/chem/threed";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";
-import { useGLViewer } from "../workbench/viewer/useGLViewer";
+import { useGLViewer } from "@ksmech/viz/viewer/useGLViewer";
 import { Modal } from "../../components/Modal";
 
 export interface OrbitalModalProps {

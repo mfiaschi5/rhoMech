@@ -13,7 +13,7 @@
 // layout": the server's RDKit depiction replaced the home-made relaxation (docs/decisions.md,
 // 2026-10-25).
 import { useEffect, useState, type ReactNode } from "react";
-import { PALETTE, PERIODIC_ROWS, elementClass } from "./elements";
+import { PALETTE, PERIODIC_ROWS, elementClass } from "@ksmech/viz/sketch/elements";
 import type { ToolName } from "./tools";
 import type { CleanStyle } from "./depiction";
 import type { TransformAction } from "./transform";

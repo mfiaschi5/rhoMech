@@ -3,7 +3,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { loadRDKit } from "./chem/rdkit";
+import { loadRDKit } from "@ksmech/viz/chem/rdkit";
+import "@ksmech/viz/theme.css";
 import "./styles.css";
 
 const features = import.meta.glob("./features/*/index.{ts,tsx}", { eager: true });

@@ -10,10 +10,10 @@
 // DOM: <table data-testid="<prefix>-readings"> > tr[data-testid=<prefix>-reading-<k>][data-i][data-j]
 // [data-g-atom], button[data-testid=<prefix>-reading-3d-<k>]; the OrbitalModal.
 import { useState } from "react";
-import { exact, fmt, fmtSig, moLabel } from "../../components/format";
+import { exact, fmt, fmtSig, moLabel } from "@ksmech/viz/format";
 import { OrbitalModal } from "./OrbitalModal";
-import type { PoolStructure } from "./poolStructure";
-import type { OrbitalReadingOut } from "./v9types";
+import type { PoolStructure } from "@ksmech/viz/pool/poolStructure";
+import type { OrbitalReadingOut } from "@ksmech/viz/v9types";
 
 export interface ReadingTableProps {
   readings: readonly OrbitalReadingOut[];

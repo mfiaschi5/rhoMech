@@ -8,7 +8,7 @@
 // camera sits on +z looking down -z, so view x is screen right, view y screen up and view z
 // points at the viewer. The projection is orthographic (3Dmol's perspective, fov 20 deg, only
 // changes the apparent size with depth; the page checks the residual against modelToScreen).
-import type { Vec } from "./geometry";
+import type { Vec } from "@ksmech/viz/sketch/geometry";
 
 export type Vec3 = readonly [number, number, number];
 /** A unit quaternion [x, y, z, w] (3Dmol / three.js order). */

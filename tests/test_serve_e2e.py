@@ -207,8 +207,10 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import react from "@vitejs/plugin-react";
 import { build } from "vite";
+import { vizResolve } from "./scripts/viz-alias.mjs";
 
 const cfg = JSON.parse(process.env.KSMECH_UI_PROBE);
+const viz = vizResolve();
 const modules = join(process.cwd(), "node_modules");
 await build({
   configFile: false,
@@ -221,7 +223,9 @@ await build({
       { find: /^react$/, replacement: join(modules, "react", "index.js") },
       { find: /^react-dom\\/server$/, replacement: join(modules, "react-dom", "server.node.js") },
       { find: /^@playwright\\/test$/, replacement: cfg.playwrightStub },
+      ...viz.alias,
     ],
+    dedupe: viz.dedupe,
   },
   ssr: { noExternal: true, target: "node" },
   build: {

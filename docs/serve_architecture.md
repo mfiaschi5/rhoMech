@@ -94,3 +94,27 @@ same-origin guard, auth gate, the routes.
   samples). `science` is the next candidate (G^atom, the readings, B + R).
 - The token and physics fingerprints hash their files by path (`core/versions.py`); moving one
   of those files changes the fingerprint once, and the caches it keys are recomputed on demand.
+
+## The frontend and its visualizations (`@ksmech/viz`)
+
+The web app is `apps/ui` (Vite + React, served from `apps/ui/dist` by the `app` package). Its
+visualizations live in the source package `packages/viz` (`@ksmech/viz`, README there): the 2D
+renderer and molfile reader, RDKit.js and 3Dmol.js wrappers, the step views (Textbook, Animated,
+Orbitals), the network views (Scheme, Pathways), the molecule viewer and the orbital level
+diagram. They take props only: `apps/ui` keeps the API client, the data hooks that call the
+routes above (`usePool`, `useStepSides`, `useOrbitalData`, the expansion of a network state) and
+hands the views plain values; `packages/viz/src/vizBoundary.test.ts` fails when anything under
+`packages/viz` imports the app, a package outside react / react-dom / RDKit.js / 3Dmol, or
+fetches outside the scene loader. The package is resolved by alias (`apps/ui/scripts/viz-alias.mjs`
+for Vite and node, `paths` in `apps/ui/tsconfig.json`); there is no separate install or build.
+
+Static pages (the educational wiki) draw the same views from **scenes**: versioned JSON documents
+(`{kind: "ksmech-scene", version: 1, scene: {type: molecule | step | network, ...}, provenance}`,
+`packages/viz/scene.schema.json`) that hold exactly the API responses a view needs, with orbital
+cubes as asset files referenced by relative path, size and sha256. `npm --prefix apps/ui run
+scene:export` writes one from a running server (`GET /jobs/{id}`, `/pool/{state}/depiction`,
+`/geometry`, `/orbital/{token}`; `POST /molecule`, `/molecule/{id}/geometry`, `/orbitals`,
+`/cube`), so reading a page never triggers QM compute. In the app, `#/scene?src=scenes/<file>`
+draws a scene with no API call at all (no shell, no `/api/meta`); the examples are in
+`apps/ui/public/scenes/` and `apps/ui/e2e/scene.spec.ts` checks them with every `/api/` request
+aborted.

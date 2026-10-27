@@ -13,13 +13,13 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { addAtom, addBond, emptySketch, setBondStereo, setCharge } from "./model.ts";
+import { addAtom, addBond, emptySketch, setBondStereo, setCharge } from "@ksmech/viz/sketch/model";
 import { analyzeSketch, importSketch } from "./rdkitSketch.ts";
-import { buildScene } from "./drawing.ts";
-import { sceneOverlaps, segInBox, endTrim } from "./labelLayout.ts";
+import { buildScene } from "@ksmech/viz/sketch/drawing";
+import { sceneOverlaps, segInBox, endTrim } from "@ksmech/viz/sketch/labelLayout";
 import { fragments, fragmentsTouch, tidyFragments } from "./fragments.ts";
-import { PRESETS, drawMetrics, pxPerPt } from "./style.ts";
-import { exportLayout } from "./exportImage.ts";
+import { PRESETS, drawMetrics, pxPerPt } from "@ksmech/viz/sketch/style";
+import { exportLayout } from "@ksmech/viz/sketch/exportImage";
 import { toChemfig } from "./latex.ts";
 
 const wasmJs = fileURLToPath(new URL("../../../../node_modules/@rdkit/rdkit/dist/RDKit_minimal.js", import.meta.url));

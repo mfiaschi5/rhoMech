@@ -6,14 +6,12 @@
 //   chain: a zigzag chain along the drag (tools.chainPoints);
 //   select: moves the pressed object, or the whole selection when the pressed object is in it;
 //     a single atom released on another atom merges into it.
-import type { SketchModel } from "./model";
-import type { Vec } from "./geometry";
+import type { SketchModel } from "@ksmech/viz/sketch/model";
+import type { Vec } from "@ksmech/viz/sketch/geometry";
 import type { Hit, Selection, ToolName } from "./tools";
+import { BOND_LENGTH, atomById, bondById, mergeAtoms, moveAtoms } from "@ksmech/viz/sketch/model";
+import { add, angleOf, chainPoints, fromAngle, sideOf, snapAngle, sub } from "@ksmech/viz/sketch/geometry";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { BOND_LENGTH, atomById, bondById, mergeAtoms, moveAtoms } from "./model.ts";
-// @ts-ignore TS5097: see above
-import { add, angleOf, chainPoints, fromAngle, sideOf, snapAngle, sub } from "./geometry.ts";
-// @ts-ignore TS5097: see above
 import { addChain, bondBetweenPoints } from "./templates.ts";
 // @ts-ignore TS5097: see above
 import { selectionAtoms } from "./tools.ts";

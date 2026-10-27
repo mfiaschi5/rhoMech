@@ -9,11 +9,11 @@
 // DOM: <ol data-testid="predict-pathways"> > <li data-testid="predict-pathway-{rank}"
 // data-pathway data-selected>, with its step buttons predict-pathway-step-{rank}-{k} and
 // <a data-testid="predict-curate-link-{rank}">.
-import { fmt } from "../../components/format";
+import { fmt } from "@ksmech/viz/format";
 import { curateHash } from "../../router";
-import { matrixText, scoreText } from "./network";
+import { matrixText, scoreText } from "@ksmech/viz/network/network";
 import { Panel } from "../../components/Panel";
-import type { NetworkOut, PathwayOut } from "./v9types";
+import type { NetworkOut, PathwayOut } from "@ksmech/viz/v9types";
 
 export interface PathwayListProps {
   jobId: string;

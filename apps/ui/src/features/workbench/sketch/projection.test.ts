@@ -2,8 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { projectPoints, quatFromAxisAngle, rotateByQuat, toViewFrame } from "./projection.ts";
-import { addAtom, addBond, emptySketch, sketchExtras, withExtras } from "./model.ts";
-import { fromMolblock, toMolblock } from "./molfile.ts";
+import { addAtom, addBond, emptySketch, sketchExtras, withExtras } from "@ksmech/viz/sketch/model";
+import { fromMolblock, toMolblock } from "@ksmech/viz/sketch/molfile";
 import { applyDepiction } from "./depiction.ts";
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);

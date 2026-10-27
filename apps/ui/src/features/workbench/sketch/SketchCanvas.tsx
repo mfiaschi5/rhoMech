@@ -35,16 +35,16 @@
 //   <g data-testid="sketch-frame" data-atoms="<n>"> with sketch-frame-rotate (circle) and
 //      sketch-frame-corner-<0..3> (top-left, top-right, bottom-right, bottom-left)
 import type { CSSProperties, RefObject } from "react";
-import type { SketchModel } from "./model";
-import type { Rect, Vec, View } from "./geometry";
+import type { SketchModel } from "@ksmech/viz/sketch/model";
+import type { Rect, Vec, View } from "@ksmech/viz/sketch/geometry";
 import type { Hit, Selection } from "./tools";
 import type { SketchPointer } from "./useSketchPointer";
 import type { SelectionFrame } from "./frame";
-import type { StereoLabels } from "./cip";
-import type { DrawMetrics } from "./style";
-import { buildScene, chargeAnchor, hLabelWidth, labelGlyphs, type AtomScene, type BondScene, type Glyph, type LabelStyle, type Mark } from "./drawing";
-import { cssFontFamily } from "./style";
-import { elementClass } from "./elements";
+import type { StereoLabels } from "@ksmech/viz/sketch/cip";
+import type { DrawMetrics } from "@ksmech/viz/sketch/style";
+import { buildScene, chargeAnchor, hLabelWidth, labelGlyphs, type AtomScene, type BondScene, type Glyph, type LabelStyle, type Mark } from "@ksmech/viz/sketch/drawing";
+import { cssFontFamily } from "@ksmech/viz/sketch/style";
+import { elementClass } from "@ksmech/viz/sketch/elements";
 
 export interface SketchCanvasProps {
   model: SketchModel;

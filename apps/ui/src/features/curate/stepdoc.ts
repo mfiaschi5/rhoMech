@@ -2,7 +2,7 @@
 // carries it: an untyped dict. parseStepDoc reads it defensively; an arrow that lacks the fields
 // needed to draw it is not dropped silently but counted in `badArrows` and shown as a warning.
 import type { DatasetArrowOut } from "../../api/types.gen";
-import type { TokenArrowLike } from "../../chem/arrowGeom";
+import type { TokenArrowLike } from "@ksmech/viz/chem/arrowGeom";
 
 export const STEP_DOC_FORMAT = "ksmech-serve/step-v1";
 

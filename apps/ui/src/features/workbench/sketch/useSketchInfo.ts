@@ -6,10 +6,10 @@
 //   "pending"      the drawing changed since the analysis shown (it is `stale`)
 //   "ready"        the analysis describes this exact model
 import { useEffect, useRef, useState } from "react";
-import { useRDKit } from "../../../chem/rdkit";
-import type { SketchModel } from "./model";
+import { useRDKit } from "@ksmech/viz/chem/rdkit";
+import type { SketchModel } from "@ksmech/viz/sketch/model";
 import { analyzeSketch, type SketchAnalysis } from "./rdkitSketch";
-import { NO_STEREO } from "./cip";
+import { NO_STEREO } from "@ksmech/viz/sketch/cip";
 
 export type SketchInfoStatus = "empty" | "loading" | "unavailable" | "pending" | "ready";
 

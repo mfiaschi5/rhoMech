@@ -2,8 +2,8 @@
 //
 // Props: label, scale ("rwb" | "seq"), min, max, units?, note?
 // DOM: <div data-testid="colour-bar" data-role data-min data-max data-scale>.
-import { exact, fmtSig } from "../../../components/format";
-import { cssGradient, type Scale } from "./colour";
+import { exact, fmtSig } from "@ksmech/viz/format";
+import { cssGradient, type Scale } from "@ksmech/viz/viewer/colour";
 
 export interface ColourBarProps {
   role: string;

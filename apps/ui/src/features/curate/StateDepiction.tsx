@@ -7,11 +7,11 @@ import { type RequestOptions } from "../../api/http";
 import { getDepiction } from "../../api/pool";
 import { useCached } from "../../api/cache";
 import type { DatasetArrowOut, DepictionOut, WorkerStatusOut } from "../../api/types.gen";
-import type { TokenArrowLike } from "../../chem/arrowGeom";
+import type { TokenArrowLike } from "@ksmech/viz/chem/arrowGeom";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { MolDepiction } from "../../components/MolDepiction";
 import { PendingNote } from "../../components/PendingNote";
-import { SmilesDepiction } from "../../components/SmilesDepiction";
+import { SmilesDepiction } from "@ksmech/viz/components/SmilesDepiction";
 import { arrowMaps } from "./stepdoc";
 
 export interface StateDepictionProps {

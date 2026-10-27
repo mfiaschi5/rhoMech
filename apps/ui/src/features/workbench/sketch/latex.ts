@@ -15,19 +15,15 @@
 //                            Not supported: radicals (dropped, noted in a comment), explicit
 //                            crossing breaks, circled charges and per-element colours.
 // Pure: runs under node --experimental-strip-types.
-import type { SketchAtom, SketchBond, SketchModel } from "./model";
-import type { Vec } from "./geometry";
-import type { DrawingStyle } from "./style";
-import type { ExportLayout } from "./exportImage";
-import type { AtomLabel, ChargeSlot } from "./drawing";
-// @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { buildScene, doubleBondSide } from "./drawing.ts";
-// @ts-ignore TS5097: see above
-import { fallbackHCount } from "./elements.ts";
-// @ts-ignore TS5097: see above
-import { bondOrderSum, neighbors } from "./model.ts";
-// @ts-ignore TS5097: see above
-import { drawMetrics, MODEL_BOND } from "./style.ts";
+import type { SketchAtom, SketchBond, SketchModel } from "@ksmech/viz/sketch/model";
+import type { Vec } from "@ksmech/viz/sketch/geometry";
+import type { DrawingStyle } from "@ksmech/viz/sketch/style";
+import type { ExportLayout } from "@ksmech/viz/sketch/exportImage";
+import type { AtomLabel, ChargeSlot } from "@ksmech/viz/sketch/drawing";
+import { buildScene, doubleBondSide } from "@ksmech/viz/sketch/drawing";
+import { fallbackHCount } from "@ksmech/viz/sketch/elements";
+import { bondOrderSum, neighbors } from "@ksmech/viz/sketch/model";
+import { drawMetrics, MODEL_BOND } from "@ksmech/viz/sketch/style";
 
 const cm = (pt: number) => Math.round(((pt / 72) * 2.54) * 100) / 100;
 

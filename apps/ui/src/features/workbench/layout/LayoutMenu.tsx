@@ -14,8 +14,8 @@ import { useEffect, useRef, useState, type Dispatch, type ReactNode } from "reac
 import { REPS, type Rep } from "../params";
 import { PANELS, PANEL_TITLES, PRESETS, PRESET_TITLES, type LayoutAction, type LayoutState } from "./layoutState";
 import { LABEL_STYLE_CHOICES, LABEL_STYLE_TITLES, PREF_BOUNDS, THEMES, type Prefs, type ThemeChoice } from "./prefs";
-import type { LabelStyle } from "../sketch/drawing";
-import { STYLE_IDS, STYLE_TIPS, STYLE_TITLES, type StyleId } from "../sketch/style";
+import type { LabelStyle } from "@ksmech/viz/sketch/drawing";
+import { STYLE_IDS, STYLE_TIPS, STYLE_TITLES, type StyleId } from "@ksmech/viz/sketch/style";
 
 export interface LayoutBarProps {
   layout: LayoutState;

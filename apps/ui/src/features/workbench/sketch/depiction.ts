@@ -8,9 +8,8 @@
 // atom at the narrow end. The drawing keeps its centroid; every old wedge is replaced; the depth
 // is kept (crossing breaks turned on) or dropped.
 import type { Depict2DIn, Depict2DOut } from "../../../api/types.gen";
-import type { BondStereo, SketchModel } from "./model";
-// @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { centroid, clearDepth, setBondMarks, setBreakCrossings, setPositions } from "./model.ts";
+import type { BondStereo, SketchModel } from "@ksmech/viz/sketch/model";
+import { centroid, clearDepth, setBondMarks, setBreakCrossings, setPositions } from "@ksmech/viz/sketch/model";
 
 export type CleanStyle = "textbook" | "perspective";
 export const CLEAN_STYLES: readonly CleanStyle[] = ["textbook", "perspective"];

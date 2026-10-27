@@ -25,12 +25,12 @@ import { formatRoute, jobHash, navigate, parsePredictPrefill, type Route } from 
 import { useCapability } from "../../state/store";
 import { CorrectEditor } from "./CorrectEditor";
 import { JobProgress } from "../../components/JobProgress";
-import { pathTo, rankLabel, speciesLabel } from "../predict/network";
+import { pathTo, rankLabel, speciesLabel } from "@ksmech/viz/network/network";
 import { Panel } from "../../components/Panel";
 import { ReactantRows, usePreflight, type ReactantRow } from "../predict/ReactantRows";
 import { expandBody } from "../predict/checkpoints";
 import { expandNode, networkOfJob, predict } from "../../api/predict";
-import type { EdgeOut, NetworkOut, NodeOut } from "../predict/v9types";
+import type { EdgeOut, NetworkOut, NodeOut } from "@ksmech/viz/v9types";
 
 /** Steps applied in this tab, by job: the network a done job carries is a snapshot, so the
  *  states and edges added since are kept here until a reload reads them from the server. */

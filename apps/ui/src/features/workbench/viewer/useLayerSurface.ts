@@ -7,7 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isAbort, toApiError, type ApiError } from "../../../api/http";
 import { type CubeMeta, type CubeQuality } from "../../../api/workbench";
 import type { PendingInfo } from "../../../api/hooks";
-import { addMappedSurface, addSurface, addSurfaces, removeMapped, removeShapes, type MappedSurface } from "../../../chem/threed";
+import { addMappedSurface, addSurface, addSurfaces, removeMapped, removeShapes, type MappedSurface } from "@ksmech/viz/chem/threed";
 import type { LayerSpec } from "../params";
 import { KIND_LOOK, type SurfaceLayer } from "./layers";
 import { espRange, loadVolume, peekVolume, volumeKey, type LoadedVolume } from "./volumes";

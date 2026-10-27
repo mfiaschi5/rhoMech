@@ -3,8 +3,8 @@
 // collision with the existing shortcuts) and one history step per transform.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BOND_LENGTH, addAtom, addBond, emptySketch, meanBondLength, setBondStereo } from "./model.ts";
-import { DEG, toScreen } from "./geometry.ts";
+import { BOND_LENGTH, addAtom, addBond, emptySketch, meanBondLength, setBondStereo } from "@ksmech/viz/sketch/model";
+import { DEG, toScreen } from "@ksmech/viz/sketch/geometry";
 import { initHistory, pushHistory, undo, redo } from "./history.ts";
 import { KEY_ELEMENTS, NO_SELECTION } from "./tools.ts";
 import {

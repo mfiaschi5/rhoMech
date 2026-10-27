@@ -10,10 +10,10 @@
 // and the ReadingTable "correct".
 import { ErrorBanner } from "../../components/ErrorBanner";
 import type { StepCheck } from "../predict/hooks";
-import type { PoolStructure } from "../predict/poolStructure";
+import type { PoolStructure } from "@ksmech/viz/pool/poolStructure";
 import { ReadingTable } from "../predict/ReadingTable";
-import { arrowText, type LocalIssue } from "../predict/rmatrix";
-import { ProductView } from "../predict/step/StepView";
+import { arrowText, type LocalIssue } from "@ksmech/viz/pool/rmatrix";
+import { ProductView } from "@ksmech/viz/step/ProductView";
 
 export interface CheckPanelProps {
   check: StepCheck & { current: boolean };

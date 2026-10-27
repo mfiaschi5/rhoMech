@@ -8,15 +8,23 @@
 // button[data-testid=predict-network-variant-<layered|explorer>][aria-pressed], the variant's
 // <div data-testid="predict-network" data-variant>, the splitter predict-network-resize
 // (role=separator, arrow keys too), and the NetworkLegend <details data-testid="predict-network-list">.
-import { useRef, type KeyboardEvent, type PointerEvent as RPointerEvent } from "react";
+import { useRef, useState, type KeyboardEvent, type PointerEvent as RPointerEvent } from "react";
+import { toApiError } from "../../../api/http";
+import { pollJob } from "../../../api/poll";
+import { expandNode } from "../../../api/predict";
+import { expandBody } from "../checkpoints";
 import { NetworkLegend } from "../NetworkLegend";
 import { Panel } from "../../../components/Panel";
-import { PathwayExplorer } from "./PathwayExplorer";
-import { SchemeView } from "./SchemeView";
-import { useVariant, VARIANTS, type NetViewProps } from "./shared";
-import "./netview.css";
+import { PathwayExplorer } from "@ksmech/viz/network/PathwayExplorer";
+import { SchemeView } from "@ksmech/viz/network/SchemeView";
+import { useVariant } from "./prefs";
+import { VARIANTS, type NetViewProps } from "@ksmech/viz/network/shared";
+import "@ksmech/viz/network/netview.css";
 
 export interface NetworkPanelProps extends NetViewProps {
+  jobId: string;
+  /** The network changed on the server (an expansion): reload it. */
+  onNetworkChanged: () => void;
   height: number;
   onHeight: (h: number) => void;
 }
@@ -37,8 +45,26 @@ function Splitter({ height, onHeight }: { height: number; onHeight: (h: number) 
   return <div className="nv-splitter" role="separator" aria-orientation="horizontal" aria-label="network height" aria-valuenow={height} tabIndex={0} data-testid="predict-network-resize" onPointerDown={down} onPointerMove={move} onPointerUp={() => (start.current = null)} onKeyDown={key} />;
 }
 
+/** A double-click on a state with no step out: POST /jobs/{id}/expand, wait, reload. */
+function useExpand(p: NetworkPanelProps) {
+  const [status, setStatus] = useState<string | null>(null);
+  const expand = async (id: string) => {
+    setStatus(`expanding ${id}…`);
+    try {
+      const created = await expandNode(p.jobId, expandBody(p.net.provenance, id, 1));
+      const done = await pollJob(created.job_id);
+      setStatus(done.status === "done" ? null : `expansion ${done.status}`);
+      if (done.status === "done") p.onNetworkChanged();
+    } catch (err) {
+      setStatus(`cannot expand: ${toApiError(err).message}`);
+    }
+  };
+  return { status, expand };
+}
+
 export function NetworkPanel(p: NetworkPanelProps) {
   const [variant, setVariant] = useVariant();
+  const { status, expand } = useExpand(p);
   const { net } = p;
   const tools = (
     <span className="nv-switch" role="group" aria-label="network view" data-testid="predict-network-variant" data-variant={variant}>
@@ -53,7 +79,7 @@ export function NetworkPanel(p: NetworkPanelProps) {
   return (
     <Panel title="Network" note={note} tools={tools} className="pv-network-panel">
       <div className="nv-frame" style={{ height: p.height }}>
-        {variant === "layered" ? <SchemeView {...p} /> : <PathwayExplorer {...p} />}
+        {variant === "layered" ? <SchemeView {...p} onExpand={(id) => void expand(id)} expandStatus={status} /> : <PathwayExplorer {...p} />}
       </div>
       <Splitter height={p.height} onHeight={p.onHeight} />
       <NetworkLegend net={net} selectedNode={p.selectedNode} selectedEdge={p.selectedEdge} pathway={p.pathway} onSelectNode={p.onSelectNode} onSelectEdge={p.onSelectEdge} probabilities={p.probabilities} />

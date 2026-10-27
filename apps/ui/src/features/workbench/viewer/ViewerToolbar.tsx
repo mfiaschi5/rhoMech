@@ -6,10 +6,10 @@
 // symmetry-toggle, symmetry-classes-toggle, measure-select, quality-select, export-png,
 // export-xyz, export-mol.
 import type { CubeQuality } from "../../../api/workbench";
-import type { AtomPropDef } from "../atomProps";
+import type { AtomPropDef } from "@ksmech/viz/viewer/atomProps";
 import { QUALITIES, REPS, type Rep } from "../params";
-import type { MeasureMode } from "./measure";
-import { LABEL_MODES, type LabelMode } from "./scene";
+import type { MeasureMode } from "@ksmech/viz/viewer/measure";
+import { LABEL_MODES, type LabelMode } from "@ksmech/viz/viewer/scene";
 import { setSymmetryView, useSymmetryView } from "./symmetry";
 
 export interface ViewOptions {

@@ -27,11 +27,11 @@ import { EntryTable } from "./EntryTable";
 import { useDrawnStructure, usePool, useStepCheck } from "../predict/hooks";
 import { Panel } from "../../components/Panel";
 import { PoolCanvas, type CanvasInteraction } from "../predict/PoolCanvas";
-import type { PoolStructure } from "../predict/poolStructure";
-import { arrowFromGesture, isEmptyMatrix, localIssues } from "../predict/rmatrix";
+import type { PoolStructure } from "@ksmech/viz/pool/poolStructure";
+import { arrowFromGesture, isEmptyMatrix, localIssues } from "@ksmech/viz/pool/rmatrix";
 import { useEditorKeys } from "./useEditorKeys";
 import { overrideJob } from "../../api/predict";
-import type { ArrowReadingOut, EdgeOut, MatrixIO, NodeOut } from "../predict/v9types";
+import type { ArrowReadingOut, EdgeOut, MatrixIO, NodeOut } from "@ksmech/viz/v9types";
 
 export interface CorrectEditorProps {
   jobId: string;

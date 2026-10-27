@@ -18,13 +18,13 @@
 // sketch-copy-chemfig, and <span data-testid="sketch-copy-status">; on the canvas, the drag
 // handle <div data-testid="sketch-drag" draggable data-ready data-line-pt>.
 import { useEffect, useRef, useState, type DragEvent } from "react";
-import type { SketchModel } from "./model";
-import type { StereoLabels } from "./cip";
-import type { LabelStyle } from "./drawing";
-import { exportLayout, pixelSize, pngWithDpi, sizeCm, toSvg, type ExportLayout } from "./exportImage";
+import type { SketchModel } from "@ksmech/viz/sketch/model";
+import type { StereoLabels } from "@ksmech/viz/sketch/cip";
+import type { LabelStyle } from "@ksmech/viz/sketch/drawing";
+import { exportLayout, pixelSize, pngWithDpi, sizeCm, toSvg, type ExportLayout } from "@ksmech/viz/sketch/exportImage";
 import { pdfBytes, toPdf } from "./pdf";
 import { latexFigure, toChemfig } from "./latex";
-import type { DrawingStyle } from "./style";
+import type { DrawingStyle } from "@ksmech/viz/sketch/style";
 
 export interface ImageOptions {
   dpi: number;

@@ -8,17 +8,13 @@
 // RDKit log ("Explicit valence for atom # 3 N ...", "Unkekulized atoms: 1 2 3") to mark the
 // offending atoms. The CIP labels (cip.ts) come from get_stereo_tags() on the first parse, so
 // their atom indices are the model's. Radicals reach RDKit as `M  RAD` (molfile.ts).
-import type { RDKitModule, RDKitMol } from "../../../chem/rdkit";
-import type { SketchModel } from "./model";
-import type { StereoLabels } from "./cip";
-// @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { bondOrderSum, centroid, clearDepth, normalizeBondLength } from "./model.ts";
-// @ts-ignore TS5097: see above
-import { fromMolblock, looksLikeMolfile, MolfileError, molblockBondStereo, toMolblock } from "./molfile.ts";
-// @ts-ignore TS5097: see above
-import { fallbackHCount, hillFormula } from "./elements.ts";
-// @ts-ignore TS5097: see above
-import { NO_STEREO, parseStereoTags } from "./cip.ts";
+import type { RDKitModule, RDKitMol } from "@ksmech/viz/chem/rdkit";
+import type { SketchModel } from "@ksmech/viz/sketch/model";
+import type { StereoLabels } from "@ksmech/viz/sketch/cip";
+import { bondOrderSum, centroid, clearDepth, normalizeBondLength } from "@ksmech/viz/sketch/model";
+import { fromMolblock, looksLikeMolfile, MolfileError, molblockBondStereo, toMolblock } from "@ksmech/viz/sketch/molfile";
+import { fallbackHCount, hillFormula } from "@ksmech/viz/sketch/elements";
+import { NO_STEREO, parseStereoTags } from "@ksmech/viz/sketch/cip";
 
 export interface SketchAnalysis {
   /** The model this analysis describes (stale once the drawing changed). */

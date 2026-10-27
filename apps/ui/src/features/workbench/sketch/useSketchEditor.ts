@@ -2,7 +2,7 @@
 // selection, the hovered object, the current tool and element. Commits call onChange; a new
 // `value` from the parent (by reference) is pushed into the history without calling it back.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { emptySketch, type SketchModel } from "./model";
+import { emptySketch, type SketchModel } from "@ksmech/viz/sketch/model";
 import { canRedo, canUndo, initHistory, pushHistory, redo, undo, type History } from "./history";
 import { NO_SELECTION, type Hit, type Selection, type ToolName } from "./tools";
 

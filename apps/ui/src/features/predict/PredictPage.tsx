@@ -18,9 +18,9 @@ import { useCapability } from "../../state/store";
 import { recordedLabel } from "./checkpoints";
 import { usePredictors } from "./hooks";
 import { JobProgress } from "../../components/JobProgress";
-import { currentPathway } from "./network";
+import { currentPathway } from "@ksmech/viz/network/network";
 import { NetworkPanel } from "./netview/NetworkPanel";
-import { useNetHeight } from "./netview/shared";
+import { useNetHeight } from "./netview/prefs";
 import { NodePanel } from "./NodePanel";
 import { PathwayList } from "./PathwayList";
 import { PredictForm } from "./PredictForm";
@@ -28,7 +28,7 @@ import { scoreBadge } from "./PredictorSelect";
 import { parseSelection, useSelect, type JobSelection, type SelectionUpdate } from "./selection";
 import { StepPanel } from "./step/StepPanel";
 import { networkOfJob } from "../../api/predict";
-import type { NetworkOut } from "./v9types";
+import type { NetworkOut } from "@ksmech/viz/v9types";
 
 export function PredictPage({ route }: PageProps) {
   const cap = useCapability("predict");

@@ -25,7 +25,7 @@ import { Panel } from "../../components/Panel";
 import { defaultPredictor, PredictorSelect } from "./PredictorSelect";
 import { ReactantRows, usePreflight, type ReactantRow } from "./ReactantRows";
 import { usePredictors } from "./hooks";
-import type { PredictIn } from "./v9types";
+import type { PredictIn } from "@ksmech/viz/v9types";
 
 export const DEFAULT_BEAM = 5;
 export const DEFAULT_MAX_STEPS = 8;

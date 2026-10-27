@@ -4,7 +4,7 @@
 // DOM: <table data-testid={testId} data-sort="<key>:<asc|desc>">, headers
 // <th data-testid="sort-<key>" data-diagnostic>, rows <tr data-testid={rowTestId} ...rowAttrs>.
 import { useMemo, useState, type MouseEvent, type ReactNode } from "react";
-import { fmt } from "../../../components/format";
+import { fmt } from "@ksmech/viz/format";
 
 export type Cell = number | string | boolean | null | undefined;
 

@@ -15,10 +15,10 @@
 // so; 3D->2D has no fallback.
 import { useLayoutEffect, useRef, useState } from "react";
 import type { Depict2DOut } from "../../../api/types.gen";
-import type { RDKitModule } from "../../../chem/rdkit";
-import { setBreakCrossings, type SketchModel } from "./model";
+import type { RDKitModule } from "@ksmech/viz/chem/rdkit";
+import { setBreakCrossings, type SketchModel } from "@ksmech/viz/sketch/model";
 import type { Quat } from "./projection";
-import { toMolblock } from "./molfile";
+import { toMolblock } from "@ksmech/viz/sketch/molfile";
 import { cleanUpSketch } from "./rdkitSketch";
 import { applyDepiction, type CleanStyle, type Depictor } from "./depiction";
 import type { SketchEditor } from "./useSketchEditor";

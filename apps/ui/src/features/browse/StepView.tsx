@@ -18,7 +18,7 @@ import type {
   StepSummaryOut,
   StepViewOut,
 } from "../../api/types.gen";
-import { useRDKit } from "../../chem/rdkit";
+import { useRDKit } from "@ksmech/viz/chem/rdkit";
 import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { useCapability } from "../../state/store";

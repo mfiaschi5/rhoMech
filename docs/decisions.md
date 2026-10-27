@@ -5740,3 +5740,44 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   read-only (it submits compute, non-destructive). No write tool for curation or datasets: those
   changes will go through a review queue. The HTTP transport uses one `KSMECH_TOKEN` for every
   MCP client and binds to 127.0.0.1 by default.
+
+## 2026-10-27: @ksmech/viz, the visualizations as a props-only source package, and scene format v1
+
+- **Why.** The online platform adds a teaching wiki (static HTML built from MDX) that must show
+  the same molecule 2D/3D, orbital, step (Textbook, Animated, Orbitals) and network (Scheme,
+  Pathways) views as the app, from precomputed data: reading a page never triggers QM compute.
+- **Package.** `packages/viz` (`@ksmech/viz`) holds the visualizations with a props-only API (no
+  component fetches, reads the app store or the router): the RDKit.js / 3Dmol.js wrappers and
+  depiction components, the sketcher's 2D renderer core (the editor stays in apps/ui), the pool
+  structure / R-matrix / arrow modules, the step views and helpers, the network views and
+  layouts, the 3D viewer core and the level diagram (82 files, `git mv`). Where a component
+  fetched it was split into a pure view in the package and a data hook in apps/ui
+  (`stepSidesOf` / `useStepSides`, `OrbitalData` / `useOrbitalData`, the network expansion as
+  SchemeView's `onExpand`, depiction tier 3 as a `fetchServer` prop). The colour tokens moved to
+  `viz/src/theme.css`.
+- **Wiring: an alias, not npm workspaces.** `apps/ui/scripts/viz-alias.mjs` feeds Vite (alias,
+  react `dedupe`, `fs.allow`), a node resolve hook (`npm test`, the exporter) and the Python UI
+  probe; `tsconfig.json` `paths` repeats it (react, @rdkit/rdkit, 3dmol included: the package has
+  no `node_modules`). Workspaces would move the lockfile to the repo root and break the
+  self-contained apps/ui that `e2e/serve.mjs`, the Python harness and `vendor.mjs` assume;
+  revisit when the wiki is a second consumer with its own `package.json`.
+- **API types.** `viz/src/apiTypes.ts` is a type-only re-export of `apps/ui/src/api/types.gen.ts`,
+  the one bridge to the app, erased at runtime. `viz/src/vizBoundary.test.ts` fails on any other
+  apps/ui import, a package outside the peer dependencies, a network call outside
+  `scene/load.ts`, or an `/api` URL.
+- **Scene format v1.** `{kind: "ksmech-scene", version: 1, scene: {type: molecule | step |
+  network, ...}, provenance}`; each type holds exactly what its views read, as API types narrowed
+  with `Pick`. Cubes are asset files referenced by relative path, byte size and sha256, checked
+  by the loader before a view reads them. Validation is hand-written (no schema library);
+  `scene.schema.json` (draft 2020-12) documents the same shape and a test keeps the two in
+  agreement; another version is refused. A step scene holds the predicted step only
+  (alternatives need POST `/step/check`).
+- **Exporter.** `npm run scene:export` reads a running server and writes the scene, its assets
+  and `index.json`; pool cubes at 0.35 Å spacing and 2.5 Å padding (about 6x smaller than the
+  default), workbench cubes thinned to every 2nd point per axis (`--cube-stride`). The committed
+  examples (SN2 step and network, acrolein; 688 KB) come from user-style input on the live
+  server, never from dataset samples: the repository is public.
+- **`#/scene`.** An embed page: no shell, no `/api/meta`, scenes from the page's own origin only;
+  its e2e aborts every `/api/` request and asserts none was attempted.
+- **Fix.** `useRDKit` missed RDKit when it finished loading between the first render and the
+  effect, so network cards never got their drawings; the effect now picks up the loaded module.

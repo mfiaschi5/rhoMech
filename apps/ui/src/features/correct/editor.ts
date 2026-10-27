@@ -14,10 +14,9 @@
 // Every change of the matrix is one undo step; the tool, the pending atom and the selection
 // are not history.
 import type { Tool } from "../predict/PoolCanvas";
-import type { ArrowReadingOut, MatrixIO } from "../predict/v9types";
-import type { BondContext, Entry } from "../predict/rmatrix";
-// @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { addMatrix, bondDelta, compileArrow, compileArrows, EMPTY_MATRIX, entryKey, loneDelta, MAX_BOND_ORDER, normalize, removeEntries, sameMatrix, setEntry } from "../predict/rmatrix.ts";
+import type { ArrowReadingOut, MatrixIO } from "@ksmech/viz/v9types";
+import type { BondContext, Entry } from "@ksmech/viz/pool/rmatrix";
+import { addMatrix, bondDelta, compileArrow, compileArrows, EMPTY_MATRIX, entryKey, loneDelta, MAX_BOND_ORDER, normalize, removeEntries, sameMatrix, setEntry } from "@ksmech/viz/pool/rmatrix";
 
 export const TOOLS: readonly Tool[] = ["bond", "lone", "arrow", "eraser"];
 export const HISTORY_CAP = 200;

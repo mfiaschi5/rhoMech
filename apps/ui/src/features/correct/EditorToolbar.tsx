@@ -7,7 +7,7 @@
 import type { Dispatch } from "react";
 import type { Tool } from "../predict/PoolCanvas";
 import { canRedo, canUndo, TOOLS, type EditorAction, type EditorState } from "./editor";
-import { isEmptyMatrix } from "../predict/rmatrix";
+import { isEmptyMatrix } from "@ksmech/viz/pool/rmatrix";
 
 const TOOL_INFO: Record<Tool, { label: string; key: string; title: string }> = {
   bond: { label: "Bond", key: "b", title: "click a bond: 0 → −1 → +1 → 0; click two atoms: form a bond" },

@@ -9,7 +9,7 @@
 // with input[data-testid="independent-toggle-{i}"] for i >= 1.
 import type { ReactNode } from "react";
 import type { ArrowReadingOut, CuratedStepOut, DatasetArrowOut, EdgeOut, MatrixIO, NetworkOut, PathwayOut } from "../../api/types.gen";
-import type { TokenArrowLike } from "../../chem/arrowGeom";
+import type { TokenArrowLike } from "@ksmech/viz/chem/arrowGeom";
 import { correctHash } from "../../router";
 import type { IndependenceHint } from "./orderGroups";
 import { StateDepiction } from "./StateDepiction";

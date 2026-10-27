@@ -6,6 +6,7 @@
 //   #/curate   #/curate/<jobId>?pathway=<pid>   #/curate/m/<mechId>
 //   #/browse?q=&mode=&side=&src=&st=            #/browse/step/<ref>
 //   #/workbench?smiles=&m=&set=&start=&orb=&rep=&layers=&q=
+//   #/scene?src=scenes/<name>.json               (a scene file, no shell and no API call)
 import { useMemo, useSyncExternalStore } from "react";
 
 // The molecule workbench while /api/meta reports the predict capability off (spec v8 port);
