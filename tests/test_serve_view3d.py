@@ -3,8 +3,9 @@ depictions (with and without tokens)."""
 
 import pytest
 
-from ksmech.serve import schemas, view3d
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.core import schemas
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.pool import view3d
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     sn2_state,
@@ -69,7 +70,7 @@ def test_orbital_cube_text(synthetic_context, sn2):  # noqa: F811
 
 
 def test_depiction_out_with_and_without_tokens(synthetic_context, sn2):  # noqa: F811
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state
 
     state, rt, *_ = sn2
     dep = view3d.depiction_out(synthetic_context, state.state_id, keep_maps=set(), server_svg=True)

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from ksmech.serve import schemas
+from ksmech.serve.core import schemas
 
 pytestmark = pytest.mark.serve
 
@@ -21,7 +21,8 @@ def test_types_gen_has_no_drift():
     assert TYPES_GEN.is_file(), f"{TYPES_GEN} missing: run schemas.write_typescript()"
     assert TYPES_GEN.read_text(encoding="utf-8") == schemas.typescript(), (
         "apps/ui/src/api/types.gen.ts is stale: regenerate with "
-        "uv run python -c 'from ksmech.serve.schemas import write_typescript; write_typescript()'"
+        "uv run python -c 'from ksmech.serve.core.schemas import "
+        "write_typescript; write_typescript()'"
     )
 
 

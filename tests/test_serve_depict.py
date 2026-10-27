@@ -8,8 +8,9 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem.Draw import rdMolDraw2D
 
-from ksmech.serve import depict, geometry
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.chem import geometry
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.depiction import depict
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     sn2_state,
@@ -181,7 +182,7 @@ def test_species_geometry_xyz_molblock_and_offsets(sn2_rt):
 
 def test_aromatic_geometry_is_kekulized(synthetic_settings, synthetic_loader):  # noqa: F811
     from ksmech.arrows.reactants import ReactantTokens
-    from ksmech.serve.pools import SpeciesInput, initial_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state
 
     state = initial_state([SpeciesInput("c1ccccc1", 1)], synthetic_settings.limits)
     rt = ReactantTokens.from_smiles(state.mapped_smiles, synthetic_loader)

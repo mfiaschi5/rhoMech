@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from ksmech.serve import schemas as S
-from ksmech.serve.capabilities import CAPABILITIES
+from ksmech.serve.core import schemas as S
+from ksmech.serve.core.capabilities import CAPABILITIES
 from tests.test_serve_api import error_of
 from tests.test_serve_fixtures_api import api_client
 from tests.test_serve_fixtures_wb import (  # noqa: F401 (fixtures)
@@ -137,7 +137,7 @@ def test_download_header(app, methanol):
 def test_pending_then_ready(wb_settings):  # noqa: F811
     from dataclasses import replace
 
-    from ksmech.serve.settings import TaskEnv
+    from ksmech.serve.core.settings import TaskEnv
 
     settings = replace(wb_settings, interactive_wait_s=0.01)
     sched = DeferredScheduler(TaskEnv(settings))
@@ -194,7 +194,7 @@ def test_get_errors(app, methanol):
 
 
 def test_workbench_capability(app, monkeypatch, methanol):
-    from ksmech.serve import capabilities
+    from ksmech.serve.core import capabilities
 
     meta = app.get("/api/meta").json()
     assert meta["capabilities"]["workbench"] == {"enabled": True, "reason": None}

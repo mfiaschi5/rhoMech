@@ -11,11 +11,7 @@ import shutil
 import numpy as np
 import pytest
 
-from ksmech.serve import tasks
-from ksmech.serve.errors import STATUS, Code, Pending, ServeError, error_body, jsonable
-from ksmech.serve.settings import TaskEnv, assert_writable, load_settings, pin_threads
-from ksmech.serve.testing import requires
-from ksmech.serve.worker import (
+from ksmech.serve.compute.worker import (
     InlineScheduler,
     Priority,
     TaskHandle,
@@ -24,6 +20,10 @@ from ksmech.serve.worker import (
     interactive,
     task_key,
 )
+from ksmech.serve.core.errors import STATUS, Code, Pending, ServeError, error_body, jsonable
+from ksmech.serve.core.settings import TaskEnv, assert_writable, load_settings, pin_threads
+from ksmech.serve.core.testing import requires
+from ksmech.serve.runtime import tasks
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     serve_settings,
@@ -135,9 +135,9 @@ def test_run_task_lazy_references(env, extra_task):
     out = tasks.run_task("ghost", env, {}, 3)
     assert out["code"] == "UNEXPECTED"
     assert out["detail"] == "task body not installed: ksmech.serve.does_not_exist:t_ghost"
-    extra_task("ghost2", "ksmech.serve.contracts:t_missing")
+    extra_task("ghost2", "ksmech.serve.core.contracts:t_missing")
     out = tasks.run_task("ghost2", env, {}, 4)
-    assert out["detail"] == "task body not installed: ksmech.serve.contracts:t_missing"
+    assert out["detail"] == "task body not installed: ksmech.serve.core.contracts:t_missing"
     out = tasks.run_task("no_such_task", env, {}, 5)
     assert out["code"] == "UNEXPECTED" and "unknown task" in out["detail"]
 
@@ -159,8 +159,8 @@ def test_task_registry_is_fixed():
         "embedding",
     }
     lazy = {k: v for k, v in tasks.TASKS.items() if isinstance(v, str)}
-    assert lazy["expand"] == "ksmech.serve.expansion:t_expand"
-    assert lazy["recheck_step"] == "ksmech.serve.recheck:t_recheck_step"
+    assert lazy["expand"] == "ksmech.serve.predict.expansion:t_expand"
+    assert lazy["recheck_step"] == "ksmech.serve.curate.recheck:t_recheck_step"
     assert tasks.resolve("analyze").__name__ == "t_analyze"
 
 
@@ -294,7 +294,7 @@ def test_interactive_pending_and_dedup():
 
 @requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_ensure_analysis(synthetic_context, sn2_state):  # noqa: F811
-    from ksmech.serve.analysis import PoolAnalysis
+    from ksmech.serve.science.analysis import PoolAnalysis
 
     ctx = synthetic_context
     an = ctx.ensure_analysis(sn2_state)
@@ -309,8 +309,8 @@ def test_api_context_ensure_analysis(synthetic_context, sn2_state):  # noqa: F81
 
 
 def test_api_context_not_analyzed(serve_settings):  # noqa: F811
-    from ksmech.serve.context import build_context
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.runtime.context import build_context
 
     s = serve_settings(chemistry="synthetic")
     ctx = build_context(s)
@@ -332,8 +332,8 @@ def test_api_context_not_analyzed(serve_settings):  # noqa: F811
 
 @requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_featurizes_then_analyzes(serve_settings):  # noqa: F811
-    from ksmech.serve.context import build_context
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.runtime.context import build_context
 
     s = serve_settings(chemistry="synthetic")
     ctx = build_context(s)
@@ -366,7 +366,7 @@ def test_provenance(synthetic_context):  # noqa: F811
 
 
 def test_meta(synthetic_context):  # noqa: F811
-    from ksmech.serve.context import meta
+    from ksmech.serve.runtime.context import meta
 
     m = meta(synthetic_context)
     assert set(m) == META_KEYS
@@ -387,7 +387,7 @@ def test_spec_version_and_artifacts(synthetic_settings):  # noqa: F811
     from ksmech.orbitals.tokens import SCHEMA_VERSION as TOK
     from ksmech.qm.records import SCHEMA_VERSION as QM
     from ksmech.qm.xtb_calc import QMConfig
-    from ksmech.serve import versions
+    from ksmech.serve.core import versions
 
     v = versions.artifact_versions()
     assert v == {
@@ -411,7 +411,7 @@ def test_spec_version_and_artifacts(synthetic_settings):  # noqa: F811
 
 
 def _tree(tmp_path):
-    from ksmech.serve import versions
+    from ksmech.serve.core import versions
 
     src = versions.SRC_ROOT
     root = tmp_path / "src"
@@ -424,7 +424,7 @@ def _tree(tmp_path):
 
 
 def test_fingerprints_change_only_with_their_own_files(tmp_path):
-    from ksmech.serve.versions import compute_fingerprint
+    from ksmech.serve.core.versions import compute_fingerprint
 
     root = _tree(tmp_path)
 
@@ -440,14 +440,14 @@ def test_fingerprints_change_only_with_their_own_files(tmp_path):
         compute_fingerprint("physics", root, "M"),
     )
     edits = {
-        "serve/gto.py": (True, True),
+        "serve/chem/gto.py": (True, True),
         "orbitals/tokens.py": (True, True),
         "physics/pairs.py": (False, True),
         "orbitals/classify.py": (False, True),
         "arrows/steps.py": (False, True),
-        "serve/analysis.py": (False, True),
-        "serve/reading.py": (False, True),
-        "serve/geometry.py": (False, False),  # display-only: invalidates nothing
+        "serve/science/analysis.py": (False, True),
+        "serve/science/reading.py": (False, True),
+        "serve/chem/geometry.py": (False, False),  # display-only: invalidates nothing
     }
     for rel, (ori, phy) in edits.items():
         path = root / rel
@@ -466,11 +466,11 @@ def test_fingerprints_change_only_with_their_own_files(tmp_path):
 
 
 def test_fingerprint_tolerates_missing_files(tmp_path):
-    from ksmech.serve.versions import compute_fingerprint, fingerprint_files
+    from ksmech.serve.core.versions import compute_fingerprint, fingerprint_files
 
     root = _tree(tmp_path)
     before = compute_fingerprint("physics", root, "M")
-    (root / "serve" / "synthetic.py").unlink()
+    (root / "serve" / "chem" / "synthetic.py").unlink()
     gone = compute_fingerprint("physics", root, "M")
     assert gone != before and re.match(r"^[0-9a-f]{12}$", gone)
     empty = tmp_path / "empty"
@@ -609,7 +609,7 @@ def _synthetic_files(s, key):
     """(QM npz, token npz) of `key` in the synthetic root of settings `s`."""
     from ksmech.orbitals.build import tokens_path
     from ksmech.qm.records import cache_path
-    from ksmech.serve.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
 
     return (
         cache_path(s.serve_qm, key, 0, SYNTHETIC_METHOD),
@@ -621,7 +621,7 @@ def test_qm_featurizer_cached_mode(serve_settings, synthetic_settings):  # noqa:
     from ksmech.orbitals.build import tokens_path
     from ksmech.qm.records import cache_path
     from ksmech.qm.xtb_calc import QMConfig
-    from ksmech.serve.featurize import FeaturizeStatus, make_featurizer
+    from ksmech.serve.chem.featurize import FeaturizeStatus, make_featurizer
 
     s = serve_settings(chemistry="cached")
     feat = make_featurizer(s)
@@ -652,7 +652,7 @@ def test_qm_featurizer_real_mode_wiring(serve_settings, synthetic_settings, monk
     from ksmech.qm import batch
     from ksmech.qm.records import cache_path
     from ksmech.qm.xtb_calc import QMConfig
-    from ksmech.serve.featurize import FeaturizeStatus, make_featurizer
+    from ksmech.serve.chem.featurize import FeaturizeStatus, make_featurizer
 
     s = serve_settings(chemistry="real", qm_timeout_s=123)
     feat = make_featurizer(s)
@@ -670,7 +670,7 @@ def test_qm_featurizer_real_mode_wiring(serve_settings, synthetic_settings, monk
 
     def fake_build(key, config):
         from ksmech.qm.bond_index import bond_index_path
-        from ksmech.serve.synthetic import SYNTHETIC_METHOD
+        from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
 
         calls["build"] = config
         out = build.tokens_path(config.out_dir, key, 0, config.method)
@@ -710,9 +710,9 @@ def test_qm_featurizer_real_mode_wiring(serve_settings, synthetic_settings, monk
 
 def test_layered_loader(tmp_path, synthetic_settings):  # noqa: F811
     from ksmech.orbitals.build import tokens_path
-    from ksmech.serve.loader import LayeredTokenLoader
-    from ksmech.serve.synthetic import SYNTHETIC_METHOD
-    from ksmech.serve.versions import file_sha256
+    from ksmech.serve.chem.loader import LayeredTokenLoader
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.core.versions import file_sha256
 
     _, src = _synthetic_files(synthetic_settings, "CCl")
     shared, serve = tmp_path / "shared", tmp_path / "serve"
@@ -750,8 +750,8 @@ def test_layered_loader_resolves_inputs_against_the_layer_root(tmp_path, synthet
 
     from ksmech.data import provenance as prov
     from ksmech.orbitals.build import tokens_path
-    from ksmech.serve.loader import LayeredTokenLoader, token_header_problems
-    from ksmech.serve.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.chem.loader import LayeredTokenLoader, token_header_problems
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
 
     qm, src = _synthetic_files(synthetic_settings, "CCl")
     root = tmp_path / "other-checkout"
@@ -797,7 +797,7 @@ def fresh_settings(serve_settings, synthetic_settings, sn2_state):  # noqa: F811
     """Synthetic settings (stub on) on a new data root holding a copy of the synthetic
     tokens, QM records and Wiberg sidecars, with the SN2 state saved: these token files may
     be rewritten (the session's synthetic root never is)."""
-    from ksmech.serve.pools import save_state
+    from ksmech.serve.chem.pools import save_state
 
     s = serve_settings(chemistry="synthetic")
     for name in ("tokens", "qm", "bond_index"):
@@ -809,8 +809,8 @@ def fresh_settings(serve_settings, synthetic_settings, sn2_state):  # noqa: F811
 
 def test_layered_loader_follows_a_rewritten_file(tmp_path, synthetic_settings):  # noqa: F811
     from ksmech.orbitals.build import tokens_path
-    from ksmech.serve.loader import LayeredTokenLoader
-    from ksmech.serve.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.chem.loader import LayeredTokenLoader
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
 
     _, src = _synthetic_files(synthetic_settings, "CCl")
     shared, serve = tmp_path / "shared", tmp_path / "serve"
@@ -839,7 +839,7 @@ def test_layered_loader_follows_a_rewritten_file(tmp_path, synthetic_settings): 
 
 @requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_follows_a_token_rebuild(fresh_settings, sn2_state):  # noqa: F811
-    from ksmech.serve.context import build_context
+    from ksmech.serve.runtime.context import build_context
 
     ctx = build_context(fresh_settings)
     rt1 = ctx.reactant_tokens(sn2_state)
@@ -856,8 +856,8 @@ def test_api_context_follows_a_token_rebuild(fresh_settings, sn2_state):  # noqa
 
 @requires("predict")  # the pool analysis serves predict and correct
 def test_api_context_passes_tokens_changed_through(fresh_settings, sn2_state, monkeypatch):  # noqa: F811
-    from ksmech.serve import analysis
-    from ksmech.serve.context import build_context
+    from ksmech.serve.runtime.context import build_context
+    from ksmech.serve.science import analysis
 
     ctx = build_context(fresh_settings)
     path = ctx.loader.path_of("CCl")

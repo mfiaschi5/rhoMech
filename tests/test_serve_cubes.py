@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ksmech.serve import cubes
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.chem import cubes
+from ksmech.serve.core.errors import Code, ServeError
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     sn2_state,
@@ -68,7 +68,7 @@ def _read_cube(text: str) -> dict:
 
 
 def test_orbital_cube_header_grid_and_values(synthetic_runtime, sn2_state, sn2_rt):  # noqa: F811
-    from ksmech.serve.gto import ao_values
+    from ksmech.serve.chem.gto import ao_values
 
     cap_atoms = cubes.cap_atoms
 

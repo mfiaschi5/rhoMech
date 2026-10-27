@@ -42,7 +42,7 @@ pytestmark = pytest.mark.serve
 
 def _fragment_atoms(state, key: str, nth: int = 0) -> list[int]:
     from ksmech.data import chem
-    from ksmech.serve.keys import fragment_keys
+    from ksmech.serve.core.keys import fragment_keys
 
     frags = [f for f in fragment_keys(chem.parse_mapped(state.mapped_smiles)) if f.token_key == key]
     return list(frags[nth].atoms)
@@ -61,10 +61,10 @@ class Step:
 
 
 def record_step(settings, runtime, state, bonds, lone) -> Step:
-    from ksmech.serve.analysis import pool_work
-    from ksmech.serve.edgestep import step_record
-    from ksmech.serve.pools import save_state
-    from ksmech.serve.stepapply import matrix_of
+    from ksmech.serve.chem.pools import save_state
+    from ksmech.serve.science.analysis import pool_work
+    from ksmech.serve.science.edgestep import step_record
+    from ksmech.serve.science.stepapply import matrix_of
 
     work = pool_work(runtime, state)
     R = matrix_of({"bonds": bonds, "lone": lone})
@@ -103,8 +103,8 @@ def _hex(text: str, n: int) -> str:
 
 
 def node_out(state, depth: int, *, root: bool, parent: str | None = None, logp: float = 0.0):
-    from ksmech.serve.network import display_smiles
-    from ksmech.serve.schemas import NodeOut
+    from ksmech.serve.core.schemas import NodeOut
+    from ksmech.serve.predict.network import display_smiles
 
     species = [
         {
@@ -142,9 +142,9 @@ def node_out(state, depth: int, *, root: bool, parent: str | None = None, logp: 
 
 def edge_out(step: Step, *, kind: str = "predicted", **kw):
     """The `EdgeOut` of a step (a predicted floor edge of rank 1 unless `kw` says otherwise)."""
-    from ksmech.serve.job_service import _edge_out
-    from ksmech.serve.network import Network, Node, NodeStatus, step_edge
-    from ksmech.serve.schemas import EdgeOut
+    from ksmech.serve.core.schemas import EdgeOut
+    from ksmech.serve.predict.network import Network, Node, NodeStatus, step_edge
+    from ksmech.serve.predict.service import _edge_out
 
     parent = Node(step.state.pool_id, step.state.pool_key, step.state, [], 0, 0.0, None,
                   NodeStatus.EXPANDED)  # fmt: skip
@@ -161,7 +161,7 @@ def edge_out(step: Step, *, kind: str = "predicted", **kw):
 
 
 def network_out(nodes, edges, pathway_edges, provenance, request, *, n_corrected: int = 0):
-    from ksmech.serve.schemas import NetworkOut
+    from ksmech.serve.core.schemas import NetworkOut
 
     ids = [e.id for e in pathway_edges]
     pathway = {
@@ -207,7 +207,7 @@ def network_out(nodes, edges, pathway_edges, provenance, request, *, n_corrected
 
 
 def predict_request(reactants: list[str], conditions: str | None = "water, 25 C"):
-    from ksmech.serve.schemas import PredictIn
+    from ksmech.serve.core.schemas import PredictIn
 
     return PredictIn(
         reactants_smiles=reactants,
@@ -220,7 +220,7 @@ def predict_request(reactants: list[str], conditions: str | None = "water, 25 C"
 
 
 def floor_provenance(context):
-    from ksmech.serve.schemas import Provenance
+    from ksmech.serve.core.schemas import Provenance
 
     return Provenance.model_validate(context.provenance("floor"))
 
@@ -254,7 +254,7 @@ def corrected_network(settings, runtime, context, state, donor_key: str, reactan
 def double_sn2_network(settings, runtime, context):
     """2 MeO- + 2 MeCl: root -> mid -> final, two independent SN2 steps (disjoint maps,
     continuous states)."""
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state
 
     state = initial_state([SpeciesInput("C[O-]", 2), SpeciesInput("CCl", 2)], settings.limits)
     save_state(state, settings)
@@ -279,7 +279,7 @@ def double_sn2_network(settings, runtime, context):
 @pytest.fixture
 def curation_engine(tmp_path):
     """A fresh curation database on tmp (make_engine + init_db)."""
-    from ksmech.serve import db
+    from ksmech.serve.core import db
 
     engine = db.make_engine(tmp_path / "curation" / "curation.sqlite")
     db.init_db(engine)
@@ -298,7 +298,7 @@ class NetworkStore:
         return network.network_id
 
     def __call__(self, job_id: str):
-        from ksmech.serve.errors import Code, ServeError
+        from ksmech.serve.core.errors import Code, ServeError
 
         if job_id not in self.networks:
             raise ServeError(Code.JOB_NOT_FOUND, f"no job {job_id}", status=404)
@@ -316,7 +316,7 @@ class InlineJobs:
         self.contexts: dict[str, Any] = {}
 
     def __call__(self, kind: str, request: dict) -> dict:
-        from ksmech.serve.contracts import LocalJobContext
+        from ksmech.serve.core.contracts import LocalJobContext
 
         job_id = "j" + _hex(f"{kind}|{len(self.results)}|{request}", 16)
         settings = self.settings_for.get(kind, self.settings)
@@ -340,7 +340,7 @@ def mini_pairs(processed) -> dict[tuple[str, str], str]:
     """(reactant pool key, product pool key) -> step id of the PMechDB steps under
     `processed` (keys.side_keys of both sides): the export's PairsProvider stand-in."""
     from ksmech.data.io import read_steps
-    from ksmech.serve.keys import side_keys
+    from ksmech.serve.core.keys import side_keys
 
     out = {}
     for s in read_steps(processed / "pmechdb" / "steps.parquet"):
@@ -425,7 +425,7 @@ def test_sn2_networks_are_typed_and_consistent(oh_sn2_network, meo_sn2_network):
 
 
 def test_product_states_are_saved(meo_sn2_network, synthetic_settings):  # noqa: F811
-    from ksmech.serve.pools import load_state
+    from ksmech.serve.chem.pools import load_state
 
     edge = meo_sn2_network.edges[0]
     assert load_state(edge.product_state_id, synthetic_settings).pool_key == edge.target_pool_key

@@ -15,9 +15,9 @@ from collections.abc import Callable
 
 import pytest
 
-from ksmech.serve.contracts import LocalJobContext
-from ksmech.serve.testing import StubChemistry, ToyRule, toy_catalytic_cycle, toy_keto_enol
-from ksmech.serve.worker import TaskHandle, TaskResult, WorkerStatus
+from ksmech.serve.compute.worker import TaskHandle, TaskResult, WorkerStatus
+from ksmech.serve.core.contracts import LocalJobContext
+from ksmech.serve.core.testing import StubChemistry, ToyRule, toy_catalytic_cycle, toy_keto_enol
 from tests.test_serve_fixtures import no_xtb, serve_settings  # noqa: F401 (fixtures)
 
 JOB_ID = "j" + "0" * 16
@@ -172,7 +172,7 @@ def test_job_ctx_factory(job_ctx, tmp_path):
 
 
 def test_toy_chemistries_are_well_formed(toy_cycle, keto_enol):
-    from ksmech.serve.pools import SpeciesInput
+    from ksmech.serve.chem.pools import SpeciesInput
 
     root = toy_cycle.root([SpeciesInput("Cat", 1), SpeciesInput("S", 2)])
     assert root.pool_key == "Cat.S.S" and root.mapped_smiles == "Cat.S.S"
@@ -182,7 +182,7 @@ def test_toy_chemistries_are_well_formed(toy_cycle, keto_enol):
 
 
 def test_toy_step_encodes_the_rule():
-    from ksmech.serve.testing import toy_step
+    from ksmech.serve.core.testing import toy_step
 
     step = toy_step(2, rule("x", "A.B", "C", 1.0))
     assert step["matrix"] == {"bonds": [[0, 1, 3]], "lone": []}

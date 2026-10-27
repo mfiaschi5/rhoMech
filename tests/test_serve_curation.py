@@ -10,19 +10,19 @@ from functools import partial
 import pytest
 from sqlmodel import select
 
-from ksmech.serve import db
-from ksmech.serve.contracts import LocalJobContext, PredictorInfo
-from ksmech.serve.curate_service import CurateService
-from ksmech.serve.curation import (
+from ksmech.serve.core import db
+from ksmech.serve.core.contracts import LocalJobContext, PredictorInfo
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.core.testing import requires
+from ksmech.serve.curate.curation import (
     STATUSES,
     check_order_groups,
     independence_issues,
     staleness,
     step_doc,
 )
-from ksmech.serve.errors import Code, ServeError
-from ksmech.serve.recheck import UNCHECKED, run_recheck
-from ksmech.serve.testing import requires
+from ksmech.serve.curate.recheck import UNCHECKED, run_recheck
+from ksmech.serve.curate.service import CurateService
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     oh_sn2_state,
@@ -461,9 +461,9 @@ def test_recheck_reasons(curation_engine, synthetic_context, synthetic_settings,
 @pytest.fixture
 def fresh_settings(tmp_path, synthetic_settings, synthetic_loader):  # noqa: F811
     """A synthetic data root holding every synthetic token file except [OH-]'s."""
-    from ksmech.serve.featurize import qm_npz_path
-    from ksmech.serve.settings import load_settings
-    from ksmech.serve.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.chem.featurize import qm_npz_path
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.core.settings import load_settings
 
     fresh = load_settings({}, data_root=tmp_path / "fresh", chemistry="synthetic")
     for sub in ("tokens", "qm", "bond_index"):
@@ -479,10 +479,10 @@ def fresh_settings(tmp_path, synthetic_settings, synthetic_loader):  # noqa: F81
 def test_recheck_featurizes_first(fresh_settings, curation_engine, oh_sn2_network):  # noqa: F811
     """A reactant key missing from the loader is featurized (JOB priority) before the
     recheck_step task, which itself never runs QM."""
-    from ksmech.serve.predictors import PredictorRegistry
-    from ksmech.serve.settings import TaskEnv
-    from ksmech.serve.versions import physics_fingerprint
-    from ksmech.serve.worker import InlineScheduler
+    from ksmech.serve.compute.worker import InlineScheduler
+    from ksmech.serve.core.settings import TaskEnv
+    from ksmech.serve.core.versions import physics_fingerprint
+    from ksmech.serve.predict.predictors import PredictorRegistry
 
     fresh = fresh_settings
     mid = _insert(curation_engine, "validated", False)
@@ -506,7 +506,7 @@ class _TimeoutScheduler:
         self.inner, self.calls = inner, []
 
     def run(self, name, payload, **kw):
-        from ksmech.serve.worker import TaskResult
+        from ksmech.serve.compute.worker import TaskResult
 
         self.calls.append((name, kw["priority"], kw["timeout_s"]))
         if name == "recheck_step":
@@ -515,7 +515,7 @@ class _TimeoutScheduler:
 
 
 def test_recheck_task_fails(curation_engine, synthetic_context, synthetic_settings, oh_sn2_network):  # noqa: F811
-    from ksmech.serve.worker import Priority
+    from ksmech.serve.compute.worker import Priority
 
     mid = _insert(curation_engine, "validated", False)
     with db.session(curation_engine) as s:

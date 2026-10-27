@@ -6,7 +6,7 @@ import threading
 import numpy as np
 import pytest
 
-from ksmech.serve.contracts import (
+from ksmech.serve.core.contracts import (
     LRU,
     ExpandRequest,
     Expansion,

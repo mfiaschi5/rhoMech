@@ -12,9 +12,9 @@ import time
 
 import pytest
 
-from ksmech.serve.procsched import ProcessScheduler, _is_live_child, rss_mb
-from ksmech.serve.settings import THREAD_VARS, TaskEnv, load_settings
-from ksmech.serve.worker import Priority, interactive, task_key
+from ksmech.serve.compute.procsched import ProcessScheduler, _is_live_child, rss_mb
+from ksmech.serve.compute.worker import Priority, interactive, task_key
+from ksmech.serve.core.settings import THREAD_VARS, TaskEnv, load_settings
 from tests.test_serve_fixtures import no_xtb  # noqa: F401 (fixture)
 
 pytestmark = pytest.mark.serve
@@ -180,8 +180,8 @@ def test_circuit_breaker(tmp_path_factory):
 
 
 def test_recycle_flags_and_breaker_window_without_a_worker(tmp_path_factory):
-    from ksmech.serve.procsched import _Item
-    from ksmech.serve.worker import TaskHandle
+    from ksmech.serve.compute.procsched import _Item
+    from ksmech.serve.compute.worker import TaskHandle
 
     sc = ProcessScheduler(_env(tmp_path_factory, "serve-flags"), workers=5, breaker_failures=1)
     try:

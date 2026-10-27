@@ -64,7 +64,7 @@ def no_xtb():
 @pytest.fixture
 def serve_settings(tmp_path):
     """A factory make(**overrides) -> ServeSettings over a fresh data root (tmp_path)."""
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     def make(**overrides):
         return load_settings({}, data_root=tmp_path, **overrides)
@@ -86,8 +86,8 @@ def synthetic_keys() -> list[str]:
 def ensure_synthetic_root(root: Path) -> bool:
     """Build the synthetic tokens under `root` unless `<root>/.ready` exists. Returns True
     when it built. `.ready` is written last; the build runs inside `xtb_forbidden()`."""
-    from ksmech.serve.featurize import FeaturizeStatus, SyntheticFeaturizer
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.chem.featurize import FeaturizeStatus, SyntheticFeaturizer
+    from ksmech.serve.core.settings import load_settings
 
     root = Path(root)
     if (root / ".ready").exists():
@@ -111,15 +111,15 @@ def synthetic_root(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def synthetic_settings(synthetic_root):
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     return load_settings({}, data_root=synthetic_root, chemistry="synthetic")
 
 
 @pytest.fixture(scope="session")
 def synthetic_runtime(synthetic_settings):
-    from ksmech.serve.settings import TaskEnv
-    from ksmech.serve.tasks import runtime
+    from ksmech.serve.core.settings import TaskEnv
+    from ksmech.serve.runtime.tasks import runtime
 
     return runtime(TaskEnv(synthetic_settings))
 
@@ -132,13 +132,13 @@ def synthetic_loader(synthetic_runtime):
 @pytest.fixture(scope="session")
 def synthetic_context(synthetic_settings):
     """`build_context(synthetic_settings)`: InlineScheduler, synthetic featurizer, stub on."""
-    from ksmech.serve.context import build_context
+    from ksmech.serve.runtime.context import build_context
 
     return build_context(synthetic_settings)
 
 
 def _saved_state(settings, pairs):
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state
 
     state = initial_state([SpeciesInput(s, n) for s, n in pairs], settings.limits)
     save_state(state, settings)
@@ -234,7 +234,7 @@ def test_synthetic_root_holds_every_key(synthetic_settings, synthetic_loader):
 
 
 def test_states_are_saved(synthetic_settings, sn2_state, oh_sn2_state):
-    from ksmech.serve.pools import load_state, state_path
+    from ksmech.serve.chem.pools import load_state, state_path
 
     for state in (sn2_state, oh_sn2_state):
         assert state_path(state.state_id, synthetic_settings).is_file()
@@ -256,7 +256,7 @@ def test_serve_mini_processed(serve_mini_processed, serve_settings):
 
 
 def test_synthetic_context_and_runtime(synthetic_context, synthetic_runtime, synthetic_settings):
-    from ksmech.serve.worker import InlineScheduler
+    from ksmech.serve.compute.worker import InlineScheduler
 
     assert isinstance(synthetic_context.scheduler, InlineScheduler)
     assert synthetic_context.chemistry == "synthetic"

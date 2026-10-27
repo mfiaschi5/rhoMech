@@ -9,8 +9,10 @@ import math
 import numpy as np
 import pytest
 
-from ksmech.serve.contracts import log_softmax_valid
-from ksmech.serve.network import (
+from ksmech.serve.chem.pools import SpeciesInput
+from ksmech.serve.core.contracts import log_softmax_valid
+from ksmech.serve.core.testing import StubChemistry, ToyPredictorRef, requires, toy_state
+from ksmech.serve.predict.network import (
     NetHooks,
     NetParams,
     NodeStatus,
@@ -21,8 +23,6 @@ from ksmech.serve.network import (
     network_to_dict,
     rank_pathways,
 )
-from ksmech.serve.pools import SpeciesInput
-from ksmech.serve.testing import StubChemistry, ToyPredictorRef, requires, toy_state
 from tests.test_serve_fixtures_net import (  # noqa: F401 (fixtures)
     branching,
     job_ctx,

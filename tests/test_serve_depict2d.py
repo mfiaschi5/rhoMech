@@ -1,5 +1,7 @@
-"""The sketcher's 2D depiction (POST /api/depict2d, serve/depiction2d.py) and its perspective
-template library (serve/depiction_templates.py, serve/data/ring_templates.*): RDKit only, never
+"""The sketcher's 2D depiction (POST /api/depict2d, serve/depiction/depiction2d.py) and its
+perspective
+template library (serve/depiction/depiction_templates.py, serve/data/ring_templates.*): RDKit only,
+never
 xTB (match3d gets an RDKit structure here, and the synthetic chemistry's record over HTTP).
 
 Checked: every template parses (and RDKit's own loader accepts the file), its `fit` is a real
@@ -16,12 +18,12 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from ksmech.serve import depiction2d as D
-from ksmech.serve import depiction_metrics as M
-from ksmech.serve import depiction_templates as T
-from ksmech.serve import molecule
-from ksmech.serve.depiction_gallery import principal_frame, slot_angles
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.depiction import depiction2d as D
+from ksmech.serve.depiction import depiction_metrics as M
+from ksmech.serve.depiction import depiction_templates as T
+from ksmech.serve.depiction.depiction_gallery import principal_frame, slot_angles
+from ksmech.serve.workbench import molecule
 from tests.test_serve_fixtures_api import api_client
 from tests.test_serve_fixtures_wb import (  # noqa: F401 (fixtures)
     no_xtb,

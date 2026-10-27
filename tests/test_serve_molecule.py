@@ -1,4 +1,4 @@
-"""serve/molecule.py: input formats, the cache key and stereo, one-fragment and query-atom
+"""serve/workbench/molecule.py: input formats, the cache key and stereo, one-fragment and query-atom
 checks, preflight (radical, atom limit), the molecule id and registry, the sketch <-> record
 mapping on permuted and symmetric drawings, and the status of a registered molecule."""
 
@@ -8,9 +8,10 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from ksmech.serve import molecule, workbench_service
-from ksmech.serve import schemas as S
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.core import schemas as S
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.workbench import molecule
+from ksmech.serve.workbench import service as workbench_service
 from tests.test_serve_fixtures_api import NeverScheduler
 from tests.test_serve_fixtures_wb import (  # noqa: F401 (fixtures)
     no_xtb,
@@ -41,7 +42,7 @@ def code_of(fn, *args, **kwargs) -> str:
 
 @pytest.fixture
 def ctx(wb_settings):  # noqa: F811
-    from ksmech.serve.context import build_context
+    from ksmech.serve.runtime.context import build_context
 
     return build_context(wb_settings)
 
@@ -173,7 +174,7 @@ def test_status_missing_qm_only_and_running(ctx, wb_settings):  # noqa: F811
     from dataclasses import replace
 
     from ksmech.orbitals.build import tokens_path
-    from ksmech.serve.context import build_context
+    from ksmech.serve.runtime.context import build_context
 
     entry = molecule.register(ctx.settings, "CCCCO", ctx.featurizer.method)
     assert molecule.molecule_out(ctx, entry["molecule_id"]).status == "missing"
@@ -197,7 +198,7 @@ def test_failed_featurize_is_recorded_and_retried_only_on_request(
     wb_runtime,  # noqa: F811
     monkeypatch,
 ):
-    from ksmech.serve.synthetic import SyntheticError
+    from ksmech.serve.chem.synthetic import SyntheticError
 
     def broken(self, key):
         raise SyntheticError("EMBED_FAILED", f"no conformer for {key}")

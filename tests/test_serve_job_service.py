@@ -8,18 +8,18 @@ import time
 
 import pytest
 
-from ksmech.serve.context import build_context
-from ksmech.serve.errors import ServeError
-from ksmech.serve.job_service import JobService
-from ksmech.serve.jobs import JobRunner, JobStore
-from ksmech.serve.schemas import (
+from ksmech.serve.core.errors import ServeError
+from ksmech.serve.core.schemas import (
     EdgeOut,
     JobOut,
     NetworkOut,
     PathwayOut,
     PredictIn,
 )
-from ksmech.serve.testing import requires
+from ksmech.serve.core.testing import requires
+from ksmech.serve.predict.jobs import JobRunner, JobStore
+from ksmech.serve.predict.service import JobService
+from ksmech.serve.runtime.context import build_context
 from tests.test_serve_fixtures_net import (  # noqa: F401 (fixtures)
     FakeScheduler,
     branching,

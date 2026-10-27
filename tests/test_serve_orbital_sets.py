@@ -1,4 +1,4 @@
-"""serve/orbital_sets.py: every set and start is orthonormal (C^T S C = I) and spans the
+"""serve/workbench/orbital_sets.py: every set and start is orthonormal (C^T S C = I) and spans the
 canonical occupied space; ibo/cholesky is the model token file; canonical rows carry the
 frontier labels and degenerate levels; LMO rows carry exactly the model-input descriptors; the
 workbench set files are cached with provenance; bad names are REQUEST_INVALID."""
@@ -11,9 +11,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ksmech.serve import orbital_sets as osets
-from ksmech.serve import schemas as S
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.core import schemas as S
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.workbench import orbital_sets as osets
 from tests.test_serve_fixtures_wb import (  # noqa: F401 (fixtures)
     canonical_key,
     no_xtb,
@@ -113,7 +113,7 @@ def test_canonical_rows_labels_and_degenerate_levels(wb_runtime):  # noqa: F811
 
 
 def test_lmo_rows_carry_the_model_input(wb_runtime):  # noqa: F811
-    from ksmech.serve.token_rows import orbital_model_input
+    from ksmech.serve.chem.token_rows import orbital_model_input
 
     key = "CCO"
     t = wb_runtime.loader(key)

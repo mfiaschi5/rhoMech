@@ -7,10 +7,10 @@ from dataclasses import fields
 
 import pytest
 
-from ksmech.serve import pool_service as ps
-from ksmech.serve import schemas as S
-from ksmech.serve.capabilities import CAPABILITIES
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.core import schemas as S
+from ksmech.serve.core.capabilities import CAPABILITIES
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.pool import service as ps
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     sn2_state,
@@ -76,7 +76,7 @@ def test_normalize_rows_carry_the_field_error(synthetic_context):  # noqa: F811
 
 
 def test_create_pool_is_ready_and_saved(synthetic_context, sn2_state, synthetic_settings):  # noqa: F811
-    from ksmech.serve.pools import state_path
+    from ksmech.serve.chem.pools import state_path
 
     out = ps.create_pool(synthetic_context, _in("C[O-]", "CCl"))
     assert isinstance(out, S.PoolOut) and out.state_id == sn2_state.state_id
@@ -92,7 +92,7 @@ def test_create_pool_is_ready_and_saved(synthetic_context, sn2_state, synthetic_
 
 
 def test_pool_out_missing_then_ready(synthetic_context, synthetic_settings):  # noqa: F811
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state
 
     state = initial_state(
         [SpeciesInput("CCO", 1), SpeciesInput("CN", 1)], synthetic_settings.limits
@@ -109,8 +109,8 @@ def test_pool_out_missing_then_ready(synthetic_context, synthetic_settings):  # 
 def test_featurize_failure_without_tokens(synthetic_context, synthetic_settings, monkeypatch):  # noqa: F811
     """A recorded featurize failure (digest None: the tokens are missing) is `failed` and makes
     `ensure_tokens` a 409 POOL_NOT_ANALYZED without submitting the task again."""
-    from ksmech.serve.analysis import clear_failure, write_failure
-    from ksmech.serve.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state
+    from ksmech.serve.science.analysis import clear_failure, write_failure
 
     ctx = synthetic_context
     state = initial_state([SpeciesInput("CCCCC", 1)], synthetic_settings.limits)

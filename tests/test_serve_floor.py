@@ -21,7 +21,7 @@ from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
 
 @pytest.fixture(scope="module")
 def sn2_work(synthetic_runtime, sn2_state):  # noqa: F811
-    from ksmech.serve.analysis import pool_work
+    from ksmech.serve.science.analysis import pool_work
 
     return pool_work(synthetic_runtime, sn2_state)
 
@@ -62,7 +62,7 @@ def test_pooled_gap_is_the_spec_sum(sn2_work):  # noqa: F811
 
 
 def test_floor_ranks_the_sn2_anchor_first(sn2_work):  # noqa: F811
-    from ksmech.serve.predictors import floor_anchors
+    from ksmech.serve.predict.predictors import floor_anchors
 
     o, c, _ = _sn2_atoms(sn2_work)
     anchors = floor_anchors(sn2_work, "all")
@@ -77,7 +77,7 @@ def test_floor_ranks_the_sn2_anchor_first(sn2_work):  # noqa: F811
 
 
 def test_floor_completion_gives_the_sn2_matrix(synthetic_runtime, sn2_work):  # noqa: F811
-    from ksmech.serve.predictors import FloorPredictor
+    from ksmech.serve.predict.predictors import FloorPredictor
 
     o, c, cl = _sn2_atoms(sn2_work)
     skips: Counter = Counter()
@@ -92,7 +92,7 @@ def test_floor_completion_gives_the_sn2_matrix(synthetic_runtime, sn2_work):  # 
 
 
 def test_breaking_anchor_completes_as_heterolysis(sn2_work):  # noqa: F811
-    from ksmech.serve.predictors import anchor_candidates
+    from ksmech.serve.predict.predictors import anchor_candidates
 
     _, c, cl = _sn2_atoms(sn2_work)
     i, j = sorted((c, cl))
@@ -102,9 +102,9 @@ def test_breaking_anchor_completes_as_heterolysis(sn2_work):  # noqa: F811
 
 
 def test_expansion_keeps_the_beam_and_reports_counts(synthetic_runtime, sn2_state):  # noqa: F811
-    from ksmech.serve.contracts import ExpandRequest
-    from ksmech.serve.expansion import expand_state
-    from ksmech.serve.pools import state_path
+    from ksmech.serve.chem.pools import state_path
+    from ksmech.serve.core.contracts import ExpandRequest
+    from ksmech.serve.predict.expansion import expand_state
 
     ex = expand_state(synthetic_runtime, sn2_state, ExpandRequest("floor", 3, None, "all", 64))
     assert ex.ok and 1 <= len(ex.children) <= 3
@@ -129,8 +129,8 @@ def test_equal_products_merge_by_sigma_key(sn2_state, sn2_work):  # noqa: F811
     """Two matrices that take different H atoms of chloromethane give one product pool key:
     one child, the second an alternative."""
     from ksmech.arrows.delta_be import ReactionMatrix
-    from ksmech.serve.expansion import _group
-    from ksmech.serve.predictors import Candidate
+    from ksmech.serve.predict.expansion import _group
+    from ksmech.serve.predict.predictors import Candidate
 
     mol = sn2_work.rt.mol
     o, c, _ = _sn2_atoms(sn2_work)
@@ -147,8 +147,8 @@ def test_equal_products_merge_by_sigma_key(sn2_state, sn2_work):  # noqa: F811
 
 def test_apply_failures_are_counted(sn2_state):  # noqa: F811
     from ksmech.arrows.delta_be import ReactionMatrix
-    from ksmech.serve.expansion import _group
-    from ksmech.serve.predictors import Candidate
+    from ksmech.serve.predict.expansion import _group
+    from ksmech.serve.predict.predictors import Candidate
 
     failures: Counter = Counter()
     bad = Candidate(ReactionMatrix(((0, 1, 1),), ()), (0, 1, "form"), 1.0)  # charge not conserved
@@ -157,7 +157,7 @@ def test_apply_failures_are_counted(sn2_state):  # noqa: F811
 
 
 def test_beam_weights():  # noqa: F811
-    from ksmech.serve.expansion import beam_weights
+    from ksmech.serve.predict.expansion import beam_weights
 
     w = beam_weights([2.0, 1.0, 1.0], [None] * 3, probabilities=False)
     assert np.allclose(np.exp(w), [0.5, 0.25, 0.25])
@@ -167,7 +167,7 @@ def test_beam_weights():  # noqa: F811
 
 
 def test_gbdt_is_unavailable_without_its_file(synthetic_settings, tmp_path):  # noqa: F811
-    from ksmech.serve.predictors import GBDTPredictor
+    from ksmech.serve.predict.predictors import GBDTPredictor
 
     info = GBDTPredictor(tmp_path / "none.npz", "fp").info()
     assert not info.available and info.code == "GBDT_MISSING" and "none.npz" in info.reason
@@ -181,7 +181,7 @@ def test_default_gbdt_path_is_the_geomfree_molecule_model(serve_settings):  # no
 
 
 def test_registry_lists_three_predictors(synthetic_settings):  # noqa: F811
-    from ksmech.serve.predictors import PredictorRegistry
+    from ksmech.serve.predict.predictors import PredictorRegistry
 
     reg = PredictorRegistry(synthetic_settings, "fp")
     infos = {i.name: i for i in reg.info()}
@@ -204,7 +204,7 @@ class FakeModel:
 
     def decode(self, sample, rt, beam, *, state, scope, skips):  # noqa: F811
         from ksmech.arrows.delta_be import ReactionMatrix
-        from ksmech.serve.predictors import NetworkStep
+        from ksmech.serve.predict.predictors import NetworkStep
 
         o, c, cl = (rt.global_atom[a] for a in _sn2_atoms(self.work))
         R = ReactionMatrix(
@@ -214,7 +214,7 @@ class FakeModel:
 
 
 def test_network_adapter_with_a_fake_model(synthetic_runtime, synthetic_settings, sn2_work):  # noqa: F811
-    from ksmech.serve.network_predictor import NetworkPredictor
+    from ksmech.serve.predict.network_predictor import NetworkPredictor
 
     p = NetworkPredictor(synthetic_settings, "fp", FakeModel(sn2_work))
     info = p.info()
@@ -233,7 +233,7 @@ def test_gbdt_inputs_resolve_against_the_shared_root(tmp_path):
 
     from ksmech.data import provenance as prov
     from ksmech.physics import baseline as bl
-    from ksmech.serve.predictors import gbdt_problems
+    from ksmech.serve.predict.predictors import gbdt_problems
 
     root = tmp_path / "shared"
     sample = root / "data" / "processed" / "pmechdb" / "samples.json"

@@ -6,17 +6,17 @@ import json
 
 import pytest
 
-from ksmech.serve.chemistry import MolecularChemistry
-from ksmech.serve.contracts import (
+from ksmech.serve.chem.chemistry import MolecularChemistry
+from ksmech.serve.chem.featurize import SyntheticFeaturizer
+from ksmech.serve.chem.pools import SpeciesInput, initial_state, save_state, state_path
+from ksmech.serve.compute.worker import Priority
+from ksmech.serve.core.contracts import (
     ExpandRequest,
     Expansion,
     LocalJobContext,
     ProposedChild,
 )
-from ksmech.serve.errors import ServeError
-from ksmech.serve.featurize import SyntheticFeaturizer
-from ksmech.serve.pools import SpeciesInput, initial_state, save_state, state_path
-from ksmech.serve.worker import Priority
+from ksmech.serve.core.errors import ServeError
 from tests.test_serve_fixtures_net import (  # noqa: F401 (fixtures)
     FakeScheduler,
     fail,
@@ -199,7 +199,7 @@ def test_worker_events_are_forwarded(setup, caplog):
     exp = ok(expansion(product(s)))
     exp.events = [wiped]
     sched.responses = {"featurize": feat, "expand": exp}
-    with caplog.at_level("WARNING", logger="ksmech.serve.chemistry"):
+    with caplog.at_level("WARNING", logger="ksmech.serve.chem.chemistry"):
         assert chem.expand(sn2(s), REQ, ctx).ok
     assert ctx.skipped == {"TOKENS_STALE": 1} and ctx.skip_log[0]["key"] == "CCl"
     assert "ORIENTED_CACHE_WIPED" in caplog.text

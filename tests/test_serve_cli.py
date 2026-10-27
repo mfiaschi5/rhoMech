@@ -13,9 +13,9 @@ import socket
 
 import pytest
 
-from ksmech.serve import cli
-from ksmech.serve.capabilities import CAPABILITIES
-from ksmech.serve.testing import requires
+from ksmech.serve.app import cli
+from ksmech.serve.core.capabilities import CAPABILITIES
+from ksmech.serve.core.testing import requires
 from tests.test_serve_fixtures_api import (  # noqa: F401 (fixtures)
     api_client,
     no_xtb,
@@ -46,7 +46,7 @@ def fake_server(monkeypatch):
     """Monkeypatched create_app and uvicorn.run; records their arguments."""
     import uvicorn
 
-    from ksmech.serve import api
+    from ksmech.serve.app import api
 
     calls: dict = {}
 
@@ -182,7 +182,7 @@ def test_run_options(env_root, fake_server):
 
 
 def test_run_refuses_a_held_lock(env_root, fake_server, capsys):
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     held = cli.acquire_server_lock(load_settings())
     assert held is not None
@@ -279,7 +279,7 @@ def test_dev_and_no_ui_pages(serve_settings, tmp_path):  # noqa: F811
 
 
 def test_schema_ts_writes_the_file(env_root):
-    from ksmech.serve.schemas import typescript
+    from ksmech.serve.core.schemas import typescript
 
     out = env_root / "types.gen.ts"
     assert cli.main(["schema-ts", "--out", str(out)]) == 0
@@ -291,7 +291,7 @@ def _real_token_copy(root, shared, key: str) -> None:
     real-method loader of the shared root `shared` looks for it."""
     from ksmech.orbitals.build import tokens_path
     from ksmech.qm.xtb_calc import QMConfig
-    from ksmech.serve.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
 
     src = tokens_path(root / "data" / "serve" / "tokens", key, 0, SYNTHETIC_METHOD)
     dst = tokens_path(shared / "data" / "cache" / "tokens", key, 0, QMConfig().method)

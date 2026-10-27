@@ -7,10 +7,7 @@ import re
 import pytest
 from rdkit import Chem
 
-from ksmech.serve import keys
-from ksmech.serve.contracts import Limits, PoolState
-from ksmech.serve.errors import Code, ServeError
-from ksmech.serve.pools import (
+from ksmech.serve.chem.pools import (
     SpeciesInput,
     initial_state,
     load_state,
@@ -20,6 +17,9 @@ from ksmech.serve.pools import (
     state_from_mol,
     state_path,
 )
+from ksmech.serve.core import keys
+from ksmech.serve.core.contracts import Limits, PoolState
+from ksmech.serve.core.errors import Code, ServeError
 from tests.fixtures.molecules import MOLECULES
 from tests.test_serve_fixtures import no_xtb, serve_settings  # noqa: F401 (fixtures)
 
@@ -243,7 +243,7 @@ def test_load_state_corrupt(serve_settings):  # noqa: F811
 
 
 def _featurizer(make, chemistry="synthetic"):
-    from ksmech.serve.featurize import make_featurizer
+    from ksmech.serve.chem.featurize import make_featurizer
 
     return make_featurizer(make(chemistry=chemistry))
 

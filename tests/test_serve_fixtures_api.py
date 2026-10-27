@@ -51,7 +51,7 @@ class NeverScheduler:
     one for the same key), so `worker.interactive` raises `Pending`. Records every submit."""
 
     def __init__(self) -> None:
-        from ksmech.serve.worker import TaskHandle
+        from ksmech.serve.compute.worker import TaskHandle
 
         self._handle = TaskHandle
         self.handles: dict[str, object] = {}
@@ -59,7 +59,7 @@ class NeverScheduler:
         self._lock = threading.Lock()
 
     def submit(self, name, payload, *, priority, timeout_s, owner="", key=None, label=""):
-        from ksmech.serve.worker import task_key
+        from ksmech.serve.compute.worker import task_key
 
         key = key or task_key(name, payload)
         with self._lock:
@@ -76,7 +76,7 @@ class NeverScheduler:
             return self.handles.get(key)
 
     def status(self):
-        from ksmech.serve.worker import WorkerStatus
+        from ksmech.serve.compute.worker import WorkerStatus
 
         label = self.calls[-1][1] if self.calls else None
         return WorkerStatus(True, 1, [], bool(self.calls), None, label, None, 0, 0, False)
@@ -94,9 +94,9 @@ def api_client(settings, **kwargs):
     to an InlineScheduler and jobs run inline."""
     from fastapi.testclient import TestClient
 
-    from ksmech.serve.api import create_app
-    from ksmech.serve.settings import TaskEnv
-    from ksmech.serve.worker import InlineScheduler
+    from ksmech.serve.app.api import create_app
+    from ksmech.serve.compute.worker import InlineScheduler
+    from ksmech.serve.core.settings import TaskEnv
 
     kwargs.setdefault("scheduler", InlineScheduler(TaskEnv(settings)))
     kwargs.setdefault("jobs_inline", True)
@@ -125,7 +125,7 @@ def copy_synthetic_root(src: Path, dst: Path) -> Path:
 def fresh_synthetic_settings(tmp_path, synthetic_root):  # noqa: F811
     """Synthetic settings (stub predictor on) on a new data root holding a copy of the
     synthetic tokens; the curation database, job store and exports start empty."""
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     root = copy_synthetic_root(synthetic_root, tmp_path / "root")
     return load_settings({}, data_root=root, chemistry="synthetic")
@@ -184,7 +184,7 @@ def test_synthetic_app_answers(synthetic_app):
 
 
 def test_fresh_settings_hold_the_tokens(fresh_synthetic_settings, synthetic_settings):  # noqa: F811
-    from ksmech.serve.featurize import make_featurizer
+    from ksmech.serve.chem.featurize import make_featurizer
 
     s = fresh_synthetic_settings
     assert s.data_root != synthetic_settings.data_root
@@ -195,8 +195,8 @@ def test_fresh_settings_hold_the_tokens(fresh_synthetic_settings, synthetic_sett
 
 
 def test_never_scheduler_is_pending():
-    from ksmech.serve.errors import Pending
-    from ksmech.serve.worker import interactive
+    from ksmech.serve.compute.worker import interactive
+    from ksmech.serve.core.errors import Pending
 
     sched = NeverScheduler()
     with pytest.raises(Pending) as first:

@@ -1,4 +1,5 @@
-"""serve/densities.py: the canonical cube is `ao_values @ C[:, k]`; at 0.2 Angstrom with enough
+"""serve/workbench/densities.py: the canonical cube is `ao_values @ C[:, k]`; at 0.2 Angstrom with
+enough
 padding |psi|^2 integrates to 1, the density to N_valence, f+ / f- to 1 and the dual to 0
 (within 1%); the point-charge ESP is positive around NH4+, negative around acetate and Q/r far
 away; quality sets the spacing; requests are normalized; the errors NO_FRONTIER,
@@ -14,10 +15,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ksmech.serve import cubes
-from ksmech.serve import densities as D
-from ksmech.serve import orbital_sets as osets
-from ksmech.serve.errors import Code, ServeError
+from ksmech.serve.chem import cubes
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.workbench import densities as D
+from ksmech.serve.workbench import orbital_sets as osets
 from tests.test_serve_cubes import _read_cube
 from tests.test_serve_fixtures_wb import (  # noqa: F401 (fixtures)
     no_xtb,
@@ -49,7 +50,7 @@ def _cube(rt, key: str, **request) -> tuple[dict, dict, Path]:
 
 
 def test_canonical_cube_is_ao_values_times_c(wb_runtime):  # noqa: F811
-    from ksmech.serve.gto import ao_values
+    from ksmech.serve.chem.gto import ao_values
 
     key = "CCO"
     rec, _, _ = osets.load_qm(wb_runtime, key)
@@ -69,7 +70,7 @@ def test_canonical_cube_is_ao_values_times_c(wb_runtime):  # noqa: F811
 
 
 def test_lmo_cube_is_the_token_coefficients(wb_runtime):  # noqa: F811
-    from ksmech.serve.gto import ao_values
+    from ksmech.serve.chem.gto import ao_values
 
     key = "CCO"
     t = wb_runtime.loader(key)

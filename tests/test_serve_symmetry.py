@@ -1,4 +1,5 @@
-"""The workbench point-group finder (`ksmech.serve.symmetry`) and GET /molecule/{id}/symmetry:
+"""The workbench point-group finder (`ksmech.serve.workbench.symmetry`) and GET
+/molecule/{id}/symmetry:
 known molecules (RDKit ETKDG + MMFF, or hand-built ideal geometries) give their Schoenflies
 group, order and elements; perturbed geometries show the tolerance (C1 below the noise, the
 group above it, the looser-tolerance hint), the symmetrized structure is exactly symmetric; the
@@ -13,7 +14,7 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from ksmech.serve import symmetry as sym
+from ksmech.serve.workbench import symmetry as sym
 from tests.fixtures.molecules import MOLECULES
 from tests.test_serve_fixtures import no_xtb, synthetic_root  # noqa: F401 (fixtures)
 
@@ -335,7 +336,7 @@ def test_expected_order_table():
 
 @pytest.fixture(scope="module")
 def app(tmp_path_factory, synthetic_root):  # noqa: F811
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
     from tests.test_serve_fixtures_api import api_client, copy_synthetic_root
 
     root = copy_synthetic_root(synthetic_root, tmp_path_factory.mktemp("sym") / "root")
@@ -345,7 +346,7 @@ def app(tmp_path_factory, synthetic_root):  # noqa: F811
 
 
 def test_symmetry_endpoint(app):
-    from ksmech.serve import schemas as S
+    from ksmech.serve.core import schemas as S
 
     created = app.post("/api/molecule", json={"smiles": "C"})
     assert created.status_code == 200, created.text

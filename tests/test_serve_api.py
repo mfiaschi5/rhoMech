@@ -11,9 +11,9 @@ import re
 
 import pytest
 
-from ksmech.serve import schemas as S
-from ksmech.serve.capabilities import CAPABILITIES
-from ksmech.serve.testing import requires
+from ksmech.serve.core import schemas as S
+from ksmech.serve.core.capabilities import CAPABILITIES
+from ksmech.serve.core.testing import requires
 from tests.test_serve_fixtures import serve_mini_processed  # noqa: F401 (fixture)
 from tests.test_serve_fixtures_api import (  # noqa: F401 (fixtures)
     CH_TUPLE,
@@ -352,7 +352,7 @@ def test_unexpected_errors_are_500_with_a_request_id(synthetic_app, monkeypatch,
         raise RuntimeError("boom")
 
     monkeypatch.setattr(svc.browse, "status", boom)
-    with caplog.at_level(logging.ERROR, logger="ksmech.serve.api"):
+    with caplog.at_level(logging.ERROR, logger="ksmech.serve.app.api"):
         r = synthetic_app.get("/api/browse/status")
     err = error_of(r, 500, "UNEXPECTED")
     assert "RuntimeError: boom" in err["message"]
@@ -467,7 +467,7 @@ def test_cross_origin_mutations_are_refused(fresh_synthetic_settings):  # noqa: 
 
 
 def test_review_codes_and_their_statuses():
-    from ksmech.serve.errors import STATUS, Code, ServeError
+    from ksmech.serve.core.errors import STATUS, Code, ServeError
 
     assert STATUS[Code.REQUEST_FORBIDDEN] == 403 and STATUS[Code.TOKENS_CHANGED] == 503
     assert Code.PMECHDB_UNAVAILABLE not in STATUS  # a report reason, never an HTTP status
@@ -539,7 +539,7 @@ def test_disabled_capabilities_are_503(synthetic_app, monkeypatch, method, path,
 
 
 def test_meta_lists_the_capabilities(synthetic_app):  # noqa: F811
-    from ksmech.serve.capabilities import status
+    from ksmech.serve.core.capabilities import status
 
     m = S.MetaOut.model_validate(synthetic_app.get("/api/meta").json())
     assert set(m.capabilities) == set(CAPABILITIES)

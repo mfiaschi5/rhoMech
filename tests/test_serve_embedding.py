@@ -1,4 +1,5 @@
-"""Embedding traces in serve (`serve.models`, `serve.embedding`): the checkpoint listing, the
+"""Embedding traces in serve (`serve.predict.models`, `serve.embedding.service`): the checkpoint
+listing, the
 `embedding` capability, `POST /api/embedding` as a job through the worker task, the stored
 payload and page, the cache by checkpoint and pool state, the refusals with their codes, and
 the worker's model cache. The checkpoints are tiny random models (`tests/serve_fake_model.py`)
@@ -13,7 +14,7 @@ import sys
 
 import pytest
 
-from ksmech.serve import schemas as S
+from ksmech.serve.core import schemas as S
 from tests.serve_fake_model import write_fake_run
 from tests.test_serve_fixtures import no_xtb, synthetic_root  # noqa: F401 (fixtures)
 from tests.test_serve_fixtures_api import (  # noqa: F401 (fixtures)
@@ -39,7 +40,7 @@ def error_of(r, status: int, code: str) -> dict:
 @pytest.fixture(scope="module")
 def emb_settings(tmp_path_factory, synthetic_root):  # noqa: F811
     """Synthetic tokens and a clean fake run `fake/tiny` (dense) on a new data root."""
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     root = copy_synthetic_root(synthetic_root, tmp_path_factory.mktemp("embedding"))
     write_fake_run(root / "data" / "models" / "fake" / "tiny", "dense")
@@ -86,7 +87,7 @@ def test_the_capability_needs_a_checkpoint(synthetic_app, emb_app):  # noqa: F81
 
 
 def test_the_capability_is_off_without_torch(emb_app, monkeypatch):
-    from ksmech.serve import capabilities
+    from ksmech.serve.core import capabilities
 
     monkeypatch.setitem(capabilities.CAPABILITIES, "embedding", (False, "no torch (test)"))
     meta = emb_app.get("/api/meta").json()["capabilities"]["embedding"]
@@ -157,8 +158,8 @@ def test_a_dirty_run_is_listed_with_its_reason_and_refused(emb_app, emb_settings
 def test_the_worker_refuses_a_dirty_header_that_run_json_hides(tmp_path):
     """run.json says clean, the checkpoint's own header says dirty: load_model refuses it in
     the worker and the job fails with CHECKPOINT_REFUSED."""
-    from ksmech.serve.embedding import _signature, cached_model
-    from ksmech.serve.errors import ServeError
+    from ksmech.serve.core.errors import ServeError
+    from ksmech.serve.embedding.service import _signature, cached_model
 
     run = tmp_path / "models" / "fake" / "mixed"
     write_fake_run(run, dirty=True, files=("best",))
@@ -171,8 +172,8 @@ def test_the_worker_refuses_a_dirty_header_that_run_json_hides(tmp_path):
 
 
 def test_the_worker_keeps_one_model_per_file_version(tmp_path):
-    from ksmech.serve.embedding import _signature, cached_model
-    from ksmech.serve.errors import ServeError
+    from ksmech.serve.core.errors import ServeError
+    from ksmech.serve.embedding.service import _signature, cached_model
 
     (path,) = write_fake_run(tmp_path / "fake" / "cache", files=("best",))
     sig = _signature(path)
@@ -187,9 +188,9 @@ def test_the_worker_keeps_one_model_per_file_version(tmp_path):
 def test_the_api_modules_never_import_torch():
     code = (
         "import sys\n"
-        "import ksmech.serve.api, ksmech.serve.embedding, ksmech.serve.models\n"
-        "import ksmech.serve.network_predictor, ksmech.model.decode\n"
-        "from ksmech.serve.models import missing_modules\n"
+        "import ksmech.serve.app.api, ksmech.serve.embedding.service, ksmech.serve.predict.models\n"
+        "import ksmech.serve.predict.network_predictor, ksmech.model.decode\n"
+        "from ksmech.serve.predict.models import missing_modules\n"
         "missing_modules()\n"
         "assert 'torch' not in sys.modules, 'torch imported'\n"
     )

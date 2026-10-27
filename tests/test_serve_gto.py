@@ -1,4 +1,4 @@
-"""The vendored GFN2 Gaussian basis (`serve.gto`, from `physics/gto.py` at 46adf6b) against
+"""The vendored GFN2 Gaussian basis (`serve.chem.gto`, from `physics/gto.py` at 46adf6b) against
 stored values: the code and its STO-nG table must stay bit-identical to the original."""
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ AO_ROW0 = [0.33256539, 0.1291286, -0.38738579, 0.25825719]
 
 
 def test_table_is_the_original():
-    from ksmech.serve import gto
+    from ksmech.serve.chem import gto
 
     assert Path(gto.__file__).parent / "data" / "sto_ng.json" == gto.STO_NG_PATH
     assert hashlib.sha256(gto.STO_NG_PATH.read_bytes()).hexdigest() == STO_NG_SHA256
@@ -35,7 +35,7 @@ def test_table_is_the_original():
 
 def test_stewart_sto3g_1s():
     from ksmech.qm.ao import gfn2_shells
-    from ksmech.serve.gto import element_shells, slater_to_gauss
+    from ksmech.serve.chem.gto import element_shells, slater_to_gauss
 
     sh = slater_to_gauss(3, 1, 0, 1.0)
     assert np.allclose(sh.alpha, [2.227660584, 0.4057711562, 0.1098175104])
@@ -46,7 +46,7 @@ def test_stewart_sto3g_1s():
 
 
 def test_overlap_and_ao_values_match_stored_values():
-    from ksmech.serve.gto import ao_values, overlap_matrix
+    from ksmech.serve.chem.gto import ao_values, overlap_matrix
 
     S = overlap_matrix(Z, XYZ)
     assert S.shape == (16, 16) and np.allclose(S, S.T, atol=0)
@@ -76,7 +76,7 @@ def _origin_source() -> str | None:
 
 
 def test_code_is_the_original_below_the_docstring():
-    from ksmech.serve import gto
+    from ksmech.serve.chem import gto
 
     original = _origin_source()
     if original is None:

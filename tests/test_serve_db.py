@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlmodel import select
 
-from ksmech.serve import db
+from ksmech.serve.core import db
 
 pytestmark = pytest.mark.serve
 

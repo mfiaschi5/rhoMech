@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from ksmech.serve import schemas as S
-from ksmech.serve.testing import requires
+from ksmech.serve.core import schemas as S
+from ksmech.serve.core.testing import requires
 from tests.test_serve_fixtures_api import (  # noqa: F401 (fixtures)
     api_client,
     edge_to,

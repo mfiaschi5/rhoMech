@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from rdkit import Chem
 
-from ksmech.serve.synthetic import (
+from ksmech.serve.chem.synthetic import (
     NOT_CONVERGED,
     SYNTHETIC_METHOD,
     SyntheticError,
@@ -42,7 +42,7 @@ def _record(records, key):
 def test_record_fields_and_electron_count(key, records):
     from ksmech.orbitals.localize import assert_valence_only, valence_electrons
     from ksmech.qm.fukui import HARTREE_TO_EV
-    from ksmech.serve.gto import overlap_matrix
+    from ksmech.serve.chem.gto import overlap_matrix
 
     rec = _record(records, key)
     z = rec.atomic_numbers
@@ -113,7 +113,7 @@ def test_chloromethane_sigma_star(synthetic_loader):  # noqa: F811
 
 
 def test_hydride_has_no_virtual_block(serve_settings):  # noqa: F811
-    from ksmech.serve.featurize import FeaturizeStatus, SyntheticFeaturizer
+    from ksmech.serve.chem.featurize import FeaturizeStatus, SyntheticFeaturizer
 
     feat = SyntheticFeaturizer(serve_settings(chemistry="synthetic"))
     res = feat.ensure("[H-]")
@@ -124,7 +124,7 @@ def test_hydride_has_no_virtual_block(serve_settings):  # noqa: F811
 
 
 def test_featurizer_cached_on_second_call(serve_settings):  # noqa: F811
-    from ksmech.serve.featurize import FeaturizeStatus, SyntheticFeaturizer, qm_npz_path
+    from ksmech.serve.chem.featurize import FeaturizeStatus, SyntheticFeaturizer, qm_npz_path
 
     s = serve_settings(chemistry="synthetic")
     feat = SyntheticFeaturizer(s)
@@ -141,7 +141,7 @@ def test_featurizer_cached_on_second_call(serve_settings):  # noqa: F811
 
 
 def test_featurizer_failure_codes(serve_settings):  # noqa: F811
-    from ksmech.serve.featurize import FeaturizeStatus, SyntheticFeaturizer
+    from ksmech.serve.chem.featurize import FeaturizeStatus, SyntheticFeaturizer
 
     s = serve_settings(chemistry="synthetic")
     feat = SyntheticFeaturizer(s)

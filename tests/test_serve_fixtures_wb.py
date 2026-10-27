@@ -28,7 +28,7 @@ pytestmark = pytest.mark.serve
 
 @pytest.fixture(scope="module")
 def wb_settings(tmp_path_factory, synthetic_root):  # noqa: F811
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     root = copy_synthetic_root(synthetic_root, tmp_path_factory.mktemp("wb") / "root")
     return load_settings({}, data_root=root, chemistry="synthetic")
@@ -36,8 +36,8 @@ def wb_settings(tmp_path_factory, synthetic_root):  # noqa: F811
 
 @pytest.fixture(scope="module")
 def wb_runtime(wb_settings):
-    from ksmech.serve.settings import TaskEnv
-    from ksmech.serve.tasks import runtime
+    from ksmech.serve.core.settings import TaskEnv
+    from ksmech.serve.runtime.tasks import runtime
 
     return runtime(TaskEnv(wb_settings))
 
@@ -52,7 +52,7 @@ def canonical_key(smiles: str) -> str:
 
 def wb_key(rt, smiles: str) -> str:
     """The key of `smiles`, featurized with the synthetic chemistry of runtime `rt`."""
-    from ksmech.serve.featurize import FeaturizeStatus
+    from ksmech.serve.chem.featurize import FeaturizeStatus
 
     key = canonical_key(smiles)
     with xtb_forbidden():
@@ -67,7 +67,7 @@ class DeferredScheduler:
     an `InlineScheduler` and completes the handles, so the same request then answers 200."""
 
     def __init__(self, env) -> None:
-        from ksmech.serve.worker import InlineScheduler
+        from ksmech.serve.compute.worker import InlineScheduler
 
         self.inline = InlineScheduler(env)
         self.queued: dict[str, tuple[str, dict, object]] = {}
@@ -75,7 +75,7 @@ class DeferredScheduler:
         self._lock = threading.Lock()
 
     def submit(self, name, payload, *, priority, timeout_s, owner="", key=None, label=""):
-        from ksmech.serve.worker import TaskHandle, task_key
+        from ksmech.serve.compute.worker import TaskHandle, task_key
 
         key = key or task_key(name, payload)
         with self._lock:

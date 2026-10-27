@@ -11,9 +11,9 @@ import time
 
 import pytest
 
-from ksmech.serve import jobs as jobs_mod
-from ksmech.serve.errors import ServeError
-from ksmech.serve.jobs import (
+from ksmech.serve.core.errors import ServeError
+from ksmech.serve.predict import jobs as jobs_mod
+from ksmech.serve.predict.jobs import (
     Cancelled,
     Job,
     JobRunner,
@@ -116,7 +116,7 @@ def test_retention_keeps_newest_and_curated(env):
 
 
 def test_curated_job_ids_read_the_curation_db(env):
-    from ksmech.serve import db
+    from ksmech.serve.core import db
 
     s, _, _ = env
     assert curated_job_ids(s) == set()
@@ -280,7 +280,7 @@ def test_skips_go_to_events_and_failures(env, caplog):
         return {}
 
     runner.register("skipper", skipper)
-    with caplog.at_level(logging.WARNING, logger="ksmech.serve.jobs"):
+    with caplog.at_level(logging.WARNING, logger="ksmech.serve.predict.jobs"):
         job = runner.submit("skipper", {})
     assert runner.get(job.id).skipped == {"APPLY_FAILED:VALENCE": 3, "RESONANCE_ONLY_STEP": 1}
     events = store.events(job.id)

@@ -1,5 +1,5 @@
-"""Metal-complex start geometries (serve.metal_geometry) and the metal path's wiring
-(serve.metal_qm, serve.featurize). No xTB: every test runs inside `xtb_forbidden()`."""
+"""Metal-complex start geometries (serve.chem.metal_geometry) and the metal path's wiring
+(serve.chem.metal_qm, serve.chem.featurize). No xTB: every test runs inside `xtb_forbidden()`."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from rdkit.Chem import AllChem
 from ksmech.data.chem import unmapped_canonical
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.xtb_calc import QMConfig
-from ksmech.serve import metal_geometry as mg
+from ksmech.serve.chem import metal_geometry as mg
 from tests.test_serve_fixtures import xtb_forbidden
 
 STD = QMConfig().method
@@ -309,8 +309,8 @@ def test_no_template_cases():
 
 
 def test_method_tag_only_on_metal_keys():
-    from ksmech.serve.metal_qm import MetalQMConfig
-    from ksmech.serve.synthetic import SYNTHETIC_METHOD
+    from ksmech.serve.chem.metal_qm import MetalQMConfig
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
 
     metal = unmapped_canonical(Chem.MolFromSmiles("Cl[Pt-2](Cl)(Cl)Cl"))
     assert mg.method_for(metal, STD) == STD + mg.METAL_GEOM_TAG != STD
@@ -327,7 +327,7 @@ def test_method_tag_only_on_metal_keys():
 
 
 def _settings(tmp_path):
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     return load_settings({}, data_root=tmp_path, chemistry="cached")
 
@@ -335,7 +335,7 @@ def _settings(tmp_path):
 def test_featurizer_paths_follow_the_key(tmp_path):
     from ksmech.orbitals.build import tokens_path
     from ksmech.qm.records import cache_path
-    from ksmech.serve.featurize import QMFeaturizer, qm_npz_path
+    from ksmech.serve.chem.featurize import QMFeaturizer, qm_npz_path
 
     s = _settings(tmp_path)
     feat = QMFeaturizer(s, allow_compute=False)
@@ -359,8 +359,8 @@ def test_featurizer_paths_follow_the_key(tmp_path):
 
 def test_run_qm_dispatch(tmp_path, monkeypatch):
     from ksmech.qm import batch
-    from ksmech.serve import metal_qm
-    from ksmech.serve.featurize import QMFeaturizer
+    from ksmech.serve.chem import metal_qm
+    from ksmech.serve.chem.featurize import QMFeaturizer
 
     calls = []
     monkeypatch.setattr(
@@ -378,7 +378,7 @@ def test_run_qm_dispatch(tmp_path, monkeypatch):
 
 
 def test_preflight_rejects_open_shell_metal(tmp_path):
-    from ksmech.serve.featurize import QMFeaturizer
+    from ksmech.serve.chem.featurize import QMFeaturizer
 
     feat = QMFeaturizer(_settings(tmp_path), allow_compute=False)
     hs = unmapped_canonical(Chem.MolFromSmiles("[Fe+2](<-O)(<-O)(<-O)(<-O)(<-O)<-O"))
@@ -392,7 +392,7 @@ def test_preflight_rejects_open_shell_metal(tmp_path):
 def test_metal_path_is_guarded_and_never_raises(tmp_path):
     """Inside `xtb_forbidden` the inherited `GFN2Calculator.run` raises: the metal path
     reports it as a failed row instead of computing."""
-    from ksmech.serve import metal_qm
+    from ksmech.serve.chem import metal_qm
 
     key = unmapped_canonical(Chem.MolFromSmiles("Cl[Pt-2](Cl)(Cl)Cl"))
     row = metal_qm.process_metal_molecule(key, metal_qm.MetalQMConfig(cache_dir=tmp_path))
@@ -421,7 +421,7 @@ def _ptcl4_stretched(factor: float, which: int = 1):
 
 def test_metal_connectivity_tolerances():
     from ksmech.qm.records import QMError
-    from ksmech.serve.metal_qm import broken_bonds, check_metal_connectivity
+    from ksmech.serve.chem.metal_qm import broken_bonds, check_metal_connectivity
 
     mol, xyz = _ptcl4_stretched(1.25)
     assert broken_bonds(mol, xyz, 1.3, mg.ML_COV_FACTOR) == []
@@ -434,7 +434,7 @@ def test_metal_connectivity_tolerances():
 
 
 def test_walls_only_when_a_bond_breaks(monkeypatch):
-    from ksmech.serve import metal_qm
+    from ksmech.serve.chem import metal_qm
 
     mol, ok = _ptcl4_stretched(1.0)
     _, broken = _ptcl4_stretched(1.5)

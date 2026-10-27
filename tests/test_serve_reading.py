@@ -1,4 +1,4 @@
-"""The arrow reading of a reaction matrix (`serve.reading`): every move type, the directed
+"""The arrow reading of a reaction matrix (`serve.science.reading`): every move type, the directed
 pooled-gap choice between decompositions, and the PMechDB code of a reading."""
 
 from __future__ import annotations
@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from ksmech.arrows.delta_be import ReactionMatrix
-from ksmech.serve.reading import (
+from ksmech.serve.science.reading import (
     BOND_TO_BOND,
     BOND_TO_LONE,
     LONE_TO_BOND,

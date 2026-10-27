@@ -6,12 +6,13 @@ import json
 
 import pytest
 
-from ksmech.serve import db, keys, pmindex, schemas
-from ksmech.serve.browse import BrowseIndex, BrowseService, parse_query
-from ksmech.serve.contracts import LocalJobContext
-from ksmech.serve.errors import Code, ServeError
-from ksmech.serve.settings import TaskEnv
-from ksmech.serve.worker import InlineScheduler
+from ksmech.serve.browse import pmindex
+from ksmech.serve.browse.service import BrowseIndex, BrowseService, parse_query
+from ksmech.serve.compute.worker import InlineScheduler
+from ksmech.serve.core import db, keys, schemas
+from ksmech.serve.core.contracts import LocalJobContext
+from ksmech.serve.core.errors import Code, ServeError
+from ksmech.serve.core.settings import TaskEnv
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     serve_mini_processed,
@@ -111,7 +112,7 @@ def _mechanism(ses, status: str, steps: list[tuple[str, str, dict]]) -> int:
 def env(serve_settings, serve_mini_processed, tmp_path):  # noqa: F811
     """(settings, ctx, engine, mechanism ids, submitted calls, service) with an inline
     submitter that runs the index job before returning, as the inline JobRunner does."""
-    from ksmech.serve.context import build_context
+    from ksmech.serve.runtime.context import build_context
 
     s = serve_settings(chemistry="synthetic")
     ctx = build_context(s)
@@ -308,7 +309,7 @@ def test_build_index_returns_the_queued_or_running_job(env):
 
 
 def test_unavailable_without_the_parquet(serve_settings, tmp_path):  # noqa: F811
-    from ksmech.serve.context import build_context
+    from ksmech.serve.runtime.context import build_context
 
     s = serve_settings(chemistry="synthetic")
     engine = db.make_engine(tmp_path / "c.sqlite")
@@ -425,7 +426,7 @@ def test_curated_and_pmechdb_count_dataset_arrows(env, mini_steps):
 
 
 def test_substructure_cap_truncates():
-    from ksmech.serve.browse import StepEntry
+    from ksmech.serve.browse.service import StepEntry
 
     entries = []
     for i in range(30):

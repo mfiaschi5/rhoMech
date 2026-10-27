@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from ksmech.serve.testing import requires
+from ksmech.serve.core.testing import requires
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,
     serve_settings,
@@ -47,7 +47,7 @@ def io(m: dict) -> dict:  # noqa: F811
 
 
 def codes(state, matrix) -> list[str]:  # noqa: F811
-    from ksmech.serve import stepapply
+    from ksmech.serve.science import stepapply
 
     return [x.code for x in stepapply.apply_matrix(state, stepapply.matrix_of(matrix)).issues]
 
@@ -60,7 +60,7 @@ def test_valid_sn2_has_no_issue(sn2_state):  # noqa: F811
 
 
 def test_issue_codes_and_atoms(sn2_state):  # noqa: F811
-    from ksmech.serve import stepapply
+    from ksmech.serve.science import stepapply
 
     m = sn2(sn2_state)
     o, c, cl = m["_atoms"]
@@ -90,7 +90,7 @@ def test_issue_codes_and_atoms(sn2_state):  # noqa: F811
 
 
 def test_lone_pair_negative(serve_settings):  # noqa: F811
-    from ksmech.serve.pools import SpeciesInput, initial_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state
 
     state = initial_state([SpeciesInput("CO", 1), SpeciesInput("CCl", 1)], serve_settings().limits)
     mol = _mol(state)
@@ -101,7 +101,7 @@ def test_lone_pair_negative(serve_settings):  # noqa: F811
 
 
 def test_resonance_only_step_is_an_issue(serve_settings):  # noqa: F811
-    from ksmech.serve.pools import SpeciesInput, initial_state
+    from ksmech.serve.chem.pools import SpeciesInput, initial_state
 
     s = serve_settings()
     state = initial_state([SpeciesInput("CC(=O)[O-]", 1)], s.limits)
@@ -180,7 +180,7 @@ def test_user_job_override_and_expand(fresh_synthetic_settings):  # noqa: F811
         net = job["result"]
         assert len(net["nodes"]) == 1 and net["edges"] == []
         root = root_node(net)
-        from ksmech.serve.pools import load_state
+        from ksmech.serve.chem.pools import load_state
 
         state = load_state(root["state_id"], fresh_synthetic_settings)
         body = {"parent_state_id": state.state_id, "matrix": io(sn2(state))}

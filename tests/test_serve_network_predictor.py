@@ -1,4 +1,4 @@
-"""The network predictor in serve (`model.decode`, `serve.network_predictor`): the
+"""The network predictor in serve (`model.decode`, `serve.predict.network_predictor`): the
 best-first enumeration, log P(R) against a brute-force enumeration, the conservation, count
 and valence filters with their reason codes, the merge by product, the default checkpoint and
 the predictor's reason texts, and a tiny random checkpoint decoding a synthetic MeO- + MeCl
@@ -175,7 +175,7 @@ def test_merge_keeps_the_best_logp_per_product():
 def test_a_new_double_charge_on_a_non_metal_is_refused():
     from rdkit import Chem
 
-    from ksmech.serve.network_predictor import charge_issue
+    from ksmech.serve.predict.network_predictor import charge_issue
 
     before = Chem.MolFromSmiles("C[Cl]", sanitize=False)
     after = Chem.MolFromSmiles("C[Cl-2]", sanitize=False)
@@ -199,7 +199,7 @@ def test_top_anchors_respect_the_scope_mask():
 
 
 def _settings(tmp_path, **kw):
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
 
     return load_settings({}, data_root=tmp_path, shared_cache_root=tmp_path, **kw)
 
@@ -217,7 +217,7 @@ def _run(tmp_path, name, top1=None, limit=0, dirty=False):
 
 
 def test_the_default_checkpoint_is_the_best_real_run(tmp_path):
-    from ksmech.serve.models import default_checkpoint, list_checkpoints
+    from ksmech.serve.predict.models import default_checkpoint, list_checkpoints
 
     s = _settings(tmp_path)
     _run(tmp_path, "real_a", top1=0.55)
@@ -234,9 +234,9 @@ def test_the_default_checkpoint_is_the_best_real_run(tmp_path):
 
 
 def test_reason_texts_in_every_state(tmp_path, monkeypatch):
-    from ksmech.serve import models
-    from ksmech.serve.errors import Code, ServeError
-    from ksmech.serve.network_predictor import NetworkPredictor, record_failure
+    from ksmech.serve.core.errors import Code, ServeError
+    from ksmech.serve.predict import models
+    from ksmech.serve.predict.network_predictor import NetworkPredictor, record_failure
 
     s = _settings(tmp_path)
     p = NetworkPredictor(s, "fp")
@@ -267,8 +267,8 @@ def test_reason_texts_in_every_state(tmp_path, monkeypatch):
 
 
 def test_a_named_checkpoint_resolves_and_a_refused_one_is_409(tmp_path):
-    from ksmech.serve.errors import ServeError
-    from ksmech.serve.network_predictor import NetworkPredictor
+    from ksmech.serve.core.errors import ServeError
+    from ksmech.serve.predict.network_predictor import NetworkPredictor
 
     s = _settings(tmp_path)
     _run(tmp_path, "good", top1=0.6)
@@ -295,7 +295,7 @@ def tiny_net(tmp_path_factory, synthetic_settings):  # noqa: F811
     """The network predictor over a fake run `fake/tiny` beside the synthetic tokens."""
     from dataclasses import replace
 
-    from ksmech.serve.network_predictor import NetworkPredictor
+    from ksmech.serve.predict.network_predictor import NetworkPredictor
 
     root = tmp_path_factory.mktemp("netmodels")
     write_fake_run(root / "data" / "models" / "fake" / "tiny", "dense")
@@ -307,11 +307,11 @@ def test_tiny_model_steps_apply_with_the_model_logp(tiny_net, synthetic_runtime,
     import torch
 
     from ksmech.model.loss import _entry_sums, _real_atoms
-    from ksmech.serve.analysis import pool_work
-    from ksmech.serve.contracts import ExpandRequest
-    from ksmech.serve.embedding import cached_model
-    from ksmech.serve.network_predictor import model_sample
-    from ksmech.serve.stepapply import apply_matrix
+    from ksmech.serve.core.contracts import ExpandRequest
+    from ksmech.serve.embedding.service import cached_model
+    from ksmech.serve.predict.network_predictor import model_sample
+    from ksmech.serve.science.analysis import pool_work
+    from ksmech.serve.science.stepapply import apply_matrix
 
     work = pool_work(synthetic_runtime, sn2_state)
     ref = tiny_net.make_ref(None, None)
@@ -356,16 +356,16 @@ def test_tiny_model_steps_apply_with_the_model_logp(tiny_net, synthetic_runtime,
 
 
 def _path_sig(pred, ref):
-    from ksmech.serve.models import find_checkpoint
+    from ksmech.serve.predict.models import find_checkpoint
 
     ck = find_checkpoint(pred.settings, ref.checkpoint["run"], ref.checkpoint["file"])
     return ck.path, ck.signature
 
 
 def test_a_changed_checkpoint_file_is_refused(tiny_net, synthetic_runtime, sn2_state):  # noqa: F811
-    from ksmech.serve.analysis import pool_work
-    from ksmech.serve.contracts import ExpandRequest
-    from ksmech.serve.errors import ServeError
+    from ksmech.serve.core.contracts import ExpandRequest
+    from ksmech.serve.core.errors import ServeError
+    from ksmech.serve.science.analysis import pool_work
 
     work = pool_work(synthetic_runtime, sn2_state)
     ck = dict(tiny_net.make_ref(None, None).checkpoint) | {"mtime_ns": 1}
@@ -380,7 +380,7 @@ def test_a_changed_checkpoint_file_is_refused(tiny_net, synthetic_runtime, sn2_s
 
 @pytest.fixture(scope="module")
 def net_app(tmp_path_factory, synthetic_root):  # noqa: F811
-    from ksmech.serve.settings import load_settings
+    from ksmech.serve.core.settings import load_settings
     from tests.test_serve_fixtures_api import api_client, copy_synthetic_root
 
     root = copy_synthetic_root(synthetic_root, tmp_path_factory.mktemp("netapi"))
@@ -402,8 +402,8 @@ def _job(client, r) -> dict:
 
 
 def test_the_network_predicts_through_the_api(net_app):
-    from ksmech.serve import schemas as S
-    from ksmech.serve.context import NOTE_NETWORK_STOP
+    from ksmech.serve.core import schemas as S
+    from ksmech.serve.runtime.context import NOTE_NETWORK_STOP
 
     infos = {p["name"]: p for p in net_app.get("/api/predictors").json()}
     net = infos["network"]
