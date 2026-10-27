@@ -37,7 +37,7 @@ jobs, and it needs to sign in to submit a job.
 ## Admins have no limits
 
 Every role except admin has a job quota. It counts submitted jobs: `POST /predict`,
-`/jobs/{id}/expand` and `/embedding`. Each role has a limit per day (the last 24 hours) and a
+`/jobs/{id}/expand`, `/embedding` and `/ocr` (one image read by the OCR engine). Each role has a limit per day (the last 24 hours) and a
 limit per minute.
 
 | Role | Per day | Per minute |

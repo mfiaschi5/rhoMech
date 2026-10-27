@@ -50,6 +50,11 @@ class Code(StrEnum):
     ORBITAL_OUT_OF_RANGE = "ORBITAL_OUT_OF_RANGE"
     NO_FRONTIER = "NO_FRONTIER"  # no HOMO or no LUMO block (Fukui / dual surfaces)
     LOCALIZATION_FAILED = "LOCALIZATION_FAILED"
+    IMAGE_INVALID = "IMAGE_INVALID"  # ocr: an accepted image type that does not decode
+    OCR_FAILED = "OCR_FAILED"  # ocr: nothing the engine returned parses as a structure
+    # 413 / 415: ocr uploads (over 10 MB or too many pixels; not png, jpeg, webp, gif, bmp, tiff)
+    IMAGE_TOO_LARGE = "IMAGE_TOO_LARGE"
+    IMAGE_TYPE_UNSUPPORTED = "IMAGE_TYPE_UNSUPPORTED"
     # 404
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
     NODE_NOT_FOUND = "NODE_NOT_FOUND"
@@ -65,6 +70,7 @@ class Code(StrEnum):
     RUN_NOT_FOUND = "RUN_NOT_FOUND"  # ml: no training run <source>/<run>
     USER_NOT_FOUND = "USER_NOT_FOUND"  # accounts: no user of that id
     PROVIDER_NOT_FOUND = "PROVIDER_NOT_FOUND"  # accounts: no configured OIDC provider
+    WIKI_PAGE_NOT_FOUND = "WIKI_PAGE_NOT_FOUND"  # content: no wiki page of that slug
     # 401: core.auth (a bearer token that matches no stored hash; a route above anonymous)
     TOKEN_INVALID = "TOKEN_INVALID"
     AUTH_REQUIRED = "AUTH_REQUIRED"
@@ -97,6 +103,10 @@ class Code(StrEnum):
     WORKER_UNSTABLE = "WORKER_UNSTABLE"
     TOKENS_CHANGED = "TOKENS_CHANGED"  # transient: a token file was rebuilt mid-computation
     FEATURE_DISABLED = "FEATURE_DISABLED"  # capabilities: off under spec v9 or the profile
+    OCR_ENGINE_FAILED = "OCR_ENGINE_FAILED"  # ocr: the worker crashed or answered nonsense
+    OCR_BUSY = "OCR_BUSY"  # ocr: the one engine stayed busy with other images
+    OCR_TIMEOUT = "OCR_TIMEOUT"  # ocr: one image took longer than the request timeout
+    WIKI_PAGE_INVALID = "WIKI_PAGE_INVALID"  # content: a page file that does not parse
     # predictor availability (PREDICTOR_UNAVAILABLE detail.code)
     TRANSFORMER_NOT_AVAILABLE = "TRANSFORMER_NOT_AVAILABLE"
     GBDT_MISSING = "GBDT_MISSING"
@@ -150,12 +160,16 @@ _BY_STATUS = {
         "SITE_NOT_A_CENTRE SAME_SITE DONOR_NOT_DONOR ACCEPTOR_NOT_ACCEPTOR PAIR_EXCLUDED "
         "APPLY_FAILED RESONANCE_ONLY_STEP OVERRIDE_NOOP STATUS_INCONSISTENT "
         "ORDER_GROUPS_INVALID NOT_INDEPENDENT QUERY_INVALID CUBE_TOO_LARGE INVALID_MOLFILE "
-        "MULTIPLE_FRAGMENTS ORBITAL_OUT_OF_RANGE NO_FRONTIER LOCALIZATION_FAILED"
+        "MULTIPLE_FRAGMENTS ORBITAL_OUT_OF_RANGE NO_FRONTIER LOCALIZATION_FAILED IMAGE_INVALID "
+        "OCR_FAILED"
     ),
+    413: "IMAGE_TOO_LARGE",
+    415: "IMAGE_TYPE_UNSUPPORTED",
     404: (
         "JOB_NOT_FOUND NODE_NOT_FOUND EDGE_NOT_FOUND PATHWAY_NOT_FOUND POOL_NOT_FOUND "
         "MECHANISM_NOT_FOUND STEP_NOT_FOUND EXPORT_NOT_FOUND MOLECULE_NOT_FOUND "
-        "CHECKPOINT_NOT_FOUND EMBEDDING_NOT_FOUND RUN_NOT_FOUND USER_NOT_FOUND PROVIDER_NOT_FOUND"
+        "CHECKPOINT_NOT_FOUND EMBEDDING_NOT_FOUND RUN_NOT_FOUND USER_NOT_FOUND PROVIDER_NOT_FOUND "
+        "WIKI_PAGE_NOT_FOUND"
     ),
     401: "TOKEN_INVALID AUTH_REQUIRED LOGIN_FAILED",
     403: "REQUEST_FORBIDDEN ROLE_INSUFFICIENT",
@@ -168,10 +182,11 @@ _BY_STATUS = {
     502: "OIDC_FAILED",
     500: (
         "PLACEMENT_MISMATCH CONSISTENCY_FAILED UNEXPECTED WORKER_CRASH DEPICTION_FAILED "
-        "SYMMETRY_FAILED CHECKPOINT_LOAD_FAILED EMBEDDING_FAILED NETWORK_DECODE_FAILED"
+        "SYMMETRY_FAILED CHECKPOINT_LOAD_FAILED EMBEDDING_FAILED NETWORK_DECODE_FAILED "
+        "OCR_ENGINE_FAILED WIKI_PAGE_INVALID"
     ),
-    503: "WORKER_UNSTABLE TOKENS_CHANGED FEATURE_DISABLED",
-    504: "WORKER_TIMEOUT",
+    503: "WORKER_UNSTABLE TOKENS_CHANGED FEATURE_DISABLED OCR_BUSY",
+    504: "WORKER_TIMEOUT OCR_TIMEOUT",
 }
 STATUS: dict[Code, int] = {Code(c): s for s, codes in _BY_STATUS.items() for c in codes.split()}
 """HTTP status per code. A code not listed (a job or report reason) defaults to 422."""

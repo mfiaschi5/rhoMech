@@ -74,6 +74,8 @@ CAPABILITY_ROLES: dict[str, Role] = {
     "curate_recheck": Role.CURATOR,
     "export": Role.CURATOR,
     "ml": Role.CURATOR,
+    "ocr": Role.USER,  # image to structure: a job of the OCR engine (GET /ocr: reader)
+    "wiki": Role.READER,  # the read-only wiki pages
 }
 """The least role each capability needs (`capabilities.require` checks it)."""
 

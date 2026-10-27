@@ -685,7 +685,7 @@ LOGIN_PATTERN = r"^[a-z0-9][a-z0-9_.-]{1,39}$"
 
 
 class QuotaOut(_Out):
-    """The job quota of a principal's role (submitting predict, expand and embedding jobs);
+    """The job quota of a principal's role (predict, expand, embedding and ocr jobs);
     None: no limit of that kind. `unlimited`: an admin, no quota at all."""
 
     per_day: int | None
@@ -1484,6 +1484,64 @@ class PointGroupOut(_Out):
     looser: PointGroupLooserOut | None  # a higher group at a looser tolerance, if any
     notes: list[str]
     qm_digest: str
+
+
+# ---- optical structure recognition (serve.ocr)
+
+
+class OcrOut(_Out):
+    """`POST /api/ocr`: the structure an image shows. `molfile` is a V2000 block whose 2D
+    coordinates follow the drawing (y up, scaled to a median bond of about 1.5 Å), or RDKit's
+    own layout when the drawing's atoms could not be kept (a warning says so)."""
+
+    smiles: str
+    molfile: str
+    confidence: float | None  # the engine's own confidence in [0, 1], when it gives one
+    engine: str  # "molscribe 1.1.1"
+    elapsed_s: float
+    warnings: list[str]
+
+
+class OcrStatusOut(_Out):
+    """`GET /api/ocr`: whether the OCR engine is installed here, and which one."""
+
+    enabled: bool
+    reason: str | None  # why it is off (None when on)
+    engine: str
+
+
+# ---- the wiki (serve.content: read-only Markdown pages rendered on the server)
+
+
+class WikiPageBriefOut(_Out):
+    slug: str
+    title: str
+    summary: str
+    tags: list[str]
+
+
+class WikiIndexOut(_Out):
+    """`GET /api/wiki?q=`: the pages, by `order` then title."""
+
+    pages: list[WikiPageBriefOut]
+
+
+class WikiHeadingOut(_Out):
+    level: int  # 1..6
+    id: str  # the heading's slugified id in `html`
+    text: str
+
+
+class WikiPageOut(_Out):
+    slug: str
+    title: str
+    summary: str
+    tags: list[str]
+    html: str  # rendered on the server: raw HTML in the source is escaped
+    markdown: str  # the page body, without its front matter
+    scenes: list[str]  # the scene files the page embeds, relative to apps/ui/public
+    toc: list[WikiHeadingOut]
+    updated: datetime  # the file's modification time
 
 
 # ---- the TypeScript mirror

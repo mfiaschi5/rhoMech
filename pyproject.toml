@@ -51,6 +51,10 @@ serve = [
     "pydantic==2.13.5",
     # the OIDC sign-in (serve.accounts.oidc): the version of the dev and client groups
     "httpx==0.28.1",
+    # the wiki (serve.content: Markdown rendered server-side) and the OCR upload (serve.ocr:
+    # multipart forms), both at the versions already in the lock (from rich and mcp)
+    "markdown-it-py==4.2.0",
+    "python-multipart==0.0.32",
 ]
 # the HTTP client of the serve API (`ksmech`, src/ksmech/client) and the MCP server over it
 # (`ksmech-mcp`, src/ksmech/mcp): neither is a dependency of the engine, and the client imports no

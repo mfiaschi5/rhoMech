@@ -279,6 +279,20 @@ def cmd_molecule_orbitals(c: KsmechClient, a: argparse.Namespace) -> Output:
     )
 
 
+def cmd_ocr(c: KsmechClient, a: argparse.Namespace) -> Output:
+    path = Path(a.image)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise UsageError(f"cannot read {path}: {exc.strerror or exc}") from exc
+    out = c.ocr(data, path.name)
+    if a.molfile:
+        Path(a.molfile).write_text(out.molfile, encoding="utf-8")
+    text = kv({"smiles": out.smiles, "confidence": out.confidence, "engine": out.engine})
+    text += "".join(f"\nwarning: {w}" for w in out.warnings)
+    return Output(out, text)
+
+
 def cmd_depict2d(c: KsmechClient, a: argparse.Namespace) -> Output:
     molblock = Path(a.molfile).read_text(encoding="utf-8")
     d = c.depict2d(molblock, mode=a.mode, style=a.style)

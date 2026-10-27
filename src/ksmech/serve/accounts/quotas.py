@@ -1,4 +1,4 @@
-"""Job quotas: how many predict, expand and embedding jobs a principal may submit.
+"""Job quotas: how many predict, expand, embedding and ocr jobs a principal may submit.
 
 The quota is the role's (`AuthConfig.quota`): at most `per_day` jobs in the last 24 hours and
 `per_minute` in the last minute, None meaning no limit of that kind. An admin is never limited
@@ -25,7 +25,7 @@ from ksmech.serve.core.auth import Principal
 from ksmech.serve.core.db import session, utcnow
 from ksmech.serve.core.errors import Code, ServeError
 
-COUNTED = frozenset({"predict", "embedding"})  # the capabilities whose POST submits a job
+COUNTED = frozenset({"predict", "embedding", "ocr"})  # the capabilities whose POST is a job
 KEEP = timedelta(days=2)
 
 
