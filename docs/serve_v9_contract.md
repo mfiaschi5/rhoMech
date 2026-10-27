@@ -181,3 +181,26 @@ Additive: no existing request or response changes, except `MetaOut.profile` (new
 the file name before `_report_`; `report` is the file's JSON as is, or null with `reason`
 `REPORT_TOO_LARGE: ...` (over 4 MiB) or `REPORT_UNREADABLE: ...`. The `/api/ml/*` routes need
 the `ml` capability (lab only) and the curator role.
+
+## OCR and the wiki (2026-10-27)
+
+Additive: `MetaOut.capabilities` gains `ocr` and `wiki`, both in the `public` profile.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/api/ocr` | | `OcrStatusOut {enabled, reason, engine}` (anyone) |
+| POST | `/api/ocr` | multipart, field `image` (png, jpeg, webp, gif, bmp, tiff; at most 10 MB) | `OcrOut {smiles, molfile, confidence, engine, elapsed_s, warnings}` (user role; one job of the quota) |
+| GET | `/api/wiki` | `?q=` | `WikiIndexOut {pages: WikiPageBriefOut[] {slug, title, summary, tags}}` |
+| GET | `/api/wiki/{slug}` | | `WikiPageOut {slug, title, summary, tags, html, markdown, scenes, toc: WikiHeadingOut[] {level, id, text}, updated}` |
+| GET | `/api/wiki/llms.txt` | | `text/plain` |
+
+- `ocr` is off until `ksmech-serve ocr-setup` has run, with the reason "OCR engine not
+  installed: run `ksmech-serve ocr-setup`". `POST /api/ocr` then answers 503
+  `FEATURE_DISABLED`.
+- The `molfile` is V2000 with the drawing's 2D layout, y up, at a median bond of about 1.5 Å.
+- New codes: `IMAGE_INVALID` 422, `OCR_FAILED` 422, `IMAGE_TOO_LARGE` 413,
+  `IMAGE_TYPE_UNSUPPORTED` 415, `OCR_ENGINE_FAILED` 500, `OCR_BUSY` 503, `OCR_TIMEOUT` 504,
+  `WIKI_PAGE_NOT_FOUND` 404, `WIKI_PAGE_INVALID` 500.
+- A wiki page's HTML holds `<figure class="wiki-scene" data-scene-src="scenes/....json">`
+  for each scene (a path relative to `apps/ui/public`) and `<a class="wiki-link"
+  href="#/wiki/slug">` for each wiki link. `docs/ocr.md` and `docs/wiki.md` have the details.

@@ -9,20 +9,32 @@ workbench, embedding, browse, curate, ml) stand on the foundation and on depicti
 import one another, with one exception: `ml` stands on core alone, so that predict, runtime and
 the other features may read its checkpoint listing (`ml.checkpoints`). `accounts` (users,
 sessions, quotas) also stands on core alone: core reaches it only through what the app injects.
-`app` wires them all."""
+So do `ocr` (image to structure) and `content` (the wiki). `app` wires them all."""
 
 import ast
 from pathlib import Path
 
 SERVE = Path(__file__).resolve().parents[1] / "src" / "ksmech" / "serve"
 FOUNDATION = ("core", "compute", "chem", "science", "predict", "runtime")
-FEATURES = ("pool", "workbench", "embedding", "browse", "curate", "ml", "accounts")
+FEATURES = (
+    "pool",
+    "workbench",
+    "embedding",
+    "browse",
+    "curate",
+    "ml",
+    "accounts",
+    "ocr",
+    "content",
+)
 ALLOWED: dict[str, set[str]] = {
     layer: set(FOUNDATION[:k]) for k, layer in enumerate(FOUNDATION)
 } | {"depiction": {"core"}}
 ALLOWED |= {f: {*FOUNDATION, "depiction", "ml"} for f in FEATURES}
 ALLOWED["ml"] = {"core"}  # the checkpoint listing: readable by the foundation above core
 ALLOWED["accounts"] = {"core"}
+ALLOWED["ocr"] = {"core"}  # the OCR engine and its uploads: RDKit directly, no chemistry layer
+ALLOWED["content"] = {"core"}  # the wiki: Markdown files, no chemistry
 for _layer in ("predict", "runtime"):
     ALLOWED[_layer].add("ml")
 ALLOWED["app"] = {*FOUNDATION, "depiction", *FEATURES}

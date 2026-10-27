@@ -91,7 +91,7 @@ export function toPdf(l: ExportLayout, opts: { background?: string | null; title
     font(f1),
     font(f2),
     font(f3),
-    `<< /Producer (ksmech workbench) /Title ${pdfString(opts.title ?? "scheme")} >>`,
+    `<< /Producer (ChemRho ChemPtah) /Title ${pdfString(opts.title ?? "scheme")} >>`,
   ];
   let out = "%PDF-1.4\n%\xe2\xe3\xcf\xd3\n";
   const offsets: number[] = [];

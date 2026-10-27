@@ -22,8 +22,10 @@ if TYPE_CHECKING:
     from ksmech.serve.browse.service import BrowseService
     from ksmech.serve.chem.chemistry import Chemistry
     from ksmech.serve.compute.worker import Scheduler
+    from ksmech.serve.content.service import WikiService
     from ksmech.serve.core.settings import ServeSettings
     from ksmech.serve.curate.service import CurateService
+    from ksmech.serve.ocr.service import OcrService
     from ksmech.serve.predict.jobs import JobRunner
     from ksmech.serve.predict.service import JobService
     from ksmech.serve.runtime.context import ApiContext
@@ -43,6 +45,7 @@ ID_RULES: dict[str, tuple[re.Pattern[str], Code]] = {
     "embedding_id": (re.compile(r"b[0-9a-f]{24}"), Code.EMBEDDING_NOT_FOUND),
     # a source or run directory name of data/models (ml.checkpoints.NAME_RE)
     "run_name": (re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"), Code.RUN_NOT_FOUND),
+    "wiki_slug": (re.compile(r"[a-z0-9][a-z0-9-]{0,63}"), Code.WIKI_PAGE_NOT_FOUND),
 }
 
 
@@ -79,6 +82,8 @@ class Services:
     curate: CurateService
     frontend_built: bool = False
     accounts: AccountService | None = None
+    ocr: OcrService | None = None
+    wiki: WikiService | None = None
 
 
 def _services(request: Request) -> Services:

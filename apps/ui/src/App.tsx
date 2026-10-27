@@ -1,20 +1,22 @@
-// The shell: navigation, the app-wide banners (from /api/meta) and the current page, or a
+// The shell of ChemRho: the section nav (registry.NAV_SECTIONS; ClotoMech's pages in a second
+// tab row, testids subnav-<page>), the app-wide banners (from /api/meta) and the current page, or a
 // "page not installed" placeholder when no feature registered it (design §11.1).
 import { useEffect } from "react";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { SyntheticBanner } from "./components/SyntheticBanner";
 import { UserMenu } from "./components/UserMenu";
-import { isEmbedPage, NAV_PAGE_IDS, PAGE_IDS, usePage, type PageId } from "./registry";
+import { isEmbedPage, isPageId, NAV_SECTIONS, PAGE_IDS, PRODUCT_NAME, sectionOf, usePage, type PageId } from "./registry";
 import { useHashRoute, type Route } from "./router";
 import { loadAuth } from "./state/auth";
 import { appErrorStore, capabilityOf, clearError, loadMeta, metaStore, useStore } from "./state/store";
 
 const NAV_LABELS: Record<PageId, string> = {
-  workbench: "Workbench",
+  workbench: "ChemPtah",
   predict: "Predict",
   correct: "Correct",
   curate: "Curate",
-  browse: "Browse",
+  browse: "ChemThot",
+  wiki: "Wiki",
   login: "Sign in",
   users: "Users",
 };
@@ -26,32 +28,76 @@ const PAGE_CAPABILITY: Partial<Record<PageId, string>> = {
   correct: "correct",
 };
 
-function Nav({ current }: { current: string }) {
+/** A capability-aware nav link (a section, or a page of the ClotoMech tab row). */
+function NavLink(p: { href: string; testId: string; label: string; hint: string; page?: PageId; active: boolean; className: string }) {
   const meta = useStore(metaStore, (s) => s.data);
+  const needs = p.page ? PAGE_CAPABILITY[p.page] : undefined;
+  const cap = needs ? capabilityOf(meta, needs) : null;
+  const off = cap !== null && !cap.enabled;
   return (
-    <nav className="nav" aria-label="pages">
-      <span className="brand">ksmech</span>
-      {NAV_PAGE_IDS.map((id) => {
-        const needs = PAGE_CAPABILITY[id];
-        const cap = needs ? capabilityOf(meta, needs) : null;
-        const off = cap !== null && !cap.enabled;
-        return (
-          <a
-            key={id}
-            href={`#/${id}`}
-            data-testid={`nav-${id}`}
-            data-disabled={off ? "true" : undefined}
-            aria-disabled={off ? true : undefined}
-            title={off ? `${NAV_LABELS[id]} is disabled: ${cap?.reason ?? ""}` : undefined}
-            className={`nav-link${current === id ? " active" : ""}${off ? " disabled" : ""}`}
-            aria-current={current === id ? "page" : undefined}
-          >
-            {NAV_LABELS[id]}
-          </a>
-        );
-      })}
+    <a
+      href={p.href}
+      data-testid={p.testId}
+      data-disabled={off ? "true" : undefined}
+      aria-disabled={off ? true : undefined}
+      title={off ? `${p.label} is disabled: ${cap?.reason ?? ""}` : p.hint}
+      className={`${p.className}${p.active ? " active" : ""}${off ? " disabled" : ""}`}
+      aria-current={p.active ? "page" : undefined}
+    >
+      {p.label}
+    </a>
+  );
+}
+
+function Nav({ current }: { current: string }) {
+  const section = sectionOf(current);
+  return (
+    <nav className="nav" aria-label="sections">
+      <span className="brand" data-testid="brand" title={`${PRODUCT_NAME}: mechanisms from orbital interactions`}>
+        {PRODUCT_NAME}
+      </span>
+      {NAV_SECTIONS.map((s) => (
+        <NavLink
+          key={s.id}
+          href={`#/${s.pages[0]}`}
+          testId={`nav-${s.id}`}
+          label={s.label}
+          hint={s.hint}
+          page={s.pages.length === 1 ? s.pages[0] : undefined}
+          active={section?.id === s.id}
+          className="nav-link"
+        />
+      ))}
     </nav>
   );
+}
+
+const SUB_HINTS: Partial<Record<PageId, string>> = {
+  predict: "Predict a mechanism from the reactants",
+  correct: "Correct a predicted step (reaction matrix editor)",
+  curate: "Curate mechanisms into the curation database",
+};
+
+/** The second tab row of a section of several pages (ClotoMech), while one of them is open. */
+function SubNav({ current }: { current: string }) {
+  const section = sectionOf(current);
+  if (!section || section.pages.length < 2) return null;
+  return (
+    <nav className="subnav" aria-label={`${section.label} pages`} data-testid={`subnav-${section.id}`}>
+      <span className="subnav-title muted">{section.label}</span>
+      {section.pages.map((id) => (
+        <NavLink key={id} href={`#/${id}`} testId={`subnav-${id}`} label={NAV_LABELS[id]} hint={SUB_HINTS[id] ?? NAV_LABELS[id]} page={id} active={current === id} className="subnav-link" />
+      ))}
+    </nav>
+  );
+}
+
+/** document.title: "ChemRho", or "ChemRho · <section>" (· <page> inside ClotoMech). */
+export function pageTitle(page: string): string {
+  const section = sectionOf(page);
+  if (!section) return PRODUCT_NAME;
+  const sub = section.pages.length > 1 && isPageId(page) ? ` · ${NAV_LABELS[page]}` : "";
+  return `${PRODUCT_NAME} · ${section.label}${sub}`;
 }
 
 function Page({ route }: { route: Route }) {
@@ -95,6 +141,9 @@ export function App() {
   const appError = useStore(appErrorStore);
   const embed = isEmbedPage(route.page);
   useEffect(() => {
+    document.title = pageTitle(route.page);
+  }, [route.page]);
+  useEffect(() => {
     if (!embed) {
       void loadMeta();
       void loadAuth();
@@ -113,6 +162,7 @@ export function App() {
         <Nav current={route.page} />
         <UserMenu />
         <MetaLine />
+        <SubNav current={route.page} />
       </header>
       <SyntheticBanner meta={meta} />
       <ErrorBanner error={appError} onDismiss={clearError} />

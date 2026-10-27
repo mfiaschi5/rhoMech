@@ -31,6 +31,8 @@ graphify-out/
 # Serve app (ksmech-serve) and its frontend
 data/serve/
 data/curation/
+# the OCR engine: its isolated environment and weights (ksmech-serve ocr-setup)
+data/ocr/
 apps/ui/node_modules/
 apps/ui/dist/
 apps/ui/public/vendor/

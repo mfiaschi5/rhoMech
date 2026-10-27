@@ -5927,3 +5927,99 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   built from a dirty tree (allowed: sidecars are verified, not `verify_clean`ed).
 - **Not done here:** moving serve-built records into the shared cache (`promote`), a
   resonance-invariant key, and packs of records for FlowER-scale roots.
+
+## 2026-10-27: OCR and wiki — an isolated MolScribe worker, and a read-only Markdown wiki rendered on the server
+
+- **MolScribe in its own environment, as a separate process.** MolScribe 1.1.1 (MIT) pins
+  numpy<2, OpenNMT-py 2.2.0, albumentations 1.1.0 and timm 0.4.12, which clash with the main
+  environment (numpy 2, torch 2.14 ROCm). It therefore lives in the uv project `tools/ocr`,
+  synced into `data/ocr/venv` (`UV_PROJECT_ENVIRONMENT`), and never in the root pyproject or
+  uv.lock. The server talks to it only through `tools/ocr/ocr_worker.py`: one persistent process
+  that loads the model once and answers JSON lines. The worker starts at the first image and
+  takes one request at a time under a lock. A crash or a 60 s timeout ends that request and the
+  next one starts a fresh worker. An `OcrEngine` protocol leaves room for OSRA or DECIMER;
+  only MolScribe is implemented.
+- **CPU torch 2.5.1.** The OCR environment takes torch from the PyTorch CPU index, so it never
+  competes with training for the GPU and needs no ROCm build. It is pinned below 2.6, where
+  `torch.load` started defaulting to `weights_only=True`: MolScribe calls it without the
+  argument. The worker uses 2 threads by default (`KSMECH_OCR_THREADS`). Every direct
+  dependency is pinned exactly; `exclude-newer = 2026-10-13` keeps every transitive one at
+  least two weeks old. The first `ocr-setup` (same day) needed one override: MolScribe 1.1.1
+  declares `torch<2.0`, overridden to our 2.5.1 pin (`override-dependencies`); torchtext 0.5.0
+  imports as is. The lock is committed (`tools/ocr/uv.lock`); the real aspirin test passes.
+- **The capability is a file check, the checksum is the setup's.** `ocr` is on when the venv's
+  python, the worker, the checkpoint and its `.verified` marker exist and agree. The marker is
+  written only after the sha256 of the downloaded file matched, so `/api/meta` never hashes
+  1.1 GB. The download resumes with HTTP Range requests and deletes a file that fails the check.
+- **Uploads are checked before the engine sees them.** The type is what Pillow reads in the
+  bytes, never the name. The body is refused while it streams in past 10 MB, so an oversized
+  upload never lands on disk whole; the route parses the multipart body itself for this,
+  instead of FastAPI's `File`. The image is flattened onto white before the engine reads it,
+  because a transparent PNG from a drawing program would otherwise turn black. RDKit checks the
+  answer: it keeps the drawn layout when the molfile agrees with the SMILES, and falls back
+  with a warning. The route counts as one job of the quota, and admins stay unlimited.
+- **The wiki is read-only Markdown in git.** Pages live in `content/wiki/*.md` with TOML front
+  matter, parsed with `tomllib`, so there is no YAML dependency. Pages are edited by commits,
+  not through the app. There is no editor, history or permission model to build yet, and
+  review is a pull request.
+- **Rendered on the server.** markdown-it-py, already in the lock at 4.2.0 through rich, is
+  pinned in the serve group (with python-multipart 0.0.32 for the upload, also already locked;
+  `uv lock --offline` added nothing new). It renders with raw HTML off, so a page can never
+  inject markup. The frontend receives finished HTML, its table of contents and the scene list,
+  and needs no Markdown library. `llms.txt` serves the same pages to LLM readers. Scene blocks
+  become empty `<figure data-scene-src>` placeholders that the frontend fills from
+  `apps/ui/public/scenes`, so reading a page never triggers QM compute.
+- **No dataset content in the wiki.** The repository is public. The worked example embeds
+  `scenes/sn2-step.json`, a floor-predictor step that ChemRho computed from the SMILES
+  `C[O-]` and `CCl` (its provenance says so), not a PMechDB record.
+
+## 2026-10-27: ChemRho naming and sections — product name, nav sections, OCR import, ChemDraw hotkeys, fixed lengths and angles
+
+- **Product name vs package name.** The UI is branded ChemRho (header, `<title>`, the section
+  titles, the exported SVG/PDF metadata, `apps/ui/package.json` description). The Python
+  package, the CLIs, every code identifier, test id, storage key (`ksmech.*`) and `@ksmech/viz`
+  keep the name ksmech: renaming them would break scripts, saved sessions and the merge with the
+  backend branch for no user-visible gain.
+- **Sections.** The nav is four sections (`registry.NAV_SECTIONS`): ChemPtah (the workbench:
+  drawing, 3D, orbitals), ClotoMech (predict, correct, curate in a second tab row shown while one
+  of them is open), ChemThot (browse: the databases) and the Wiki. Page ids and routes are kept
+  (`#/workbench`, `#/predict`, ...; deep links and e2e tests keep working); the section names are
+  hash aliases (`#/chemptah`, `#/clotomech` = `#/predict`, `#/chemthot`). Capability greying
+  moved with the pages: the predict and correct sub-tabs grey with the reason.
+- **Wiki.** `#/wiki`, `#/wiki/<slug>`, pages rendered by the server; the UI hydrates
+  `<figure class="wiki-scene" data-scene-src>` with the same scene viewer as `#/scene`
+  (`components/SceneEmbed.tsx`, so the wiki feature does not import the scene page;
+  `sameOriginUrl` moved into `@ksmech/viz` `scene/load.ts`). Heading links and the contents
+  scroll instead of replacing the hash route.
+- **OCR import.** The sketcher gets the recognizer from the page (`OcrSource`, like the
+  Depictor), so it still never fetches. Three ways in: a dropped image (canvas or import box), a
+  paste with an image and no text (a clipboard with text keeps importing the text: a SMILES or
+  molfile is exact, and programs that copy a picture often add text), and the import panel's
+  file picker. The result's molfile goes through the usual import (one undoable step, the
+  image's layout scaled to the standard bond length), its SMILES as a fallback. With the `ocr`
+  capability off every path says why instead of doing nothing. The OCR and wiki API types are
+  hand-written to the contract until the backend's `types.gen.ts` lands.
+- **ChemDraw hotkeys.** Verified against ChemDraw documentation (the hotkey table on
+  macinchem.org, a ChemDraw lab handout, Revvity support notes): hover element keys
+  (c n o s f p, l b i h), bond 1/2/3, w wedge, h hash (again flips), Enter = atom label editor,
+  Space on an atom = plain carbon, Ctrl+Shift+K Clean, Alt-drag = free length and angle, fixed
+  lengths / fixed angles as toggles. Taken from ChemDraw's menus without an online source to
+  check: Ctrl+Shift+H / Ctrl+Shift+V flip, Ctrl+D duplicate. ChemRho's own: Shift+3...Shift+8
+  cycloalkane and Shift+A benzene on a hovered atom (spiro) or bond (fused) (ChemDraw has no
+  ring hotkeys), Space with nothing hovered = previous tool, "?" = the cheat sheet. Ctrl+C / X
+  put the selection (or the drawing) on the clipboard as a molfile in text/plain, which ChemDraw
+  and this sketcher both paste, plus its SMILES as chemical/x-daylight-smiles.
+- **Conflicts with ChemDraw, kept ours:** 1/2/3 on an atom grow a bond (ChemDraw adds n-Bu,
+  s-Bu, t-Bu; there are no abbreviations in the model); "." cycles radicals (ChemDraw:
+  attachment point); "?" is the cheat sheet (ChemDraw: bond properties); Alt+H / Alt+V flips
+  stay beside Ctrl+Shift+H / V. Not done: bond hotkeys d (dashed), b (bold), y (wavy), 4
+  (quadruple), c/l/r (double-bond position) and f — the model has none of those bond kinds.
+- **Fixed lengths and angles.** On by default, kept per tab in sessionStorage: a drawn bond is
+  one standard bond long at a multiple of 30 degrees (ChemDraw's default step is 15; the
+  sketcher's chain and growth geometry is built on 30, and the brief asked for 30); a dragged
+  bond end (an atom with one neighbour, alone) snaps to its neighbour the same way, or lands
+  exactly on the atom under the pointer and joins it on release. Alt or Shift held frees the
+  drag (ChemDraw: Alt / Option; Shift already freed the angle here). That takes Alt-drag from
+  panning where it starts on an atom or bond; Alt-drag on empty canvas and the middle button
+  still pan. Clicking an atom still grows the bond at 120 degrees in the best free direction
+  (zig-zag), unchanged.

@@ -1,11 +1,13 @@
 // Pointer handling of the sketch canvas: hover by geometric hit test, clicks through
 // tools.applyClick, drags through gestures.dragModel (preview, committed on release), the
 // select tool's rubber band, the selection frame's handles (frame.ts: rotate and scale the
-// selection, any tool; one commit on release), middle-button (or Alt) panning and Ctrl/Cmd +
-// wheel zoom.
+// selection, any tool; one commit on release), middle-button panning (or Alt on empty canvas:
+// Alt pressed on an atom or bond is ChemDraw's free drag, gestures.ts) and Ctrl/Cmd + wheel zoom.
+// Drags keep the fixed lengths and angles of the toolbar toggles (`snap`), both off while Alt
+// or Shift is held.
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { dist, inRect, rectFrom, toModel, toScreen, type Rect, type Vec, type View } from "@ksmech/viz/sketch/geometry";
-import { dragModel, finishMove, movedAtoms, type DragStart } from "./gestures";
+import { dragModel, dragSnap, finishMove, movedAtoms, type DragStart, type Snap } from "./gestures";
 import { frameHandleAt, handleDragModel, type HandleDrag, type SelectionFrame } from "./frame";
 import { applyClick, hitTest, NO_SELECTION, selectInRect, type Hit, type Selection } from "./tools";
 import type { SketchEditor } from "./useSketchEditor";
@@ -71,10 +73,10 @@ function rubberSelection(view: View, d: Press, p: Vec): Selection {
 }
 
 /** Commit the model of a drag released at p (a select-drag may merge its atom on drop). */
-function finishDrag(ed: SketchEditor, view: View, d: Press, p: Vec, freeAngle: boolean) {
+function finishDrag(ed: SketchEditor, view: View, d: Press, p: Vec, snap: Snap) {
   const exclude = new Set(d.start.tool === "select" ? movedAtoms(d.start) : []);
   const toHit = hitTest(d.start.base, view, p, exclude);
-  const m = dragModel(d.start, toModel(view, p), toHit, freeAngle);
+  const m = dragModel(d.start, toModel(view, p), toHit, snap);
   if (!m) ed.setPreview(null);
   else ed.commit(d.start.tool === "select" ? finishMove(d.start, m, toHit) : m);
 }
@@ -92,6 +94,7 @@ export function useSketchPointer(
   setView: (v: View) => void,
   readOnly: boolean,
   frame: SelectionFrame | null,
+  snap: Snap,
 ): SketchPointer {
   const press = useRef<Press | null>(null);
   const inside = useRef(false);
@@ -110,7 +113,8 @@ export function useSketchPointer(
 
   const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
     const p = point(e);
-    const pan = e.button === 1 || (e.button === 0 && e.altKey);
+    const hit = hitTest(ed.committed, view, p);
+    const pan = e.button === 1 || (e.button === 0 && e.altKey && !hit);
     if (!pan && (e.button !== 0 || readOnly)) return;
     e.preventDefault(); // no text selection; it also keeps focus where it was, so move it here
     svgRef.current?.focus({ preventScroll: true });
@@ -119,7 +123,6 @@ export function useSketchPointer(
     } catch {
       // synthetic events without an active pointer
     }
-    const hit = hitTest(ed.committed, view, p);
     const start: DragStart = { tool: ed.tool, hit, at: toModel(view, p), base: ed.committed, selection: ed.selection };
     const handle = pan ? null : startHandle(frame, p, ed);
     press.current = { start, screen: p, moved: false, additive: e.shiftKey, pan: pan ? view : null, handle };
@@ -149,7 +152,7 @@ export function useSketchPointer(
     const exclude = new Set(d.start.tool === "select" ? movedAtoms(d.start) : []);
     const toHit = hitTest(d.start.base, view, p, exclude);
     ed.setHover(toHit);
-    ed.setPreview(dragModel(d.start, toModel(view, p), toHit, e.shiftKey));
+    ed.setPreview(dragModel(d.start, toModel(view, p), toHit, dragSnap(snap, e)));
   };
 
   const onPointerUp = (e: ReactPointerEvent<SVGSVGElement>) => {
@@ -168,7 +171,7 @@ export function useSketchPointer(
     else if (d.start.tool === "select" && !d.start.hit) {
       ed.setSelection(rubberSelection(view, d, p));
       setRubber(null);
-    } else finishDrag(ed, view, d, p, e.shiftKey);
+    } else finishDrag(ed, view, d, p, dragSnap(snap, e));
   };
 
   useZoom(svgRef, view, setView);

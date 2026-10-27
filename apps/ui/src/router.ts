@@ -6,12 +6,22 @@
 //   #/curate   #/curate/<jobId>?pathway=<pid>   #/curate/m/<mechId>
 //   #/browse?q=&mode=&side=&src=&st=            #/browse/step/<ref>
 //   #/workbench?smiles=&m=&set=&start=&orb=&rep=&layers=&q=
+//   #/wiki   #/wiki?q=<search>   #/wiki/<slug>
 //   #/scene?src=scenes/<name>.json               (a scene file, no shell and no API call)
+// The section names of ChemRho are aliases of the page ids (PAGE_ALIASES): #/chemptah is
+// #/workbench, #/clotomech is #/predict, #/chemthot is #/browse (same parts and query).
 import { useMemo, useSyncExternalStore } from "react";
 
 // The molecule workbench while /api/meta reports the predict capability off (spec v8 port);
 // was "predict", then "browse"
 export const DEFAULT_PAGE = "workbench";
+
+/** Section names that stand for a page id; parseHash reads them as that page. */
+export const PAGE_ALIASES: Readonly<Record<string, string>> = {
+  chemptah: "workbench",
+  clotomech: "predict",
+  chemthot: "browse",
+};
 
 export interface Route {
   /** First path segment ("workbench", "predict", "correct", "curate", "browse"); DEFAULT_PAGE when empty. */
@@ -38,11 +48,16 @@ export function parseHash(hash: string = window.location.hash): Route {
   const query = q < 0 ? "" : body.slice(q + 1);
   const segments = path.split("/").filter((s) => s.length > 0).map(safeDecode);
   return {
-    page: segments[0] ?? DEFAULT_PAGE,
+    page: pageOf(segments[0]),
     parts: segments.slice(1),
     params: new URLSearchParams(query),
     hash,
   };
+}
+
+function pageOf(segment: string | undefined): string {
+  if (!segment) return DEFAULT_PAGE;
+  return PAGE_ALIASES[segment.toLowerCase()] ?? segment;
 }
 
 function safeDecode(s: string): string {
@@ -159,6 +174,11 @@ export function correctHash(jobId: string, target: { edge?: string; node?: strin
 /** "#/curate/<jobId>?pathway=<pid>". */
 export function curateHash(jobId: string, pathwayId?: string): string {
   return formatRoute({ page: "curate", parts: [jobId], params: { pathway: pathwayId } });
+}
+
+/** "#/wiki/<slug>" (the index without a slug). */
+export function wikiHash(slug?: string): string {
+  return formatRoute({ page: "wiki", parts: slug ? [slug] : [] });
 }
 
 /** The `cand` param "<donor>,<dsite>,<acceptor>,<asite>" as numbers, or null. */

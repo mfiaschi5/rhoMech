@@ -2,7 +2,7 @@
 
 `ksmech.serve` is the web add-on of the engine (`uv sync` installs it with the `serve` group;
 `uv sync --no-group serve` gives the engine alone). The engine never imports it
-(`tests/test_engine_boundary.py`). Inside, one process holds fifteen sub-packages; the compute
+(`tests/test_engine_boundary.py`). Inside, one process holds seventeen sub-packages; the compute
 runs in one spawned worker process. The HTTP contract is `docs/serve_v9_contract.md`; this page
 is the code map.
 
@@ -19,6 +19,9 @@ ml ─────────► core                    (a feature on core alo
                                        read its checkpoint listing, ml.checkpoints)
 accounts ───► core                    (users, sessions, quotas: core reaches them only through the
                                        session lookup and the quota hook the app injects)
+ocr ────────► core                    (image to structure: its engine is a separate process in its
+                                       own environment, data/ocr/venv)
+content ────► core                    (the wiki: Markdown files rendered on the server)
 ```
 
 A module-level import between sub-packages must follow these arrows
@@ -44,6 +47,8 @@ checked.
 | `curate` | curated mechanisms, recheck, export | `/curate/*` |
 | `ml` | the local checkpoints (`checkpoints.py`, read without torch), the training runs and the physics / eval reports on disk (`runs.py`, passed through) | `/models`, `/ml/*` |
 | `accounts` | users and their OIDC identities, browser sessions, password hashes (stdlib scrypt), the OIDC client (`oidc.py`), the job quotas (`quotas.py`), the auth file (`config.py`); its own database `data/serve/accounts/accounts.sqlite` (`docs/accounts.md`) | `/auth/*`, `/admin/users*` |
+| `ocr` | optical structure recognition: upload checks and the PNG for the engine (`images.py`), the engine protocol and MolScribe behind a persistent JSON-lines worker (`engine.py`, `tools/ocr/ocr_worker.py`), RDKit's check of the answer and the drawn layout (`structure.py`), the install paths and the capability (`install.py`), `ocr-setup` (`provision.py`); `docs/ocr.md` | `/ocr` |
+| `content` | the wiki: page files with TOML front matter (`pages.py`), the markdown-it-py render with heading ids, `[[slug]]` links and scene figures (`render.py`), the mtime cache, search and `llms.txt` (`service.py`); pages in `content/wiki/`, format in `docs/wiki.md` | `/wiki`, `/wiki/{slug}`, `/wiki/llms.txt` |
 | `app` | the FastAPI app (`api.py`: error handlers, middleware, wiring, `/health`, `/meta`, `/whoami`), the `ksmech-serve` CLI, the static frontend | |
 
 ## Profiles, roles and the audit log
@@ -64,7 +69,7 @@ One codebase, two deployments (`KSMECH_SERVE_PROFILE`, `ksmech-serve run --profi
 A request's principal comes, in this order, from a bearer token (`KSMECH_SERVE_TOKENS`), a
 session cookie (`serve.accounts`: a local password or an OIDC provider), else the profile's
 anonymous principal. In `lab` a request without a session stays the local admin. Job
-submissions (`POST /predict`, `/jobs/{id}/expand`, `/embedding`) are charged to the role's
+submissions (`POST /predict`, `/jobs/{id}/expand`, `/embedding`, `/ocr`) are charged to the role's
 quota (per day and per minute, QUOTA_EXCEEDED 429); admins have none.
 
 The routes of a dataset, curation or ML package are gated as a whole router
@@ -87,6 +92,8 @@ Roles are reader < user < curator < admin (`core.auth`):
 | `curate` (reads) | no | reader |
 | `curate_edit`, `curate_recheck`, `export` | no | curator |
 | `ml` (`/ml/*`) | no | curator |
+| `ocr`: `GET /ocr` (the engine's status) / `POST /ocr` (one image; a job of the quota) | yes | reader / user |
+| `wiki` (`/wiki`, `/wiki/{slug}`, `/wiki/llms.txt`) | yes | reader |
 | `/auth/*` (sign-in, sign-out, `me`, password) | yes | anyone |
 | `/admin/users*` | yes | admin |
 
@@ -130,3 +137,20 @@ scene:export` writes one from a running server (`GET /jobs/{id}`, `/pool/{state}
 draws a scene with no API call at all (no shell, no `/api/meta`); the examples are in
 `apps/ui/public/scenes/` and `apps/ui/e2e/scene.spec.ts` checks them with every `/api/` request
 aborted.
+
+### ChemRho: the sections of the app
+
+The UI calls itself **ChemRho** (brand, `<title>`, exported image metadata); the Python package,
+the CLIs, the code identifiers, the test ids and `@ksmech/viz` keep the name ksmech. The nav
+(`apps/ui/src/registry.ts` `NAV_SECTIONS`, drawn by `App.tsx`) has four sections; page ids and
+routes are unchanged, and the section names are hash aliases (`router.ts` `PAGE_ALIASES`):
+
+| Section | Pages (routes) | Alias | What it is |
+|---|---|---|---|
+| ChemPtah | `workbench` (`#/workbench`) | `#/chemptah` | the 2D sketcher (ChemDraw-like hotkeys, fixed lengths and angles, image import by OCR through `POST /api/ocr`), 3D structure and orbitals |
+| ClotoMech | `predict`, `correct`, `curate` | `#/clotomech` (= `#/predict`) | mechanisms; a second tab row (`subnav-<page>`) while one of the three is open, capability greying per tab |
+| ChemThot | `browse` (`#/browse`) | `#/chemthot` | the mechanism databases (PMechDB, curated steps) |
+| Wiki | `wiki` (`#/wiki`, `#/wiki/<slug>`) | | `GET /api/wiki`, `/api/wiki/{slug}`: server-rendered pages whose `<figure class="wiki-scene" data-scene-src>` are hydrated with the scene viewer (`apps/ui/src/components/SceneEmbed.tsx`, shared with `#/scene`) |
+
+The OCR and wiki types are written by hand in `apps/ui/src/api/ocr.ts` and `api/wiki.ts` to the
+backend contract until `types.gen.ts` carries them.

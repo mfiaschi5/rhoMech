@@ -6,8 +6,18 @@ import { BOND_LENGTH, addAtom, addBond, atomAt, atomById, bondById, findBond, ne
 import { add, fromAngle, growthAngle, largestGapDirection, polygonAt, polygonFromVertex, polygonOnEdge, sideOf } from "@ksmech/viz/sketch/geometry";
 import type { Vec } from "@ksmech/viz/sketch/geometry";
 
-export type RingKind = "benzene" | "cyclohexane" | "cyclopentane";
-export const RING_SIZE: Record<RingKind, number> = { benzene: 6, cyclohexane: 6, cyclopentane: 5 };
+export type RingKind = "benzene" | "cyclopropane" | "cyclobutane" | "cyclopentane" | "cyclohexane" | "cycloheptane" | "cyclooctane";
+export const RING_SIZE: Record<RingKind, number> = {
+  benzene: 6,
+  cyclopropane: 3,
+  cyclobutane: 4,
+  cyclopentane: 5,
+  cyclohexane: 6,
+  cycloheptane: 7,
+  cyclooctane: 8,
+};
+/** The cycloalkane template of each ring size (the Shift+3 ... Shift+8 hotkeys). */
+export const CYCLOALKANE_OF_SIZE: Readonly<Record<number, RingKind>> = { 3: "cyclopropane", 4: "cyclobutane", 5: "cyclopentane", 6: "cyclohexane", 7: "cycloheptane", 8: "cyclooctane" };
 
 export type Placement = { kind: "empty"; at: Vec } | { kind: "atom"; id: number } | { kind: "bond"; id: number; at?: Vec };
 
