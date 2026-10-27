@@ -4744,3 +4744,49 @@ stay valid.
     the pod read schema 16, so their numbers compare only with schema-16 evaluations.
   - A batch's label tensors are (B, V, A, A) and V now reaches 32: watch memory in the first
     training run.
+
+## 2026-10-26 — Five PMechDB runs on the molecule split: encoders and the resonance augmentation (schema 16)
+
+- **Setup.** One split (molecule), 30 epochs, seed 0, `d=256`, 8 layers, lr 3e-4, bf16, cell budget
+  1,100,000; 1,239 val samples. Pod runs on an RTX 5080 (schema 16, code 682b7f2); `flex_first`
+  on the earlier RTX 3090 Ti pod (schema 15, old `bond_order` feature). Figures are val, at the
+  epoch of the best val anchor top-1 (`best.pt`); no test evaluation yet.
+
+  | run | draws | top-1 | top-3 | top-5 | R exact | min val loss (epoch) | time |
+  |---|---|---|---|---|---|---|---|
+  | flex_first | no | 60.9% | 79.9% | 87.3% | 55.6% | 2.74 (11) | 25 min |
+  | flex_resonance | yes | 63.4% | 81.0% | 87.0% | 56.7% | 2.54 (15) | 26 min |
+  | sparse_resonance | yes | 62.1% | 81.0% | 88.1% | 55.6% | 2.62 (14) | 40 min |
+  | dense_resonance | yes | 62.3% | 85.5% | 91.6% | 57.1% | 2.24 (15) | 45 min |
+  | dense_plain | no | 65.6% | 84.3% | 91.1% | 61.7% | 2.20 (13) | 45 min |
+
+  References on the same split: the anchor floor (|G^atom|, no parameter) 15.6 / 26.0 / 31.1%
+  val; LightGBM on the geometry-free pair features 44.1 / 62.0 / 70.8% val (48.8 / 67.7 / 75.1%
+  test).
+- **Overfitting.** Every run peaks at epoch 20-22 and its val loss at epoch 11-15, then val loss
+  rises (dense_resonance 2.24 to 4.04) while train loss falls to 0.1-0.9. The last epoch is 2-6
+  points below the best, so `best.pt` is the checkpoint to use. 65% of val pools have
+  Tanimoto < 0.4 to the nearest training pool, and top-1 there is 56%.
+- **Augmentation.**
+  - flex: +1.9 points of top-1 on average over epochs 10-30 (higher in 20 of 21), val loss 0.41
+    lower, val loss at epoch 30 3.55 against 4.37. `flex_first` used the old `bond_order`
+    feature, so part of the gap may come from that.
+  - dense: the run without draws is 3.1 points higher in all 21 epochs, R exact 61.7% against
+    57.1%, the same minimum val loss (2.20 against 2.24).
+  - Validation always uses the dataset's drawing, so these numbers do not measure what the
+    augmentation is for, robustness to another drawing of the same molecule. Not measured yet.
+- **Encoders.** With draws, dense and flex differ by 0.2 points (mean over epochs 10-30; higher
+  in 9 of 21 epochs), sparse is 0.2 points below flex at the end; dense alone reaches top-5 > 91%
+  and takes 70% longer than flex.
+- **Reliability.** The standard error of a 62% top-1 on 1,239 samples is 1.4 points and each run
+  has one seed, so differences of 2-3 points are at the edge. 5 points of `flex_resonance`'s 63.4%
+  were bf16 ties and about a fifth of val labels name one of several symmetric atoms (see the
+  schema-17 entry). These runs read schema 16 and compare with each other, not with schema-17
+  evaluations. `p_stop` in the logs is meaningless (`stop_weight` is 0 on PMechDB).
+- **Open.**
+  - Re-score all `best.pt` on the schema-17 val and test, in float32.
+  - Measure each model on alternative resonance drawings of the val pools.
+  - More seeds before choosing between dense and flex.
+  - Weights: `best.pt` hashes of sparse_resonance and dense_plain are in
+    `data/models/pmechdb/<run>/SHA256SUMS.pod`; the `.pt` of flex_resonance and dense_resonance
+    are still on the pod.
