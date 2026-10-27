@@ -183,6 +183,26 @@ def test_request_errors(kwargs):
     assert info.value.code == Code.REQUEST_INVALID
 
 
+@pytest.mark.parametrize("smiles", ["CCO", "CC(=O)[O-]"])
+def test_grid_values_equal_the_point_evaluation(wb_runtime, smiles):  # noqa: F811
+    """The cube's separable evaluation (`grid_values`) gives `surface`'s values point by point."""
+    key = wb_key(wb_runtime, smiles)
+    rec, _, _ = osets.load_qm(wb_runtime, key)
+    g = cubes.grid_around(rec.coords_ang, 0.35, 2.0)
+    homo = int(np.flatnonzero(np.asarray(rec.occupations) >= 0.5).max())
+    requests = [D.cube_request(k) for k in D.KINDS if k not in D.ORBITAL_KINDS]
+    for kind in sorted(D.ORBITAL_KINDS):
+        requests.append(D.cube_request(kind, "canonical", None, homo))
+        requests.append(D.cube_request(kind, "pm_mulliken", "cholesky", homo))
+    for req in requests:
+        ref = cubes.on_grid(g, D.surface(wb_runtime, key, rec, req)[0])
+        got = D.grid_values(wb_runtime, key, rec, req, g)
+        assert got.shape == ref.shape, req.kind
+        np.testing.assert_allclose(
+            got, ref, rtol=0, atol=1e-12 * np.abs(ref).max(), err_msg=req.kind
+        )
+
+
 def test_orbital_out_of_range(wb_runtime):  # noqa: F811
     rec, _, _ = osets.load_qm(wb_runtime, "CCO")
     for set_ in ("canonical", "pm_mulliken"):

@@ -6023,3 +6023,26 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   panning where it starts on an atom or bond; Alt-drag on empty canvas and the middle button
   still pan. Clicking an atom still grows the bond at 120 degrees in the best free direction
   (zig-zag), unchanged.
+
+## 2026-10-27: Faster orbital surfaces; LMO degeneracy
+
+- **Orbitals on the grid by separability** (`serve/chem/gto_grid.py`). A workbench cube used
+  `gto.ao_values` at every point times C: 2.8-3.9 s per orbital for a 350k-point cube of a
+  33-atom molecule (3.4 s request time for toluene on the LAN server). On the cube's
+  axis-aligned grid every primitive Cartesian component is a product of three 1-D factors, so
+  one orbital is a (nx ny, T) by (T, nz) matrix product over the T = (atom, shell, primitive,
+  component) terms: 0.02 s for the same cube, equal to `ao_values @ C` to 1e-14 (tests compare
+  every kind against the point evaluation). Densities and Fukui functions square-sum blocks of
+  columns; the ESP (point charges, no AOs) stays point by point. The pool cubes of the step
+  panel (`cubes.lmo_values`) use it too. `gto.py` itself is untouched (it must stay
+  bit-identical to the vendored original). The cube text and the cache keys are unchanged, so
+  cached cubes stay valid.
+- **gzip level 4.** Starlette's default level 9 took 1.3 s for a 4.9 MB cube on every download,
+  cached cubes included (1.5 s for a cached toluene cube); level 4 takes 0.1 s for a 10% larger
+  body (1.94 vs 1.77 MB). Rewriting the cube writer with one %-format per column was tried and
+  was no faster (Python's float formatting dominates), so it stays as it was.
+- **LMO degeneracy.** The level diagram's threshold (0.001-0.5 eV) now also groups the LMO
+  energies E_r (`levels.groupLmoLevels`): the occupied and the virtual LMOs apart, by the
+  canonical rule (a new level more than the threshold above the level's first member), drawn side
+  by side at the group's mean E_r. The orbital list gains a `deg` column (×n) for both kinds of
+  set. This is display only: the tokens and the model never see it.

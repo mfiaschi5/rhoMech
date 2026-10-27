@@ -13,8 +13,9 @@
 // window-select, <div data-testid="orbital-body">, the diagram (LevelDiagram.tsx), <button
 // data-testid="orbital-info-toggle" aria-expanded>, <div data-testid="orbital-info"> (hidden when
 // folded) with <div data-testid="orbital-list"> of <tr data-testid="orbital-row" data-set
-// data-index data-selected data-frontier>.
-import { useState, type CSSProperties } from "react";
+// data-index data-selected data-frontier data-degeneracy> (the size of the orbital's degenerate
+// group at the diagram's threshold: canonical MOs by levels.groupLevels, LMOs by groupLmoLevels).
+import { useMemo, useState, type CSSProperties } from "react";
 import type { ApiError } from "../../../api/http";
 import type { PendingCached } from "../../../api/hooks";
 import type { OrbitalRowOut, OrbitalSetOut } from "../../../api/types.gen";
@@ -23,7 +24,7 @@ import { fmt, moLabel } from "@ksmech/viz/format";
 import { PendingNote } from "../../../components/PendingNote";
 import { CANONICAL, FALLBACK_SETS, FALLBACK_STARTS } from "../params";
 import { LevelDiagram } from "@ksmech/viz/orbitals/LevelDiagram";
-import { frontierLabel, sanitizeDegeneracy, type Window } from "@ksmech/viz/orbitals/levels";
+import { degeneracies, frontierLabel, sanitizeDegeneracy, type Window } from "@ksmech/viz/orbitals/levels";
 import { PREFS_KEY, readJson, writeJson } from "../layout/storage";
 
 export interface OrbitalPanelProps {
@@ -61,7 +62,9 @@ function rowLabel(r: OrbitalRowOut): string {
   return r.kind === "occupied" ? "occ" : "virt";
 }
 
-function OrbitalList({ data, selected, onPick }: { data: OrbitalSetOut; selected: number | null; onPick(i: number): void }) {
+function OrbitalList({ data, selected, onPick, degeneracyEv }: { data: OrbitalSetOut; selected: number | null; onPick(i: number): void; degeneracyEv: number }) {
+  const lmo = data.set !== CANONICAL;
+  const deg = useMemo(() => degeneracies(data.orbitals, degeneracyEv, lmo), [data.orbitals, degeneracyEv, lmo]);
   return (
     <div className="wb-orbital-list" data-testid="orbital-list">
       <table className="table">
@@ -71,6 +74,9 @@ function OrbitalList({ data, selected, onPick }: { data: OrbitalSetOut; selected
             <th>{data.set === CANONICAL ? "label" : "block"}</th>
             <th className="num">occ</th>
             <th className="num">{data.set === CANONICAL ? "E (eV)" : "E_r (eV)"}</th>
+            <th className="num" title={`degenerate within ${degeneracyEv} eV (the level diagram's threshold)`}>
+              deg
+            </th>
             <th>centres (record atoms)</th>
             {data.set !== CANONICAL && (
               <th className="diagnostic" title="diagnostic: never model input">
@@ -88,6 +94,7 @@ function OrbitalList({ data, selected, onPick }: { data: OrbitalSetOut; selected
               data-index={r.index}
               data-frontier={r.frontier ?? ""}
               data-selected={r.index === selected ? "true" : "false"}
+              data-degeneracy={deg.get(r.index) ?? 1}
               className={`wb-click${r.index === selected ? " selected" : ""}`}
               onClick={() => onPick(r.index)}
             >
@@ -95,6 +102,7 @@ function OrbitalList({ data, selected, onPick }: { data: OrbitalSetOut; selected
               <td>{rowLabel(r)}</td>
               <td className="num">{fmt(r.occupation, 2)}</td>
               <td className="num">{fmt(r.energy_ev, 3)}</td>
+              <td className="num muted">{(deg.get(r.index) ?? 1) > 1 ? `×${deg.get(r.index)}` : ""}</td>
               <td className="wb-small">{centresText(r)}</td>
               {data.set !== CANONICAL && (
                 <td className="diagnostic" title="diagnostic: never model input">
@@ -208,7 +216,7 @@ export function OrbitalPanel(p: OrbitalPanelProps) {
         <div className="wb-orbital-info" id="wb-orbital-info" data-testid="orbital-info" hidden={!open}>
           {lmo && <Loading res={p.shown} what={`${SET_LABELS[p.set] ?? p.set} orbitals`} />}
           {data && <SetStats data={data} />}
-          {data && <OrbitalList data={data} selected={p.selected} onPick={p.onPick} />}
+          {data && <OrbitalList data={data} selected={p.selected} onPick={p.onPick} degeneracyEv={degeneracy} />}
         </div>
       </div>
     </div>

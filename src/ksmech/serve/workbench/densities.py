@@ -4,7 +4,10 @@ One whole-molecule grid: `cubes.grid_around(all atoms, spacing, padding)` (defau
 3.0 Angstrom). The spacing is explicit, or set by `quality` so that the box holds about
 120k (draft), 350k (normal) or 1.2M (fine) points, rounded up to 0.001 Angstrom;
 `cubes.MAX_POINTS` still applies (CUBE_TOO_LARGE). Values come from
-`A = serve.chem.gto.ao_values(Z, xyz, points)`, chunked through `cubes.on_grid`:
+`A = serve.chem.gto.ao_values(Z, xyz, points)` (`surface`, point by point); the cube itself is
+computed by `grid_values`, which gives the same values to rounding from the separability of the
+Gaussians on the axis-aligned grid (`serve.chem.gto_grid`; the ESP still point by point through
+`cubes.on_grid`):
 
 - `orbital`: `A @ c` (bohr^-3/2) for MO / LMO `index` of a set (`orbital_sets`);
 - `orbital_density`: `(A @ c)^2` (bohr^-3);
@@ -239,6 +242,37 @@ def surface(rt: Runtime, key: str, rec: QMRecord, req: CubeRequest) -> tuple[Cal
     return (lambda pts: esp_at(rec.coords_ang, q, pts)), {"expected": None, "notes": [NOTE_ESP]}
 
 
+def grid_values(rt: Runtime, key: str, rec: QMRecord, req: CubeRequest, g: cubes.Grid):
+    """`surface(...)`'s values on every point of `g` (flat cube order): the AO kinds through
+    `gto_grid` (one matrix product per block instead of every AO at every point), the ESP
+    through `cubes.on_grid`."""
+    from ksmech.serve.chem.gto_grid import columns_on_grid, square_sum_on_grid
+
+    box = (rec.atomic_numbers, rec.coords_ang)
+    grid = (g.origin_ang, g.n, g.spacing_ang)
+    occ = np.asarray(rec.occupations, dtype=float)
+
+    def squares(M: np.ndarray, scale: float = 1.0) -> np.ndarray:
+        return square_sum_on_grid(*box, M, *grid, scale).ravel()
+
+    def fukui(level: str) -> np.ndarray:
+        Cb = frontier_columns(rec, level)
+        return squares(Cb, 1.0 / Cb.shape[1])
+
+    if req.kind == "orbital":
+        c = orbital_vector(rt, key, rec, req)[:, None]
+        return columns_on_grid(*box, c, *grid)[0].ravel()
+    if req.kind == "orbital_density":
+        return squares(orbital_vector(rt, key, rec, req)[:, None])
+    if req.kind == "density":
+        return squares(rec.C[:, occ > 0] * np.sqrt(occ[occ > 0]))
+    if req.kind in ("fukui_minus", "fukui_plus"):
+        return fukui("homo" if req.kind == "fukui_minus" else "lumo")
+    if req.kind == "dual":
+        return fukui("lumo") - fukui("homo")
+    return cubes.on_grid(g, surface(rt, key, rec, req)[0])
+
+
 def grid_integral(kind: str, values: np.ndarray, g: cubes.Grid) -> float | None:
     """The grid sum times the voxel volume (bohr^3); of psi^2 for `orbital`; None for `esp`."""
     if kind == "esp":
@@ -265,8 +299,8 @@ def render(rt: Runtime, key: str, rec: QMRecord, req: CubeRequest) -> tuple[str,
 
     spacing = req.spacing or spacing_for(rec.coords_ang, req.quality, req.padding)
     g = cubes.grid_around(rec.coords_ang, spacing, req.padding)
-    evaluate, info = surface(rt, key, rec, req)
-    values = cubes.on_grid(g, evaluate)
+    info = surface(rt, key, rec, req)[1]
+    values = grid_values(rt, key, rec, req, g)
     notes = info["notes"] + ([NOTE_SYNTHETIC] if rt.settings.chemistry == "synthetic" else [])
     meta = req.to_payload() | {
         "key": key,

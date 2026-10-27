@@ -3,7 +3,9 @@
 // side; occupations as half-arrows; the HOMO-1, HOMO, LUMO and LUMO+1 blocks labelled with their
 // energies, the labels kept apart with leaders. Click a level to show that MO. When an LMO set
 // is shown, a second column holds the LMO energies E_r (click: show that LMO) and the selected
-// LMO's spectral weights are drawn as bars on the canonical levels.
+// LMO's spectral weights are drawn as bars on the canonical levels. The LMOs are grouped at the
+// same degeneracy threshold (groupLmoLevels: the occupied and the virtual LMOs apart) and drawn
+// side by side at the group's mean E_r.
 //
 // Zoom and pan of the energy axis: the mouse wheel (or Ctrl+wheel) zooms about the cursor,
 // Shift+wheel and dragging pan, a double-click resets to the window; the buttons zoom in, zoom
@@ -13,16 +15,17 @@
 //
 // DOM: <figure data-testid="level-diagram" data-mode="canonical|lmo" data-lo data-hi (the
 // visible energy range, eV) data-span data-zoom (full span / visible span) data-groups (the
-// number of degenerate groups at the threshold) data-threshold data-window>; buttons
+// number of degenerate groups at the threshold) data-lmo-groups (the LMO groups, when an LMO set
+// is shown) data-threshold data-window>; buttons
 // level-zoom-in, level-zoom-out, level-fit, level-frontier; <input data-testid=
 // "degeneracy-threshold">; <svg data-testid="level-svg">; canonical level lines <g data-testid=
 // "level-<i>" data-frontier="homo|lumo|homo_minus_1|lumo_plus_1|" (at the threshold)
 // data-group data-selected data-weight>, frontier labels <text data-testid="level-label-<f>">,
-// LMO lines <g data-testid="lmo-level-<i>">.
+// LMO lines <g data-testid="lmo-level-<i>" data-group>.
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { OrbitalRowOut } from "../apiTypes";
 import { exact, fmt, niceTicks } from "../format";
-import { DEGENERACY, energyWindow, frontierBlocks, frontierLabel, groupLevels, panRange, sanitizeDegeneracy, sideBySide, spectralWeights, spreadLabels, zoomRange, type LevelGroup, type Range, type Window } from "./levels";
+import { DEGENERACY, energyWindow, frontierBlocks, frontierLabel, groupLevels, groupLmoLevels, panRange, sanitizeDegeneracy, sideBySide, spectralWeights, spreadLabels, zoomRange, type LevelGroup, type Range, type Window } from "./levels";
 import "./orbitals.css";
 
 export interface LevelDiagramProps {
@@ -50,6 +53,7 @@ const BOTTOM = 16;
 const AXIS_X = 50;
 const LEVEL_W = 46;
 const LEVEL_GAP = 10;
+const LMO_GAP = 4;
 const LABEL_W = 132;
 /** Below this width the frontier labels drop their energies (in the level's tooltip). */
 const COMPACT_W = 380;
@@ -217,26 +221,32 @@ function FrontierLabels({ groups, frontier, s, g }: Pick<LevelsProps, "groups" |
   );
 }
 
-function LmoLevels(p: { rows: OrbitalRowOut[]; s: Scale; g: Geometry; selected: number | null; onPick(i: number): void }) {
+/** The LMO column: degenerate LMOs (groupLmoLevels at the threshold) side by side at their mean
+ *  E_r, like the canonical levels. */
+function LmoLevels(p: { groups: LevelGroup[]; s: Scale; g: Geometry; selected: number | null; onPick(i: number): void }) {
   const { lmoX0, lmoX1 } = p.g;
   return (
     <g>
       <text className="wb-axis-title" x={(lmoX0 + lmoX1) / 2} y={12} textAnchor="middle">
         LMO E_r
       </text>
-      {p.rows
-        .filter((r) => r.energy_ev >= p.s.lo && r.energy_ev <= p.s.hi)
-        .map((r) => {
-          const yy = p.s.y(r.energy_ev);
-          const sel = r.index === p.selected;
-          return (
-            <g key={r.index} className={`wb-level lmo ${r.occupation > 0.5 ? "occ" : "virt"}${sel ? " selected" : ""}`} data-testid={`lmo-level-${r.index}`} data-selected={sel ? "true" : "false"} onClick={() => p.onPick(r.index)} role="button">
-              <title>{`LMO ${r.index}: E_r ${fmt(r.energy_ev, 3)} eV, occupation ${fmt(r.occupation, 2)}`}</title>
-              <rect className="wb-hit" x={lmoX0 - 2} y={yy - 5} width={lmoX1 - lmoX0 + 4} height={10} />
-              {sel && <rect className="wb-level-halo" x={lmoX0 - 3} y={yy - 5} width={lmoX1 - lmoX0 + 6} height={10} rx={3} />}
-              <line x1={lmoX0} x2={lmoX1} y1={yy} y2={yy} />
-            </g>
-          );
+      {p.groups
+        .filter((grp) => grp.energy >= p.s.lo && grp.energy <= p.s.hi)
+        .map((grp) => {
+          const { xs, w } = sideBySide(grp.rows.length, lmoX0, lmoX1, lmoX1 - lmoX0, LMO_GAP);
+          const yy = p.s.y(grp.energy);
+          return grp.rows.map((r, k) => {
+            const sel = r.index === p.selected;
+            const deg = grp.rows.length > 1 ? `, ${grp.rows.length}-fold degenerate (mean ${fmt(grp.energy, 3)} eV)` : "";
+            return (
+              <g key={r.index} className={`wb-level lmo ${r.occupation > 0.5 ? "occ" : "virt"}${sel ? " selected" : ""}`} data-testid={`lmo-level-${r.index}`} data-group={grp.level} data-selected={sel ? "true" : "false"} onClick={() => p.onPick(r.index)} role="button">
+                <title>{`LMO ${r.index}: E_r ${fmt(r.energy_ev, 3)} eV, occupation ${fmt(r.occupation, 2)}${deg}`}</title>
+                <rect className="wb-hit" x={xs[k] - 1} y={yy - 5} width={w + 2} height={10} />
+                {sel && <rect className="wb-level-halo" x={xs[k] - 2} y={yy - 5} width={w + 4} height={10} rx={3} />}
+                <line x1={xs[k]} x2={xs[k] + w} y1={yy} y2={yy} />
+              </g>
+            );
+          });
         })}
     </g>
   );
@@ -387,7 +397,7 @@ function ThresholdInput({ value, onChange }: { value: number; onChange(v: number
     if (text.trim() !== "" && Number.isFinite(v) && v >= DEGENERACY.min && v <= DEGENERACY.max) onChange(sanitizeDegeneracy(v));
   };
   return (
-    <label className="wb-inline wb-degeneracy" title="Canonical MOs within this energy of a level's first MO form one degenerate level (drawn side by side; the HOMO / LUMO blocks follow). The server uses 0.05 eV.">
+    <label className="wb-inline wb-degeneracy" title="Orbitals within this energy of a level's first orbital form one degenerate level, drawn side by side: the canonical MOs (the HOMO / LUMO blocks follow) and, in their own column, the LMO energies E_r (occupied and virtual apart). The server uses 0.05 eV.">
       degenerate ≤
       <input type="number" data-testid="degeneracy-threshold" min={DEGENERACY.min} max={DEGENERACY.max} step={DEGENERACY.step} value={draft ?? String(value)} onChange={(e) => commit(e.target.value)} onBlur={() => setDraft(null)} aria-label="degeneracy threshold (eV)" />
       eV
@@ -430,13 +440,14 @@ export function LevelDiagram(p: LevelDiagramProps) {
   const g = geometry(W, H, !!p.lmos);
   const groups = useMemo(() => groupLevels(p.canonical, threshold), [p.canonical, threshold]);
   const frontier = useMemo(() => frontierBlocks(p.canonical, threshold), [p.canonical, threshold]);
+  const lmoGroups = useMemo(() => (p.lmos ? groupLmoLevels(p.lmos, threshold) : null), [p.lmos, threshold]);
   const lmo = p.lmos?.find((r) => r.index === p.selected);
   const weights = p.lmos ? spectralWeights(lmo) : null;
   const gestures = useGestures(svgRef, view, s);
   const clip = useId().replace(/:/g, "");
   const span = view.range[1] - view.range[0];
   return (
-    <figure ref={figRef} className="wb-levels wb-levels-zoom" data-testid="level-diagram" data-mode={p.lmos ? "lmo" : "canonical"} data-lo={view.range[0].toFixed(3)} data-hi={view.range[1].toFixed(3)} data-span={span.toFixed(3)} data-zoom={((view.limit[1] - view.limit[0]) / span).toFixed(2)} data-groups={groups.length} data-threshold={threshold} data-window={view.mode}>
+    <figure ref={figRef} className="wb-levels wb-levels-zoom" data-testid="level-diagram" data-mode={p.lmos ? "lmo" : "canonical"} data-lo={view.range[0].toFixed(3)} data-hi={view.range[1].toFixed(3)} data-span={span.toFixed(3)} data-zoom={((view.limit[1] - view.limit[0]) / span).toFixed(2)} data-groups={groups.length} data-lmo-groups={lmoGroups?.length} data-threshold={threshold} data-window={view.mode}>
       <Tools view={view} threshold={threshold} onThreshold={setThreshold} />
       <svg ref={svgRef} data-testid="level-svg" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="orbital energy levels: wheel to zoom, drag to pan, double-click to reset" tabIndex={0} onKeyDown={(e) => onKey(e, view)} onDoubleClick={view.reset} {...gestures}>
         <defs>
@@ -449,7 +460,7 @@ export function LevelDiagram(p: LevelDiagramProps) {
         <g clipPath={`url(#${clip})`}>
           <CanonicalLevels groups={groups} frontier={frontier} s={s} g={g} selected={p.selected} weights={weights} onPick={p.onPickCanonical} />
           <FrontierLabels groups={groups} frontier={frontier} s={s} g={g} />
-          {p.lmos && <LmoLevels rows={p.lmos} s={s} g={g} selected={p.selected} onPick={p.onPickLmo} />}
+          {lmoGroups && <LmoLevels groups={lmoGroups} s={s} g={g} selected={p.selected} onPick={p.onPickLmo} />}
         </g>
         <OutOfView rows={p.canonical} s={s} g={g} />
       </svg>

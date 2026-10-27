@@ -7,7 +7,10 @@
 // the first MO of the current level). groupLevels(rows, tol) regroups them client-side the same
 // way at any threshold the user picks, and frontierBlocks(rows, tol) re-derives the HOMO / LUMO
 // blocks (orbitals.frontier.frontier_blocks: occupation >= 0.5 is occupied; HOMO-1 / LUMO+1 the
-// next distinct level), so at 0.05 eV both agree with the server.
+// next distinct level), so at 0.05 eV both agree with the server. The LMO energies E_r of a
+// localized set are grouped at the same threshold by groupLmoLevels, the occupied and the virtual
+// block apart (the three C-H bonds of a methyl group: one level of three), and degeneracies
+// gives the group size of every orbital for the orbital list.
 import type { OrbitalRowOut } from "../apiTypes";
 
 export interface LevelGroup {
@@ -59,6 +62,23 @@ export function groupLevels(rows: readonly OrbitalRowOut[], tol?: number): Level
 }
 
 const OCCUPIED = 0.5;
+
+/** The LMO levels at `tol`, ascending energy: groupLevels of the occupied and of the virtual
+ *  LMOs apart (an occupied and a virtual LMO are never one level), level ids unique. */
+export function groupLmoLevels(rows: readonly OrbitalRowOut[], tol: number): LevelGroup[] {
+  const occ = groupLevels(rows.filter((r) => r.occupation >= OCCUPIED), tol);
+  const offset = occ.reduce((m, g) => Math.max(m, g.level + 1), 0);
+  const virt = groupLevels(rows.filter((r) => r.occupation < OCCUPIED), tol).map((g) => ({ ...g, level: g.level + offset }));
+  return [...occ, ...virt].sort((a, b) => a.energy - b.energy);
+}
+
+/** The size of each orbital's degenerate group at `tol` (index -> n): the canonical rule, or
+ *  the LMO rule (groupLmoLevels) for a localized set. */
+export function degeneracies(rows: readonly OrbitalRowOut[], tol: number, lmo: boolean): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const g of lmo ? groupLmoLevels(rows, tol) : groupLevels(rows, tol)) for (const r of g.rows) out.set(r.index, g.rows.length);
+  return out;
+}
 
 /** The MOs of `members` within `tol` of `anchor`'s energy. */
 const block = (members: readonly OrbitalRowOut[], anchor: OrbitalRowOut, tol: number) => members.filter((r) => Math.abs(r.energy_ev - anchor.energy_ev) <= tol + 1e-12);
