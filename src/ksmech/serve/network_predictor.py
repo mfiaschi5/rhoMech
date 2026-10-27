@@ -1,5 +1,5 @@
 """The `network` predictor (spec v9): a local `ksmech-train fit` checkpoint (`serve.models`)
-through the serve step decoder (`serve.network_decode`). Torch is imported only in the worker.
+through the engine's step decoder (`model.decode`). Torch is imported only in the worker.
 
 - **Availability** (`network_status`), with the reason text of each state, in this order:
   TRANSFORMER_NOT_AVAILABLE (torch or the model code is not importable), CHECKPOINT_NOT_FOUND
@@ -34,6 +34,8 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ksmech.model import decode
+from ksmech.model.decode import NONMETALS
 from ksmech.serve.contracts import PredictorInfo, PredictorRef
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.predictors import Candidate, NetworkModel, NetworkStep, Predictor
@@ -59,8 +61,8 @@ DESCRIPTION = (
 def decoder_sha8() -> str:
     """8 hex of sha256 over the decoder's and this module's code."""
     h = hashlib.sha256()
-    for name in ("network_decode.py", "network_predictor.py"):
-        h.update((Path(__file__).with_name(name)).read_bytes())
+    for path in (Path(decode.__file__), Path(__file__)):
+        h.update(path.read_bytes())
     return h.hexdigest()[:8]
 
 
@@ -357,7 +359,7 @@ class CheckpointNetwork:
 
     def decode(self, sample, rt, beam, *, state, scope, skips) -> list[NetworkStep]:
         from ksmech.arrows.delta_be import ReactionMatrix
-        from ksmech.serve.network_decode import SIGN, DecodeConfig, decode_pool
+        from ksmech.model.decode import SIGN, DecodeConfig, decode_pool
 
         b = max(1, int(beam))
         cfg = DecodeConfig(anchors=b, per_anchor=b)
@@ -372,9 +374,6 @@ class CheckpointNetwork:
             NetworkStep(ReactionMatrix(c.bonds, c.lone), c.logp, (*c.anchor[:2], SIGN[c.anchor[2]]))
             for c in found
         ]
-
-
-NONMETALS = frozenset({1, 5, 6, 7, 8, 9, 14, 15, 16, 17, 34, 35, 53})
 
 
 def charge_issue(reactant, product, atoms) -> str | None:

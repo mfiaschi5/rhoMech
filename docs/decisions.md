@@ -5628,3 +5628,25 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   step (0.983), then the O-protonation by N-H (0.003); the loss of Cl- to the acylammonium is
   2e-13. Cached chemistry never featurizes a new intermediate, so pathways stop at states whose
   tokens are not cached (FEATURIZATION_DISABLED). About 20 s per job of 2-3 steps on the CPU.
+
+## 2026-10-27: The step decoder moves into the engine (`model.decode`, `ksmech-eval decode`)
+
+- `serve/network_decode.py` is now `src/ksmech/model/decode.py`, unchanged but for its docstring
+  and `NONMETALS` (the FORMAL_CHARGE_RANGE elements, which serve's `charge_issue` now imports).
+  B + R stays injected (`apply`), so the engine decodes without serve: serve passes
+  `stepapply.apply_matrix` on a pool, the engine `eval.decode.lewis_apply` on a stored sample.
+  The network's version keeps hashing the decoder's code (`dec-<sha8>`, now over
+  `model/decode.py`), so it changes once.
+- `lewis_apply` works on the sample's own Lewis structure (Kekulé bonds with every H, lone pairs,
+  formal charges): the bond orders stay in [0, 3], the lone pairs non-negative, no touched H-Ne
+  atom exceeds its octet (H and He 2), no touched non-metal becomes |q| >= 2, RDKit writes the
+  product, and the sigma keys with the atom maps differ (else RESONANCE_ONLY_STEP). The product
+  key is the map-free sigma key, so drawings of the same products merge, as serve's pool key
+  does. It is a lighter check than serve's `stepapply` (no RDKit sanitization of each product):
+  the two can disagree on exotic valences; the hit metric does not depend on the key, only the
+  merging does.
+- `ksmech-eval decode` scores the full reaction matrix: a hit at k when one of the k best
+  completions equals a variant of the label class (the class is closed under the pool's symmetry,
+  schema 17), so a symmetric image counts. First check, flex_first/best, molecule val, the first
+  20 samples, beam 5: top-1 60%, top-3 70%, top-5 75%, 1.2 s per sample on one CPU thread.
+

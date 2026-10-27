@@ -188,7 +188,7 @@ def test_the_api_modules_never_import_torch():
     code = (
         "import sys\n"
         "import ksmech.serve.api, ksmech.serve.embedding, ksmech.serve.models\n"
-        "import ksmech.serve.network_predictor, ksmech.serve.network_decode\n"
+        "import ksmech.serve.network_predictor, ksmech.model.decode\n"
         "from ksmech.serve.models import missing_modules\n"
         "missing_modules()\n"
         "assert 'torch' not in sys.modules, 'torch imported'\n"

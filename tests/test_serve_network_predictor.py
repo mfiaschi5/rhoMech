@@ -1,4 +1,4 @@
-"""The network predictor in serve (`serve.network_decode`, `serve.network_predictor`): the
+"""The network predictor in serve (`model.decode`, `serve.network_predictor`): the
 best-first enumeration, log P(R) against a brute-force enumeration, the conservation, count
 and valence filters with their reason codes, the merge by product, the default checkpoint and
 the predictor's reason texts, and a tiny random checkpoint decoding a synthetic MeO- + MeCl
@@ -14,7 +14,7 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from ksmech.serve import network_decode as nd
+from ksmech.model import decode as nd
 from tests.serve_fake_model import write_fake_run
 from tests.test_serve_fixtures import (  # noqa: F401 (fixtures)
     no_xtb,

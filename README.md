@@ -87,7 +87,7 @@ canonical MO pair (k, m) with its energies) and the product SMILES and sigma key
 - `network`: the spec-v9 model through a local checkpoint (`data/models/<source>/<run>/<file>.pt`,
   `GET /api/models`). `PredictIn.checkpoint {run, file, source?}` chooses one; the default is the
   best usable non-smoke run by validation top-1 (a smoke run is a `--limit` run or one named
-  `smoke*`). The decoder is serve's (`serve/network_decode.py`, until the model gets one): the
+  `smoke*`). The decoder is the engine's (`model/decode.py`, also `ksmech-eval decode`): the
   pool is encoded once on the CPU, the B (= beam) most probable anchors are completed by an exact
   best-first search over their most probable non-zero entries (at most 8 bond and 2 atom
   changes), completions that break charge conservation, a valence (B + R) or leave a non-metal at

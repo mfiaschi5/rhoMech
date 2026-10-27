@@ -1,6 +1,6 @@
-"""The step decoder of the spec-v9 network in serve (spec v9, "Decoding a step" and "Edit
-decoder": the constrained beam search). Move upstream to `ksmech.model` when the model session
-adds an inference decoder; until then serve only imports the model.
+"""The step decoder of the spec-v9 network (spec v9, "Decoding a step" and "Edit decoder": the
+constrained beam search). B + R is checked by the caller's `apply`: `eval.decode.lewis_apply`
+on a stored sample's Lewis structure, `serve.stepapply.apply_matrix` on a serve pool.
 
 `decode_pool(model, sample, cfg, apply, scope, skips)` on one pool (the sample's global atoms):
 
@@ -20,7 +20,7 @@ adds an inference decoder; until then serve only imports the model.
    in exact order of decreasing log P(R).
 4. Each completion is checked in that order, and each drop is counted
    (`DECODE_DROPPED:<code>`): CHARGE_NOT_CONSERVED (sum R_ii + 2 sum_{i<j} R_ij != 0), then
-   B + R by `apply(R)` (serve: `stepapply.apply_matrix`), its first issue code
+   B + R by `apply(R)`, its first issue code
    (VALENCE_EXCEEDED, RESONANCE_ONLY_STEP, ...). `screen` also refuses TOO_MANY_CHANGES and
    ANCHOR_NOT_ADMISSIBLE (a breaking anchor with a +1 entry: such an R's anchors are its +1
    entries), which the search never proposes: a breaking anchor's candidates have no +1.
@@ -43,6 +43,7 @@ from dataclasses import dataclass
 import numpy as np
 
 FORM, BREAK = 0, 1  # arrows.batches.ANCHOR_SIDE
+NONMETALS = frozenset({1, 5, 6, 7, 8, 9, 14, 15, 16, 17, 34, 35, 53})  # FORMAL_CHARGE_RANGE
 SIGN = {FORM: "form", BREAK: "break"}
 PAIR_VALUES = np.array([-1, 0, 1])
 ATOM_VALUES = np.array([-2, 0, 2])

@@ -3,10 +3,16 @@
     ksmech-eval floor --source pmechdb --split molecule
     ksmech-eval embedding --run flex_first --step-id pmechdb-018a36c64ec74e5e
     ksmech-eval embedding --run flex_first --smiles 'CC(=O)C.[OH-]'
+    ksmech-eval decode --run flex_first --part val --limit 200
 
 `floor` ranks each step's anchor by |G^atom| (no learned parameter) on the validation and test
 parts and writes `anchor_floor_report_<split>.json`, the reference every trained model is
 compared with.
+
+`decode` runs the beam decoder (`model.decode`) on the stored samples of one part and scores the
+full reaction matrix: a hit at k when one of the k best completions is a variant of the label
+class (`eval.decode`). It writes `decode_report_<split>_<part>[_n<limit>].json` next to the
+checkpoint.
 
 `embedding` traces one sample through a trained model (`eval.embedding`) and writes one
 self-contained HTML page (`eval.embedding_page`): the tokens on the Lewis structure, the parts
@@ -37,6 +43,7 @@ from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.train.loop import DEFAULT_MODELS_DIR
 
 FLOOR_VERSION = 1
+DECODE_VERSION = 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--source", required=True, choices=[str(x) for x in Source])
     f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     f.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    _decode_parser(sub)
     e = sub.add_parser("embedding", help="one sample through a trained model, as an HTML page")
     e.add_argument("--run", required=True, help="training run under <models-dir>/<source>/")
     e.add_argument("--checkpoint", default="best", choices=["best", "last"])
@@ -64,6 +72,53 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     e.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
     return parser
+
+
+def _decode_parser(sub) -> None:
+    d = sub.add_parser("decode", help="the beam decoder on stored samples: full-R top-k")
+    d.add_argument("--run", required=True, help="training run under <models-dir>/<source>/")
+    d.add_argument("--checkpoint", default="best", choices=["best", "last"])
+    d.add_argument("--source", default="pmechdb", choices=[str(x) for x in Source])
+    d.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    d.add_argument("--part", default="val", choices=["train", "val", "test"])
+    d.add_argument("--limit", type=int, help="the first N samples of the part")
+    d.add_argument("--beam", type=int, default=5, help="anchors completed and products kept each")
+    d.add_argument("--scope", default="all", choices=["all", "inter"], help="inter: anchors "
+                   "between two molecules only")  # fmt: skip
+    d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
+    d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+
+
+def cmd_decode(args, console: Console) -> int:
+    from ksmech.eval.decode import decode_report, sample_decoder
+    from ksmech.model.decode import DecodeConfig
+    from ksmech.train.loop import load_model
+
+    ckpt = args.models_dir / args.source / args.run / f"{args.checkpoint}.pt"
+    model, payload = load_model(ckpt, "cpu")
+    path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
+    ids = sample_ids(path)
+    ids = ids[: args.limit] if args.limit is not None else ids
+    cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam)
+    report = decode_report(load_samples(path, ids=ids), sample_decoder(model, cfg, args.scope))
+    config = {k: getattr(args, k) for k in ("split", "part", "limit", "beam", "scope")}
+    config["checkpoint"] = _checkpoint_text(args.checkpoint, payload)
+    inputs = prov.file_input(path) | prov.file_input(ckpt)
+    header = prov.stamp("decode", DECODE_VERSION, inputs, config)
+    suffix = f"_n{args.limit}" if args.limit is not None else ""
+    out = ckpt.parent / f"decode_report_{args.split}_{args.part}{suffix}.json"
+    prov.write_json(out, report, header)
+    table = Table(title=f"full-R decoding, {args.run} {args.checkpoint}, {args.split} {args.part}")
+    for col in ("n", "top-1", "top-3", "top-5", "not found", "s / sample"):
+        table.add_column(col)
+    tops = (f"{report[f'top{k}']:.1%}" for k in (1, 3, 5))
+    per_sample = f"{report['mean_seconds']:.1f}"
+    table.add_row(str(report["n"]), *tops, str(report["not_found"]), per_sample)
+    console.print(table)
+    for code, count in report["skips"].items():
+        console.print(f"  {code}: {count}")
+    console.print(f"wrote {out}")
+    return 0
 
 
 def cmd_floor(args, console: Console) -> int:
@@ -200,7 +255,8 @@ def _print_trace(console: Console, tr: dict, sample: MechanismSample) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"floor": cmd_floor, "embedding": cmd_embedding}[args.command](args, Console())
+    commands = {"floor": cmd_floor, "decode": cmd_decode, "embedding": cmd_embedding}
+    return commands[args.command](args, Console())
 
 
 if __name__ == "__main__":

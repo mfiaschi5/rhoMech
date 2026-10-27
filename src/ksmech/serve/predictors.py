@@ -18,7 +18,7 @@ predictor drops is counted in `skips` under a reason code.
   valid orbital pairs; the `beam` best are completed into R the same way, at the sites
   (a, b) of r and s with the largest w_a^r w_b^s. The score is the model's ranking score.
 - `network`: the spec-v9 model through a local checkpoint (`serve.network_predictor`, with
-  its decoder `serve.network_decode`; neither is part of the physics fingerprint, the
+  its decoder `model.decode`; neither is part of the physics fingerprint, the
   network's version names the checkpoint's sha and the decoder's code instead).
 
 `info()` is cheap and runs on the API side; `propose()` runs in the worker.
