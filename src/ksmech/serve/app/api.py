@@ -1,6 +1,7 @@
 """The FastAPI app of ksmech-serve (design 6): the error envelope, the wiring of every service
 (design 6.4) and the routers of the sub-packages under `/api` (`ROUTERS`: predict, pool,
-workbench, embedding, curate, browse, ml; health, meta and whoami are here; the shared plumbing
+workbench, embedding, curate, browse, ml, accounts, ocr, the wiki of `content`; health, meta and
+whoami are here; the shared plumbing
 is `core.http`).
 
 Routes are thin. Each one checks its ids against the id table (a mismatch is a 404 with the
@@ -14,7 +15,8 @@ carries the request id (also sent as the `X-Request-ID` header). JSON never carr
 `create_app` wires, in this order: pin_threads, settings, the scheduler (a one-worker
 `ProcessScheduler` unless injected), the `ApiContext`, the chemistry (`MolecularChemistry`
 unless injected), the curation database, the job store and runner, `JobService`,
-`BrowseService`, `CurateService`, the export / recheck / index job handlers, the routers, the
+`BrowseService`, `CurateService`, the export / recheck / index job handlers, the accounts, the
+OCR service (its engine starts at the first image) and the wiki, the routers, the
 auth gate, the same-origin guard, the audit log, the handlers, gzip, the Host allow-list, and
 the frontend mount last. Shutdown closes the runner and the scheduler.
 
@@ -57,6 +59,8 @@ from ksmech.serve.accounts import router as accounts_router
 from ksmech.serve.accounts.service import AccountService
 from ksmech.serve.app import static
 from ksmech.serve.browse import router as browse_router
+from ksmech.serve.content import router as content_router
+from ksmech.serve.content.service import WikiService
 from ksmech.serve.core import schemas as S
 from ksmech.serve.core.audit import AuditLog
 from ksmech.serve.core.auth import Authenticator, AuthGate, principal_of
@@ -72,6 +76,8 @@ from ksmech.serve.core.settings import (
 from ksmech.serve.curate import router as curate_router
 from ksmech.serve.embedding import router as embedding_router
 from ksmech.serve.ml import router as ml_router
+from ksmech.serve.ocr import router as ocr_router
+from ksmech.serve.ocr.service import OcrService
 from ksmech.serve.pool import router as pool_router
 from ksmech.serve.predict import router as predict_router
 from ksmech.serve.workbench import router as workbench_router
@@ -299,6 +305,8 @@ ROUTERS = (
     ml_router.lab,
     accounts_router.router,
     accounts_router.admin,
+    ocr_router.router,
+    content_router.router,
 )
 
 
@@ -391,10 +399,12 @@ def _shutdown(svc: Services) -> None:
     closers = [("runner", svc.runner.close), ("scheduler", svc.scheduler.close)]
     if svc.accounts is not None:
         closers.append(("accounts", svc.accounts.close))
+    if svc.ocr is not None:
+        closers.append(("ocr engine", svc.ocr.close))
     for name, close in closers:
         try:
             close()
-        except Exception:  # noqa: BLE001 - shutdown must close both
+        except Exception:  # noqa: BLE001 - shutdown must close every one
             log.exception("closing the %s failed", name)
     svc.engine.dispose()
 
@@ -440,6 +450,8 @@ def create_app(
     authenticator = Authenticator.of(settings, sessions=accounts.session_principal)
     svc = _services_of(settings, scheduler, chemistry, registry, jobs_inline)
     svc.accounts = accounts
+    svc.ocr = OcrService(settings)
+    svc.wiki = WikiService(settings.wiki)
     app = FastAPI(
         title="ksmech-serve",
         version=str(ksmech.__version__),

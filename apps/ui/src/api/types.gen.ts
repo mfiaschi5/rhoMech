@@ -1277,3 +1277,47 @@ export interface PointGroupOut {
   notes: string[];
   qm_digest: string;
 }
+
+export interface OcrOut {
+  smiles: string;
+  molfile: string;
+  confidence: number | null;
+  engine: string;
+  elapsed_s: number;
+  warnings: string[];
+}
+
+export interface OcrStatusOut {
+  enabled: boolean;
+  reason: string | null;
+  engine: string;
+}
+
+export interface WikiPageBriefOut {
+  slug: string;
+  title: string;
+  summary: string;
+  tags: string[];
+}
+
+export interface WikiIndexOut {
+  pages: WikiPageBriefOut[];
+}
+
+export interface WikiHeadingOut {
+  level: number;
+  id: string;
+  text: string;
+}
+
+export interface WikiPageOut {
+  slug: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  html: string;
+  markdown: string;
+  scenes: string[];
+  toc: WikiHeadingOut[];
+  updated: string;
+}

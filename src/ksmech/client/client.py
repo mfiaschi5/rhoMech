@@ -176,6 +176,7 @@ class KsmechClient:
         *,
         params: Mapping[str, Any] | None = None,
         json: Any = None,
+        files: Mapping[str, Any] | None = None,
         wait_pending: float | None = None,
     ) -> httpx.Response:
         """One API call: a 202 Pending answer is retried after its `retry_after_s` until
@@ -184,7 +185,7 @@ class KsmechClient:
         budget = self.pending_timeout if wait_pending is None else float(wait_pending)
         deadline = time.monotonic() + budget
         while True:
-            response = self._send(method, path, params=params, json=json)
+            response = self._send(method, path, params=params, json=json, files=files)
             pending = pending_of(response)
             if pending is None:
                 if response.is_error:
@@ -392,6 +393,17 @@ class KsmechClient:
         """POST /api/depict2d (`Depict2DIn`: mode, style, molecule_id, view)."""
         body = _request_body(S.Depict2DIn, {"molblock": molblock, **_body(**fields)})
         return parse(S.Depict2DOut, self.post_json("/api/depict2d", body))
+
+    # ---- optical structure recognition
+
+    def ocr_status(self) -> S.OcrStatusOut:
+        return parse(S.OcrStatusOut, self.get_json("/api/ocr"))
+
+    def ocr(self, image: bytes, filename: str = "image.png") -> S.OcrOut:
+        """POST /api/ocr: one image (png, jpeg, webp, gif, bmp or tiff, at most 10 MB) to its
+        SMILES and molfile; the server reads the type from the bytes, not the name."""
+        files = {"image": (filename, image, "application/octet-stream")}
+        return parse(S.OcrOut, self._json(self.request("POST", "/api/ocr", files=files)))
 
     # ---- checkpoints, training runs and reports
 

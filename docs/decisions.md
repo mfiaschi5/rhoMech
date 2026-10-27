@@ -5867,3 +5867,47 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
 - **UI.** A user menu in the header (name, role, "no limits" for an admin, Sign in / Sign out,
   Users for an admin), `#/login` (password form, provider buttons, then the account with its
   quota and a password change) and `#/users` (the admins' user management).
+
+## 2026-10-27: OCR and wiki — an isolated MolScribe worker, and a read-only Markdown wiki rendered on the server
+
+- **MolScribe in its own environment, as a separate process.** MolScribe 1.1.1 (MIT) pins
+  numpy<2, OpenNMT-py 2.2.0, albumentations 1.1.0 and timm 0.4.12, which clash with the main
+  environment (numpy 2, torch 2.14 ROCm). It therefore lives in the uv project `tools/ocr`,
+  synced into `data/ocr/venv` (`UV_PROJECT_ENVIRONMENT`), and never in the root pyproject or
+  uv.lock. The server talks to it only through `tools/ocr/ocr_worker.py`: one persistent process
+  that loads the model once and answers JSON lines. The worker starts at the first image and
+  takes one request at a time under a lock. A crash or a 60 s timeout ends that request and the
+  next one starts a fresh worker. An `OcrEngine` protocol leaves room for OSRA or DECIMER;
+  only MolScribe is implemented.
+- **CPU torch 2.5.1.** The OCR environment takes torch from the PyTorch CPU index, so it never
+  competes with training for the GPU and needs no ROCm build. It is pinned below 2.6, where
+  `torch.load` started defaulting to `weights_only=True`: MolScribe calls it without the
+  argument. The worker uses 2 threads by default (`KSMECH_OCR_THREADS`). Every direct
+  dependency is pinned exactly; `exclude-newer = 2026-10-13` keeps every transitive one at
+  least two weeks old. Nothing has been locked or installed yet: `ksmech-serve ocr-setup` does
+  both, and OpenNMT-py's old torchtext pin may need an override then (`docs/ocr.md`).
+- **The capability is a file check, the checksum is the setup's.** `ocr` is on when the venv's
+  python, the worker, the checkpoint and its `.verified` marker exist and agree. The marker is
+  written only after the sha256 of the downloaded file matched, so `/api/meta` never hashes
+  1.1 GB. The download resumes with HTTP Range requests and deletes a file that fails the check.
+- **Uploads are checked before the engine sees them.** The type is what Pillow reads in the
+  bytes, never the name. The body is refused while it streams in past 10 MB, so an oversized
+  upload never lands on disk whole; the route parses the multipart body itself for this,
+  instead of FastAPI's `File`. The image is flattened onto white before the engine reads it,
+  because a transparent PNG from a drawing program would otherwise turn black. RDKit checks the
+  answer: it keeps the drawn layout when the molfile agrees with the SMILES, and falls back
+  with a warning. The route counts as one job of the quota, and admins stay unlimited.
+- **The wiki is read-only Markdown in git.** Pages live in `content/wiki/*.md` with TOML front
+  matter, parsed with `tomllib`, so there is no YAML dependency. Pages are edited by commits,
+  not through the app. There is no editor, history or permission model to build yet, and
+  review is a pull request.
+- **Rendered on the server.** markdown-it-py, already in the lock at 4.2.0 through rich, is
+  pinned in the serve group (with python-multipart 0.0.32 for the upload, also already locked;
+  `uv lock --offline` added nothing new). It renders with raw HTML off, so a page can never
+  inject markup. The frontend receives finished HTML, its table of contents and the scene list,
+  and needs no Markdown library. `llms.txt` serves the same pages to LLM readers. Scene blocks
+  become empty `<figure data-scene-src>` placeholders that the frontend fills from
+  `apps/ui/public/scenes`, so reading a page never triggers QM compute.
+- **No dataset content in the wiki.** The repository is public. The worked example embeds
+  `scenes/sn2-step.json`, a floor-predictor step that ChemRho computed from the SMILES
+  `C[O-]` and `CCl` (its provenance says so), not a PMechDB record.

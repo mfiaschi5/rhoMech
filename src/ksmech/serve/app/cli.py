@@ -9,6 +9,7 @@
     ksmech-serve probe-cache --smiles S [--smiles S ...]
     ksmech-serve gallery [--out DIR] [--only NAME ...] [--derive-templates]
     ksmech-serve users list | add LOGIN --name N [--role R] | set LOGIN [--role R] ...
+    ksmech-serve ocr-setup [--relock] [--uv UV] [--skip-env] [--skip-weights]
 
 `--profile` (`KSMECH_SERVE_PROFILE`) is `lab` (the default: every feature) or `public` (no
 dataset, curation or ML route). In `lab` without `KSMECH_SERVE_TOKENS` there is no
@@ -21,7 +22,9 @@ inserted, so `ksmech-serve --port 8000` works. `run` and `recheck` hold
 `data/serve/run/server.lock` (flock), so at most one serve worker pool exists per data root;
 `recheck` refuses with exit 2 while a server runs. `export` only reads the curation database
 and writes the PMechDB-format file (a download, never training data). `users` manages the
-accounts of `serve.accounts` (`app.users_cli`); it works while a server runs.
+accounts of `serve.accounts` (`app.users_cli`); it works while a server runs. `ocr-setup`
+installs the OCR engine under `data/ocr/` (`app.ocr_cli`: its own environment and the verified
+MolScribe weights); a running server picks it up at its next request.
 
 This module imports only the standard library at module level: `main` pins the BLAS / OpenMP
 threads to 1 before numpy (or anything that imports it) is loaded.
@@ -51,7 +54,16 @@ log = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
-COMMANDS = ("run", "recheck", "export", "schema-ts", "probe-cache", "gallery", "users")
+COMMANDS = (
+    "run",
+    "recheck",
+    "export",
+    "schema-ts",
+    "probe-cache",
+    "gallery",
+    "users",
+    "ocr-setup",
+)
 CHEMISTRY_CHOICES = ("real", "cached", "synthetic")
 PROFILE_CHOICES = ("lab", "public")  # core.settings.PROFILES (stdlib-only module)
 _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
@@ -128,9 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also write ring_templates.smi/.json re-derived from their derivations into OUT",
     )
-    from ksmech.serve.app import users_cli
+    from ksmech.serve.app import ocr_cli, users_cli
 
     users_cli.add_parser(sub)
+    ocr_cli.add_parser(sub)
     return parser
 
 
@@ -481,9 +494,16 @@ def cmd_users(args: argparse.Namespace) -> int:
     return users_cli.run(args, _settings())
 
 
+def cmd_ocr_setup(args: argparse.Namespace) -> int:
+    from ksmech.serve.app import ocr_cli
+
+    return ocr_cli.run(args, _settings())
+
+
 HANDLERS = {
     "run": cmd_run,
     "users": cmd_users,
+    "ocr-setup": cmd_ocr_setup,
     "recheck": cmd_recheck,
     "export": cmd_export,
     "schema-ts": cmd_schema_ts,

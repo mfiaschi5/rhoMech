@@ -11,6 +11,9 @@ shared cache or the live PMechDB data.
 `tokens_file` (`KSMECH_SERVE_TOKENS`) is the optional bearer-token table of `core.auth`;
 `auth_file` (`KSMECH_SERVE_AUTH`) the optional TOML of the accounts (OIDC providers, quotas,
 sessions: `serve.accounts.config`), whose users live in `data/serve/accounts/accounts.sqlite`.
+`wiki_dir` (`KSMECH_SERVE_WIKI`, default `<repo>/content/wiki`) holds the wiki pages
+(`serve.content`); `ocr` is the OCR engine's own tree `data/ocr/` (`serve.ocr.install`: its
+isolated environment and weights, written by `ksmech-serve ocr-setup`).
 """
 
 from __future__ import annotations
@@ -66,6 +69,7 @@ class ServeSettings:
     profile: str = "lab"  # lab | public (KSMECH_SERVE_PROFILE)
     tokens_file: Path | None = None  # KSMECH_SERVE_TOKENS: sha256 -> {name, role} (core.auth)
     auth_file: Path | None = None  # KSMECH_SERVE_AUTH: providers, quotas (serve.accounts.config)
+    wiki_dir: Path | None = None  # KSMECH_SERVE_WIKI; default repo/content/wiki
 
     # ---- shared, read-only
     @property
@@ -188,6 +192,16 @@ class ServeSettings:
         return self.frontend_dist or self.repo_root / "apps" / "ui" / "dist"
 
     @property
+    def wiki(self) -> Path:
+        """The wiki pages (`content/wiki/*.md`, tracked; `serve.content`)."""
+        return self.wiki_dir or self.repo_root / "content" / "wiki"
+
+    @property
+    def ocr(self) -> Path:
+        """The OCR engine (`serve.ocr.install`): `venv/` and `weights/`, gitignored."""
+        return self.data_root / "data" / "ocr"
+
+    @property
     def spec_path(self) -> Path:
         return self.repo_root / "docs" / "ksmech_architecture.tex"
 
@@ -231,6 +245,7 @@ _ENV = {
     "KSMECH_SERVE_PROFILE": ("profile", str),
     "KSMECH_SERVE_TOKENS": ("tokens_file", Path),
     "KSMECH_SERVE_AUTH": ("auth_file", Path),
+    "KSMECH_SERVE_WIKI": ("wiki_dir", Path),
 }
 _PATH_FIELDS = (
     "data_root",
@@ -240,6 +255,7 @@ _PATH_FIELDS = (
     "frontend_dist",
     "tokens_file",
     "auth_file",
+    "wiki_dir",
 )
 
 
@@ -283,7 +299,7 @@ def load_settings(env: Mapping[str, str] = os.environ, **overrides: Any) -> Serv
     if values.get("shared_cache_root") is None:
         values["shared_cache_root"] = values["data_root"]
     s = ServeSettings(**values)
-    return replace(s, gbdt_path=s.gbdt_file, frontend_dist=s.dist)
+    return replace(s, gbdt_path=s.gbdt_file, frontend_dist=s.dist, wiki_dir=s.wiki)
 
 
 def pin_threads() -> None:

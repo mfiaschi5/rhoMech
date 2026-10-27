@@ -1,0 +1,42 @@
+# The isolated environment of the OCR worker (tools/ocr/ocr_worker.py): MolScribe 1.1.1 and its
+# old pins (numpy<2, OpenNMT-py 2.2.0, albumentations 1.1.0, timm 0.4.12) clash with the main
+# project, so they live here and never in the root pyproject.toml or uv.lock. Built by
+# `uv run ksmech-serve ocr-setup` into data/ocr/venv (UV_PROJECT_ENVIRONMENT); docs/ocr.md.
+#
+# Every direct dependency is pinned exactly; `exclude-newer` keeps every transitive one to a
+# release uploaded before 2026-10-13 (at least two weeks before these pins were chosen). Torch is
+# the CPU build: the server's GPU stays with training.
+[project]
+name = "ksmech-ocr-env"
+version = "0.1.0"
+description = "The isolated MolScribe environment of ksmech-serve's OCR worker (not a package)."
+requires-python = "==3.11.*"
+dependencies = [
+    "MolScribe==1.1.1",
+    # torch < 2.6: MolScribe calls torch.load without weights_only, and 2.6 made True the default
+    "torch==2.5.1",
+    "torchvision==0.20.1",  # timm 0.4.12 needs it; the build that matches torch 2.5.1
+    "numpy==1.26.4",  # the last numpy 1.x: OpenNMT-py 2.2.0 and albumentations 1.1.0 predate 2.0
+    "OpenNMT-py==2.2.0",
+    "albumentations==1.1.0",
+    "timm==0.4.12",
+    "SmilesPE==0.0.3",
+    # MolScribe asks for opencv-python, albumentations for the headless build: one version
+    "opencv-python==4.10.0.84",
+    "opencv-python-headless==4.10.0.84",
+    "Pillow==10.4.0",
+]
+
+[tool.uv]
+package = false  # an environment, not a package: nothing here is built or installed
+exclude-newer = "2026-10-13T00:00:00Z"
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

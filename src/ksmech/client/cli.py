@@ -11,6 +11,7 @@ same permissions, quotas and audit as the web UI; requests carry `X-Ksmech-Via: 
     ksmech pool create|get|svg ...
     ksmech molecule create|get|props|symmetry|orbitals SMILES_OR_ID ...
     ksmech depict2d MOLFILE [--mode clean|match3d] [--style textbook|perspective]
+    ksmech ocr IMAGE [--molfile OUT]
     ksmech ml runs | ml run SOURCE RUN [--detail] | ml reports
     ksmech embedding create --run RUN (--state-id S | --smiles S) | embedding get ID
     ksmech curate list [...] | curate get ID
@@ -144,6 +145,9 @@ def _add_chem(r: _Parsers) -> None:
     p.add_argument("molfile")
     p.add_argument("--mode", choices=("clean", "match3d"), default=None)
     p.add_argument("--style", choices=("textbook", "perspective"), default=None)
+    p = r.add("ocr", C.cmd_ocr, "read a drawn structure from an image (png, jpeg, ...)")
+    p.add_argument("image")
+    p.add_argument("--molfile", default=None, metavar="OUT", help="write the molfile here")
 
 
 def _add_molecule(r: _Parsers) -> None:

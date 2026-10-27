@@ -69,6 +69,13 @@ PUBLIC_ROUTES = {
     ("GET", "/api/admin/users"),
     ("POST", "/api/admin/users"),
     ("PATCH", "/api/admin/users/{user_id}"),
+    # serve.ocr: the engine's status for everyone, an image for users (test_serve_ocr.py)
+    ("GET", "/api/ocr"),
+    ("POST", "/api/ocr"),
+    # serve.content: the wiki, public reads (test_serve_wiki.py)
+    ("GET", "/api/wiki"),
+    ("GET", "/api/wiki/llms.txt"),
+    ("GET", "/api/wiki/{slug}"),
 }
 # The dataset, curation and ML routes: refused in public whatever comes later.
 NEVER_PUBLIC = re.compile(r"^/api/(browse|curate|embedding|ml)(/|$)")
@@ -158,6 +165,11 @@ def test_profiles_and_roles_cover_every_capability(tmp_path):
     for name in off:
         assert status(name, public) == (False, PUBLIC_REASON)
     assert status("workbench", public) == (True, None)
+    assert status("wiki", public) == (True, None)
+    assert status("ocr", public) == (
+        False,
+        "OCR engine not installed: run `ksmech-serve ocr-setup`",
+    )
     assert status("browse", _settings(tmp_path)) == (True, None)
     assert STATUS[Code.TOKEN_INVALID] == STATUS[Code.AUTH_REQUIRED] == 401
     assert STATUS[Code.ROLE_INSUFFICIENT] == 403 and STATUS[Code.RUN_NOT_FOUND] == 404
@@ -205,6 +217,8 @@ def test_public_roles(public_app):
     assert anon == {"name": "anonymous", "role": "reader", "via": None} | ANON
     assert public_app.get("/api/predictors").status_code == 200  # a reader reads
     assert public_app.get("/api/models").status_code == 200
+    assert public_app.get("/api/wiki").status_code == 200  # the wiki: anyone
+    assert public_app.get("/api/ocr").json()["enabled"] is False  # its status: anyone
     err = _error(public_app.post(f"/api/jobs/{JOB}/cancel"), 401, "AUTH_REQUIRED")
     assert err["detail"] == {
         "required": "user",

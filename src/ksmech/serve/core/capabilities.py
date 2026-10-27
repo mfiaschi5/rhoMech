@@ -16,6 +16,11 @@ the machine: torch and the model code importable (checked without importing them
 usable local checkpoint (`serve.ml.checkpoints.embedding_status`), so it is evaluated per request
 against the app's settings.
 
+`ocr` (an image of a structure to a molfile, `serve.ocr`) needs the isolated MolScribe
+environment and its verified checkpoint under `data/ocr/` (`ksmech-serve ocr-setup`), checked per
+request as file stats; `wiki` (the read-only pages of `content/wiki`, `serve.content`) needs the
+page directory. Both are in the `public` profile.
+
 `browse` (the PMechDB browser), `curate` (reading curated mechanisms) and `ml` (training runs and
 the physics / eval reports) are always on in the `lab` profile. A profile (`PROFILES`,
 `ServeSettings.profile`) is the set of capabilities a deployment admits: `public` drops every
@@ -30,7 +35,7 @@ ServeError FEATURE_DISABLED (503) with the reason, then the least role of the ca
 (`core.auth.CAPABILITY_ROLES`, or `role=`). `admit(name)` checks the profile and the role only
 (a router of stored results that stays readable while the feature itself is off).
 A POST through `require` is then charged to the principal's job quota when the app installed
-one (`app.state.charge`, `serve.accounts.quotas`: predict and embedding jobs; QUOTA_EXCEEDED).
+one (`app.state.charge`, `serve.accounts.quotas`: predict, embedding and ocr jobs; QUOTA_EXCEEDED).
 `/api/meta` lists them (`MetaOut.capabilities`) and the UI greys the pages.
 """
 
@@ -68,11 +73,15 @@ ORDER = (
     "browse",
     "curate",
     "ml",
+    "ocr",
+    "wiki",
 )
 ALWAYS_ON = frozenset({"workbench"})  # display-only features that read molecules
 PROFILES: dict[str, frozenset[str]] = {
     "lab": frozenset(ORDER),
-    "public": frozenset({"predict", "correct", "candidates", "physics", "workbench"}),
+    "public": frozenset(
+        {"predict", "correct", "candidates", "physics", "workbench", "ocr", "wiki"}
+    ),
 }
 """The capabilities each profile admits (`ServeSettings.profile`)."""
 
@@ -90,9 +99,23 @@ def _embedding_settings(settings: ServeSettings) -> tuple[bool, str | None]:
     return embedding_status(settings)
 
 
+def _ocr_settings(settings: ServeSettings) -> tuple[bool, str | None]:
+    from ksmech.serve.ocr.install import engine_status
+
+    return engine_status(settings)
+
+
+def _wiki_settings(settings: ServeSettings) -> tuple[bool, str | None]:
+    if settings.wiki.is_dir():
+        return True, None
+    return False, "no wiki pages on this server"
+
+
 _STATIC: dict[str, Callable[[], tuple[bool, str | None]]] = {"embedding": _embedding_imports}
 _DYNAMIC: dict[str, Callable[[ServeSettings], tuple[bool, str | None]]] = {
-    "embedding": _embedding_settings
+    "embedding": _embedding_settings,
+    "ocr": _ocr_settings,
+    "wiki": _wiki_settings,
 }
 
 

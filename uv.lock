@@ -441,7 +441,9 @@ rocm = [
 serve = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "markdown-it-py" },
     { name = "pydantic" },
+    { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "sqlmodel" },
     { name = "starlette" },
@@ -481,7 +483,9 @@ rocm = [
 serve = [
     { name = "fastapi", specifier = "==0.142.2" },
     { name = "httpx", specifier = "==0.28.1" },
+    { name = "markdown-it-py", specifier = "==4.2.0" },
     { name = "pydantic", specifier = "==2.13.5" },
+    { name = "python-multipart", specifier = "==0.0.32" },
     { name = "sqlalchemy", specifier = "==2.0.54" },
     { name = "sqlmodel", specifier = "==0.0.47" },
     { name = "starlette", specifier = "<=1.7.0" },
