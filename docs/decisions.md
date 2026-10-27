@@ -5561,3 +5561,70 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   vendored GFN2 basis for cubes, the metal start geometries); moving it behind an engine API is the
   deferred split.
 - Removed the unused cytoscape `NetworkView.tsx` and the probe test that imported it.
+
+## 2026-10-27 — Serve: the network predictor over the local checkpoints, with a serve decoder
+
+- **A decoder in serve.** Upstream has no inference decoder (only `model.loss.greedy_edit`), so
+  `serve/network_decode.py` implements spec "Decoding a step" / "Edit decoder" on top of
+  `KSMech.encode`, `EditDecoder.anchor_logits` and `entry_logits` (serve only imports the model).
+  **Move upstream to `ksmech.model` when the model session adds an inference decoder.** The pool
+  is encoded once (CPU, `torch.no_grad`, the worker's one torch thread; the flex encoder takes its
+  dense reference off the GPU, as the embedding tracer does); the B = beam most probable anchors
+  are each completed into at most `per_anchor` = beam distinct products; all are merged by the
+  product's pool key (sorted sigma keys), the best log P kept, best first.
+- **Completion search.** log P(R) = log P(e) + sum over every other entry of log P(R_x | e),
+  zeros included: the all-zero background plus, per changed entry, its gain log P(v) - log P(0).
+  The candidates are the 48 non-zero classes with the largest gains; a best-first branch and
+  bound (include / exclude each candidate in gain order; the bound adds the best positive gains
+  the remaining bond and atom capacity admits) yields the completions with at most 8 bond (the
+  anchor included) and 2 atom changes, one class per entry, in exact order of log P (tested
+  against a brute-force enumeration). A first version started from the greedy completion (every
+  entry's argmax) and enumerated deviations from it; on an untrained model about two thirds of
+  the entries have a non-zero argmax, and the budget went to completions over the change limit.
+  A breaking anchor's candidates exclude +1 entries (such an R's admissible anchors are its +1
+  entries). Budgets: 20,000 search nodes and 64 applications of B + R per anchor.
+- **Filters, every drop counted** (`DECODE_DROPPED:<code>` in the node's `apply_failures` and
+  the network's `skipped`): charge conservation (sum R_ii + 2 sum_{i<j} R_ij = 0), then B + R
+  through `stepapply.apply_matrix` (RDKit valence, the octet on H-Ne, sanitization, a resonance
+  interconversion), then FORMAL_CHARGE_RANGE: a non-metal the step touches left at |formal
+  charge| >= 2 that it did not carry. The first real runs produced [Cl-2], [O-2] and [C+2]
+  products that RDKit's valence table and the H-Ne octet check let through; in PMechDB 11 of
+  13,090 products hold an atom with |q| >= 2, all metals or a perchlorate carried from the
+  reactants (Li-2 5, Ti-2 4, Cl+3 2). The rule is the network's only, not `stepapply`'s: that
+  module is shared with the floor and the user's step check and is in the physics fingerprint.
+  `DECODE_MERGED` counts completions whose product another one already gave,
+  `DECODE_ANCHOR_UNCOMPLETED` anchors without a valid completion within the budgets.
+- **Path probability, not the marginal.** An edge's `logp` is the path through its anchor; the
+  training loss marginalizes over every admissible anchor of R, which would need one
+  `entry_logits` call per anchor of every completion. Merging keeps the best path.
+- **END_MECH ignored.** The stop head is untrained on PMechDB (lambda_stop = 0); a network job
+  stops at max_steps, a turnover, a recurring pool or an empty frontier, and its provenance notes
+  say so (`context.NOTE_NETWORK_STOP`).
+- **Checkpoints.** `PredictIn.checkpoint` / `ExpandIn.checkpoint` ({run, file, source?}); the
+  default is the best usable non-smoke run by val top-1 (`models.default_checkpoint`; a smoke run
+  is a `--limit` run or a run named `smoke*`, the default only when nothing else is usable). The
+  live server had shown the reason for `smoke_resonance_flex` because the old reason text named
+  the last `best.pt` in sorted order. The checkpoint is resolved and hashed at submission (404 /
+  409 at once), written into the stored request and the provenance (`Provenance.checkpoint`:
+  run, file, sha256, file version, epoch, val top-1). Expansions with the network's predictor
+  keep its checkpoint; the worker refuses a file that changed since it was hashed
+  (CHECKPOINT_CHANGED) and loads the model once per file version (`embedding.cached_model`).
+- **Reason texts.** TRANSFORMER_NOT_AVAILABLE (torch or the model code missing),
+  CHECKPOINT_NOT_FOUND, CHECKPOINT_REFUSED (every checkpoint dirty), NETWORK_ADAPTER_FAILED (every
+  usable checkpoint failed to load in the worker: the worker records the failure per file version
+  in `data/serve/network/adapter_failures.json`, and the API skips that checkpoint for 10 minutes
+  or until the file changes, so a transient failure is retried).
+- **Fingerprint.** The network code left `serve/predictors.py` for `serve/network_predictor.py`
+  and `serve/expansion.py` binds the request to the predictor (`Predictor.bind`, for the
+  checkpoint), so the physics fingerprint changes once: pool analyses are recomputed on demand
+  and curated mechanisms re-check as predictor-stale. The two network modules are not in the
+  fingerprint; the network's version names the checkpoint's sha and their code's sha instead
+  (`network/<source>/<run>/<file>@<sha12>/dec-<sha8>/<fp>`). A curated network mechanism predicted
+  with a checkpoint other than the default reads as predictor-stale (the registry's version is
+  the default's).
+- **Real check** (flex_first/best, epoch 19, val top-1 60.9%; cached GFN2 tokens, beam 5):
+  MeO- + MeCl: the SN2 first, P = 0.956 (next 7e-6). MeNH2 + AcCl: N adds to the carbonyl C
+  (the tetrahedral zwitterion), P = 0.9999. From that intermediate the model prefers the reverse
+  step (0.983), then the O-protonation by N-H (0.003); the loss of Cl- to the acylammonium is
+  2e-13. Cached chemistry never featurizes a new intermediate, so pathways stop at states whose
+  tokens are not cached (FEATURIZATION_DISABLED). About 20 s per job of 2-3 steps on the CPU.

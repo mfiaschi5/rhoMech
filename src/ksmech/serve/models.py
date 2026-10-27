@@ -11,6 +11,9 @@ A checkpoint is `data/models/<source>/<run>/<file>.pt` under the shared root
   last line) and of `best.pt` (the line the trainer kept: the largest val top-1, ties broken by
   the smaller val loss, `train.loop._end_epoch`). The exact epoch is in the checkpoint itself;
   the trace page shows that one.
+- A **smoke** run is a `ksmech-train fit --limit N` run (`config.train.limit > 0` in run.json)
+  or a run named `smoke*`: listed and usable, the default only when nothing else is usable
+  (`default_checkpoint`).
 
 `checkpoint_sha256` hashes a checkpoint once per file version (mtime, size).
 """
@@ -58,6 +61,7 @@ class Checkpoint:
     clean: bool | None = None  # None: no run.json, checked when the worker loads it
     reason: str | None = None  # why it is not usable (a dirty run)
     built_at: str | None = None
+    smoke: bool = False  # a --limit run or a run named smoke* (is_smoke)
 
     @property
     def usable(self) -> bool:
@@ -121,13 +125,23 @@ def epoch_metrics(lines: list[dict], file: str) -> dict | None:
     return max(lines, key=lambda m: (m["val_top1"], -float(m.get("val_loss") or 0.0)))
 
 
+def is_smoke(run: str, train: dict) -> bool:
+    """A smoke run: trained on a `--limit` subset, or named `smoke*`."""
+    try:
+        limited = int(train.get("limit") or 0) > 0
+    except (TypeError, ValueError):
+        limited = False
+    return limited or run.lower().startswith("smoke")
+
+
 def _run_facts(run_dir: Path) -> dict:
-    """encoder, model, clean, reason, built_at from `run.json`."""
+    """encoder, model, clean, reason, built_at, smoke from `run.json`."""
     doc = _read_json(run_dir / "run.json")
     header = (doc or {}).get("provenance")
     if not isinstance(header, dict):
-        return {"reason": None, "clean": None}
+        return {"reason": None, "clean": None, "smoke": is_smoke(run_dir.name, {})}
     cfg = (header.get("config") or {}).get("model") or {}
+    train = (header.get("config") or {}).get("train") or {}
     dirty = bool(header.get("code_dirty")) or str(header.get("code_git_hash", "")).endswith(
         "+dirty"
     )
@@ -138,6 +152,7 @@ def _run_facts(run_dir: Path) -> dict:
         "clean": not dirty,
         "reason": f"STALE_ARTIFACT: trained from a dirty tree (HEAD {head})" if dirty else None,
         "built_at": header.get("built_at"),
+        "smoke": is_smoke(run_dir.name, train if isinstance(train, dict) else {}),
     }
 
 
@@ -199,6 +214,22 @@ def find_checkpoint(
         msg = f"run {run!r} exists for several sources {sources}: give the source"
         raise ServeError(Code.REQUEST_INVALID, msg, status=422)
     return hits[0]
+
+
+def _rank_key(c: Checkpoint) -> tuple:
+    top1 = c.metrics.get("val_top1")
+    top1 = float(top1) if isinstance(top1, int | float) else -1.0
+    return (-top1, c.file != "best", c.source, c.run, c.file)
+
+
+def default_checkpoint(ckpts: list[Checkpoint]) -> Checkpoint | None:
+    """The checkpoint a client gets when it names none: the usable non-smoke one with the best
+    validation top-1 (best.pt before last.pt on a tie, then by name); a usable smoke run only
+    when nothing else is usable; None when no checkpoint is usable."""
+    usable = [c for c in ckpts if c.usable]
+    real = [c for c in usable if not c.smoke]
+    pool = real or usable
+    return min(pool, key=_rank_key) if pool else None
 
 
 def checkpoint_sha256(c: Checkpoint) -> str:

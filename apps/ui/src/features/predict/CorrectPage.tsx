@@ -27,6 +27,7 @@ import { JobProgress } from "./JobProgress";
 import { pathTo, rankLabel, speciesLabel } from "./network";
 import { Panel } from "./Panel";
 import { ReactantRows, usePreflight, type ReactantRow } from "./ReactantRows";
+import { expandBody } from "./checkpoints";
 import { expandNode, networkOfJob, predictV9 } from "./v9api";
 import type { EdgeOut, NetworkOut, NodeOut } from "./v9types";
 
@@ -143,14 +144,14 @@ function SaveButton({ jobId, edgeIds }: { jobId: string; edgeIds: string[] }) {
   );
 }
 
-function ExpandButton({ jobId, nodeId }: { jobId: string; nodeId: string }) {
+function ExpandButton({ jobId, nodeId, net }: { jobId: string; nodeId: string; net: NetworkOut | null }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const expand = async () => {
     setBusy(true);
     setError(null);
     try {
-      const created = await expandNode(jobId, { node_id: nodeId, steps: 3 });
+      const created = await expandNode(jobId, expandBody(net?.provenance, nodeId, 3));
       const done = await pollJob(created.job_id);
       if (done.status !== "done") throw new Error(done.error ? `${done.error.code}: ${done.error.message}` : `the expansion ${done.status}`);
       navigate(jobHash(jobId, { node: nodeId }));
@@ -207,7 +208,7 @@ function JobCorrect({ jobId, route }: { jobId: string; route: Route }) {
           extra={
             <>
               <SaveButton jobId={jobId} edgeIds={chain.map((e) => e.id)} />
-              <ExpandButton jobId={jobId} nodeId={node.id} />
+              <ExpandButton jobId={jobId} nodeId={node.id} net={net} />
             </>
           }
         />

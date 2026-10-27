@@ -46,12 +46,16 @@ MAX_ALTERNATIVES = 5
 MAX_FAILED_EXAMPLES = 10
 
 
-def _predictor(rt_ctx: Runtime, name: str):
-    predictor = rt_ctx.scorers.get(name)
+def _predictor(rt_ctx: Runtime, req: ExpandRequest):
+    """The available predictor of the request, bound to it (`Predictor.bind`: the network
+    takes the request's checkpoint)."""
+    predictor = rt_ctx.scorers.get(req.predictor)
     if predictor is None:
-        msg = f"predictor {name!r} is not available in the worker ({sorted(rt_ctx.scorers)})"
+        msg = (
+            f"predictor {req.predictor!r} is not available in the worker ({sorted(rt_ctx.scorers)})"
+        )
         raise ServeError(Code.PREDICTOR_UNAVAILABLE, msg, status=409)
-    return predictor
+    return predictor.bind(req)
 
 
 def beam_weights(scores: list[float], logps: list, probabilities: bool) -> list[float]:
@@ -133,7 +137,7 @@ def expand_state(rt_ctx: Runtime, state: PoolState, req: ExpandRequest) -> Expan
         return _failed(Code.ANALYSIS_FAILED, exc.message, exc.upstream or str(exc.code))
     skips: Counter = Counter()
     try:
-        predictor = _predictor(rt_ctx, req.predictor)
+        predictor = _predictor(rt_ctx, req)
         cands = predictor.propose(rt_ctx, work, req.beam, req.candidate_scope, skips)
     except ServeError as exc:
         return _failed(exc.code, exc.message, exc.upstream)

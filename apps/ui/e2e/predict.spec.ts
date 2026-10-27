@@ -7,8 +7,15 @@
 //   its score in the predictor's unit, the orbital reading with the 3D orbitals, and "Correct
 //   this step" (the Correct page with the step's R preloaded). The job view has no control
 //   sticking out of its panel at 1024, 1440 and 1920 px.
+//   The network: a tiny random checkpoint (tests/serve_fake_model.py) under the server's data
+//   root, chosen in the checkpoint picker (the default: the best real run), its job with the
+//   checkpoint in the header, probabilities (no "not probabilities" badge, log p scores), and an
+//   expansion with the same predictor and checkpoint.
 // Skipped, with the server's reason, while the predict capability is off.
-import { expect, test, type Page } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { browserPath, NO_BROWSER_REASON } from "./browser";
 import { entryCount, logChemistry, skipUnless, waitRdkit } from "./helpers";
@@ -177,4 +184,81 @@ test("MeO- + MeCl: network, pathways, a step as R with its arrows and reading, t
   await page.waitForURL(new RegExp(`#/correct/${jobId}/edge/${edgeId}`));
   await expect(page.getByTestId("correct-editor")).toBeVisible();
   await expect.poll(() => entryCount(page)).toBe(nEntries);
+});
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
+/** The fake run `e2e/tiny` (and a smoke run beside it) under the server's data root. */
+async function writeFakeRuns(request: APIRequestContext): Promise<void> {
+  const meta = (await (await request.get("/api/meta")).json()) as { data_root: string };
+  for (const run of ["tiny", "smoke_tiny"]) {
+    const runDir = join(meta.data_root, "data", "models", "e2e", run);
+    const out = execFileSync("uv", ["run", "--no-sync", "--project", REPO, "python", "-m", "tests.serve_fake_model", runDir], { cwd: REPO, encoding: "utf8", timeout: 240_000 });
+    console.log(`[predict/network] ${out.trim().replace(/\n/g, "; ")}`);
+  }
+}
+
+interface NetJob {
+  status: string;
+  result: { edges: { id: string; logp: number | null; predictor_version: string | null; source: string; target: string }[]; nodes: { id: string; status: string; is_root: boolean }[]; provenance: { predictor_version: string; checkpoint: { run: string; file: string } | null }; scores_are_probabilities: boolean } | null;
+}
+
+test("the network predictor: checkpoint picker, probabilities, the job's checkpoint, an expansion", async ({ page, request }) => {
+  test.setTimeout(300_000);
+  await skipUnless(request, "predict");
+  await logChemistry(request, "predict/network");
+  await writeFakeRuns(request);
+  const predictors = (await (await request.get("/api/predictors")).json()) as PredictorLike[];
+  const net = predictors.find((p) => p.name === "network");
+  test.skip(!net?.available, `the network is unavailable: ${net?.reason}`);
+
+  await page.goto("/#/predict");
+  await waitRdkit(page);
+  await page.getByTestId("predict-smiles-0").fill("C[O-]");
+  await page.getByTestId("predict-add-reactant").click();
+  await page.getByTestId("predict-smiles-1").fill("CCl");
+  await expect(page.locator("[data-testid=predict-preflight-1][data-ok=true]")).toBeVisible({ timeout: 60_000 });
+  await page.getByTestId("predict-predictor").selectOption("network");
+  await expect(page.getByTestId("predict-score-badge")).toHaveCount(0);
+  const picker = page.getByTestId("predict-checkpoint");
+  await expect(picker).toHaveValue("e2e/tiny/best"); // the best real run, not the smoke one
+  await expect(page.getByTestId("predict-checkpoint-option-e2e-smoke_tiny-best")).toHaveAttribute("data-smoke", "true");
+  await expect(page.getByTestId("predict-checkpoint-option-e2e-smoke_tiny-best")).toContainText("smoke");
+  await picker.selectOption("e2e/tiny/last");
+  await page.getByTestId("predict-beam").fill("2");
+  await page.getByTestId("predict-max-steps").fill("2");
+  await page.getByTestId("predict-submit").click();
+  await page.waitForURL(JOB_HASH, { timeout: 60_000 });
+  const jobId = JOB_HASH.exec(page.url())?.[1] ?? "";
+  await expect(page.locator("[data-testid=predict-job-status][data-status=done]")).toBeVisible({ timeout: 240_000 });
+  const header = page.getByTestId("predict-job-header");
+  await expect(header).toHaveAttribute("data-probabilities", "true");
+  await expect(page.getByTestId("predict-job-checkpoint")).toHaveAttribute("data-run", "tiny");
+  await expect(page.getByTestId("predict-job-checkpoint")).toHaveAttribute("data-file", "last");
+  await expect(header.getByTestId("predict-score-badge")).toHaveCount(0);
+
+  const job = (await (await request.get(`/api/jobs/${jobId}`)).json()) as NetJob;
+  expect(job.result?.scores_are_probabilities).toBe(true);
+  expect(job.result?.provenance.checkpoint?.file).toBe("last");
+  const edges = job.result?.edges ?? [];
+  console.log(`[predict/network] ${edges.length} steps, logp ${edges.map((e) => e.logp?.toFixed(2)).join(", ")}`);
+  test.skip(!edges.length, "the tiny random model proposed no valid step");
+  expect(edges.every((e) => e.logp !== null)).toBe(true);
+  await page.goto(`/#/predict/job/${jobId}?edge=${edges[0].id}`);
+  await expect(page.getByTestId("predict-step-panel")).toHaveAttribute("data-edge", edges[0].id, { timeout: 60_000 });
+  await expect(page.getByTestId("predict-step-score")).toHaveAttribute("data-unit", "logp");
+  await expect(page.getByTestId("predict-step-score")).toContainText("log p");
+
+  // a double-click on a state without steps out expands it with the same checkpoint
+  await page.goto(`/#/predict/job/${jobId}`);
+  await page.getByTestId("predict-network-variant-layered").click();
+  const sources = new Set(edges.map((e) => e.source));
+  const leaf = job.result?.nodes.find((n) => !n.is_root && !sources.has(n.id));
+  test.skip(!leaf, "no state without steps out to expand");
+  await page.getByTestId(`predict-net-node-${leaf!.id}`).dblclick();
+  await page.waitForURL(/[?&]rev=\d+/, { timeout: 180_000 });
+  const grown = (await (await request.get(`/api/jobs/${jobId}`)).json()) as NetJob;
+  const versions = new Set((grown.result?.edges ?? []).map((e) => e.predictor_version));
+  expect([...versions]).toEqual([job.result?.provenance.predictor_version]);
+  await page.setViewportSize({ width: 1400, height: 1000 });
 });

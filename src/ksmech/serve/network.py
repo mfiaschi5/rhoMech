@@ -436,6 +436,7 @@ def expand_node(chem, net, node_id, params, hooks) -> list[tuple[str, ProposedCh
         net.predictor.temperature,
         params.candidate_scope,
         params.max_scan,
+        net.predictor.checkpoint,
     )
     ex = chem.expand(node.state, req, hooks.ctx)
     if not ex.ok:

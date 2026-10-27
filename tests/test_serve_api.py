@@ -97,7 +97,8 @@ def test_predictors(synthetic_app):  # noqa: F811
     assert list(infos) == ["floor", "gbdt", "network"]
     assert infos["floor"].available and not infos["floor"].scores_are_probabilities
     assert not infos["network"].available and infos["network"].scores_are_probabilities
-    assert infos["network"].code == "TRANSFORMER_NOT_AVAILABLE"
+    assert infos["network"].code == "CHECKPOINT_NOT_FOUND"  # torch is here, no checkpoint
+    assert infos["network"].reason.startswith("no checkpoint <source>/<run>/<file>.pt under")
     assert not infos["gbdt"].available and infos["gbdt"].code == "GBDT_MISSING"
 
 
@@ -120,7 +121,7 @@ def test_predictors_and_job_created_carry_the_spec_version(synthetic_app):  # no
 def test_predict_unavailable_and_unknown_predictor(synthetic_app):  # noqa: F811
     body = {"reactants_smiles": SN2_REACTANTS, "predictor": "network"}
     err = error_of(synthetic_app.post("/api/predict", json=body), 409, "PREDICTOR_UNAVAILABLE")
-    assert err["detail"]["code"] == "TRANSFORMER_NOT_AVAILABLE"
+    assert err["detail"]["code"] == "CHECKPOINT_NOT_FOUND"
     body["predictor"] = "no-such-predictor"
     error_of(synthetic_app.post("/api/predict", json=body), 422, "PREDICTOR_UNKNOWN")
 

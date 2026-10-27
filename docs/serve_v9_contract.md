@@ -120,3 +120,29 @@ score, logp: number | null, predictor, rank, product_smiles: string[], sigma_key
 
 Scores are not probabilities for `floor` (|G_atom| of the anchor, 1/eV) and `gbdt` (a
 lambdarank score); `scores_are_probabilities` is true only for `network`.
+
+## The network predictor (2026-10-27)
+
+- `PredictIn.checkpoint` and `ExpandIn.checkpoint`: `CheckpointRefIn {run, file = "best",
+  source?}`, network only (another predictor with a checkpoint is 422 `REQUEST_INVALID`). The
+  default is the best usable non-smoke checkpoint by validation top-1 (`CheckpointOut.smoke`: a
+  `--limit` run or a run named `smoke*`; a smoke run is the default only when nothing else is
+  usable). An unknown checkpoint is 404 `CHECKPOINT_NOT_FOUND`, a dirty one 409
+  `CHECKPOINT_REFUSED`, both at submission. The job's stored `request.checkpoint` names the
+  checkpoint it resolved to.
+- `Provenance.checkpoint`: `CheckpointRefOut {source, run, file, sha256, mtime_ns, size_bytes,
+  epoch, val_top1, encoder, smoke}` (null for the other predictors); `predictor_version` is
+  `network/<source>/<run>/<file>@<sha12>/dec-<decoder code sha8>/<physics fingerprint>` and
+  `checkpoint_hash` the sha256.
+- An expansion with the network's own predictor and no checkpoint keeps the network's
+  checkpoint; the file must still be the one hashed (else the node fails with
+  `CHECKPOINT_CHANGED`).
+- `PredictorInfoOut` of `network`: `available` false with `code` and `reason` when torch or the
+  model is not importable (`TRANSFORMER_NOT_AVAILABLE`), there is no checkpoint
+  (`CHECKPOINT_NOT_FOUND`), every checkpoint is refused (`CHECKPOINT_REFUSED`), or every usable
+  one failed to load in the worker within the last 10 minutes (`NETWORK_ADAPTER_FAILED`, with the
+  error); `version` and `checkpoint_hash` are the default checkpoint's.
+- Decoder drops are counted in the node's `apply_failures` and the network's `skipped` as
+  `DECODE_DROPPED:<code>` (`CHARGE_NOT_CONSERVED`, `VALENCE_EXCEEDED` and the other step-check
+  issue codes, `FORMAL_CHARGE_RANGE`), `DECODE_MERGED` (another completion gave the same product)
+  and `DECODE_ANCHOR_UNCOMPLETED`; a decoder error fails the node with `NETWORK_DECODE_FAILED`.

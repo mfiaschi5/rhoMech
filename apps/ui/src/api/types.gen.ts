@@ -50,10 +50,30 @@ export interface CandidateConfigOut {
   site_weight: number;
 }
 
+export interface CheckpointRefIn {
+  run: string;
+  file?: string;
+  source?: string | null;
+}
+
+export interface CheckpointRefOut {
+  source: string;
+  run: string;
+  file: string;
+  sha256: string;
+  mtime_ns: number;
+  size_bytes: number;
+  epoch: number | null;
+  val_top1: number | null;
+  encoder: string | null;
+  smoke: boolean;
+}
+
 export interface Provenance {
   predictor: string;
   predictor_version: string | null;
   checkpoint_hash: string | null;
+  checkpoint: CheckpointRefOut | null;
   spec_version: string;
   physics_fingerprint: string;
   artifact_versions: Record<string, number | string>;
@@ -174,6 +194,7 @@ export interface PredictIn {
   candidate_scope?: "all" | "inter";
   max_nodes?: number;
   n_pathways?: number;
+  checkpoint?: CheckpointRefIn | null;
 }
 
 export interface JobCreatedOut {
@@ -401,6 +422,7 @@ export interface ExpandIn {
   steps?: number;
   predictor?: string | null;
   beam?: number | null;
+  checkpoint?: CheckpointRefIn | null;
 }
 
 export interface ExpandResultOut {
@@ -446,6 +468,7 @@ export interface CheckpointOut {
   usable: boolean;
   reason: string | null;
   built_at: string | null;
+  smoke: boolean;
 }
 
 export interface ModelsOut {

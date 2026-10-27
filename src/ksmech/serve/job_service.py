@@ -172,6 +172,17 @@ def _params_out(net: Network) -> dict:
     }
 
 
+def checkpoint_request(ref) -> dict | None:
+    """{source, run, file} of a reference's checkpoint (`PredictorRef.checkpoint`), or None."""
+    ck = getattr(ref, "checkpoint", None)
+    return None if not ck else {k: ck[k] for k in ("source", "run", "file")}
+
+
+def _predictor_label(name: str, ref) -> str:
+    ck = checkpoint_request(ref)
+    return name if ck is None else f"{name} {ck['run']}/{ck['file']}"
+
+
 def network_provenance(net: Network, provenance: Mapping) -> dict:
     """`provenance` with the predictor fields of the network's own predictor reference and
     the chemistry it was built with."""
@@ -180,6 +191,7 @@ def network_provenance(net: Network, provenance: Mapping) -> dict:
         predictor=net.predictor.name,
         predictor_version=net.predictor.version,
         checkpoint_hash=net.predictor.checkpoint_hash,
+        checkpoint=None if net.predictor.checkpoint is None else dict(net.predictor.checkpoint),
         temperature=net.predictor.temperature,
         candidate_scope=net.params.candidate_scope,
     )
@@ -239,14 +251,20 @@ class JobService:
     # ---- endpoints
 
     def predict(self, body: PredictIn) -> JobCreatedOut:
-        """Preflight (input and predictor errors are immediate 422 / 409), then queue."""
+        """Preflight (input, predictor and checkpoint errors are immediate 422 / 404 / 409),
+        then queue. The stored request names the checkpoint the network resolved to."""
         request = body.model_dump(mode="json")
         inputs = species_inputs(request)
+        ref = None
         if body.predictor != USER_PREDICTOR:
-            self.ctx.registry.get(body.predictor)
+            ref = self.ctx.registry.ref(body.predictor, body.temperature, request["checkpoint"])
+            request["checkpoint"] = checkpoint_request(ref)
+        elif body.checkpoint is not None:
+            msg = "a checkpoint applies only to the network predictor, not 'user'"
+            raise ServeError(Code.REQUEST_INVALID, msg, status=422)
         self.chemistry.root(inputs)
-        prov = self._provenance(body.predictor, body.temperature, body.candidate_scope)
-        label = f"{body.predictor}: " + " + ".join(
+        prov = self._provenance(body.predictor, body.temperature, body.candidate_scope, ref)
+        label = f"{_predictor_label(body.predictor, ref)}: " + " + ".join(
             s if n == 1 else f"{n} {s}" for s, n in ((i.smiles, i.count) for i in inputs)
         )
         job = self.runner.submit(JobKind.PREDICT, request, label=label, provenance=prov)
@@ -321,18 +339,21 @@ class JobService:
         name = body.predictor or (
             "floor" if net.predictor.name == USER_PREDICTOR else net.predictor.name
         )
-        self.ctx.registry.get(name)
-        request = {
-            "network_id": owner.id,
-            "parent_job_id": job.id,
-            "expand": body.model_dump(mode="json") | {"predictor": name},
+        ck = None if body.checkpoint is None else body.checkpoint.model_dump(mode="json")
+        if ck is None and name == net.predictor.name:
+            ck = checkpoint_request(net.predictor)  # the network's own checkpoint
+        ref = self.ctx.registry.ref(name, net.predictor.temperature, ck)
+        expand = body.model_dump(mode="json") | {
+            "predictor": name,
+            "checkpoint": checkpoint_request(ref),
         }
+        request = {"network_id": owner.id, "parent_job_id": job.id, "expand": expand}
         created = self.runner.submit(
             JobKind.EXPAND,
             request,
             parent_job_id=job.id,
             network_id=owner.id,
-            label=f"expand {body.node_id} with {name}",
+            label=f"expand {body.node_id} with {_predictor_label(name, ref)}",
             exclusive=True,
             provenance=owner.provenance,
         )
@@ -370,8 +391,8 @@ class JobService:
 
     # ---- helpers
 
-    def _provenance(self, predictor: str, temperature, scope: str) -> dict:
-        prov = self.ctx.provenance(predictor, temperature=temperature, scope=scope)
+    def _provenance(self, predictor: str, temperature, scope: str, ref=None) -> dict:
+        prov = self.ctx.provenance(predictor, temperature=temperature, scope=scope, ref=ref)
         mode = getattr(self.chemistry, "mode", None)
         if mode in CHEMISTRIES:
             prov["chemistry"] = mode

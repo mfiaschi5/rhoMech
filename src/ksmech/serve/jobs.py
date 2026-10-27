@@ -648,19 +648,19 @@ class _NetworkWriter:
             self.write(self.last, force=True)
 
 
-def predict_handler(
-    chem: Chemistry, ref_of: Callable[[str, float | None], PredictorRef]
-) -> Handler:
-    """The `predict` job: root, `build_network`, `network.json`. `ref_of(name, T)` gives the
-    predictor reference (`PredictorRegistry.ref`). Predictor "user" builds the root alone (a
-    network the user extends with steps and expansions)."""
+def predict_handler(chem: Chemistry, ref_of: Callable[..., PredictorRef]) -> Handler:
+    """The `predict` job: root, `build_network`, `network.json`. `ref_of(name, T, checkpoint)`
+    gives the predictor reference (`PredictorRegistry.ref`; the checkpoint is the network's).
+    Predictor "user" builds the root alone (a network the user extends with steps and
+    expansions)."""
 
     def handle(ctx: JobContext, request: dict) -> dict:
         from ksmech.serve.network import NetHooks, Network, build_network
 
         ctx.progress(phase="normalize", message="building the root pool")
         root = chem.root(species_inputs(request))
-        ref = ref_of(str(request.get("predictor", "floor")), request.get("temperature"))
+        name = str(request.get("predictor", "floor"))
+        ref = ref_of(name, request.get("temperature"), request.get("checkpoint"))
         writer = _NetworkWriter(ctx, ctx.job_id)
         params = net_params(request)
         if ref.name == USER_PREDICTOR:
@@ -680,7 +680,7 @@ def predict_handler(
 
 
 def expand_handler(
-    chem: Chemistry, runner: JobRunner, ref_of: Callable[[str, float | None], PredictorRef]
+    chem: Chemistry, runner: JobRunner, ref_of: Callable[..., PredictorRef]
 ) -> Handler:
     """The `expand` job: load the network, `continue_from` one node under the network's
     lock, write it back. Request: {network_id, parent_job_id, expand: ExpandIn dict}."""
@@ -700,7 +700,8 @@ def expand_handler(
             if node_id not in net.nodes:
                 raise ServeError(Code.NODE_NOT_FOUND, f"no node {node_id} in {net_id}", status=404)
             default = "floor" if net.predictor.name == USER_PREDICTOR else net.predictor.name
-            ref = ref_of(str(body.get("predictor") or default), net.predictor.temperature)
+            name = str(body.get("predictor") or default)
+            ref = ref_of(name, net.predictor.temperature, body.get("checkpoint"))
             params = replace(net.params, beam=int(body.get("beam") or net.params.beam))
             writer = _NetworkWriter(ctx, net_id)
             try:

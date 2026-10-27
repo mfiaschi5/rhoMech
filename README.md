@@ -84,12 +84,19 @@ canonical MO pair (k, m) with its energies) and the product SMILES and sigma key
 - `gbdt`: the geometry-free LightGBM ranker of `ksmech-physics gbdt`
   (`gbdt_lgbm_molecule_geomfree.npz` under the shared processed directory), ranking orbital
   pairs that are completed the same way; a ranking score.
-- `network`: the spec-v9 model, through an adapter; unavailable (the reason is in the listing).
-  The model code and checkpoints exist, but upstream has no step decoder yet: spec "Decoding a
-  step" needs a constrained beam search over R (the B best anchors, each completed into reaction
-  matrices that conserve charge and respect every valence, ranked by log P(R)), and
-  `ksmech.model` has only `loss.greedy_edit` (top anchor, argmax entries). Serve does not write
-  one.
+- `network`: the spec-v9 model through a local checkpoint (`data/models/<source>/<run>/<file>.pt`,
+  `GET /api/models`). `PredictIn.checkpoint {run, file, source?}` chooses one; the default is the
+  best usable non-smoke run by validation top-1 (a smoke run is a `--limit` run or one named
+  `smoke*`). The decoder is serve's (`serve/network_decode.py`, until the model gets one): the
+  pool is encoded once on the CPU, the B (= beam) most probable anchors are completed by an exact
+  best-first search over their most probable non-zero entries (at most 8 bond and 2 atom
+  changes), completions that break charge conservation, a valence (B + R) or leave a non-metal at
+  |formal charge| >= 2 are dropped with reason codes, and the rest are ranked by log P(R) and
+  merged by product. Scores are probabilities: an edge's `logp` is log P(R) and a pathway's
+  probability the product along it. END_MECH is untrained on PMechDB and ignored. The job's
+  provenance records the checkpoint (run, file, sha256, epoch, val top-1); expansions keep it.
+  The predictor is unavailable, with the reason, when torch or the model code is missing, no
+  checkpoint exists, every checkpoint is refused (a dirty run) or every usable one failed to load.
 
 **Embedding trace** (capability `embedding`: torch and the model code importable and one usable
 local checkpoint). `GET /api/models` lists the checkpoints `data/models/<source>/<run>/<file>.pt`

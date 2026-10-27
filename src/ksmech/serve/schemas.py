@@ -136,10 +136,35 @@ class CandidateConfigOut(_Out):
     site_weight: float
 
 
+class CheckpointRefIn(_In):
+    """A local checkpoint `<source>/<run>/<file>.pt` (source needed only when two sources
+    have the run)."""
+
+    run: str
+    file: str = "best"
+    source: str | None = None
+
+
+class CheckpointRefOut(_Out):
+    """The checkpoint a network job runs: its file version and what its run reported."""
+
+    source: str
+    run: str
+    file: str
+    sha256: str
+    mtime_ns: int
+    size_bytes: int
+    epoch: int | None
+    val_top1: float | None
+    encoder: str | None
+    smoke: bool
+
+
 class Provenance(_Out):
     predictor: str
     predictor_version: str | None
     checkpoint_hash: str | None
+    checkpoint: CheckpointRefOut | None = None  # the network's checkpoint; None for the others
     spec_version: str
     physics_fingerprint: str
     artifact_versions: dict[str, int | str]
@@ -263,6 +288,9 @@ class PredictIn(NormalizeIn):
     candidate_scope: Literal["all", "inter"] = "all"
     max_nodes: int = Field(200, ge=1, le=500)
     n_pathways: int = Field(20, ge=1, le=50)
+    # network only: the checkpoint (default: the best usable non-smoke run by validation
+    # top-1); the job's stored request names the one it resolved to
+    checkpoint: CheckpointRefIn | None = None
 
 
 class JobCreatedOut(_Out):
@@ -512,6 +540,9 @@ class ExpandIn(_In):
     steps: int = Field(1, ge=1, le=12)
     predictor: str | None = None  # default: the network's predictor (floor for a user network)
     beam: int | None = Field(None, ge=1, le=10)
+    # network only; default: the network's own checkpoint when it expands with the network,
+    # else the default checkpoint
+    checkpoint: CheckpointRefIn | None = None
 
 
 class ExpandResultOut(_Out):
@@ -567,6 +598,7 @@ class CheckpointOut(_Out):
     usable: bool
     reason: str | None
     built_at: str | None
+    smoke: bool  # a `--limit` run or a run named smoke*: the default only when nothing else is
 
 
 class ModelsOut(_Out):

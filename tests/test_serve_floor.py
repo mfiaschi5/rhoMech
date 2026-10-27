@@ -202,7 +202,7 @@ class FakeModel:
     def __init__(self, work):  # noqa: F811
         self.work = work
 
-    def decode(self, sample, rt, beam):  # noqa: F811
+    def decode(self, sample, rt, beam, *, state, scope, skips):  # noqa: F811
         from ksmech.arrows.delta_be import ReactionMatrix
         from ksmech.serve.predictors import NetworkStep
 
@@ -214,9 +214,9 @@ class FakeModel:
 
 
 def test_network_adapter_with_a_fake_model(synthetic_runtime, synthetic_settings, sn2_work):  # noqa: F811
-    from ksmech.serve.predictors import NetworkPredictor
+    from ksmech.serve.network_predictor import NetworkPredictor
 
-    p = NetworkPredictor(synthetic_settings, FakeModel(sn2_work))
+    p = NetworkPredictor(synthetic_settings, "fp", FakeModel(sn2_work))
     info = p.info()
     assert info.available and info.version == "network/fake/1" and info.scores_are_probabilities
     cands = p.propose(synthetic_runtime, sn2_work, 5, "all", Counter())

@@ -25,7 +25,7 @@ from ksmech.serve.analysis import (
     read_failure,
     write_failure,
 )
-from ksmech.serve.contracts import LRU, PoolState
+from ksmech.serve.contracts import LRU, PoolState, PredictorRef
 from ksmech.serve.errors import Code, ServeError
 from ksmech.serve.featurize import Featurizer, featurize_label, make_featurizer
 from ksmech.serve.loader import LayeredTokenLoader
@@ -52,6 +52,11 @@ SCORE_TIMEOUT_S = 300
 NOTE_NO_STOP = (
     "the floor and gbdt have no END_MECH head: prediction stops at max_steps, a turnover or an "
     "empty frontier, never by a learned stop"
+)
+NOTE_NETWORK_STOP = (
+    "the network's END_MECH head is untrained on PMechDB (lambda_stop = 0) and is ignored: "
+    "prediction stops at max_steps, a turnover, a recurring pool or an empty frontier, never by "
+    "a learned stop"
 )
 NOTE_SYNTHETIC = (
     "synthetic chemistry (SYNTHETIC-EHT/v1, charge-iterated extended Hueckel): a test vehicle, "
@@ -221,8 +226,10 @@ class ApiContext:
         temperature: float | None = None,
         scope: str = "all",
         notes: Sequence[str] = (),
+        ref: PredictorRef | None = None,
     ) -> dict:
-        """`Provenance` fields."""
+        """`Provenance` fields; `ref` (the job's resolved predictor reference) gives the
+        version, the checkpoint hash and the network's checkpoint."""
         info = None
         if predictor is not None:
             try:
@@ -232,10 +239,17 @@ class ApiContext:
         if temperature is None and info is not None:
             temperature = info.default_temperature
         c = physics_constants()
+        src = ref if ref is not None else info
+        version = None if src is None else src.version
+        sha = None if src is None else src.checkpoint_hash
+        ck = None if ref is None else ref.checkpoint
+        if ck and ck.get("smoke"):
+            notes = [*notes, f"checkpoint {ck['run']}/{ck['file']} is a smoke run (--limit)"]
         return {
             "predictor": predictor or "none",
-            "predictor_version": None if info is None else info.version,
-            "checkpoint_hash": None if info is None else info.checkpoint_hash,
+            "predictor_version": version,
+            "checkpoint_hash": sha,
+            "checkpoint": None if ck is None else dict(ck),
             "spec_version": self.spec_version,
             "physics_fingerprint": self.physics_fp,
             "artifact_versions": dict(self.artifact_versions),
@@ -251,6 +265,8 @@ class ApiContext:
         out = list(notes)
         if predictor in ("floor", "gbdt", "user"):
             out.append(NOTE_NO_STOP)
+        elif predictor == "network":
+            out.append(NOTE_NETWORK_STOP)
         if info is not None:
             out += list(info.warnings)
         if self.chemistry == "synthetic":

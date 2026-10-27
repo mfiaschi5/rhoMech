@@ -138,15 +138,19 @@ class ExpandRequest(_Jsonable):
     temperature: float | None  # None: the predictor's default
     candidate_scope: str  # "all" | "inter"
     max_scan: int
+    # the network's checkpoint (PredictorRef.checkpoint); None: the predictor's default
+    checkpoint: dict | None = field(default=None, hash=False)
 
     @classmethod
     def from_dict(cls, d: dict) -> ExpandRequest:
+        ck = d.get("checkpoint")
         return cls(
             str(d["predictor"]),
             int(d["beam"]),
             _opt_f(d.get("temperature")),
             str(d["candidate_scope"]),
             int(d["max_scan"]),
+            None if ck is None else dict(ck),
         )
 
 
@@ -275,10 +279,20 @@ class PredictorRef(_Jsonable):
     version: str | None
     checkpoint_hash: str | None
     temperature: float
+    # the network's checkpoint: {source, run, file, sha256, mtime_ns, size_bytes, epoch,
+    # val_top1, encoder, smoke} (serve.network_predictor.checkpoint_ref); None for the others
+    checkpoint: dict | None = field(default=None, hash=False)
 
     @classmethod
     def from_dict(cls, d: dict) -> PredictorRef:
-        return cls(str(d["name"]), d.get("version"), d.get("checkpoint_hash"), _f(d["temperature"]))
+        ck = d.get("checkpoint")
+        return cls(
+            str(d["name"]),
+            d.get("version"),
+            d.get("checkpoint_hash"),
+            _f(d["temperature"]),
+            None if ck is None else dict(ck),
+        )
 
 
 USER_PREDICTOR = "user"  # the predictor name of user steps and of root-only user networks

@@ -38,6 +38,7 @@ SPEC_RE = re.compile(r"^v9\+[0-9a-f]{12};tok\d+;smp\d+;qm\d+$")
 PROVENANCE_KEYS = {
     "predictor",
     "predictor_version",
+    "checkpoint",
     "checkpoint_hash",
     "spec_version",
     "physics_fingerprint",

@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEven
 import { toApiError } from "../../../api/client";
 import { pollJob } from "../../../api/poll";
 import { useRDKit } from "../../../chem/rdkit";
+import { expandBody } from "../checkpoints";
 import { expandNode } from "../v9api";
 import type { NetworkOut } from "../v9types";
 import { backEdges, edgeStrength, schemeLayout, type Rect, type Scheme } from "./netLayout";
@@ -146,7 +147,7 @@ function useExpand(p: NetViewProps) {
   const expand = async (id: string) => {
     setStatus(`expanding ${id}…`);
     try {
-      const created = await expandNode(p.jobId, { node_id: id, steps: 1 });
+      const created = await expandNode(p.jobId, expandBody(p.net.provenance, id, 1));
       const done = await pollJob(created.job_id);
       setStatus(done.status === "done" ? null : `expansion ${done.status}`);
       if (done.status === "done") p.onNetworkChanged();

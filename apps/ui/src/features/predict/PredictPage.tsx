@@ -5,15 +5,17 @@
 // orbital reading) or state (NodePanel). Every selection lives in the hash (selection.ts).
 //
 // Props: PageProps {route}.
-// DOM: predict-job[data-job-id], predict-job-header, the JobProgress ids (predict-job-status ...),
+// DOM: predict-job[data-job-id], predict-job-header, predict-job-checkpoint (network jobs:
+// the checkpoint the job ran, data-run, data-file, data-sha; a smoke run badged), the JobProgress ids (predict-job-status ...),
 // predict-network, predict-network-list, predict-pathways, predict-step-panel, predict-node-panel.
 import { useJobPoll } from "../../api/poll";
-import type { JobOut } from "../../api/types.gen";
+import type { JobOut, Provenance } from "../../api/types.gen";
 import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ProvenanceBadge } from "../../components/ProvenanceBadge";
 import type { PageProps } from "../../registry";
 import { predictPrefillHash, type Route } from "../../router";
 import { useCapability } from "../../state/store";
+import { recordedLabel } from "./checkpoints";
 import { usePredictors } from "./hooks";
 import { JobProgress } from "./JobProgress";
 import { currentPathway } from "./network";
@@ -49,6 +51,7 @@ function JobHeader({ job, net, probabilities, badge }: { job: JobOut | null; net
         </span>
       )}
       {badge && <span className="badge badge-warn" data-testid="predict-score-badge">{badge}</span>}
+      <CheckpointLine provenance={net?.provenance ?? job?.provenance ?? null} />
       <ProvenanceBadge provenance={net?.provenance ?? job?.provenance} compact />
       {req && (
         <a className="btn btn-small" href={predictPrefillHash(req.reactants_smiles.map((smiles, i) => ({ smiles, count: req.stoichiometry?.[i] ?? 1 })))}>
@@ -56,6 +59,17 @@ function JobHeader({ job, net, probabilities, badge }: { job: JobOut | null; net
         </a>
       )}
     </div>
+  );
+}
+
+function CheckpointLine({ provenance }: { provenance: Provenance | null }) {
+  const ck = provenance?.checkpoint;
+  if (!ck) return null;
+  return (
+    <span className="muted pv-wrap" data-testid="predict-job-checkpoint" data-run={ck.run} data-file={ck.file} data-sha={ck.sha256} title={`${ck.source}/${ck.run}/${ck.file}.pt, sha256 ${ck.sha256}`}>
+      checkpoint {recordedLabel(ck)}
+      {ck.smoke && <span className="badge badge-warn"> smoke</span>}
+    </span>
   );
 }
 

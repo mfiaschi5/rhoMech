@@ -17,17 +17,15 @@ predictor drops is counted in `skips` under a reason code.
   (`gbdt_lgbm_molecule_geomfree.npz` under the shared processed directory). It ranks the
   valid orbital pairs; the `beam` best are completed into R the same way, at the sites
   (a, b) of r and s with the largest w_a^r w_b^s. The score is the model's ranking score.
-- `network`: the spec-v9 model. Available only when `ksmech.model.net` imports and a
-  checkpoint `data/models/<source>/<run>/best.pt` exists, and only through a `NetworkModel`
-  adapter (`decode(sample, rt, beam) -> [NetworkStep]`, R with its log-probability). No
-  adapter ships on this branch: the model code is not committed here.
+- `network`: the spec-v9 model through a local checkpoint (`serve.network_predictor`, with
+  its decoder `serve.network_decode`; neither is part of the physics fingerprint, the
+  network's version names the checkpoint's sha and the decoder's code instead).
 
 `info()` is cheap and runs on the API side; `propose()` runs in the worker.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import threading
 from abc import ABC, abstractmethod
@@ -47,7 +45,7 @@ if TYPE_CHECKING:
     from ksmech.arrows.reactants import ReactantTokens
     from ksmech.arrows.steps import MechanismSample
     from ksmech.serve.analysis import PoolWork
-    from ksmech.serve.contracts import Runtime
+    from ksmech.serve.contracts import ExpandRequest, PoolState, Runtime
     from ksmech.serve.settings import ServeSettings
 
 log = logging.getLogger(__name__)
@@ -55,7 +53,6 @@ log = logging.getLogger(__name__)
 ORDER = ("floor", "gbdt", "network")
 N_CHANNELS = 2  # channels completed per direction of a forming anchor
 SCORE_NOTE = "scores rank candidates; they are not probabilities"
-NETWORK_MODULE = "ksmech.model.net"
 
 
 @dataclass(frozen=True)
@@ -80,11 +77,23 @@ class NetworkStep:
 
 
 class NetworkModel(Protocol):
-    """The adapter the spec-v9 network plugs in through (pool -> ranked (R, logp))."""
+    """The adapter the spec-v9 network plugs in through (pool -> ranked (R, logp)):
+    `serve.network_predictor.CheckpointNetwork` over a local checkpoint, or a fake in tests.
+    `state` is the pool state (B + R is checked on it), `scope` "all" | "inter", and every
+    completion the decoder drops is counted in `skips`."""
 
     version: str
 
-    def decode(self, sample: MechanismSample, rt: ReactantTokens, beam: int) -> list: ...
+    def decode(
+        self,
+        sample: MechanismSample,
+        rt: ReactantTokens,
+        beam: int,
+        *,
+        state: PoolState,
+        scope: str,
+        skips: Counter,
+    ) -> list[NetworkStep]: ...
 
 
 class Predictor(ABC):
@@ -100,6 +109,20 @@ class Predictor(ABC):
         self, rt_ctx: Runtime, work: PoolWork, beam: int, scope: str, skips: Counter
     ) -> list[Candidate]:
         """Worker side; candidates best first."""
+
+    def bind(self, req: ExpandRequest) -> Predictor:
+        """The predictor that serves one expansion request (the network binds the request's
+        checkpoint); the others serve every request as they are."""
+        return self
+
+    def make_ref(self, temperature: float | None, checkpoint=None) -> PredictorRef:
+        """The reference a network records. Only the network takes a checkpoint."""
+        if checkpoint is not None:
+            msg = f"a checkpoint applies only to the network predictor, not {self.name!r}"
+            raise ServeError(Code.REQUEST_INVALID, msg, status=422)
+        info = self.info()
+        t = info.default_temperature if temperature is None else float(temperature)
+        return PredictorRef(info.name, info.version, info.checkpoint_hash, t)
 
 
 def _info(name, label, kind, available, code, reason, version, sha, unit, warnings, desc, prob):
@@ -442,90 +465,19 @@ class GBDTPredictor(Predictor):
         return ranked(out)
 
 
-# ---- network
-
-
-def network_status(settings: ServeSettings) -> tuple[str | None, list[Path]]:
-    """(why the network is unavailable or None, the checkpoints found)."""
-    try:
-        found = importlib.util.find_spec(NETWORK_MODULE) is not None
-    except (ImportError, ValueError):
-        found = False
-    ckpts = sorted(Path(settings.shared_root).glob("data/models/*/*/best.pt"))
-    if not found:
-        return (
-            f"{NETWORK_MODULE} is not importable here: the spec-v9 model code is not "
-            "committed on this branch",
-            ckpts,
-        )
-    if not ckpts:
-        return f"no checkpoint data/models/<source>/<run>/best.pt under {settings.shared_root}", []
-    return (
-        "no NetworkModel adapter is installed for the checkpoint "
-        f"{ckpts[-1].parent.name} (serve.predictors.NetworkModel)",
-        ckpts,
-    )
-
-
-class NetworkPredictor(Predictor):
-    """The spec-v9 network through a `NetworkModel` adapter (`model`); unavailable without one."""
-
-    name = "network"
-    kind = "network"
-
-    def __init__(self, settings: ServeSettings, model: NetworkModel | None = None) -> None:
-        self.settings = settings
-        self.model = model
-
-    def info(self) -> PredictorInfo:
-        desc = "the spec-v9 transformer: anchor pointer and entry classifiers, joint log P(R)"
-        if self.model is not None:
-            version = f"network/{self.model.version}"
-            return _info(
-                self.name, "Network (spec v9)", self.kind, True, None, None, version, None,
-                "log P", (), desc, True,
-            )  # fmt: skip
-        reason, _ = network_status(self.settings)
-        return _info(
-            self.name, "Network (spec v9)", self.kind, False, str(Code.TRANSFORMER_NOT_AVAILABLE),
-            reason, None, None, "log P", (), desc, True,
-        )  # fmt: skip
-
-    def propose(self, rt_ctx, work, beam, scope, skips) -> list[Candidate]:
-        if self.model is None:
-            reason, _ = network_status(self.settings)
-            raise ServeError(Code.PREDICTOR_UNAVAILABLE, str(reason), status=409)
-        rt, out = work.rt, []
-        for step in self.model.decode(work.sample, rt, int(beam)):
-            atoms = {a for i, j, _ in step.matrix.bonds for a in (i, j)}
-            if not atoms | {i for i, _ in step.matrix.lone} <= rt.mol_atom.keys():
-                skips["NETWORK_STEP_OUTSIDE_POOL"] += 1
-                continue
-            R = step.matrix.mapped(rt.mol_atom)
-            anchor = step.anchor and tuple(sorted(rt.mol_atom[a] for a in step.anchor[:2]))
-            anchor = (*anchor, step.anchor[2]) if anchor else _first_anchor(R)
-            if anchor is None:
-                skips["NETWORK_STEP_WITHOUT_ANCHOR"] += 1
-                continue
-            out.append(Candidate(R, anchor, float(step.logp), float(step.logp)))
-        return sorted(out, key=lambda c: -c.score)
-
-
-def _first_anchor(R: ReactionMatrix) -> tuple[int, int, str] | None:
-    anchors = R.anchors()
-    return tuple(anchors[0]) if anchors else None
-
-
 class PredictorRegistry:
-    """Every predictor of one process: floor, gbdt and network."""
+    """Every predictor of one process: floor, gbdt and network (`network`: a fixed
+    `NetworkModel` for tests, else the local checkpoints)."""
 
     def __init__(self, settings: ServeSettings, fp: str, network: NetworkModel | None = None):
+        from ksmech.serve.network_predictor import NetworkPredictor
+
         self.settings = settings
         self.fp = fp
         self._predictors: dict[str, Predictor] = {
             "floor": FloorPredictor(fp),
             "gbdt": GBDTPredictor(settings.gbdt_file, fp, settings.shared_root),
-            "network": NetworkPredictor(settings, network),
+            "network": NetworkPredictor(settings, fp, network),
         }
 
     def names(self) -> list[str]:
@@ -554,12 +506,12 @@ class PredictorRegistry:
             raise ServeError(Code.PREDICTOR_UNAVAILABLE, msg, status=409, detail=detail)
         return p
 
-    def ref(self, name: str, temperature: float | None = None) -> PredictorRef:
+    def ref(self, name: str, temperature: float | None = None, checkpoint=None) -> PredictorRef:
+        """The reference of an available predictor; `checkpoint` ({source?, run, file}) names
+        the network's checkpoint (None: its default)."""
         if name == USER_PREDICTOR:
             return USER_REF
-        info = self.get(name).info()
-        t = info.default_temperature if temperature is None else float(temperature)
-        return PredictorRef(info.name, info.version, info.checkpoint_hash, t)
+        return self.get(name).make_ref(temperature, checkpoint)
 
     def available(self) -> dict[str, Predictor]:
         """Available predictors by name (the worker's `Runtime.scorers`)."""

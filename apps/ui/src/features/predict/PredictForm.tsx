@@ -1,21 +1,24 @@
 // PredictForm: the inputs of the Predict page (spec v9 "Inference"): reactant rows with
 // stoichiometry, live depictions, a Draw button (the workbench sketcher) and the /normalize
-// preflight; the predictor; beam (default 5) and max steps (default 8). Submit creates the job
-// and opens #/predict/job/<id>. Rows can be prefilled by #/predict?r=<smiles>&n=<count>&...
+// preflight; the predictor (the network with its checkpoint picker, CheckpointPicker); beam
+// (default 5) and max steps (default 8). Submit creates the job and opens #/predict/job/<id>. Rows can be prefilled by #/predict?r=<smiles>&n=<count>&...
 // "Correct from scratch" opens the Correct page on the same reactants with no prediction.
 //
 // Props:
 //   route   Route     the #/predict route (its r / n params prefill the rows)
 //
-// DOM: predict-form, the ReactantRows ids, predict-conditions, the PredictorSelect ids,
-// predict-beam, predict-max-steps, predict-submit, predict-correct-scratch, predict-error,
+// DOM: predict-form, the ReactantRows ids, predict-conditions, the PredictorSelect ids, the
+// CheckpointPicker ids (network only), predict-beam, predict-max-steps, predict-submit, predict-correct-scratch, predict-error,
 // predict-recent.
 import { useState } from "react";
+import type { CheckpointOut } from "../../api/types.gen";
 import { listJobs, toApiError, type ApiError } from "../../api/client";
 import { useCached } from "../../api/cache";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { formatRoute, jobHash, navigate, parsePredictPrefill, type Route } from "../../router";
 import { metaStore, useStore } from "../../state/store";
+import { CheckpointPicker, useNetworkCheckpoint } from "./CheckpointPicker";
+import { refOf } from "./checkpoints";
 import { NumberField } from "./NumberField";
 import { Panel } from "./Panel";
 import { defaultPredictor, PredictorSelect } from "./PredictorSelect";
@@ -30,11 +33,12 @@ export const DEFAULT_MAX_STEPS = 8;
 interface Settings {
   conditions: string;
   predictor: string | null;
+  checkpoint: string | null; // network: the chosen checkpoint id; null: the default
   beam: number | null;
   maxSteps: number | null;
 }
 
-const INITIAL: Settings = { conditions: "", predictor: null, beam: DEFAULT_BEAM, maxSteps: DEFAULT_MAX_STEPS };
+const INITIAL: Settings = { conditions: "", predictor: null, checkpoint: null, beam: DEFAULT_BEAM, maxSteps: DEFAULT_MAX_STEPS };
 
 function RecentJobs() {
   const [mounted] = useState(() => Date.now());
@@ -71,7 +75,7 @@ function usePredictSubmit() {
   return { busy, error, submit };
 }
 
-function requestOf(rows: ReactantRow[], s: Settings, predictor: string): PredictIn {
+function requestOf(rows: ReactantRow[], s: Settings, predictor: string, checkpoint: CheckpointOut | null): PredictIn {
   return {
     reactants_smiles: rows.map((r) => r.smiles.trim()),
     stoichiometry: rows.map((r) => r.count),
@@ -79,7 +83,15 @@ function requestOf(rows: ReactantRow[], s: Settings, predictor: string): Predict
     predictor,
     beam: s.beam ?? DEFAULT_BEAM,
     max_steps: s.maxSteps ?? DEFAULT_MAX_STEPS,
+    ...(predictor === "network" && checkpoint ? { checkpoint: refOf(checkpoint) } : {}),
   };
+}
+
+function blockedBy(filled: number, predictor: string, available: boolean | undefined, checkpoint: CheckpointOut | null): string | null {
+  if (!filled) return "enter at least one reactant";
+  if (available === false) return `predictor ${predictor} is unavailable`;
+  if (predictor === "network" && !checkpoint) return "choose a usable checkpoint";
+  return null;
 }
 
 /** "#/correct?r=..&n=..": the Correct page on bare reactants. */
@@ -97,8 +109,10 @@ export function PredictForm({ route }: { route: Route }) {
   const set = (p: Partial<Settings>) => setS((prev) => ({ ...prev, ...p }));
   const predictor = s.predictor ?? defaultPredictor(predictors.data);
   const info = predictors.data?.find((p) => p.name === predictor);
+  const network = predictor === "network";
+  const ck = useNetworkCheckpoint(network, s.checkpoint).chosen;
   const filled = rows.filter((r) => r.smiles.trim());
-  const blocked = !filled.length ? "enter at least one reactant" : info && !info.available ? `predictor ${predictor} is unavailable` : null;
+  const blocked = blockedBy(filled.length, predictor, info?.available, network ? ck : null);
   return (
     <div className="pv-page pv-form stack" data-testid="predict-form">
       <Panel title="Predict a mechanism" note="each step is a reaction matrix R = ΔBE; the arrows are its reading">
@@ -111,12 +125,13 @@ export function PredictForm({ route }: { route: Route }) {
             <input type="text" data-testid="predict-conditions" maxLength={500} value={s.conditions} placeholder="e.g. MeOH, 25 °C" onChange={(e) => set({ conditions: e.target.value })} />
           </label>
           <PredictorSelect value={predictor} onChange={(name) => set({ predictor: name })} predictors={predictors.data ?? null} error={predictors.error} />
+          {network && info?.available && <CheckpointPicker value={s.checkpoint} onChange={(checkpoint) => set({ checkpoint })} />}
           <div className="row pv-inline-row">
             <NumberField label="beam" testId="predict-beam" value={s.beam} min={1} max={meta?.limits.max_beam ?? 10} onChange={(beam) => set({ beam })} />
             <NumberField label="max steps" testId="predict-max-steps" value={s.maxSteps} min={1} max={meta?.limits.max_steps ?? 12} onChange={(maxSteps) => set({ maxSteps })} />
           </div>
           <div className="row pv-inline-row">
-            <button type="button" className="btn btn-primary" data-testid="predict-submit" disabled={busy || !!blocked} title={blocked ?? undefined} onClick={() => void submit(requestOf(filled, s, predictor))}>
+            <button type="button" className="btn btn-primary" data-testid="predict-submit" disabled={busy || !!blocked} title={blocked ?? undefined} onClick={() => void submit(requestOf(filled, s, predictor, network ? ck : null))}>
               {busy ? "submitting…" : "Predict"}
             </button>
             <a className={`btn${filled.length ? "" : " pv-link-disabled"}`} data-testid="predict-correct-scratch" href={filled.length ? correctScratchHash(filled) : undefined} title="draw the steps yourself on these reactants, without a prediction">
