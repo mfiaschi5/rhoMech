@@ -277,6 +277,12 @@ class QMFeaturizer(_Base):
             return self._fail(key, t0, Code.FEATURIZATION_DISABLED, detail)
         warnings = ""
         if qm is None:
+            known = self._known_failure(key)
+            if known is not None:
+                from ksmech.qm.failures import known_detail
+
+                detail = known_detail(known)
+                return self._fail(key, t0, Code.FEATURIZATION_FAILED, detail, known.reason)
             row = self._run_qm(key)
             if row["status"] != "ok":
                 return self._fail(
@@ -288,20 +294,42 @@ class QMFeaturizer(_Base):
             return self._fail(key, t0, Code.FEATURIZATION_DISABLED, detail, qm=qm)
         return self._build_tokens(key, Path(qm), t0, warnings)
 
-    def _run_qm(self, key: str) -> dict:
-        """GFN2-xTB for one species into data/serve/qm (through the module attribute, so the
-        test guard can patch it). The SIGALRM limit is `settings.qm_timeout_s`."""
-        from ksmech.qm import batch
+    def _qm_config(self, key: str):
+        """The settings `_run_qm` computes `key` with: the metal path's for a metal key."""
         from ksmech.qm.xtb_calc import QMConfig
 
         s = self.settings
+        if self.method_for(key) != self.method:
+            from ksmech.serve.chem.metal_qm import MetalQMConfig
+
+            return MetalQMConfig(cache_dir=s.serve_qm, timeout_s=int(s.qm_timeout_s))
+        return QMConfig(cache_dir=s.serve_qm, timeout_s=int(s.qm_timeout_s))
+
+    def _known_failure(self, key: str):
+        """The memo's failure of `key` under the settings `_run_qm` would use (`qm.failures`),
+        looked up in the shared cache first, then data/serve/qm; None when xTB should run."""
+        from ksmech.qm import failures
+
+        config = self._qm_config(key)
+        for qm_dir in (self.settings.shared_qm, self.settings.serve_qm):
+            hit = failures.lookup(qm_dir, key, 0, config)
+            if hit is not None:
+                return hit
+        return None
+
+    def _run_qm(self, key: str) -> dict:
+        """GFN2-xTB for one species into data/serve/qm (through the module attribute, so the
+        test guard can patch it). The SIGALRM limit is `settings.qm_timeout_s`. The call
+        records its failure in the memo, so the next request for `key` does not repeat it."""
+        from ksmech.qm import batch
+
+        s = self.settings
         assert_writable(s.serve_qm, s)
+        config = self._qm_config(key)
         if self.method_for(key) != self.method:
             from ksmech.serve.chem import metal_qm
 
-            mconfig = metal_qm.MetalQMConfig(cache_dir=s.serve_qm, timeout_s=int(s.qm_timeout_s))
-            return metal_qm.process_metal_molecule(key, mconfig)
-        config = QMConfig(cache_dir=s.serve_qm, timeout_s=int(s.qm_timeout_s))
+            return metal_qm.process_metal_molecule(key, config)
         return batch.process_molecule(batch.MolTask(key, 1, config))[0]
 
     def _build_tokens(self, key: str, qm: Path, t0: float, warnings: str) -> FeaturizeResult:

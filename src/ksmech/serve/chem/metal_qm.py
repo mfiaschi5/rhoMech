@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 from rdkit import Chem
 
-from ksmech.qm import batch
+from ksmech.qm import batch, failures
 from ksmech.qm.embed import embed, prepare_mol
 from ksmech.qm.geometry import (
     BOHR_ANG,
@@ -160,7 +160,14 @@ def _compute(key: str, config: MetalQMConfig) -> dict:
 
 def process_metal_molecule(key: str, config: MetalQMConfig) -> dict:
     """One manifest-style row (`qm.batch._row`) for `key` on the metal path. Never raises:
-    the SIGALRM limit is `config.timeout_s` (the handler is `qm.batch._init_worker`'s)."""
+    the SIGALRM limit is `config.timeout_s` (the handler is `qm.batch._init_worker`'s). The
+    outcome updates the failure memo (`qm.failures`), as `qm.batch.process_molecule`'s does."""
+    row = _run_metal(key, config)
+    failures.record_outcome([row], config)
+    return row
+
+
+def _run_metal(key: str, config: MetalQMConfig) -> dict:
     t0 = time.perf_counter()
     signal.alarm(config.timeout_s)
     try:

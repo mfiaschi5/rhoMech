@@ -30,6 +30,7 @@ from tqdm import tqdm
 
 from ksmech.data import chem
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir, steps_path
+from ksmech.qm import failures
 from ksmech.qm.embed import embed, prepare_mol
 from ksmech.qm.records import (
     QMError,
@@ -66,6 +67,7 @@ class MolTask:
     smiles: str
     n_conformers: int
     config: QMConfig
+    memo: bool = True  # consult the failure memo (`qm.failures`); off for an asked-for retry
 
 
 class _Timeout(BaseException):  # noqa: N818 - must pass through `except Exception` in the calculator
@@ -131,8 +133,28 @@ def _compute(task: MolTask) -> list[dict]:
     return rows
 
 
+def _known_failure(task: MolTask) -> dict | None:
+    """The memo's failure row of a single-conformer task, when one covers its settings."""
+    if not task.memo or task.n_conformers != 1:
+        return None
+    hit = failures.lookup(task.config.cache_dir, task.smiles, 0, task.config)
+    if hit is None:
+        return None
+    return _row(task.smiles, 0, reason=hit.reason, detail=failures.known_detail(hit))
+
+
 def process_molecule(task: MolTask) -> list[dict]:
-    """Worker entry point. Never raises: every outcome becomes manifest rows."""
+    """Worker entry point. Never raises: every outcome becomes manifest rows. A failure the memo
+    holds for these settings is answered from it; any other outcome updates the memo."""
+    known = _known_failure(task)
+    if known is not None:
+        return [known]
+    rows = _run_molecule(task)
+    failures.record_outcome(rows, task.config)
+    return rows
+
+
+def _run_molecule(task: MolTask) -> list[dict]:
     t0 = time.perf_counter()
     signal.alarm(task.config.timeout_s)
     try:
@@ -199,6 +221,14 @@ def _is_done(
     if retry_reasons:
         return not rows.loc[failed, "reason"].isin(set(retry_reasons)).any()
     return not retry_failed
+
+
+def _failed_before(prev: pd.DataFrame | None, method: str) -> set[str]:
+    """The molecules this source's manifest records as failed under `method`: a run that
+    schedules one of them again was asked to retry it, so its task skips the failure memo."""
+    if prev is None:
+        return set()
+    return set(prev.loc[(prev["status"] == "failed") & (prev["method"] == method), "smiles"])
 
 
 def _crash_row(task: MolTask) -> dict:
@@ -375,7 +405,8 @@ def featurize_dataset(
     prev = load_manifest(path)
     if prev is not None and "method" not in prev.columns:
         prev = prev.assign(method="")  # manifests written before the method column existed
-    tasks = [MolTask(s, n_conformers, config) for s in smiles_list]
+    retried = _failed_before(prev, config.method)
+    tasks = [MolTask(s, n_conformers, config, memo=s not in retried) for s in smiles_list]
     todo = [t for t in tasks if not _is_done(t, prev, retry_failed, retry_reasons)]
     console.print(
         f"{len(smiles_list)} unique molecules, {len(smiles_list) - len(todo)} done already, "
@@ -398,6 +429,9 @@ def featurize_dataset(
         _write(path, full)
     view = run_view(full, smiles_list, config)
     print_summary(view, console)
+    known = sum(str(r["detail"]).startswith(failures.KNOWN_PREFIX) for r in rows)
+    if known:
+        console.print(f"{known} known failures answered from the failure memo, not recomputed")
     console.print(f"wrote manifest: {path}")
     return view
 

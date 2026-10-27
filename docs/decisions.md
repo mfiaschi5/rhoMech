@@ -5867,3 +5867,63 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
 - **UI.** A user menu in the header (name, role, "no limits" for an admin, Sign in / Sign out,
   Users for an admin), `#/login` (password form, provider buttons, then the account with its
   quota and a password change) and `#/users` (the admins' user management).
+
+## 2026-10-27: the failure memo and the SQLite cache index (`qm.failures`, `qm.index`)
+
+- **Why.** The file caches already make every successful GFN2 run happen once: on the 1045
+  pool states the web app saved, about 2000 featurized fragment occurrences cost 188 xTB runs.
+  Two gaps were left. A failure was never remembered across runs: the web app's featurizer
+  read only `failures.jsonl`, an append-only log, so a species reached again by another job
+  ran xTB again, up to `qm_timeout_s` = 900 s on a compute worker of one or two processes, and
+  a molecule that failed in one dataset's batch was recomputed by the next dataset's (the
+  failures lived only in each source's manifest). And no single place answered "what is
+  cached, what failed and why" across `data/cache` and `data/serve` without opening every file.
+- **Tombstones next to the records, not rows in a database.** A failure that would recur leaves
+  `<cache key>.failed.json` in the QM cache directory, with the provenance header of a QM
+  record (kind `qm_failure`), the reason, the detail, the time spent and every `QMConfig`
+  setting but the cache directory. The files stay the one source of truth, so the index can
+  always be rebuilt and the memo needs no running database. The functions that run xTB write
+  it (`qm.batch.process_molecule`, serve's `metal_qm.process_metal_molecule`); a success
+  removes it, and a record on disk always wins over it.
+- **Covering rule.** A tombstone answers a later request when the settings are the same and no
+  budget (`timeout_s`, `maxiter`, `scf_maxiter`) is larger than the one that failed; a larger
+  budget or any other changed setting runs xTB again. A weaker failure never overwrites a
+  tombstone that covers it. Remembered reasons: EMBED_FAILED, SPIN_PARITY, OPT_NOT_CONVERGED,
+  SCF_NOT_CONVERGED, CONNECTIVITY_CHANGED, TIMEOUT, UNSUPPORTED_ELEMENT. Not remembered:
+  WORKER_CRASH, UNEXPECTED, XTB_NOT_FOUND (the host, not the molecule; the crashes of
+  2026-10-24 were a RAM fault). TIMEOUT is remembered although it depends on the load: it is
+  the costliest failure to repeat, and `--timeout` with a larger value retries it.
+- **Who consults it.** `process_molecule` answers a single-conformer task from the memo of its
+  own cache directory (a row with the original reason, `seconds` 0 and the detail
+  "known failure (...)"); a task with several conformers runs as before. `ksmech-qm run` turns
+  the memo off for the molecules its own manifest records as failed, so `--retry-reason` and
+  the default retry still recompute them; a molecule another source failed on is answered from
+  the memo. Serve's `QMFeaturizer` looks up the shared cache's memo, then its own, with the
+  settings it would run (`_qm_config`), before calling xTB; a hit is FEATURIZATION_FAILED with
+  the original reason as `upstream`, logged to `failures.jsonl` as before.
+- **The 149 failures in PMechDB's manifest are not imported as tombstones.** The manifest does
+  not record the settings they ran with, and inventing them would let the memo answer for
+  settings it never saw. 100 of them are SPIN_PARITY, found before any SCF; the rest get a
+  tombstone the next time they are retried.
+- **The index: SQLite from the standard library, one file per root.** `<root>/index.sqlite`
+  (`data/cache`, `data/serve`; a root holds `qm/`, `tokens/`, `bond_index/`) lists every
+  record, tombstone, token file and Wiberg sidecar with its header (kind, schema, content
+  hash, build time, git hash, dirty flag, inputs, config) and, for records and tombstones, the
+  SMILES, conformer, method, atom count, warnings or reason. The key is the cache key (the file
+  stem), which joins the layers (view `molecule`). Why SQLite: one host, many readers, one
+  writer at a time, no server, no new dependency, and the engine may not import SQLModel or
+  SQLAlchemy (`tests/test_engine_boundary.py`). PostgreSQL becomes worth it only if several
+  hosts write the same root at once; DuckDB only as a read-only query tool beside it.
+- **The index is a cache of the headers.** `ksmech-qm index refresh` reads only the files whose
+  size or mtime changed and drops the rows of removed files; `--rebuild` starts from empty; an
+  index of another `INDEX_VERSION` is recreated. Unreadable files are listed with their problem
+  (NO_HEADER, CORRUPT_ARTIFACT, KIND_MISMATCH) and counted. Nothing on the hot path reads it:
+  the batch and the web app still look files up by path, so a stale index costs nothing but a
+  stale report, and `stats` refreshes first unless `--no-refresh`. It is never copied between
+  hosts. On this host the first build of `data/cache` (43,189 files) took 74 s; a refresh with
+  nothing changed takes about 2 s; the file is 34 MB.
+- **First reading of the real index:** 245 records of `data/cache` are gas-phase
+  (`GFN2-xTB/tblite-lbfgs`) and have no tokens, and 14,342 of its 14,478 Wiberg sidecars were
+  built from a dirty tree (allowed: sidecars are verified, not `verify_clean`ed).
+- **Not done here:** moving serve-built records into the shared cache (`promote`), a
+  resonance-invariant key, and packs of records for FlowER-scale roots.

@@ -153,9 +153,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
-  codes), `uv run ksmech-qm bond-index`
+  codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,
+  and a later run of any source, or the web app, with the same settings and no larger budget
+  answers from it instead of rerunning xTB), `uv run ksmech-qm bond-index`
   (Wiberg bond indices of the Lewis bonds of every cached record, `data/cache/bond_index/`; the
-  token cache needs them, so re-run after the QM batch)
+  token cache needs them, so re-run after the QM batch), `uv run ksmech-qm index stats [--root
+  data/cache --root data/serve]` (the SQLite index `<root>/index.sqlite` of records, tombstones,
+  tokens and Wiberg sidecars, read from the file headers and refreshed incrementally first;
+  `index refresh [--rebuild]` only refreshes; the files stay the source of truth)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
   without a QM record are skipped and counted, so re-run after the QM batch), `uv run
