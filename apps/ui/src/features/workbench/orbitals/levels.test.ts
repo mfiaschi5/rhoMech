@@ -6,7 +6,7 @@
 // apart.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEGENERACY, clampRange, degeneracies, degenerateLevels, energyWindow, frontierBlocks, groupLevels, groupLmoLevels, MIN_SPAN, panRange, sanitizeDegeneracy, spreadLabels, zoomRange } from "@ksmech/viz/orbitals/levels";
+import { DEGENERACY, clampRange, degeneracies, degenerateLevels, energyWindow, frontierBlocks, groupLevels, groupLmoLevels, levelSlots, MIN_SPAN, panRange, sanitizeDegeneracy, spreadLabels, zoomRange } from "@ksmech/viz/orbitals/levels";
 import { DEFAULT_PREFS, sanitizePrefs, updatePrefs } from "../layout/prefs.ts";
 
 const row = (index, energy_ev, occupation, level = null, frontier = null) => ({ index, energy_ev, occupation, level, frontier, label: "", kind: occupation > 0.5 ? "occupied" : "virtual", centres: [], centroid: null });
@@ -108,4 +108,23 @@ test("LMOs group at the threshold, occupied and virtual apart; degeneracies size
   const d = degeneracies(lmos, 0.05, true);
   assert.deepEqual([0, 3, 4, 6].map((i) => d.get(i)), [3, 1, 2, 1]);
   assert.equal(degeneracies(MOS, 0.05, false).get(5), 2, "canonical: the HOMO pair");
+});
+
+test("levelSlots: groups a few px apart share a row side by side, far groups get the full width", () => {
+  // the toluene IBO C-H bonds: two groups 0.13 eV apart, then one far away
+  const lmos = [row(7, -13.7228, 2), row(8, -13.7227, 2), row(10, -13.6916, 2), row(12, -13.5954, 2), row(13, -13.5458, 2), row(15, -11.478, 2)];
+  const groups = groupLmoLevels(lmos, 0.05);
+  assert.equal(groups.length, 3);
+  const y = (e) => -e * 10; // 10 px per eV: the first two groups are 1.3 px apart
+  const slots = levelSlots(groups, y, 0, 100, 100, 4);
+  const xs = [7, 8, 10, 12, 13].map((i) => slots.get(i));
+  assert.equal(new Set(xs.map((s) => s.cluster)).size, 1, "one row");
+  for (let k = 1; k < xs.length; k++) assert.ok(xs[k].x >= xs[k - 1].x + xs[k - 1].w, "no overlap");
+  assert.equal(slots.get(15).w, 100, "a lone level spans the column");
+  assert.notEqual(slots.get(15).cluster, xs[0].cluster);
+  const zoomed = levelSlots(groups, (e) => -e * 1000, 0, 100, 100, 4);
+  assert.notEqual(zoomed.get(7).cluster, zoomed.get(12).cluster, "zoomed in, the groups separate");
+  const crowd = groupLevels(Array.from({ length: 40 }, (_, i) => row(i, i * 0.06, 2)), 0.05);
+  const packed = levelSlots(crowd, y, 0, 100, 100, 10);
+  assert.ok([...packed.values()].every((s) => s.w >= 1 && s.x >= 0 && s.x + s.w <= 100.0001), "a crowded row stays in the column");
 });

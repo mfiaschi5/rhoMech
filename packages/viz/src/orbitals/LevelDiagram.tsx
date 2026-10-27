@@ -1,6 +1,7 @@
 // LevelDiagram: the canonical MO energy levels in hand-made SVG, at the panel's full size.
 // Degenerate MOs (within the degeneracy threshold, regrouped client-side: levels.ts) sit side by
-// side; occupations as half-arrows; the HOMO-1, HOMO, LUMO and LUMO+1 blocks labelled with their
+// side, and so do distinct levels that would be drawn within a few px of each other at the current
+// zoom (levelSlots: each keeps its own height; zoom in to separate them); occupations as half-arrows; the HOMO-1, HOMO, LUMO and LUMO+1 blocks labelled with their
 // energies, the labels kept apart with leaders. Click a level to show that MO. When an LMO set
 // is shown, a second column holds the LMO energies E_r (click: show that LMO) and the selected
 // LMO's spectral weights are drawn as bars on the canonical levels. The LMOs are grouped at the
@@ -25,7 +26,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { OrbitalRowOut } from "../apiTypes";
 import { exact, fmt, niceTicks } from "../format";
-import { DEGENERACY, energyWindow, frontierBlocks, frontierLabel, groupLevels, groupLmoLevels, panRange, sanitizeDegeneracy, sideBySide, spectralWeights, spreadLabels, zoomRange, type LevelGroup, type Range, type Window } from "./levels";
+import { DEGENERACY, energyWindow, frontierBlocks, frontierLabel, groupLevels, groupLmoLevels, levelSlots, panRange, sanitizeDegeneracy, spectralWeights, spreadLabels, zoomRange, type LevelGroup, type Range, type Slot, type Window } from "./levels";
 import "./orbitals.css";
 
 export interface LevelDiagramProps {
@@ -134,6 +135,8 @@ function OccArrows({ x, y, occ, h }: { x: number; y: number; occ: number; h: num
 
 interface LevelsProps {
   groups: LevelGroup[];
+  /** levelSlots of the groups at this zoom. */
+  slots: Map<number, Slot>;
   frontier: Map<number, string>;
   s: Scale;
   g: Geometry;
@@ -143,10 +146,16 @@ interface LevelsProps {
 }
 
 /** Half the free height (px) around group `i` (for the arrows), up to 7; 0 (no arrows) when
- *  the neighbours are closer than 8 px: zoom in to see them. */
-function roomAt(groups: LevelGroup[], i: number, s: Scale): number {
+ *  the neighbours of other rows (groups side by side in one row do not count) are closer than
+ *  8 px: zoom in to see them. */
+function roomAt(groups: LevelGroup[], i: number, s: Scale, slots: Map<number, Slot>): number {
   const yy = s.y(groups[i].energy);
-  const gaps = [i > 0 ? s.y(groups[i - 1].energy) - yy : 99, i + 1 < groups.length ? yy - s.y(groups[i + 1].energy) : 99];
+  const row = (k: number) => slots.get(groups[k].rows[0].index)?.cluster;
+  let below = i - 1;
+  while (below >= 0 && row(below) === row(i)) below--;
+  let above = i + 1;
+  while (above < groups.length && row(above) === row(i)) above++;
+  const gaps = [below >= 0 ? s.y(groups[below].energy) - yy : 99, above < groups.length ? yy - s.y(groups[above].energy) : 99];
   const room = Math.min(7, Math.min(...gaps) / 2 - 1);
   return room < 3 ? 0 : room;
 }
@@ -157,21 +166,21 @@ function CanonicalLevels(p: LevelsProps) {
   return (
     <g>
       {visible.map(({ grp, i }) => {
-        const { xs, w } = sideBySide(grp.rows.length, p.g.canX0, p.g.canX1, LEVEL_W, LEVEL_GAP);
         const yy = p.s.y(grp.energy);
-        const h = roomAt(p.groups, i, p.s);
-        return grp.rows.map((r, k) => {
+        const h = roomAt(p.groups, i, p.s, p.slots);
+        return grp.rows.map((r) => {
+          const { x, w } = p.slots.get(r.index) ?? { x: p.g.canX0, w: LEVEL_W };
           const wt = p.weights?.get(r.index) ?? 0;
           const sel = p.weights === null && r.index === p.selected;
           const cls = `wb-level ${r.occupation > 0.5 ? "occ" : "virt"}${sel ? " selected" : ""}`;
           return (
             <g key={r.index} className={cls} data-testid={`level-${r.index}`} data-frontier={p.frontier.get(r.index) ?? ""} data-group={grp.level} data-selected={sel ? "true" : "false"} data-weight={p.weights ? exact(wt) : undefined} onClick={() => p.onPick(r.index)} role="button">
               <title>{`MO ${r.index}${r.label ? ` (${r.label})` : ""}: ${fmt(r.energy_ev, 3)} eV, occupation ${fmt(r.occupation, 2)}${grp.rows.length > 1 ? `, ${grp.rows.length}-fold degenerate` : ""}`}</title>
-              <rect className="wb-hit" x={xs[k] - 3} y={yy - 8} width={w + 6} height={16} />
-              {sel && <rect className="wb-level-halo" x={xs[k] - 3} y={yy - 5} width={w + 6} height={10} rx={3} />}
-              <line x1={xs[k]} x2={xs[k] + w} y1={yy} y2={yy} />
-              <OccArrows x={xs[k] + w / 2} y={yy} occ={r.occupation} h={h} />
-              {wt > 0 && <rect className="wb-weight" x={xs[k]} y={yy + 2.5} width={Math.max(2, w * Math.min(1, wt / 0.5))} height={4} />}
+              <rect className="wb-hit" x={x - 3} y={yy - 8} width={w + 6} height={16} />
+              {sel && <rect className="wb-level-halo" x={x - 3} y={yy - 5} width={w + 6} height={10} rx={3} />}
+              <line x1={x} x2={x + w} y1={yy} y2={yy} />
+              <OccArrows x={x + w / 2} y={yy} occ={r.occupation} h={h} />
+              {wt > 0 && <rect className="wb-weight" x={x} y={yy + 2.5} width={Math.max(2, w * Math.min(1, wt / 0.5))} height={4} />}
             </g>
           );
         });
@@ -183,7 +192,7 @@ function CanonicalLevels(p: LevelsProps) {
 const LABEL_ORDER = ["lumo_plus_1", "lumo", "homo", "homo_minus_1"];
 
 /** The frontier block labels at the right of the levels, spread apart, with leaders. */
-function FrontierLabels({ groups, frontier, s, g }: Pick<LevelsProps, "groups" | "frontier" | "s" | "g">) {
+function FrontierLabels({ groups, slots, frontier, s, g }: Pick<LevelsProps, "groups" | "slots" | "frontier" | "s" | "g">) {
   // a block (frontierBlocks: within the threshold of its anchor) may straddle two drawn groups
   // at a large threshold: the label gives the block's own size and mean energy
   const items = LABEL_ORDER.flatMap((f) => {
@@ -192,8 +201,11 @@ function FrontierLabels({ groups, frontier, s, g }: Pick<LevelsProps, "groups" |
     const energy = members.reduce((t, r) => t + r.energy_ev, 0) / members.length;
     if (energy < s.lo || energy > s.hi) return [];
     const grp = groups.filter((x) => x.rows.some((r) => frontier.get(r.index) === f)).sort((a, b) => b.rows.length - a.rows.length)[0];
-    const right = sideBySide(grp.rows.length, g.canX0, g.canX1, LEVEL_W, LEVEL_GAP);
-    return [{ f, n: members.length, energy, y: s.y(grp.energy), x: right.xs[right.xs.length - 1] + right.w }];
+    const right = Math.max(...grp.rows.map((r) => {
+      const sl = slots.get(r.index);
+      return sl ? sl.x + sl.w : g.canX1;
+    }));
+    return [{ f, n: members.length, energy, y: s.y(grp.energy), x: right }];
   });
   const ys = spreadLabels(items.map((it) => it.y), 15, TOP + 4, g.H - BOTTOM - 2);
   return (
@@ -222,28 +234,25 @@ function FrontierLabels({ groups, frontier, s, g }: Pick<LevelsProps, "groups" |
 }
 
 /** The LMO column: degenerate LMOs (groupLmoLevels at the threshold) side by side at their mean
- *  E_r, like the canonical levels. */
-function LmoLevels(p: { groups: LevelGroup[]; s: Scale; g: Geometry; selected: number | null; onPick(i: number): void }) {
+ *  E_r, like the canonical levels, and groups a few px apart side by side too (levelSlots). */
+function LmoLevels(p: { groups: LevelGroup[]; slots: Map<number, Slot>; s: Scale; g: Geometry; selected: number | null; onPick(i: number): void }) {
   const { lmoX0, lmoX1 } = p.g;
   return (
     <g>
-      <text className="wb-axis-title" x={(lmoX0 + lmoX1) / 2} y={12} textAnchor="middle">
-        LMO E_r
-      </text>
       {p.groups
         .filter((grp) => grp.energy >= p.s.lo && grp.energy <= p.s.hi)
         .map((grp) => {
-          const { xs, w } = sideBySide(grp.rows.length, lmoX0, lmoX1, lmoX1 - lmoX0, LMO_GAP);
           const yy = p.s.y(grp.energy);
-          return grp.rows.map((r, k) => {
+          return grp.rows.map((r) => {
+            const { x, w } = p.slots.get(r.index) ?? { x: lmoX0, w: lmoX1 - lmoX0 };
             const sel = r.index === p.selected;
             const deg = grp.rows.length > 1 ? `, ${grp.rows.length}-fold degenerate (mean ${fmt(grp.energy, 3)} eV)` : "";
             return (
               <g key={r.index} className={`wb-level lmo ${r.occupation > 0.5 ? "occ" : "virt"}${sel ? " selected" : ""}`} data-testid={`lmo-level-${r.index}`} data-group={grp.level} data-selected={sel ? "true" : "false"} onClick={() => p.onPick(r.index)} role="button">
                 <title>{`LMO ${r.index}: E_r ${fmt(r.energy_ev, 3)} eV, occupation ${fmt(r.occupation, 2)}${deg}`}</title>
-                <rect className="wb-hit" x={xs[k] - 1} y={yy - 5} width={w + 2} height={10} />
-                {sel && <rect className="wb-level-halo" x={xs[k] - 2} y={yy - 5} width={w + 4} height={10} rx={3} />}
-                <line x1={xs[k]} x2={xs[k] + w} y1={yy} y2={yy} />
+                <rect className="wb-hit" x={x - 1} y={yy - 5} width={w + 2} height={10} />
+                {sel && <rect className="wb-level-halo" x={x - 2} y={yy - 5} width={w + 4} height={10} rx={3} />}
+                <line x1={x} x2={x + w} y1={yy} y2={yy} />
               </g>
             );
           });
@@ -443,6 +452,8 @@ export function LevelDiagram(p: LevelDiagramProps) {
   const lmoGroups = useMemo(() => (p.lmos ? groupLmoLevels(p.lmos, threshold) : null), [p.lmos, threshold]);
   const lmo = p.lmos?.find((r) => r.index === p.selected);
   const weights = p.lmos ? spectralWeights(lmo) : null;
+  const slots = levelSlots(groups, s.y, g.canX0, g.canX1, LEVEL_W, LEVEL_GAP);
+  const lmoSlots = lmoGroups ? levelSlots(lmoGroups, s.y, g.lmoX0, g.lmoX1, g.lmoX1 - g.lmoX0, LMO_GAP) : null;
   const gestures = useGestures(svgRef, view, s);
   const clip = useId().replace(/:/g, "");
   const span = view.range[1] - view.range[0];
@@ -458,11 +469,16 @@ export function LevelDiagram(p: LevelDiagramProps) {
         <rect className="wb-level-bg" x={0} y={0} width={W} height={H} />
         <Axis s={s} H={H} />
         <g clipPath={`url(#${clip})`}>
-          <CanonicalLevels groups={groups} frontier={frontier} s={s} g={g} selected={p.selected} weights={weights} onPick={p.onPickCanonical} />
-          <FrontierLabels groups={groups} frontier={frontier} s={s} g={g} />
-          {lmoGroups && <LmoLevels groups={lmoGroups} s={s} g={g} selected={p.selected} onPick={p.onPickLmo} />}
+          <CanonicalLevels groups={groups} slots={slots} frontier={frontier} s={s} g={g} selected={p.selected} weights={weights} onPick={p.onPickCanonical} />
+          <FrontierLabels groups={groups} slots={slots} frontier={frontier} s={s} g={g} />
+          {lmoGroups && lmoSlots && <LmoLevels groups={lmoGroups} slots={lmoSlots} s={s} g={g} selected={p.selected} onPick={p.onPickLmo} />}
         </g>
         <OutOfView rows={p.canonical} s={s} g={g} />
+        {p.lmos && (
+          <text className="wb-axis-title" x={(g.lmoX0 + g.lmoX1) / 2} y={12} textAnchor="middle">
+            LMO E_r
+          </text>
+        )}
       </svg>
       <figcaption className="muted wb-small">
         {p.lmos ? "Bars: the selected LMO's spectral weights on the canonical MOs. " : ""}Click a level to show that MO · wheel: zoom · drag: pan · double-click: reset.

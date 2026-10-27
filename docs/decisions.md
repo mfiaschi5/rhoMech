@@ -6046,3 +6046,9 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   canonical rule (a new level more than the threshold above the level's first member), drawn side
   by side at the group's mean E_r. The orbital list gains a `deg` column (×n) for both kinds of
   set. This is display only: the tokens and the model never see it.
+- **Near levels side by side** (`levels.levelSlots`, the same day). The degeneracy groups
+  alone left near but distinct levels on top of each other: toluene's IBO C-H bonds form two
+  groups 0.13 eV apart (aromatic -13.72...-13.69, methyl -13.60/-13.55 eV), 1-2 px apart in the
+  frontier window, each drawn at full width. Groups whose drawn levels lie within 6 px of the
+  previous group's now share one row of side-by-side slots in both columns, each line at its own
+  energy; zooming in splits the row. The degeneracy (the `deg` column, data-group) is unchanged.
