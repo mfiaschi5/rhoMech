@@ -9,7 +9,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateScene } from "@ksmech/viz/scene/validate";
-import { sameOriginUrl } from "./sceneUrl.ts";
+import { sameOriginUrl } from "@ksmech/viz/scene/load";
 
 const DIR = fileURLToPath(new URL("../../../public/scenes/", import.meta.url));
 const FILES = readdirSync(DIR).filter((f) => f.endsWith(".json") && f !== "index.json");

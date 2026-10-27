@@ -1,5 +1,6 @@
 // DrawModal: the workbench sketcher in a dialog, to draw a reactant; "Use" hands back RDKit's
-// canonical SMILES of the drawing. An initial SMILES is imported into the sketch.
+// canonical SMILES of the drawing. An initial SMILES is imported into the sketch. The sketcher's
+// image import (OCR: drop, paste or the import panel) works here too, through POST /api/ocr.
 //
 // Props:
 //   initial   string                   the row's SMILES (imported when it parses)
@@ -11,6 +12,8 @@
 // <prefix>-draw-smiles (the SMILES that would be used), <prefix>-draw-use.
 import { useMemo, useState } from "react";
 import { depict2d } from "../../api/workbench";
+import { ocrSource } from "../../api/ocr";
+import { useCapability } from "../../state/store";
 import { useRDKit } from "@ksmech/viz/chem/rdkit";
 import { importSketch, molblockSmiles, Sketcher, toMolblock, type Depictor, type SketchModel } from "../workbench/sketch";
 import { Modal } from "../../components/Modal";
@@ -35,6 +38,8 @@ function initialModel(rdkit: ReturnType<typeof useRDKit>["rdkit"], smiles: strin
 
 export function DrawModal({ initial, onUse, onClose, prefix = "predict" }: DrawModalProps) {
   const { rdkit } = useRDKit();
+  const ocrCap = useCapability("ocr");
+  const ocr = useMemo(() => ocrSource(ocrCap), [ocrCap.enabled, ocrCap.reason]);
   const start = useMemo(() => initialModel(rdkit, initial), [rdkit, initial]);
   const [model, setModel] = useState<SketchModel | undefined>(undefined);
   const current = model ?? start;
@@ -61,7 +66,7 @@ export function DrawModal({ initial, onUse, onClose, prefix = "predict" }: DrawM
   );
   return (
     <Modal title="Draw a reactant" onClose={onClose} testId={`${prefix}-draw-modal`} wide footer={footer}>
-      {rdkit ? <Sketcher value={start} onChange={setModel} height={380} depictor={depictor} /> : <div className="muted">loading RDKit…</div>}
+      {rdkit ? <Sketcher value={start} onChange={setModel} height={380} depictor={depictor} ocr={ocr} /> : <div className="muted">loading RDKit…</div>}
     </Modal>
   );
 }

@@ -99,6 +99,7 @@ export interface ApiRequest {
   method?: "GET" | "POST" | "PATCH";
   path: string;
   query?: Query;
+  /** JSON-encoded, except a FormData (multipart/form-data, the browser sets its boundary). */
   body?: unknown;
   /** "json" (default), "text" (cube files) or "textWithHeaders" (a TextWithHeaders). */
   as?: "json" | "text" | "textWithHeaders";
@@ -152,7 +153,9 @@ async function errorFrom(res: Response): Promise<ApiError> {
 
 async function fetchOnce(req: ApiRequest, signal?: AbortSignal): Promise<Response> {
   const init: RequestInit = { method: req.method ?? "GET", signal, headers: { Accept: "application/json" } };
-  if (req.body !== undefined) {
+  if (req.body instanceof FormData) {
+    init.body = req.body;
+  } else if (req.body !== undefined) {
     init.headers = { ...init.headers, "Content-Type": "application/json" };
     init.body = JSON.stringify(req.body);
   }

@@ -8,6 +8,7 @@ export { toMolblock, fromMolblock, MolfileError } from "@ksmech/viz/sketch/molfi
 export { analyzeSketch, cleanUpSketch, importSketch, exportSketch, ImportError, type SketchAnalysis, type ExportFormat } from "./rdkitSketch";
 export { projectPoints, type Projection3D, type Quat } from "./projection";
 export { applyDepiction, type CleanStyle, type Depictor } from "./depiction";
+export type { OcrResult, OcrSource } from "./imageImport";
 export type { ProjectionSource } from "./useLayoutActions";
 export { molblockSmiles } from "./rdkitSketch";
 export {

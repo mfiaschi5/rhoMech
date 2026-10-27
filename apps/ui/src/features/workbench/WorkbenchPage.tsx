@@ -37,12 +37,13 @@ import { useCapability } from "../../state/store";
 import { EmbeddingDialog } from "../embedding/EmbeddingDialog";
 import type { MoleculeGeometryOut, MoleculeOut } from "../../api/types.gen";
 import { depict2d } from "../../api/workbench";
+import { ocrSource } from "../../api/ocr";
 import { useGeometry, useOrbitalSet, useProperties } from "./data";
 import { OrbitalPanel } from "./orbitals/OrbitalPanel";
 import type { Window } from "@ksmech/viz/orbitals/levels";
 import { CANONICAL, DEFAULT_SET, DEFAULT_START, isMoleculeId, isOrbitalKind, parseIndex, parseLayers, parseQuality, parseRep, formatLayers, type LayerSpec } from "./params";
 import { restoreComputed, restoreSketch, saveComputed, saveSketch, sketchChanged, sketchTopology } from "./session";
-import { emptySketch, exportSketch, fromMolblock, importSketch, molblockSmiles, radicalElectrons, Sketcher, toMolblock, useSketchInfo, type Depictor, type ProjectionSource, type SketchModel, type DrawingStyle, type StyleId } from "./sketch";
+import { emptySketch, exportSketch, fromMolblock, importSketch, molblockSmiles, radicalElectrons, Sketcher, toMolblock, useSketchInfo, type Depictor, type OcrSource, type ProjectionSource, type SketchModel, type DrawingStyle, type StyleId } from "./sketch";
 import { clearSelection, useSelection } from "./store";
 import { PropertyTabs } from "./tables/PropertyTabs";
 import { useMolecule, type ComputeState } from "./useMolecule";
@@ -287,6 +288,12 @@ function useProjectionSource(state: ComputeState, model: SketchModel, geometry: 
 
 const depictor: Depictor = (req, signal) => depict2d(req, { signal });
 
+/** The sketcher's image import: POST /api/ocr while the "ocr" capability is on. */
+function useOcr(): OcrSource {
+  const cap = useCapability("ocr");
+  return useMemo(() => ocrSource(cap), [cap.enabled, cap.reason]);
+}
+
 /** Everything the panels need, gathered by the page. */
 interface PageState {
   route: Route;
@@ -334,7 +341,8 @@ function useWorkbenchData({ route, prefs }: Pick<PageState, "route" | "prefs">) 
   };
   const highlight = useMemo(() => sketchHighlight(state, model, linked, sel.atoms), [state, model, linked, sel.atoms]);
   const pick = (i: number) => update({ orb: i });
-  return { set, start, orb, rep, quality, model, setModel, info, state, ready, mid, geometry, properties, symmetry, shown, canonical, win, setWin, stale, linked, viewer, setViewer, projection, layers, radicals, onCompute, highlight, pick };
+  const ocr = useOcr();
+  return { ocr, set, start, orb, rep, quality, model, setModel, info, state, ready, mid, geometry, properties, symmetry, shown, canonical, win, setWin, stale, linked, viewer, setViewer, projection, layers, radicals, onCompute, highlight, pick };
 }
 
 type WorkbenchData = ReturnType<typeof useWorkbenchData>;
@@ -349,11 +357,11 @@ function sketchPanel(d: WorkbenchData, prefs: PageState["prefs"], setPrefs: Page
     customStyle: prefs.customStyle,
   };
   const onStyle = (drawingStyle: StyleId, customStyle: DrawingStyle) => setPrefs({ drawingStyle, customStyle });
-  const { model, setModel, highlight, projection, state, info, radicals, stale, onCompute } = d;
+  const { model, setModel, highlight, projection, state, info, radicals, stale, onCompute, ocr } = d;
   return {
     body: (
       <>
-        <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={height} projection={projection.source} depictor={depictor} display={display} onStyle={onStyle} />
+        <Sketcher value={model} onChange={setModel} highlightAtoms={highlight} height={height} projection={projection.source} depictor={depictor} display={display} onStyle={onStyle} ocr={ocr} />
         <ComputeBar state={state} blocker={computeBlocker(info.valid, info.stale, radicals)} radicals={radicals} stale={stale} onCompute={onCompute} />
       </>
     ),

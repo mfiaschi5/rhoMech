@@ -7,7 +7,7 @@
 export { SCENE_KIND, SCENE_TYPES, SCENE_VERSION, STEP_SCENE_VARIANTS } from "./scene/types";
 export type { AssetRef, CubeAsset, MoleculeScene, NetworkScene, Scene, SceneDoc, SceneEdge, SceneProvenance, SceneType, StepScene, StepSceneVariant } from "./scene/types";
 export { isRelativeAssetPath, validateScene, type ValidationResult } from "./scene/validate";
-export { assetLoader, checkAssetBytes, loadScene, NO_ASSETS, SceneError, sha256Hex, type AssetLoader, type LoadedScene, type LoadOptions } from "./scene/load";
+export { assetLoader, checkAssetBytes, loadScene, NO_ASSETS, sameOriginUrl, SceneError, sha256Hex, type AssetLoader, type LoadedScene, type LoadOptions } from "./scene/load";
 export { SceneView, type SceneViewProps } from "./scene/SceneView";
 export { firstOrbital, MoleculeSceneView } from "./scene/MoleculeSceneView";
 export { cubeLoader, stepVariants, StepSceneView } from "./scene/StepSceneView";

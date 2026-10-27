@@ -137,3 +137,20 @@ scene:export` writes one from a running server (`GET /jobs/{id}`, `/pool/{state}
 draws a scene with no API call at all (no shell, no `/api/meta`); the examples are in
 `apps/ui/public/scenes/` and `apps/ui/e2e/scene.spec.ts` checks them with every `/api/` request
 aborted.
+
+### ChemRho: the sections of the app
+
+The UI calls itself **ChemRho** (brand, `<title>`, exported image metadata); the Python package,
+the CLIs, the code identifiers, the test ids and `@ksmech/viz` keep the name ksmech. The nav
+(`apps/ui/src/registry.ts` `NAV_SECTIONS`, drawn by `App.tsx`) has four sections; page ids and
+routes are unchanged, and the section names are hash aliases (`router.ts` `PAGE_ALIASES`):
+
+| Section | Pages (routes) | Alias | What it is |
+|---|---|---|---|
+| ChemPtah | `workbench` (`#/workbench`) | `#/chemptah` | the 2D sketcher (ChemDraw-like hotkeys, fixed lengths and angles, image import by OCR through `POST /api/ocr`), 3D structure and orbitals |
+| ClotoMech | `predict`, `correct`, `curate` | `#/clotomech` (= `#/predict`) | mechanisms; a second tab row (`subnav-<page>`) while one of the three is open, capability greying per tab |
+| ChemThot | `browse` (`#/browse`) | `#/chemthot` | the mechanism databases (PMechDB, curated steps) |
+| Wiki | `wiki` (`#/wiki`, `#/wiki/<slug>`) | | `GET /api/wiki`, `/api/wiki/{slug}`: server-rendered pages whose `<figure class="wiki-scene" data-scene-src>` are hydrated with the scene viewer (`apps/ui/src/components/SceneEmbed.tsx`, shared with `#/scene`) |
+
+The OCR and wiki types are written by hand in `apps/ui/src/api/ocr.ts` and `api/wiki.ts` to the
+backend contract until `types.gen.ts` carries them.

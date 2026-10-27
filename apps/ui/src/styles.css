@@ -1,4 +1,4 @@
-/* ksmech UI: the shell and the shared components. The colour tokens (light + dark) are
+/* ChemRho UI (the ksmech-serve frontend): the shell and the shared components. The colour tokens (light + dark) are
    @ksmech/viz's theme.css (main.tsx imports it first). Hand-written; no CSS framework. Feature
    pages reuse these tokens and classes. */
 
@@ -104,6 +104,48 @@ pre,
 .nav-link.disabled.active {
   background: var(--panel-2);
   color: var(--muted);
+}
+
+/* the second tab row of a section of several pages (ClotoMech: predict, correct, curate) */
+.subnav {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.subnav-title {
+  font-size: 12px;
+  margin-right: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.subnav-link {
+  padding: 3px 10px;
+  border-radius: var(--radius);
+  border-bottom: 2px solid transparent;
+  text-decoration: none;
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.subnav-link:hover {
+  background: var(--panel-2);
+}
+
+.subnav-link.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.subnav-link.disabled {
+  color: var(--muted);
+  opacity: 0.6;
+  text-decoration: line-through;
 }
 
 .capability-notice.compact {

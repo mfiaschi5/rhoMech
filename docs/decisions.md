@@ -5912,3 +5912,54 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
 - **No dataset content in the wiki.** The repository is public. The worked example embeds
   `scenes/sn2-step.json`, a floor-predictor step that ChemRho computed from the SMILES
   `C[O-]` and `CCl` (its provenance says so), not a PMechDB record.
+
+## 2026-10-27: ChemRho naming and sections — product name, nav sections, OCR import, ChemDraw hotkeys, fixed lengths and angles
+
+- **Product name vs package name.** The UI is branded ChemRho (header, `<title>`, the section
+  titles, the exported SVG/PDF metadata, `apps/ui/package.json` description). The Python
+  package, the CLIs, every code identifier, test id, storage key (`ksmech.*`) and `@ksmech/viz`
+  keep the name ksmech: renaming them would break scripts, saved sessions and the merge with the
+  backend branch for no user-visible gain.
+- **Sections.** The nav is four sections (`registry.NAV_SECTIONS`): ChemPtah (the workbench:
+  drawing, 3D, orbitals), ClotoMech (predict, correct, curate in a second tab row shown while one
+  of them is open), ChemThot (browse: the databases) and the Wiki. Page ids and routes are kept
+  (`#/workbench`, `#/predict`, ...; deep links and e2e tests keep working); the section names are
+  hash aliases (`#/chemptah`, `#/clotomech` = `#/predict`, `#/chemthot`). Capability greying
+  moved with the pages: the predict and correct sub-tabs grey with the reason.
+- **Wiki.** `#/wiki`, `#/wiki/<slug>`, pages rendered by the server; the UI hydrates
+  `<figure class="wiki-scene" data-scene-src>` with the same scene viewer as `#/scene`
+  (`components/SceneEmbed.tsx`, so the wiki feature does not import the scene page;
+  `sameOriginUrl` moved into `@ksmech/viz` `scene/load.ts`). Heading links and the contents
+  scroll instead of replacing the hash route.
+- **OCR import.** The sketcher gets the recognizer from the page (`OcrSource`, like the
+  Depictor), so it still never fetches. Three ways in: a dropped image (canvas or import box), a
+  paste with an image and no text (a clipboard with text keeps importing the text: a SMILES or
+  molfile is exact, and programs that copy a picture often add text), and the import panel's
+  file picker. The result's molfile goes through the usual import (one undoable step, the
+  image's layout scaled to the standard bond length), its SMILES as a fallback. With the `ocr`
+  capability off every path says why instead of doing nothing. The OCR and wiki API types are
+  hand-written to the contract until the backend's `types.gen.ts` lands.
+- **ChemDraw hotkeys.** Verified against ChemDraw documentation (the hotkey table on
+  macinchem.org, a ChemDraw lab handout, Revvity support notes): hover element keys
+  (c n o s f p, l b i h), bond 1/2/3, w wedge, h hash (again flips), Enter = atom label editor,
+  Space on an atom = plain carbon, Ctrl+Shift+K Clean, Alt-drag = free length and angle, fixed
+  lengths / fixed angles as toggles. Taken from ChemDraw's menus without an online source to
+  check: Ctrl+Shift+H / Ctrl+Shift+V flip, Ctrl+D duplicate. ChemRho's own: Shift+3...Shift+8
+  cycloalkane and Shift+A benzene on a hovered atom (spiro) or bond (fused) (ChemDraw has no
+  ring hotkeys), Space with nothing hovered = previous tool, "?" = the cheat sheet. Ctrl+C / X
+  put the selection (or the drawing) on the clipboard as a molfile in text/plain, which ChemDraw
+  and this sketcher both paste, plus its SMILES as chemical/x-daylight-smiles.
+- **Conflicts with ChemDraw, kept ours:** 1/2/3 on an atom grow a bond (ChemDraw adds n-Bu,
+  s-Bu, t-Bu; there are no abbreviations in the model); "." cycles radicals (ChemDraw:
+  attachment point); "?" is the cheat sheet (ChemDraw: bond properties); Alt+H / Alt+V flips
+  stay beside Ctrl+Shift+H / V. Not done: bond hotkeys d (dashed), b (bold), y (wavy), 4
+  (quadruple), c/l/r (double-bond position) and f — the model has none of those bond kinds.
+- **Fixed lengths and angles.** On by default, kept per tab in sessionStorage: a drawn bond is
+  one standard bond long at a multiple of 30 degrees (ChemDraw's default step is 15; the
+  sketcher's chain and growth geometry is built on 30, and the brief asked for 30); a dragged
+  bond end (an atom with one neighbour, alone) snaps to its neighbour the same way, or lands
+  exactly on the atom under the pointer and joins it on release. Alt or Shift held frees the
+  drag (ChemDraw: Alt / Option; Shift already freed the angle here). That takes Alt-drag from
+  panning where it starts on an atom or bond; Alt-drag on empty canvas and the middle button
+  still pan. Clicking an atom still grows the bond at 120 degrees in the best free direction
+  (zig-zag), unchanged.

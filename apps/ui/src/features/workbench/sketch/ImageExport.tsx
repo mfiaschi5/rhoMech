@@ -98,8 +98,8 @@ export function useSchemeFiles(input: SchemeInput, delay = 250): SchemeFiles | n
     const t = window.setTimeout(() => {
       const layout = exportLayout(model, hCounts, style, { cip: options.cip ? stereo : null, labelStyle });
       const bg = options.transparent ? null : "#ffffff";
-      const svg = toSvg(layout, { background: bg, title: "ksmech scheme" });
-      const pdf = pdfBytes(toPdf(layout, { background: bg, title: "ksmech scheme" }));
+      const svg = toSvg(layout, { background: bg, title: "ChemRho scheme" });
+      const pdf = pdfBytes(toPdf(layout, { background: bg, title: "ChemRho scheme" }));
       renderPng(svg, layout, options.dpi, options.transparent).then(
         (png) => {
           if (!live) return;

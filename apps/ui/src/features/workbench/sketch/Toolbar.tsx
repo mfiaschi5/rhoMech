@@ -4,12 +4,15 @@
 //
 // Props: tool / onTool, element / onElement (also the picker), the action callbacks with their
 // enabled flags, onTransform with hasSelection (the transforms' scope), and `panel` / onPanel
-// for the import/export popovers.
+// for the import/export popovers and the shortcut list ("keys"), `fixed` / onFixed for the fixed
+// lengths and angles toggles.
 //
 // DOM: <div data-testid="sketch-toolbar">, buttons tool-<name>[data-active] (tool-radical and
 // tool-diradical give an atom one or two unpaired electrons; again: clear), element-<El>
 // [data-active], element-more (opens <div data-testid="periodic-picker"> with periodic-<El>),
-// the drawing style (sketch-style, sketch-style-edit: StyleControls.tsx), then <div data-testid="sketch-actions"> (its testids in ActionBar.tsx). There is no "Fix
+// the fixed lengths / angles toggles (sketch-fixed-lengths, sketch-fixed-angles), the drawing
+// style (sketch-style, sketch-style-edit: StyleControls.tsx) with the shortcut list button
+// (sketch-keys), then <div data-testid="sketch-actions"> (its testids in ActionBar.tsx). There is no "Fix
 // layout": the server's RDKit depiction replaced the home-made relaxation (docs/decisions.md,
 // 2026-10-25).
 import { useEffect, useState, type ReactNode } from "react";
@@ -17,10 +20,11 @@ import { PALETTE, PERIODIC_ROWS, elementClass } from "@ksmech/viz/sketch/element
 import type { ToolName } from "./tools";
 import type { CleanStyle } from "./depiction";
 import type { TransformAction } from "./transform";
-import { ActionBar } from "./ActionBar";
+import type { Snap } from "./gestures";
+import { ActionBar, FixedToggles, KeysButton } from "./ActionBar";
 import { StyleControls, type StyleControlProps } from "./StyleControls";
 
-export type SketchPanel = "import" | "export" | null;
+export type SketchPanel = "import" | "export" | "keys" | null;
 
 export interface ToolbarProps {
   tool: ToolName;
@@ -58,6 +62,9 @@ export interface ToolbarProps {
   onToggleCip(): void;
   /** The drawing-style select and editor (StyleControls.tsx). */
   styleControls: StyleControlProps;
+  /** Fixed lengths / fixed angles of drawn and dragged bonds (gestures.ts). */
+  fixed: Snap;
+  onFixed(next: Snap): void;
 }
 
 const ICON: Partial<Record<ToolName, ReactNode>> = {
@@ -224,9 +231,13 @@ export function Toolbar(p: ToolbarProps) {
             ))}
           </div>
         ))}
+        <div className="sk-group sk-actions">
+          <FixedToggles fixed={p.fixed} onFixed={p.onFixed} />
+        </div>
         <Palette tool={p.tool} element={p.element} onPick={p.onElement} />
         <div className="sk-group sk-actions sk-style-group">
           <StyleControls {...p.styleControls} />
+          <KeysButton panel={p.panel} onPanel={p.onPanel} />
         </div>
       </div>
       <ActionBar {...p} />

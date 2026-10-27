@@ -210,7 +210,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (a job in the worker; pages under `data/serve/embedding/`), the step panel's Embedding view
   and the Workbench's Model trace
 - UI: `npm --prefix apps/ui run build | dev | e2e` (e2e: Playwright with the system Chrome,
-  `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`)
+  `KSMECH_E2E=1 uv run pytest tests/test_serve_e2e.py`; `KSMECH_E2E_PORT=<p>` beside another
+  server). The app is branded ChemRho, in four nav sections: ChemPtah (`#/workbench`), ClotoMech
+  (`#/predict`, `#/correct`, `#/curate`), ChemThot (`#/browse`) and the Wiki (`#/wiki`); the
+  section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
   [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; each epoch every training

@@ -111,7 +111,7 @@ export function InfoBar({ info, report = null, cip = null, radicals = 0 }: InfoB
       data-status={info.status}
       data-valid={info.valid}
     >
-      {info.status === "empty" && <span className="muted">Draw a molecule, or paste a SMILES or molfile (Ctrl+V).</span>}
+      {info.status === "empty" && <span className="muted">Draw a molecule, or paste a SMILES, a molfile or an image of a structure (Ctrl+V; ? lists the keys).</span>}
       {info.status === "loading" && <span className="muted">Loading RDKit…</span>}
       {info.error && (
         <span className="sk-error" data-testid="sketch-info-error">

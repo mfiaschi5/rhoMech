@@ -1,0 +1,148 @@
+/* The wiki (#/wiki): the page list beside the article, the table of contents, the server's HTML
+   and its scene figures. Tokens from @ksmech/viz's theme.css. */
+
+.wiki-page {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 760px) {
+  .wiki-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.wiki-side {
+  position: sticky;
+  top: 8px;
+}
+
+.wiki-search {
+  width: 100%;
+}
+
+.wiki-list,
+.wiki-cards,
+.wiki-toc ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.wiki-list a {
+  display: block;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--fg);
+}
+
+.wiki-list a:hover {
+  background: var(--panel-2);
+}
+
+.wiki-list a.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.wiki-cards li {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.wiki-main {
+  min-width: 0;
+  max-width: 980px;
+}
+
+.wiki-head h2 {
+  margin: 0 0 4px;
+}
+
+.wiki-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.wiki-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wiki-summary {
+  margin: 6px 0 0;
+  font-style: italic;
+}
+
+.wiki-toc {
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.wiki-toc-link {
+  border: 0;
+  background: none;
+  padding: 1px 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.wiki-toc-link:hover {
+  text-decoration: underline;
+}
+
+.wiki-html {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.wiki-html h1,
+.wiki-html h2,
+.wiki-html h3,
+.wiki-html h4 {
+  scroll-margin-top: 12px;
+}
+
+.wiki-html pre {
+  background: var(--panel-2);
+  padding: 8px;
+  border-radius: var(--radius);
+  overflow: auto;
+}
+
+.wiki-html table {
+  border-collapse: collapse;
+}
+
+.wiki-html th,
+.wiki-html td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}
+
+.wiki-html img {
+  max-width: 100%;
+}
+
+.wiki-html figure.wiki-scene {
+  margin: 12px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--depiction-bg);
+}
+
+.wiki-markdown {
+  max-height: none;
+}

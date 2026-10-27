@@ -687,3 +687,117 @@
   max-height: 30px;
   pointer-events: none;
 }
+
+/* ---- image import (OCR): the file picker of the import panel and the notice under the canvas */
+
+.sk-file {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.sk-file input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.sk-file.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sk-ocr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.sk-ocr-warn {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.sk-ocr[data-state="error"] {
+  border-color: var(--error);
+  background: var(--error-bg);
+}
+
+.sk-ocr-warning {
+  color: var(--warn);
+}
+
+.sk-ocr .btn {
+  margin-left: auto;
+}
+
+/* ---- the atom label editor (Enter on an atom) and the shortcut list ("?") */
+
+.sk-label-input {
+  position: absolute;
+  z-index: 25;
+  width: 56px;
+  height: 26px;
+  padding: 2px 4px;
+  font: 13px var(--mono);
+  text-align: center;
+  border: 1px solid var(--focus);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg);
+}
+
+.sk-label-input.invalid {
+  border-color: var(--error);
+  outline-color: var(--error);
+}
+
+.sk-keys {
+  width: min(560px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  overflow: auto;
+}
+
+.sk-keys-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.sk-keys-table td:first-child {
+  width: 34%;
+}
+
+.sk-key-note {
+  font-size: 11px;
+}
+
+.sk-key-origin {
+  white-space: nowrap;
+}
+
+.sk-keys-table th {
+  text-align: left;
+  padding: 8px 4px 2px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.sk-keys-table td {
+  padding: 2px 4px;
+  vertical-align: top;
+}
+
+.sk-keys-table kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}

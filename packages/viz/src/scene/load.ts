@@ -35,6 +35,17 @@ export interface LoadOptions {
   signal?: AbortSignal;
 }
 
+/** `src` as an absolute URL on the origin of `page`, or null (another origin, not a URL): the
+ *  scene viewer (#/scene) and the wiki's scene figures draw this site's files only. */
+export function sameOriginUrl(src: string, page: string): string | null {
+  try {
+    const url = new URL(src, page);
+    return url.origin === new URL(page).origin ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 const pageUrl = () => (typeof location === "undefined" ? "http://localhost/" : location.href);
 
 export async function loadScene(url: string, o: LoadOptions = {}): Promise<LoadedScene> {
