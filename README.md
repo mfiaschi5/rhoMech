@@ -65,7 +65,8 @@ export validated mechanisms, and browse PMechDB and curated steps. Backend in
 The app is an add-on to the engine: it calls the engine's modules, the engine never imports
 `ksmech.serve` (a test enforces it), and its web packages are the `serve` dependency group, not
 dependencies of `ksmech` (`uv sync` installs the group by default; `uv sync --no-group serve`
-gives the engine alone).
+gives the engine alone). The backend is thirteen sub-packages in layers, one router per service
+(predict, pool, workbench, embedding, curate, browse): `docs/serve_architecture.md`.
 
 **Spec v9 (Predict and Correct).** Every step is a reaction matrix R = Delta(BE) on the pool
 atoms (every H an atom), anchored on a forming bond. A step is applied as B + R with RDKit's

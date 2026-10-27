@@ -5650,3 +5650,24 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   schema 17), so a symmetric image counts. First check, flex_first/best, molecule val, the first
   20 samples, beam 5: top-1 60%, top-3 70%, top-5 75%, 1.2 s per sample on one CPU thread.
 
+## 2026-10-27: serve in sub-packages, one router per service
+
+- Before the merge into main and the online platform (CAD, 3D and orbitals, predict / correct,
+  curation, later a teaching wiki), the flat `ksmech.serve` (64 modules, one 900-line `api.py`)
+  became thirteen sub-packages: a foundation chain core, compute, chem, science, predict,
+  runtime; `depiction` on core; the features pool, workbench, embedding, browse, curate (one
+  `router.py` each, never importing one another); `app` wiring them. Map:
+  `docs/serve_architecture.md`; `tests/test_serve_layers.py` fails on a module-level import
+  against the layers. One process stays: a modular monolith, not separate HTTP services, because
+  the compute is already a separate worker process and the seams (routers, the `Services`
+  container, the worker's task table) are where a service would later be split off.
+- The move changed no behaviour: the OpenAPI schema is identical but for one description naming a
+  module path, and the serve tests pass unchanged but for import paths. Feature modules named after
+  their package became `service.py` (`browse/service.py`, not `browse/browse.py`).
+- `core/schemas.py` stays one module: it is the HTTP contract, mirrored into one generated
+  TypeScript file, and imports nothing from serve, so splitting it would add churn and no layer.
+- The token and physics fingerprints hash their files by relative path, so both change once:
+  orbital cubes, orbital sets, densities, properties and pool analyses are recomputed on demand,
+  and curated mechanisms read as predictor-stale until rechecked. Keeping the old paths as
+  hash labels would have kept them, at the price of names that no longer exist.
+
