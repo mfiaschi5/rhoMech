@@ -5671,3 +5671,13 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   and curated mechanisms read as predictor-stale until rechecked. Keeping the old paths as
   hash labels would have kept them, at the price of names that no longer exist.
 
+## 2026-10-27: full-R decoding of flex_first on the molecule val part
+
+- `ksmech-eval decode --run flex_first --part val` (best.pt, epoch 19, beam 5, all 1239 val
+  samples): top-1 63.0%, top-3 82.6%, top-5 85.4%; 176 samples with no completion in the class
+  among the products kept; 1.2 s per sample on one CPU thread. The anchor top-1 the trainer logs
+  is 60.9%: the full-R top-1 is higher because a completion is checked against the whole label
+  class (any variant, any symmetric image) and the beam completes five anchors, so a hit can come
+  from an anchor other than the top one. Drops: CHARGE_NOT_CONSERVED dominates (1.03M), then
+  OCTET_EXCEEDED (312k); 119 anchors found no valid completion within the search limits.
+
