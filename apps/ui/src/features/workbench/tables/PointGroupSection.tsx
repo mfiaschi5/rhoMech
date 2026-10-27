@@ -11,7 +11,7 @@
 // toolbar), symmetry-element [data-id data-label data-kind aria-pressed], symmetry-class
 // [data-element data-size].
 import { useEffect, useState, type ReactNode } from "react";
-import type { ApiError } from "../../../api/client";
+import type { ApiError } from "../../../api/http";
 import type { PendingCached } from "../../../api/hooks";
 import type { PointGroupOut, SymmetryElementOut } from "../../../api/types.gen";
 import { ErrorBanner } from "../../../components/ErrorBanner";

@@ -4,7 +4,7 @@
 // and #/browse/step/<ref>?<search>. A search never starts the index job: a 409 INDEX_NOT_READY
 // (pmechdb requested while its index is not ready) is shown in place with the way out (build the
 // index, or search curated steps only); curated-only searches always work.
-import { getBrowseStatus, searchSteps, type BrowseSource } from "../../api/client";
+import { getBrowseStatus, searchSteps, type BrowseSource } from "../../api/browse";
 import type { IndexStatusOut, SearchOut } from "../../api/types.gen";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { PendingNote } from "../../components/PendingNote";

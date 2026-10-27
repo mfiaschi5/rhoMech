@@ -3,7 +3,7 @@
 // the job and shows its report again. `onFinished` runs once per job when it reaches a terminal
 // status, so the caller can reload what the job changed.
 import { useEffect, useRef, type ReactNode } from "react";
-import { ApiError } from "../../api/client";
+import { ApiError } from "../../api/http";
 import { useJobPoll } from "../../api/poll";
 import type { JobOut } from "../../api/types.gen";
 import { ErrorBanner } from "../../components/ErrorBanner";

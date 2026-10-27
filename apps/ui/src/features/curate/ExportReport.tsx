@@ -8,7 +8,8 @@
 // export-link] (the plain download URL), div[data-testid=export-report][data-written] after a
 // download, ul[data-testid=export-warnings] li[data-code] when the report has warnings.
 import { useState } from "react";
-import { exportPmechdb, exportPmechdbUrl, toApiError, type ApiError, type PmechdbExportReport } from "../../api/client";
+import { toApiError, type ApiError } from "../../api/http";
+import { exportPmechdb, exportPmechdbUrl, type PmechdbExportReport } from "../../api/curate";
 import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import type { Route } from "../../router";

@@ -1,17 +1,18 @@
 // Predict-local React hooks: the predictors list, a pool state's depiction read as its Lewis
 // structure, and the debounced live /step/check of a matrix being edited.
 import { useEffect, useMemo, useState } from "react";
-import { getDepiction, isAbort, toApiError, type ApiError } from "../../api/client";
+import { isAbort, toApiError, type ApiError } from "../../api/http";
+import { getDepiction } from "../../api/pool";
 import { useCached, type CachedState } from "../../api/cache";
 import { useDebounced } from "../../api/hooks";
 import type { DepictionOut } from "../../api/types.gen";
 import { poolStructure, touchedAtoms, touchedHydrogens, type PoolStructure, type StructureOptions } from "./poolStructure";
 import { inContractRange, isEmptyMatrix } from "./rmatrix";
-import { checkStep, getPredictorsV9 } from "./v9api";
+import { checkStep, getPredictors } from "../../api/predict";
 import type { ArrowReadingOut, MatrixIO, PredictorOut, StepCheckOut } from "./v9types";
 
 export function usePredictors(): CachedState<PredictorOut[]> {
-  return useCached<PredictorOut[]>("/predictors#v9", () => getPredictorsV9());
+  return useCached<PredictorOut[]>("/predictors#v9", () => getPredictors());
 }
 
 export interface PoolState {

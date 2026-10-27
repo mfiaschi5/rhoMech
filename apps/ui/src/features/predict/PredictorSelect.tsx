@@ -12,7 +12,7 @@
 // DOM: select[data-testid=predict-predictor] > option[data-testid=predict-predictor-option-<name>]
 // [data-available]; predict-score-badge (scores, not probabilities); per unavailable predictor
 // [data-testid=predict-predictor-reason-<name>].
-import type { ApiError } from "../../api/client";
+import type { ApiError } from "../../api/http";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import type { PredictorOut } from "./v9types";
 

@@ -5,7 +5,7 @@
 // changes it. Test ids: browse-query, browse-mode, browse-side, browse-source-{pmechdb|user_curated},
 // browse-status, browse-resonance, browse-submit.
 import { useState, type FormEvent } from "react";
-import type { BrowseSource } from "../../api/client";
+import type { BrowseSource } from "../../api/browse";
 import { SIDES, SOURCES, STEP_STATUSES, type Mode, type Resonance, type SearchState, type Side } from "./searchParams";
 
 export interface SearchBarProps {

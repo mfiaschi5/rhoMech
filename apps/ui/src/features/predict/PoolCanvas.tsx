@@ -26,12 +26,14 @@ import { NO_SELECTION } from "../workbench/sketch/tools";
 import type { SketchPointer } from "../workbench/sketch/useSketchPointer";
 import "../workbench/sketch/sketch.css";
 import type { Vec } from "./arrowPath";
-import type { Tool } from "./editor";
 import type { PoolStructure } from "./poolStructure";
 import { arrowContext, hitPairs, hitTest, nearEnd, poolView, type PoolHit } from "./poolView";
 import { ROverlay } from "./ROverlay";
 import type { Endpoint } from "./rmatrix";
 import type { ArrowReadingOut, MatrixIO } from "./v9types";
+
+/** The editor tool whose gestures the canvas reads (the Correct page's editor cycles them). */
+export type Tool = "bond" | "lone" | "arrow" | "eraser";
 
 export interface CanvasInteraction {
   tool: Tool;

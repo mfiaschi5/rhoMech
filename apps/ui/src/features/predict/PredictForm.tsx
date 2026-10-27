@@ -12,19 +12,19 @@
 // predict-recent.
 import { useState } from "react";
 import type { CheckpointOut } from "../../api/types.gen";
-import { listJobs, toApiError, type ApiError } from "../../api/client";
+import { toApiError, type ApiError } from "../../api/http";
+import { listJobs, predict } from "../../api/predict";
 import { useCached } from "../../api/cache";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { formatRoute, jobHash, navigate, parsePredictPrefill, type Route } from "../../router";
 import { metaStore, useStore } from "../../state/store";
 import { CheckpointPicker, useNetworkCheckpoint } from "./CheckpointPicker";
 import { refOf } from "./checkpoints";
-import { NumberField } from "./NumberField";
-import { Panel } from "./Panel";
+import { NumberField } from "../../components/NumberField";
+import { Panel } from "../../components/Panel";
 import { defaultPredictor, PredictorSelect } from "./PredictorSelect";
 import { ReactantRows, usePreflight, type ReactantRow } from "./ReactantRows";
 import { usePredictors } from "./hooks";
-import { predictV9 } from "./v9api";
 import type { PredictIn } from "./v9types";
 
 export const DEFAULT_BEAM = 5;
@@ -65,7 +65,7 @@ function usePredictSubmit() {
     setBusy(true);
     setError(null);
     try {
-      const created = await predictV9(body);
+      const created = await predict(body);
       navigate(jobHash(created.job_id));
     } catch (err) {
       setError(toApiError(err));

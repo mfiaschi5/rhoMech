@@ -17,7 +17,7 @@ import { predictPrefillHash, type Route } from "../../router";
 import { useCapability } from "../../state/store";
 import { recordedLabel } from "./checkpoints";
 import { usePredictors } from "./hooks";
-import { JobProgress } from "./JobProgress";
+import { JobProgress } from "../../components/JobProgress";
 import { currentPathway } from "./network";
 import { NetworkPanel } from "./netview/NetworkPanel";
 import { useNetHeight } from "./netview/shared";
@@ -26,8 +26,8 @@ import { PathwayList } from "./PathwayList";
 import { PredictForm } from "./PredictForm";
 import { scoreBadge } from "./PredictorSelect";
 import { parseSelection, useSelect, type JobSelection, type SelectionUpdate } from "./selection";
-import { StepPanel } from "./StepPanel";
-import { networkOfJob } from "./v9api";
+import { StepPanel } from "./step/StepPanel";
+import { networkOfJob } from "../../api/predict";
 import type { NetworkOut } from "./v9types";
 
 export function PredictPage({ route }: PageProps) {

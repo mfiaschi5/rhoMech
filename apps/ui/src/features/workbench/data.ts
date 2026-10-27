@@ -1,6 +1,6 @@
 // Cached reads of a computed molecule (api/cache.ts keys are the request paths): geometry,
 // properties and orbital sets, each pending-aware (202 while the worker computes).
-import { getMoleculeGeometry, getMoleculeProperties, getOrbitalSet } from "../../api/client";
+import { getMoleculeGeometry, getMoleculeProperties, getOrbitalSet } from "../../api/workbench";
 import { usePendingCached, type PendingCached } from "../../api/hooks";
 import type { MoleculeGeometryOut, MoleculePropertiesOut, OrbitalSetOut } from "../../api/types.gen";
 import { CANONICAL } from "./params";

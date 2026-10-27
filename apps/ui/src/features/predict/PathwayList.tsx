@@ -12,7 +12,7 @@
 import { fmt } from "../../components/format";
 import { curateHash } from "../../router";
 import { matrixText, scoreText } from "./network";
-import { Panel } from "./Panel";
+import { Panel } from "../../components/Panel";
 import type { NetworkOut, PathwayOut } from "./v9types";
 
 export interface PathwayListProps {

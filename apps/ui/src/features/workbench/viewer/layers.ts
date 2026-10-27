@@ -1,6 +1,6 @@
 // Surface layers of the 3D view: what to fetch (LayerSpec, in the hash) plus the client-side
 // look (isovalue, opacity, solid or mesh, ± colours, visibility), which never refetches.
-import type { CubeKind } from "../../../api/client";
+import type { CubeKind } from "../../../api/workbench";
 import { normalizeSpec, type LayerSpec } from "../params";
 
 export interface SurfaceLayer {

@@ -7,7 +7,7 @@
 // the add controls add-layer-kind (select) and wb-add-layer (button).
 import type { GLViewer } from "3dmol";
 import { useState } from "react";
-import { moleculeCubeUrl, type CubeKind, type CubeQuality } from "../../../api/client";
+import { moleculeCubeUrl, type CubeKind, type CubeQuality } from "../../../api/workbench";
 import { ErrorBanner } from "../../../components/ErrorBanner";
 import { fmt, fmtSig } from "../../../components/format";
 import { PendingNote } from "../../../components/PendingNote";

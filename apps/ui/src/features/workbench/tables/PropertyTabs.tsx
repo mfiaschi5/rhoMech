@@ -9,7 +9,7 @@
 // [data-record-index][data-element], bond-row [data-i][data-j], orbital-table-row [data-index],
 // descriptor-row [data-name].
 import { useMemo, useState, type ReactNode } from "react";
-import type { ApiError } from "../../../api/client";
+import type { ApiError } from "../../../api/http";
 import type { PendingCached } from "../../../api/hooks";
 import type { AtomPropsOut, BondPropsOut, MoleculeOut, MoleculePropertiesOut, OrbitalRowOut, OrbitalSetOut, PointGroupOut } from "../../../api/types.gen";
 import { ErrorBanner } from "../../../components/ErrorBanner";

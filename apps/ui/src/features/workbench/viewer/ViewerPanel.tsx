@@ -18,7 +18,7 @@
 // rows wb-measure and the toolbar.
 import { useEffect, useMemo, useState } from "react";
 import type { GLViewer } from "3dmol";
-import type { CubeQuality } from "../../../api/client";
+import type { CubeQuality } from "../../../api/workbench";
 import type { MoleculeGeometryOut, MoleculePropertiesOut, OrbitalSetOut, PointGroupOut } from "../../../api/types.gen";
 import { atomPropDefs, findProp, propRange } from "../atomProps";
 import type { Rep } from "../params";

@@ -5,7 +5,7 @@
 // DOM: rep-select, h-toggle, label-select, colour-select, wiberg-toggle, centroid-toggle,
 // symmetry-toggle, symmetry-classes-toggle, measure-select, quality-select, export-png,
 // export-xyz, export-mol.
-import type { CubeQuality } from "../../../api/client";
+import type { CubeQuality } from "../../../api/workbench";
 import type { AtomPropDef } from "../atomProps";
 import { QUALITIES, REPS, type Rep } from "../params";
 import type { MeasureMode } from "./measure";

@@ -4,7 +4,8 @@
 // density isosurface.
 import type { GLShape, GLViewer } from "3dmol";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { isAbort, toApiError, type ApiError, type CubeMeta, type CubeQuality } from "../../../api/client";
+import { isAbort, toApiError, type ApiError } from "../../../api/http";
+import { type CubeMeta, type CubeQuality } from "../../../api/workbench";
 import type { PendingInfo } from "../../../api/hooks";
 import { addMappedSurface, addSurface, addSurfaces, removeMapped, removeShapes, type MappedSurface } from "../../../chem/threed";
 import type { LayerSpec } from "../params";

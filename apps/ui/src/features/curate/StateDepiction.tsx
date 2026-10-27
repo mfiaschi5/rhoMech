@@ -3,7 +3,8 @@
 // into its parent. A state that cannot be loaded (404 after a cleanup, say) falls back to a plain
 // RDKit.js drawing of `fallbackSmiles` with the error beside it, never to an empty box.
 import { useState } from "react";
-import { getDepiction, type RequestOptions } from "../../api/client";
+import { type RequestOptions } from "../../api/http";
+import { getDepiction } from "../../api/pool";
 import { useCached } from "../../api/cache";
 import type { DatasetArrowOut, DepictionOut, WorkerStatusOut } from "../../api/types.gen";
 import type { TokenArrowLike } from "../../chem/arrowGeom";

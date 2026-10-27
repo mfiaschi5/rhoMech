@@ -3,7 +3,8 @@
 // feature file and builds before any feature exists. Features never import each other's pages:
 // they share src/api, src/chem, src/components, src/state, router.ts and this file. One
 // exception: predict reuses the workbench's drawing modules (sketch/: the sketcher, its
-// renderer and molfile reader; viewer/useGLViewer), never its page or its stores.
+// renderer and molfile reader; viewer/useGLViewer), never its page or its stores; correct
+// reuses predict's modules (pool canvas, R matrix, step views, hooks), never its page.
 //
 //   // src/features/predict/index.tsx
 //   import { registerPage } from "../../registry";

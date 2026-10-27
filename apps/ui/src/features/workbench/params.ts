@@ -8,7 +8,7 @@
 //   layers  pinned surface layers, comma separated "kind:set:start:index" (empty fields allowed)
 //   q       cube quality: draft, normal (default), fine
 // Pure functions only (no React), so they can be unit-checked in node.
-import type { CubeKind, CubeQuality } from "../../api/client";
+import type { CubeKind, CubeQuality } from "../../api/workbench";
 
 export const REPS = ["ball-and-stick", "sticks", "spacefill", "wireframe", "lines"] as const;
 export type Rep = (typeof REPS)[number];

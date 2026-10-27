@@ -13,7 +13,7 @@
 //                  or DepictionOut.server_svg when already present), shown instead. Needed when
 //                  fewer than two unlabelled atoms end a single bond (CCl, [OH-] + CCl, ...).
 // Positions are in the SVG's viewBox units; the overlay uses the same viewBox.
-import { getDepiction } from "../api/client";
+import { getDepiction } from "../api/pool";
 import type { DepictionOut } from "../api/types.gen";
 import { loadRDKit, type RDKitModule } from "./rdkit";
 import { fitAtomPositions, molblockCoords, type Point, type SvgPrimitive } from "./svgFit";

@@ -9,7 +9,8 @@
 // curate-validate / curate-reject / curate-reopen (only the allowed moves), curate-save,
 // recheck-button (POST /curate/{mid}/recheck; the job is followed as recheck-job).
 import { useState } from "react";
-import { getMechanism, patchMechanism, recheckMechanism, toApiError, type ApiError } from "../../api/client";
+import { toApiError, type ApiError } from "../../api/http";
+import { getMechanism, patchMechanism, recheckMechanism } from "../../api/curate";
 import type { MechanismOut, MechanismPatchIn } from "../../api/types.gen";
 import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";

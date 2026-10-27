@@ -11,7 +11,7 @@
 import { useCached } from "../../api/cache";
 import type { CheckpointOut } from "../../api/types.gen";
 import { ErrorBanner } from "../../components/ErrorBanner";
-import { getModels } from "../embedding/api";
+import { getModels } from "../../api/predict";
 import { checkpointId, defaultNetworkCheckpoint, pickerLabel } from "./checkpoints";
 
 /** GET /models (cached), the chosen checkpoint (or the default) and the list. */

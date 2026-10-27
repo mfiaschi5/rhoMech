@@ -10,10 +10,10 @@
 // DOM: <prefix>-draw-modal (Modal) with the Sketcher (data-testid=sketch ...),
 // <prefix>-draw-smiles (the SMILES that would be used), <prefix>-draw-use.
 import { useMemo, useState } from "react";
-import { depict2d } from "../../api/client";
+import { depict2d } from "../../api/workbench";
 import { useRDKit } from "../../chem/rdkit";
 import { importSketch, molblockSmiles, Sketcher, toMolblock, type Depictor, type SketchModel } from "../workbench/sketch";
-import { Modal } from "./Modal";
+import { Modal } from "../../components/Modal";
 
 export interface DrawModalProps {
   initial: string;

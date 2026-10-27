@@ -8,7 +8,7 @@
 //
 // DOM: <div role="alert" data-testid="error-banner" data-code="<code>">: code, message, the
 // upstream reason code and request id when present, and the detail JSON in a <details>.
-import { ApiError } from "../api/client";
+import { ApiError } from "../api/http";
 
 export interface ErrorBannerProps {
   error: ApiError | Error | string | null | undefined;

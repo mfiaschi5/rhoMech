@@ -36,7 +36,7 @@ import { PendingNote } from "../../components/PendingNote";
 import { useCapability } from "../../state/store";
 import { EmbeddingDialog } from "../embedding/EmbeddingDialog";
 import type { MoleculeGeometryOut, MoleculeOut } from "../../api/types.gen";
-import { depict2d } from "../../api/client";
+import { depict2d } from "../../api/workbench";
 import { useGeometry, useOrbitalSet, useProperties } from "./data";
 import { OrbitalPanel } from "./orbitals/OrbitalPanel";
 import type { Window } from "./orbitals/levels";

@@ -3,7 +3,7 @@
 // which never change for a state id, go through useCached instead. A 202 PendingOut is retried by
 // the client (§11.3) and surfaces here as `pending` (shown with components/PendingNote).
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, isAbort, toApiError, type RequestOptions } from "../../api/client";
+import { ApiError, isAbort, toApiError, type RequestOptions } from "../../api/http";
 import type { WorkerStatusOut } from "../../api/types.gen";
 
 export interface PendingInfo {

@@ -8,7 +8,7 @@
 //   ...a "retry" button after an error: dep.reload() (refresh(key): reloads even though the
 //   failed entry was already dropped, which invalidate() would not notice).
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, isAbort, toApiError } from "./client";
+import { ApiError, isAbort, toApiError } from "./http";
 
 const entries = new Map<string, Promise<unknown>>();
 const values = new Map<string, unknown>();

@@ -2,7 +2,7 @@
 // debounced values and a latest-value ref. Feature-specific hooks (pool depictions, tokens)
 // stay in their feature.
 import { useEffect, useRef, useState } from "react";
-import type { RequestOptions } from "./client";
+import type { RequestOptions } from "./http";
 import { useCached, type CachedState } from "./cache";
 import type { WorkerStatusOut } from "./types.gen";
 

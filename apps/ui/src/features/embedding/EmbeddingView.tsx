@@ -16,7 +16,7 @@
 // <testId>-facts, <testId>-frame (the iframe, data-hash: the page's view), JobProgress inside
 // (predict-job-*), the capability notice (capability-notice[data-capability=embedding]).
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { toApiError, type ApiError } from "../../api/client";
+import { toApiError, type ApiError } from "../../api/http";
 import { useCached } from "../../api/cache";
 import { useJobPoll } from "../../api/poll";
 import type { CheckpointOut, EmbeddingResultOut, JobOut } from "../../api/types.gen";
@@ -24,8 +24,9 @@ import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { fmtSig } from "../../components/format";
 import { useCapability } from "../../state/store";
-import { JobProgress } from "../predict/JobProgress";
-import { createEmbedding, getModels } from "./api";
+import { JobProgress } from "../../components/JobProgress";
+import { getModels } from "../../api/predict";
+import { createEmbedding } from "../../api/embedding";
 import { CHECKPOINT_KEY, checkpointKey, checkpointLabel, cleanViewHash, defaultCheckpoint, parseCheckpointKey, readStored, themeOf, tracePageUrl, viewKey, writeStored, type PageTheme } from "./embedding";
 import "./embedding.css";
 

@@ -2,7 +2,9 @@
 // useSyncExternalStore. Server state lives in api/cache.ts; selection state lives in the hash.
 // The app-wide stores here hold /api/meta, /api/predictors and the shell's error banner.
 import { useSyncExternalStore } from "react";
-import { ApiError, getMeta, getPredictors, toApiError } from "../api/client";
+import { ApiError, toApiError } from "../api/http";
+import { getMeta } from "../api/meta";
+import { getPredictors } from "../api/predict";
 import type { MetaOut, PredictorInfoOut } from "../api/types.gen";
 
 export interface Store<T> {

@@ -4,7 +4,8 @@
 // direct CSV download, no job).
 // DOM: table[data-testid=mechanism-list] with tr[data-testid=mechanism-row-{id}][data-status][data-stale].
 import { useState } from "react";
-import { listMechanisms, recheckMechanisms, toApiError, type ApiError } from "../../api/client";
+import { toApiError, type ApiError } from "../../api/http";
+import { listMechanisms, recheckMechanisms } from "../../api/curate";
 import type { MechanismSummaryOut } from "../../api/types.gen";
 import { CapabilityNotice } from "../../components/CapabilityNotice";
 import { ErrorBanner } from "../../components/ErrorBanner";

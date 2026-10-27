@@ -4,7 +4,7 @@
 //   #/curate/m/<mechId>               one stored mechanism (GET / PATCH /curate/{mid}, re-check)
 // Every view also shows the mechanism list (status / stale / predictor filters), the batch
 // re-check and the export with its report. DOM: div[data-testid=curate-panel][data-view].
-import { listJobs } from "../../api/client";
+import { listJobs } from "../../api/predict";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import type { PageProps } from "../../registry";
 import { curateHash } from "../../router";

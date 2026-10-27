@@ -9,7 +9,7 @@
 // highlighted), an improper axis a dashed rod labelled S_n, a mirror plane a translucent disc
 // labelled σ, the inversion centre a small sphere labelled i.
 import type { GLViewer } from "3dmol";
-import { getMoleculeSymmetry } from "../../../api/client";
+import { getMoleculeSymmetry } from "../../../api/workbench";
 import { useDebounced, usePendingCached, type PendingCached } from "../../../api/hooks";
 import type { PointGroupOut, SymmetryElementOut } from "../../../api/types.gen";
 import { createStore, useStore } from "../../../state/store";

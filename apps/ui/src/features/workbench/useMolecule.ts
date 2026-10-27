@@ -3,7 +3,8 @@
 // sketch <-> record mapping, so it is kept with the drawing it describes (`model`, `molblock`):
 // the page compares that drawing with the current sketch to decide whether links are live.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createMolecule, getMolecule, isAbort, toApiError, type ApiError } from "../../api/client";
+import { isAbort, toApiError, type ApiError } from "../../api/http";
+import { createMolecule, getMolecule } from "../../api/workbench";
 import type { MoleculeOut, SketchMappingOut } from "../../api/types.gen";
 import type { SketchModel } from "./sketch";
 

@@ -8,7 +8,7 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { correctHash } from "../../router";
 import { usePool } from "./hooks";
 import { matrixText, rankLabel, rankOf, scoreText, speciesLabel } from "./network";
-import { Panel } from "./Panel";
+import { Panel } from "../../components/Panel";
 import { PoolCanvas } from "./PoolCanvas";
 import type { NetworkOut, NodeOut } from "./v9types";
 

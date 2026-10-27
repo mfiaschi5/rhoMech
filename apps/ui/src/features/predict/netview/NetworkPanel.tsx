@@ -10,7 +10,7 @@
 // (role=separator, arrow keys too), and the NetworkLegend <details data-testid="predict-network-list">.
 import { useRef, type KeyboardEvent, type PointerEvent as RPointerEvent } from "react";
 import { NetworkLegend } from "../NetworkLegend";
-import { Panel } from "../Panel";
+import { Panel } from "../../../components/Panel";
 import { PathwayExplorer } from "./PathwayExplorer";
 import { SchemeView } from "./SchemeView";
 import { useVariant, VARIANTS, type NetViewProps } from "./shared";

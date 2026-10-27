@@ -5,7 +5,7 @@
 // A present `q` (even empty) means "a search was submitted"; an empty query lists every step of
 // the chosen sources. A missing `src` means "the default": both sources when the PMechDB index is
 // ready, curated steps only otherwise (the pmechdb checkbox then starts unchecked).
-import type { BrowseSource } from "../../api/client";
+import type { BrowseSource } from "../../api/browse";
 import type { Route } from "../../router";
 
 export type Mode = "exact" | "substructure";

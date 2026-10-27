@@ -4,7 +4,8 @@
 // on the client and never refetch. Each load takes an AbortSignal, so a layer that changes or
 // goes away cancels its request (and the 202 pending retry loop).
 import type { VolumeData } from "3dmol";
-import { getMoleculeCube, type CubeMeta, type CubeQuality, type RequestOptions } from "../../../api/client";
+import { type RequestOptions } from "../../../api/http";
+import { getMoleculeCube, type CubeMeta, type CubeQuality } from "../../../api/workbench";
 import { parseCube, threeDmol } from "../../../chem/threed";
 import { normalizeSpec, specKey, type LayerSpec } from "../params";
 

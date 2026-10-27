@@ -15,11 +15,11 @@
 // predict-net-zoom-in/out, predict-net-cycles[aria-pressed], predict-net-export-svg/png,
 // predict-net-minimap (once zoomed in past the fit), predict-net-expand-status.
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type WheelEvent } from "react";
-import { toApiError } from "../../../api/client";
+import { toApiError } from "../../../api/http";
 import { pollJob } from "../../../api/poll";
 import { useRDKit } from "../../../chem/rdkit";
 import { expandBody } from "../checkpoints";
-import { expandNode } from "../v9api";
+import { expandNode } from "../../../api/predict";
 import type { NetworkOut } from "../v9types";
 import { backEdges, edgeStrength, schemeLayout, type Rect, type Scheme } from "./netLayout";
 import { cssVar, download, speciesLabel, stepInfo, useGraphKeys, useSymbols, type NetViewProps, type StepInfo } from "./shared";

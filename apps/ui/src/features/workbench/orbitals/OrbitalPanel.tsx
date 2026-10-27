@@ -15,7 +15,7 @@
 // folded) with <div data-testid="orbital-list"> of <tr data-testid="orbital-row" data-set
 // data-index data-selected data-frontier>.
 import { useState, type CSSProperties } from "react";
-import type { ApiError } from "../../../api/client";
+import type { ApiError } from "../../../api/http";
 import type { PendingCached } from "../../../api/hooks";
 import type { OrbitalRowOut, OrbitalSetOut } from "../../../api/types.gen";
 import { ErrorBanner } from "../../../components/ErrorBanner";

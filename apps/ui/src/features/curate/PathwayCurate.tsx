@@ -5,7 +5,9 @@
 // pathway was corrected: the server decides.
 // Without ?pathway= the job's ranked pathways are listed to choose from.
 import { useState } from "react";
-import { curate, getPathways, toApiError, type ApiError } from "../../api/client";
+import { toApiError, type ApiError } from "../../api/http";
+import { getPathways } from "../../api/predict";
+import { curate } from "../../api/curate";
 import { useJobPoll } from "../../api/poll";
 import type { CurateIn, JobOut, NetworkOut, PathwayOut } from "../../api/types.gen";
 import { CapabilityNotice } from "../../components/CapabilityNotice";

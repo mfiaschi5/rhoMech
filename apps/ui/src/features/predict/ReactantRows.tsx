@@ -15,12 +15,13 @@
 // <prefix>-preflight-{i}[data-ok="true|false|pending|empty|unchecked"] (unchecked: another field
 // failed the whole request); <prefix>-add-reactant; the DrawModal's <prefix>-draw-* ids.
 import { useEffect, useState } from "react";
-import { ApiError, isAbort, normalize, toApiError } from "../../api/client";
+import { ApiError, isAbort, toApiError } from "../../api/http";
+import { normalize } from "../../api/pool";
 import type { NormalizeOut, SpeciesPreflightOut } from "../../api/types.gen";
 import { useDebounced } from "../../api/hooks";
 import { DrawModal } from "./DrawModal";
-import { NumberField } from "./NumberField";
-import { SmilesInput } from "./SmilesInput";
+import { NumberField } from "../../components/NumberField";
+import { SmilesInput } from "../../components/SmilesInput";
 
 export interface ReactantRow {
   smiles: string;

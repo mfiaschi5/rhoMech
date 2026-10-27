@@ -7,7 +7,9 @@
 // the step's saved pool states (found through GET /curate/{mid}); PMechDB steps need the
 // server_svg of StepViewOut (w2-geometry-browse).
 import { useMemo } from "react";
-import { getDepiction, getMechanism, getBrowseStep } from "../../api/client";
+import { getDepiction } from "../../api/pool";
+import { getMechanism } from "../../api/curate";
+import { getBrowseStep } from "../../api/browse";
 import type {
   DatasetArrowOut,
   DepictionOut,

@@ -17,9 +17,8 @@
     "e2e": "playwright test"
   },
   "dependencies": {
-    "3dmol": "2.5.5",
     "@rdkit/rdkit": "2026.9.1",
-    "cytoscape": "3.34.3",
+    "3dmol": "2.5.5",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

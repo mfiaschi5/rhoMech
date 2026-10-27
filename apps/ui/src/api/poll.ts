@@ -3,7 +3,8 @@
 // With since_revision the server answers `result: null, unchanged: true` while the network
 // revision has not moved; the last full result is kept, so every JobOut handed out carries it.
 import { useEffect, useRef, useState } from "react";
-import { ApiError, getJob, isAbort, toApiError } from "./client";
+import { ApiError, isAbort, toApiError } from "./http";
+import { getJob } from "./predict";
 import type { JobOut, NetworkOut } from "./types.gen";
 
 export const TERMINAL_STATUSES: ReadonlySet<JobOut["status"]> = new Set(["done", "failed", "cancelled"]);

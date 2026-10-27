@@ -5,7 +5,8 @@
 // DOM: div[data-testid=browse-index-status][data-state] with button[data-testid=browse-build-index]
 // and, while a job is followed, span[data-testid=browse-index-job][data-status].
 import { useEffect, useRef, useState } from "react";
-import { ApiError, buildBrowseIndex, toApiError } from "../../api/client";
+import { ApiError, toApiError } from "../../api/http";
+import { buildBrowseIndex } from "../../api/browse";
 import { useJobPoll } from "../../api/poll";
 import type { IndexStatusOut, JobOut } from "../../api/types.gen";
 import { ErrorBanner } from "../../components/ErrorBanner";
