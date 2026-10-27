@@ -1,6 +1,7 @@
-// Sketcher: a ChemDraw-like 2D molecule editor in SVG (workbench phase 4). Self-contained: its
-// own immutable model (model.ts), undo/redo, tools, hotkeys, RDKit validation, import and
-// export; the 2D layouts (Clean, 3D->2D) come from the server through the page's Depictor.
+// Sketcher: a ChemDraw-like 2D molecule editor in SVG (workbench phase 4; ChemRho's ChemPtah).
+// Self-contained: its own immutable model (model.ts), undo/redo, tools, hotkeys, RDKit
+// validation, import and export; the 2D layouts (Clean, 3D->2D) come from the server through the
+// page's Depictor and the image import (OCR) through the page's OcrSource.
 //
 // Props:
 //   value          SketchModel   optional; a new value (by reference) replaces the drawing as an
@@ -20,6 +21,16 @@
 //                                (styleId, customStyle; style.ts)
 //   onStyle(id, custom)          optional; a style picked or edited in the toolbar (the page
 //                                persists it); without it the Sketcher keeps the style itself
+//   ocr            OcrSource     optional; POST /api/ocr with the capability (imageImport.ts).
+//                                An image dropped on the canvas or the import box, pasted
+//                                (Ctrl/Cmd+V with an image and no text on the clipboard) or
+//                                picked in the import panel's "Image (OCR)" becomes the drawing
+//                                (its molfile, laid out as in the image) as one undoable step;
+//                                without it, or with the capability off, those say why not
+//
+// Fixed lengths and fixed angles (two toolbar toggles, on by default, kept per tab in
+// sessionStorage; gestures.ts): drawn and dragged bonds are one standard bond long at 30-degree
+// steps; Alt or Shift held during a drag draws freely.
 //
 // Drawing styles (style.ts, StyleControls.tsx): Screen, ACS Document 1996, Total synthesis or
 // a custom style, render-only (the model, its coordinates, stereo and history never change);
@@ -42,28 +53,30 @@
 //      data-crossings (bond crossings in 2D) data-break-crossings data-has-depth
 //      data-busy (a layout is waiting for the server) data-clean-style data-style (the drawing
 //      style id) data-fragments (connected fragments) data-fragments-touch (some fragments are
-//      closer than the tidy clearance: the Tidy button is enabled)>
+//      closer than the tidy clearance: the Tidy button is enabled) data-ocr (the image import:
+//      idle | busy | done | error | off) data-fixed-lengths data-fixed-angles>
 //   the toolbar (Toolbar.tsx, ActionBar.tsx), <svg data-testid="sketch-canvas">
 //   (SketchCanvas.tsx; with two or more atoms selected, the selection frame with its rotate and
 //   scale handles, frame.ts), the
-//   import/export popovers (ImportExport.tsx) and <div data-testid="sketch-info"> (InfoBar.tsx).
+//   import/export popovers (ImportExport.tsx), the shortcut list (KeyHelp.tsx, sketch-keys-panel),
+//   the atom label editor (LabelEditor.tsx, sketch-label-input), the OCR notice (sketch-ocr,
+//   useImageImport.tsx) and <div data-testid="sketch-info"> (InfoBar.tsx).
 //
-// Keys (while the pointer is over the sketcher or focus is inside it; never while
-// typing in a text field), on the hovered atom / bond, else on the selection:
-//   c n o s f p, l=Cl, b=Br, i=I, h=H   element of the atom
-//   1 2 3                               bond order (on an atom: grow a bond of that order)
-//   + (or =)  -                         charge
-//   .                                   radical: none -> one dot -> two dots -> none
-//   Delete / Backspace                  erase
-//   Ctrl+Z   Ctrl+Shift+Z / Ctrl+Y      undo / redo
-//   Ctrl+A                              select all
-//   Ctrl+V                              import the clipboard (SMILES or molfile)
-//   Shift+D  Shift+X                    3D -> 2D, crossing breaks
-//   R  Shift+R                          rotate 15 degrees clockwise / counter-clockwise
-//   Alt+H  Alt+V                        flip horizontal / vertical (wedges swap: same isomer)
-//   Ctrl+=  Ctrl+-                      scale up / down by 10 %
-//                                       (transforms: the selection, else the whole drawing)
-//   Esc                                 cancel the gesture, clear the selection, close popovers
+// Keys (while the pointer is over the sketcher or focus is inside it; never while typing in a
+// text field; useSketchKeys.ts), on the hovered atom / bond, else on the selection. The full
+// table with each binding's origin (ChemDraw default, standard, ChemRho's own) is shortcuts.ts,
+// shown by "?":
+//   atom: c n o s f p, l=Cl, b=Br, i=I, h=H element; Enter label editor; Space plain carbon;
+//         + (or =) - charge; 1 2 3 grow a bond of that order; . radical cycle;
+//         Shift+3 ... Shift+8 cycloalkane ring, Shift+A benzene (spiro; on a bond: fused)
+//   bond: 1 2 3 order; w wedge, h hash (again: flip the narrow end)
+//   Delete / Backspace erase; Ctrl+C / Ctrl+X copy / cut (molfile + SMILES), Ctrl+V paste
+//   (SMILES, molfile or an image to OCR), Ctrl+D duplicate, Ctrl+A select all, Ctrl+Z,
+//   Ctrl+Shift+Z / Ctrl+Y undo / redo, Ctrl+Shift+K Clean, Shift+D 3D -> 2D, Shift+X breaks
+//   transforms (the selection, else the whole drawing): R / Shift+R rotate 15 degrees,
+//   Ctrl+Shift+H / Ctrl+Shift+V and Alt+H / Alt+V flip (wedges swap: same isomer),
+//   Ctrl+= / Ctrl+- scale 10 %
+//   Space (no atom hovered) previous tool; ? shortcut list; Esc cancel, deselect, close popovers
 //
 // Demo / test harness (not a page; for a scratch mount or a Playwright test):
 //   const [m, setM] = useState<SketchModel>();
@@ -72,15 +85,21 @@
 //   "o"; expect sketch[data-smiles="CCO"].
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from "react";
 import { useRDKit, type RDKitModule } from "@ksmech/viz/chem/rdkit";
-import { setElement, type SketchModel } from "@ksmech/viz/sketch/model";
+import { atomById, setElement, type SketchModel } from "@ksmech/viz/sketch/model";
 import { fitView, type Vec, type View } from "@ksmech/viz/sketch/geometry";
-import { applyKey, NO_SELECTION, selectionAtoms } from "./tools";
-import { applyTransform, transformKey, transformTargets, type TransformAction } from "./transform";
+import { relabelAtom, selectionAtoms } from "./tools";
+import { applyTransform, transformTargets, type TransformAction } from "./transform";
 import { selectionFrame } from "./frame";
 import { exportSketch, importSketch } from "./rdkitSketch";
 import { useSketchEditor, type SketchEditor } from "./useSketchEditor";
 import { useSketchInfo } from "./useSketchInfo";
-import { useSketchPointer, type SketchPointer } from "./useSketchPointer";
+import { useSketchPointer } from "./useSketchPointer";
+import { useSketchKeys } from "./useSketchKeys";
+import { FIXED, type Snap } from "./gestures";
+import { pickImage, type OcrSource } from "./imageImport";
+import { OcrNotice, useImageImport, type ImageImport } from "./useImageImport";
+import { KeyHelp } from "./KeyHelp";
+import { LabelEditor } from "./LabelEditor";
 import { SketchCanvas } from "./SketchCanvas";
 import { Toolbar, type SketchPanel } from "./Toolbar";
 import { ExportPanel, ImportPanel, readDroppedText } from "./ImportExport";
@@ -108,6 +127,7 @@ export interface SketcherProps {
   depictor?: Depictor;
   display?: SketchDisplay;
   onStyle?(id: StyleId, custom: DrawingStyle): void;
+  ocr?: OcrSource;
 }
 
 /** How the sketch draws (the page's preferences); every field optional. */
@@ -125,11 +145,6 @@ export interface SketchDisplay {
 /** Pixels per model unit at 100 %: a 1.5 bond is 37.5 px. */
 export const DEFAULT_SCALE = 25;
 
-function isTextInput(t: EventTarget | null): boolean {
-  if (!(t instanceof HTMLElement)) return false;
-  return t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName);
-}
-
 function useWidth(ref: RefObject<HTMLElement | null>): number {
   const [w, setW] = useState(0);
   useLayoutEffect(() => {
@@ -141,99 +156,6 @@ function useWidth(ref: RefObject<HTMLElement | null>): number {
     return () => ro.disconnect();
   }, [ref]);
   return w;
-}
-
-interface KeyDeps {
-  ed: SketchEditor;
-  pointer: SketchPointer;
-  rootRef: RefObject<HTMLDivElement | null>;
-  readOnly: boolean;
-  closePanel(): void;
-  importText(text: string): string | null;
-  layout: LayoutActions;
-  transform(a: TransformAction): void;
-}
-
-/** Window keydown/paste listeners, live while the pointer is over the sketcher or focus is in the
- *  sketcher; the handler is read from a ref so it always sees the latest state. */
-function useSketchKeys(deps: KeyDeps) {
-  const latest = useRef(deps);
-  useLayoutEffect(() => {
-    latest.current = deps;
-  });
-  useEffect(() => {
-    const live = (e: Event) => {
-      const { pointer, rootRef, readOnly } = latest.current;
-      const focused = rootRef.current?.contains(document.activeElement) ?? false;
-      return !readOnly && (pointer.inside.current || focused) && !isTextInput(e.target);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (!live(e)) return;
-      if (handleKey(e, latest.current)) e.preventDefault();
-    };
-    const onPaste = (e: ClipboardEvent) => {
-      const text = e.clipboardData?.getData("text") ?? "";
-      if (!live(e) || !text.trim()) return;
-      e.preventDefault();
-      const err = latest.current.importText(text);
-      if (err) console.warn("sketch paste:", err);
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("paste", onPaste);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("paste", onPaste);
-    };
-  }, []);
-}
-
-/** One keydown; true when it was handled. */
-function handleKey(e: KeyboardEvent, { ed, pointer, closePanel, layout, transform }: KeyDeps): boolean {
-  const mod = e.ctrlKey || e.metaKey;
-  const k = e.key.toLowerCase();
-  const tf = transformKey(e);
-  if (tf) {
-    transform(tf);
-    return true;
-  }
-  if (e.shiftKey && !mod && !e.altKey && layoutKey(k, layout)) return true;
-  if (mod && k === "z") {
-    if (e.shiftKey) ed.redo();
-    else ed.undo();
-    return true;
-  }
-  if (mod && k === "y") {
-    ed.redo();
-    return true;
-  }
-  if (mod && k === "a") {
-    ed.setSelection({ atoms: new Set(ed.committed.atoms.map((a) => a.id)), bonds: new Set(ed.committed.bonds.map((b) => b.id)) });
-    return true;
-  }
-  if (e.key === "Escape") {
-    pointer.cancel();
-    ed.setSelection(NO_SELECTION);
-    closePanel();
-    return true;
-  }
-  if (mod || e.altKey) return false;
-  const next = applyKey(ed.committed, e.key, ed.hover, ed.selection);
-  if (!next) return false;
-  if (next !== ed.committed) ed.commit(next);
-  return true;
-}
-
-/** Shift+D / Shift+X: 3D -> 2D, crossing breaks (not element keys). */
-function layoutKey(k: string, layout: LayoutActions): boolean {
-  if (k === "d") {
-    if (layout.canProject) void layout.project();
-    return true;
-  }
-  if (k === "x") {
-    layout.toggleBreaks();
-    return true;
-  }
-  return false;
 }
 
 interface ViewState {
@@ -285,9 +207,13 @@ function useSketchActions(ed: SketchEditor, rdkit: RDKitModule | null, readOnly:
     ed.setTool("atom");
     if (ed.selection.atoms.size) ed.commit(setElement(ed.committed, ed.selection.atoms, el));
   };
-  const onDrop = async (e: DragEvent<HTMLDivElement>) => {
+  /** A drop on the canvas: an image goes to OCR (`onImage`), a .mol / .sdf file or text is
+   *  imported, the drawing's own drag handle is ignored. */
+  const onDrop = async (e: DragEvent<HTMLDivElement>, onImage: (file: File) => void) => {
     if (readOnly || e.dataTransfer.types.includes(SCHEME_DRAG_TYPE)) return;
     e.preventDefault();
+    const image = pickImage(e.dataTransfer);
+    if (image) return onImage(image);
     const text = await readDroppedText(e);
     const err = text ? importText(text) : null;
     if (err) console.warn("sketch drop:", err);
@@ -318,6 +244,8 @@ function EditorToolbar(p: {
   styleControls: StyleControlProps;
   canTidy: boolean;
   fragments: number;
+  fixed: Snap;
+  onFixed(next: Snap): void;
 }) {
   const { ed, act, layout } = p;
   return (
@@ -350,6 +278,8 @@ function EditorToolbar(p: {
       showCip={p.showCip}
       onToggleCip={p.onToggleCip}
       styleControls={p.styleControls}
+      fixed={p.fixed}
+      onFixed={p.onFixed}
     />
   );
 }
@@ -368,6 +298,30 @@ function ExportFor({ rdkit, model, onClose, image }: { rdkit: RDKitModule | null
       {image}
     </ExportPanel>
   );
+}
+
+const FIXED_KEY = "ksmech.sketch.fixed";
+
+/** The fixed lengths / fixed angles toggles, kept per tab (sessionStorage; both on when
+ *  unavailable or unset). */
+function useFixed(): [Snap, (next: Snap) => void] {
+  const [fixed, setFixed] = useState<Snap>(() => {
+    try {
+      const v = window.sessionStorage.getItem(FIXED_KEY);
+      return v ? { length: v.includes("L"), angle: v.includes("A") } : FIXED;
+    } catch {
+      return FIXED;
+    }
+  });
+  const set = (next: Snap) => {
+    setFixed(next);
+    try {
+      window.sessionStorage.setItem(FIXED_KEY, `${next.length ? "L" : ""}${next.angle ? "A" : ""}-`);
+    } catch {
+      // storage unavailable: the toggles last as long as the page
+    }
+  };
+  return [fixed, set];
 }
 
 const CIP_KEY = "ksmech.sketch.showCip";
@@ -463,7 +417,35 @@ function useTidy(ed: SketchEditor, info: ReturnType<typeof useSketchInfo>, style
   return { run, canTidy, fragments: frags };
 }
 
-export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor, display, onStyle }: SketcherProps) {
+/** The atom label editor (Enter on an atom): which atom, and the commit of its label. */
+function useLabelEditor(ed: SketchEditor) {
+  const [atomId, setAtomId] = useState<number | null>(null);
+  const atom = atomId === null ? undefined : atomById(ed.committed, atomId);
+  const done = (label: { el: string; charge: number } | null) => {
+    if (label && atom) {
+      const next = relabelAtom(ed.committed, atom.id, label);
+      if (next !== ed.committed) ed.commit(next);
+    }
+    setAtomId(null);
+  };
+  return { atom, open: setAtomId, done };
+}
+
+/** The clipboard texts of a part of the drawing: our molfile (coordinates as drawn) and the
+ *  SMILES ("" when RDKit rejects it). */
+function clipTextOf(rdkit: RDKitModule | null) {
+  return (part: SketchModel) => ({ molfile: exportSketch(rdkit, part, "molfile"), smiles: exportSketch(rdkit, part, "smiles") });
+}
+
+/** The popovers over the stage: import, export, shortcut list, label editor. */
+function StagePanels(p: { panel: SketchPanel; close(): void; act: SketchActions; images: ImageImport; rdkit: RDKitModule | null; model: SketchModel; image: ReactNode }) {
+  if (p.panel === "import") return <ImportPanel onImport={p.act.importText} onClose={p.close} onImage={p.images.run} imageOff={p.images.offReason} />;
+  if (p.panel === "export") return <ExportFor rdkit={p.rdkit} model={p.model} onClose={p.close} image={p.image} />;
+  if (p.panel === "keys") return <KeyHelp onClose={p.close} />;
+  return null;
+}
+
+export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, height = 360, projection, depictor, display, onStyle, ocr }: SketcherProps) {
   const ed = useSketchEditor(value, onChange);
   const info = useSketchInfo(ed.committed);
   const { rdkit } = useRDKit();
@@ -476,15 +458,19 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
   const metrics = useMemo(() => drawMetrics(ds.style, pxPerPt(ds.style, view.s)), [ds.style, view.s]);
   const image = useSketchImage(ed, info, ds.style, display?.labelStyle, !readOnly);
   const [panel, setPanel] = useState<SketchPanel>(null);
+  const [fixed, setFixed] = useFixed();
   const frame = useMemo(() => selectionFrame(ed.model, [...selectionAtoms(ed.committed, ed.selection)], view), [ed.model, ed.committed, ed.selection, view]);
-  const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly, frame);
+  const pointer = useSketchPointer(ed, svgRef, view, setView, readOnly, frame, fixed);
   const act = useSketchActions(ed, rdkit, readOnly);
+  const images = useImageImport(ocr, act.importText);
+  const label = useLabelEditor(ed);
   const [cleanStyle, setCleanStyle] = useCleanStyle();
   const tidy = useTidy(ed, info, ds.style, display?.labelStyle);
   const layout = useLayoutActions(ed, rdkit, projection, depictor, cleanStyle, tidy.run);
   const fresh = !info.stale && ed.model === ed.committed && info.valid;
   const closePanel = () => setPanel(null);
-  useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, importText: act.importText, layout, transform: act.transform });
+  const toggleKeys = () => setPanel((p) => (p === "keys" ? null : "keys"));
+  useSketchKeys({ ed, pointer, rootRef, readOnly, closePanel, toggleKeys, importText: act.importText, importImage: images.run, layout, transform: act.transform, editLabel: label.open, clipText: clipTextOf(rdkit) });
   const highlight = useMemo(() => new Set(highlightAtoms ?? []), [highlightAtoms]);
   const invalid = useMemo(() => new Set(info.badAtoms), [info.badAtoms]);
   const crossings = useMemo(() => findCrossings(ed.committed).length, [ed.committed]);
@@ -517,6 +503,9 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
       data-show-cip={showCip ? "true" : "false"}
       data-fragments={tidy.fragments}
       data-fragments-touch={tidy.canTidy ? "true" : "false"}
+      data-ocr={images.ocr.state}
+      data-fixed-lengths={fixed.length ? "true" : "false"}
+      data-fixed-angles={fixed.angle ? "true" : "false"}
       onPointerEnter={setInside(true)}
       onPointerLeave={setInside(false)}
     >
@@ -536,9 +525,11 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           canTidy={tidy.canTidy}
           fragments={tidy.fragments}
           styleControls={{ styleId: ds.styleId, style: ds.style, onStyle: ds.onStyle, onActualSize: () => setView(actualSizeView(view, ds.style, width, height)) }}
+          fixed={fixed}
+          onFixed={setFixed}
         />
       )}
-      <div className="sk-stage" ref={stageRef} onDragOver={(e) => e.preventDefault()} onDrop={act.onDrop}>
+      <div className="sk-stage" ref={stageRef} onDragOver={(e) => e.preventDefault()} onDrop={(e) => void act.onDrop(e, images.run)}>
         <SketchCanvas
           model={ed.model}
           view={view}
@@ -558,9 +549,10 @@ export function Sketcher({ value, onChange, highlightAtoms, readOnly = false, he
           styleId={ds.styleId}
         />
         {!readOnly && ed.committed.atoms.length > 0 && <DragHandle files={image.files} />}
-        {panel === "import" && <ImportPanel onImport={act.importText} onClose={closePanel} />}
-        {panel === "export" && <ExportFor rdkit={rdkit} model={ed.committed} onClose={closePanel} image={image.section} />}
+        {label.atom && <LabelEditor key={label.atom.id} atom={label.atom} view={view} onDone={label.done} />}
+        <StagePanels panel={panel} close={closePanel} act={act} images={images} rdkit={rdkit} model={ed.committed} image={image.section} />
       </div>
+      <OcrNotice ocr={images.ocr} onDismiss={images.dismiss} />
       <InfoBar info={info} report={layout.report} cip={cipList} radicals={radicals} />
     </div>
   );

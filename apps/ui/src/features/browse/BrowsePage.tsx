@@ -98,7 +98,7 @@ export function BrowsePage({ route }: PageProps) {
   return (
     <div className="br-page stack" data-testid="browse-page">
       <section className="panel">
-        <h2 className="br-title">Browse steps</h2>
+        <h2 className="br-title">ChemThot <span className="muted">· browse the mechanism databases</span></h2>
         <SearchBar
           key={barKey}
           initial={search}

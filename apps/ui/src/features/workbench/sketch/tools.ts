@@ -1,14 +1,16 @@
 // The sketcher's tools as pure model edits: what a click does with each tool, what a key does
-// on the hovered atom or bond (ChemDraw hotkeys), and the hit test that finds that object.
+// on the hovered atom or bond (ChemDraw hotkeys; the whole key map is shortcuts.ts), and the
+// hit test that finds that object.
 // Radicals: the radical tool gives an atom one unpaired electron, the diradical (carbene) tool
 // two; a second click with the same tool clears them. The "." key cycles none -> one -> two.
 import type { BondOrder, SketchModel } from "@ksmech/viz/sketch/model";
 import type { Vec, View } from "@ksmech/viz/sketch/geometry";
 import type { RingKind } from "./templates";
-import { addAtom, adjustCharge, atomById, cycleBondOrder, cycleRadical, removeAtoms, removeBonds, removeSelection, setBondOrder, setBondStereo, setElement, toggleExplicitH, toggleRadical } from "@ksmech/viz/sketch/model";
+import { addAtom, adjustCharge, atomById, cycleBondOrder, cycleRadical, removeAtoms, removeBonds, removeSelection, setBondOrder, setBondStereo, setCharge, setElement, toggleExplicitH, toggleRadical } from "@ksmech/viz/sketch/model";
+import { isElement } from "@ksmech/viz/sketch/elements";
 import { dist, segmentDistance, toScreen } from "@ksmech/viz/sketch/geometry";
 // @ts-ignore TS5097: node --experimental-strip-types needs the extension (Vite accepts it)
-import { addRing, bondFromPoint, growBond } from "./templates.ts";
+import { addRing, bondFromPoint, CYCLOALKANE_OF_SIZE, growBond } from "./templates.ts";
 
 export const TOOLS = [
   "select",
@@ -118,7 +120,7 @@ function bondClick(m: SketchModel, tool: "bond" | "wedge" | "hash" | "chain", hi
   return bondFromPoint(m, at, 1, stereo).model;
 }
 
-/** ChemDraw element hotkeys. */
+/** ChemDraw element hotkeys (on a hovered atom). */
 export const KEY_ELEMENTS: Readonly<Record<string, string>> = {
   c: "C",
   n: "N",
@@ -132,8 +134,39 @@ export const KEY_ELEMENTS: Readonly<Record<string, string>> = {
   h: "H",
 };
 
+/** ChemDraw bond hotkeys (on a hovered bond): wedge and hash; again flips the narrow end. */
+export const KEY_BOND_STEREO: Readonly<Record<string, "wedge" | "hash">> = { w: "wedge", h: "hash" };
+
 /** The key that cycles an atom's unpaired electrons (none -> one -> two -> none). */
 export const RADICAL_KEY = ".";
+/** ChemDraw: Space on an atom removes its label (back to a plain carbon). */
+export const CARBON_KEY = " ";
+
+function atomKey(m: SketchModel, k: string, id: number, order: BondOrder | null, delta: number, del: boolean): SketchModel | null {
+  if (KEY_ELEMENTS[k]) return setElement(m, [id], KEY_ELEMENTS[k]);
+  if (k === CARBON_KEY) return setCharge(setElement(m, [id], "C"), id, 0);
+  if (delta) return adjustCharge(m, [id], delta);
+  if (order) return growBond(m, id, order).model;
+  if (k === RADICAL_KEY) return cycleRadical(m, [id]);
+  return del ? removeAtoms(m, [id]) : null;
+}
+
+function bondKey(m: SketchModel, k: string, id: number, order: BondOrder | null, del: boolean): SketchModel | null {
+  if (order) return setBondOrder(m, id, order);
+  if (KEY_BOND_STEREO[k]) return setBondStereo(m, id, KEY_BOND_STEREO[k]);
+  return del ? removeBonds(m, [id]) : null;
+}
+
+function selectionKey(m: SketchModel, k: string, sel: Selection, order: BondOrder | null, delta: number, del: boolean): SketchModel | null {
+  if (del) return removeSelection(m, sel.atoms, sel.bonds);
+  if (KEY_ELEMENTS[k] && sel.atoms.size) return setElement(m, sel.atoms, KEY_ELEMENTS[k]);
+  if (delta && sel.atoms.size) return adjustCharge(m, sel.atoms, delta);
+  if (k === RADICAL_KEY && sel.atoms.size) return cycleRadical(m, sel.atoms);
+  if (order && sel.bonds.size) return [...sel.bonds].reduce((acc, id) => setBondOrder(acc, id, order), m);
+  const stereo = KEY_BOND_STEREO[k];
+  if (stereo && sel.bonds.size) return [...sel.bonds].reduce((acc, id) => setBondStereo(acc, id, stereo), m);
+  return null;
+}
 
 /** The edit of a key on the hovered object, or on the selection when nothing is hovered; null
  *  when the key means nothing there (the event is then left alone). */
@@ -142,24 +175,53 @@ export function applyKey(m: SketchModel, key: string, hit: Hit, sel: Selection):
   const del = k === "Delete" || k === "Backspace";
   const delta = k === "+" || k === "=" ? 1 : k === "-" || k === "_" ? -1 : 0;
   const order = k === "1" || k === "2" || k === "3" ? (Number(k) as BondOrder) : null;
-  if (hit?.kind === "atom") {
-    if (KEY_ELEMENTS[k]) return setElement(m, [hit.id], KEY_ELEMENTS[k]);
-    if (delta) return adjustCharge(m, [hit.id], delta);
-    if (order) return growBond(m, hit.id, order).model;
-    if (k === RADICAL_KEY) return cycleRadical(m, [hit.id]);
-    return del ? removeAtoms(m, [hit.id]) : null;
-  }
-  if (hit?.kind === "bond") {
-    if (order) return setBondOrder(m, hit.id, order);
-    return del ? removeBonds(m, [hit.id]) : null;
-  }
+  if (hit?.kind === "atom") return atomKey(m, k, hit.id, order, delta, del);
+  if (hit?.kind === "bond") return bondKey(m, k, hit.id, order, del);
   if (sel.atoms.size === 0 && sel.bonds.size === 0) return null;
-  if (del) return removeSelection(m, sel.atoms, sel.bonds);
-  if (KEY_ELEMENTS[k] && sel.atoms.size) return setElement(m, sel.atoms, KEY_ELEMENTS[k]);
-  if (delta && sel.atoms.size) return adjustCharge(m, sel.atoms, delta);
-  if (k === RADICAL_KEY && sel.atoms.size) return cycleRadical(m, sel.atoms);
-  if (order && sel.bonds.size) return [...sel.bonds].reduce((acc, id) => setBondOrder(acc, id, order), m);
-  return null;
+  return selectionKey(m, k, sel, order, delta, del);
+}
+
+/** The key event fields the ring hotkeys read. */
+export interface RingKeyLike {
+  key: string;
+  code?: string;
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+}
+
+/** The ring template of a key: Shift+3 ... Shift+8 a cycloalkane of that size, Shift+A benzene
+ *  (by physical key, since Shift+digit gives a different character on every layout); null for
+ *  any other key. Not ChemDraw defaults (ChemDraw has no ring hotkeys): Marvin-like additions. */
+export function ringKey(e: RingKeyLike): RingKind | null {
+  if (!e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return null;
+  const digit = e.code?.startsWith("Digit") ? Number(e.code.slice(5)) : !e.code && /^[3-8]$/.test(e.key) ? Number(e.key) : NaN;
+  if (CYCLOALKANE_OF_SIZE[digit]) return CYCLOALKANE_OF_SIZE[digit];
+  return e.code === "KeyA" || (!e.code && e.key.toLowerCase() === "a") ? "benzene" : null;
+}
+
+/** A ring template on the hovered atom (spiro) or bond (fused); null with nothing hovered. */
+export function applyRingKey(m: SketchModel, ring: RingKind, hit: Hit): SketchModel | null {
+  if (!hit) return null;
+  return addRing(m, ring, hit.kind === "atom" ? hit : { kind: "bond", id: hit.id }).model;
+}
+
+/** An atom label typed in the label editor (ChemDraw: Enter on an atom): an element symbol,
+ *  case-insensitive, with an optional charge ("N+", "O-", "Fe3+", "S2-"); null when it is not
+ *  one. */
+export function parseAtomLabel(text: string): { el: string; charge: number } | null {
+  const m = /^\s*([A-Za-z]{1,2})\s*(?:(\d?)([+-]))?\s*$/.exec(text.replace(/\u2212/g, "-"));
+  if (!m) return null;
+  const el = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+  if (!isElement(el)) return null;
+  const charge = m[3] ? (m[3] === "+" ? 1 : -1) * Number(m[2] || 1) : 0;
+  return { el, charge };
+}
+
+/** The atom `id` relabelled (element and charge). */
+export function relabelAtom(m: SketchModel, id: number, label: { el: string; charge: number }): SketchModel {
+  return setCharge(setElement(m, [id], label.el), id, label.charge);
 }
 
 /** The atoms a selection moves: its atoms plus the ends of its bonds. */

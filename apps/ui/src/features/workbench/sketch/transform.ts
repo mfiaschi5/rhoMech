@@ -151,17 +151,23 @@ export interface KeyLike {
   altKey: boolean;
 }
 
+/** The flip of a physical H or V key (Alt changes e.key on some layouts), or null. */
+function flipOf(e: KeyLike): TransformAction | null {
+  const k = e.key.toLowerCase();
+  if (e.code === "KeyH" || (!e.code && k === "h")) return "flip-h";
+  if (e.code === "KeyV" || (!e.code && k === "v")) return "flip-v";
+  return null;
+}
+
 /** The transform of a key press, or null: R / Shift+R rotate 15 degrees clockwise /
- *  counter-clockwise, Alt+H / Alt+V flip (by physical key, since Alt changes e.key on some
- *  layouts), Ctrl+= (or +) / Ctrl+- scale up / down by 10 %. */
+ *  counter-clockwise, Ctrl+Shift+H / Ctrl+Shift+V flip horizontal / vertical (ChemDraw's
+ *  Object menu) and the older Alt+H / Alt+V (by physical key), Ctrl+= (or +) / Ctrl+- scale up /
+ *  down by 10 %. Ctrl+Shift+V is no "paste as plain text" here: the sketcher has no text field. */
 export function transformKey(e: KeyLike): TransformAction | null {
   const mod = e.ctrlKey || e.metaKey;
   const k = e.key.toLowerCase();
-  if (e.altKey && !mod) {
-    if (e.code === "KeyH" || (!e.code && k === "h")) return "flip-h";
-    if (e.code === "KeyV" || (!e.code && k === "v")) return "flip-v";
-    return null;
-  }
+  if (e.altKey && !mod) return flipOf(e);
+  if (mod && e.shiftKey && !e.altKey && flipOf(e)) return flipOf(e);
   if (mod && !e.altKey) {
     if (k === "=" || k === "+") return "scale-up";
     if (k === "-" || k === "_") return "scale-down";

@@ -24,6 +24,8 @@ export interface SketchEditor {
   setHover(h: Hit): void;
   tool: ToolName;
   setTool(t: ToolName): void;
+  /** Back to the tool used before the current one (the Space key); false when there is none. */
+  swapTool(): boolean;
   element: string;
   setElement(el: string): void;
 }
@@ -53,7 +55,7 @@ export function useSketchEditor(value: SketchModel | undefined, onChange?: (m: S
   const [preview, setPreview] = useState<SketchModel | null>(null);
   const [selection, setSelectionState] = useState<Selection>(NO_SELECTION);
   const [hover, setHover] = useState<Hit>(null);
-  const [tool, setTool] = useState<ToolName>("bond");
+  const [tools, setTools] = useState<{ tool: ToolName; previous: ToolName | null }>({ tool: "bond", previous: null });
   const [element, setElement] = useState("C");
   const [externalVersion, setExternalVersion] = useState(0);
 
@@ -96,8 +98,13 @@ export function useSketchEditor(value: SketchModel | undefined, onChange?: (m: S
     setSelection: setSelectionState,
     hover,
     setHover,
-    tool,
-    setTool,
+    tool: tools.tool,
+    setTool: useCallback((t: ToolName) => setTools((s) => (s.tool === t ? s : { tool: t, previous: s.tool })), []),
+    swapTool: () => {
+      if (!tools.previous) return false;
+      setTools({ tool: tools.previous, previous: tools.tool });
+      return true;
+    },
     element,
     setElement,
   };

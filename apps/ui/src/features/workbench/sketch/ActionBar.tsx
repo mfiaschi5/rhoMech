@@ -14,6 +14,10 @@
 // sketch-flip-h, sketch-flip-v, sketch-more [aria-expanded] opening <div
 // data-testid="sketch-more-menu"> with sketch-rotate-cw90, sketch-rotate-ccw90, sketch-scale-up,
 // sketch-scale-down, sketch-reset-bond; sketch-fit, sketch-clear, sketch-import, sketch-export.
+// Exported for the tool row (Toolbar.tsx): FixedToggles, sketch-fixed-lengths and
+// sketch-fixed-angles [data-active aria-pressed] (ChemDraw's Fixed Lengths / Fixed Angles: one
+// standard bond length, 30-degree steps; Alt or Shift while dragging draws freely), and
+// KeysButton, sketch-keys (the shortcut list, also the "?" key).
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CLEAN_STYLES, type CleanStyle } from "./depiction";
 import { Icon, type IconName } from "./icons";
@@ -35,6 +39,11 @@ const act: Act = (id, label, onClick, { enabled = true, title, icon } = {}) => (
     {icon ? <Icon name={icon} /> : label}
   </button>
 );
+
+/** The shortcut list button (also the "?" key; on the tool row, Toolbar.tsx). */
+export function KeysButton({ panel, onPanel }: Pick<ToolbarProps, "panel" | "onPanel">) {
+  return act("sketch-keys", "?", () => onPanel(panel === "keys" ? null : "keys"), { title: "Keyboard shortcuts (?): ChemDraw hotkeys on the atom or bond under the pointer, and the rest" });
+}
 
 /** The 3D -> 2D button; a disabled one sits in a span that carries the reason as its tooltip
  *  (a disabled button gets no pointer events, so its own title never shows). */
@@ -103,11 +112,27 @@ function MoreMenu({ onTransform, scope }: { onTransform(a: TransformAction): voi
   );
 }
 
+/** Fixed lengths and fixed angles (ChemDraw's Object menu), two toggles (on the tool row,
+ *  Toolbar.tsx). */
+export function FixedToggles({ fixed, onFixed }: Pick<ToolbarProps, "fixed" | "onFixed">) {
+  const toggle = (id: string, label: string, on: boolean, title: string, next: () => void) => (
+    <button type="button" className={`btn btn-small sk-toggle${on ? " active" : ""}`} data-testid={id} data-active={on} aria-pressed={on} onClick={next} title={title}>
+      {label}
+    </button>
+  );
+  return (
+    <>
+      {toggle("sketch-fixed-lengths", "⟷", fixed.length, `Fixed lengths${fixed.length ? " (on)" : ""}: every drawn or dragged bond is one standard bond long; hold Alt or Shift while dragging to draw freely`, () => onFixed({ ...fixed, length: !fixed.length }))}
+      {toggle("sketch-fixed-angles", "∠", fixed.angle, `Fixed angles${fixed.angle ? " (on)" : ""}: drawn and dragged bonds point at multiples of 30°; hold Alt or Shift while dragging to draw freely`, () => onFixed({ ...fixed, angle: !fixed.angle }))}
+    </>
+  );
+}
+
 function CleanGroup(p: ToolbarProps) {
   const cleanTitle = "Server 2D layout (RDKit): textbook = ring templates or CoordGen, perspective = chairs, cages and bicycles drawn in perspective";
   return (
     <div className="sk-group sk-actions">
-      {act("sketch-clean", p.busy ? "Clean…" : "Clean", p.onClean, { enabled: p.canClean, title: cleanTitle })}
+      {act("sketch-clean", p.busy ? "Clean…" : "Clean", p.onClean, { enabled: p.canClean, title: `${cleanTitle} (Ctrl+Shift+K)` })}
       <select className="sk-style" data-testid="sketch-clean-style" value={p.cleanStyle} title="Clean style" aria-label="Clean style" onChange={(e) => p.onCleanStyle(e.target.value as CleanStyle)}>
         {CLEAN_STYLES.map((s) => (
           <option key={s} value={s}>
@@ -164,14 +189,14 @@ export function ActionBar(p: ToolbarProps) {
       <div className="sk-group sk-actions">
         {act("sketch-rotate-ccw", "Rotate 15° counter-clockwise", tf("rotate-ccw15"), { title: `Rotate 15° counter-clockwise (Shift+R), ${scope}`, icon: "rotate-ccw" })}
         {act("sketch-rotate-cw", "Rotate 15° clockwise", tf("rotate-cw15"), { title: `Rotate 15° clockwise (R), ${scope}`, icon: "rotate-cw" })}
-        {act("sketch-flip-h", "Flip horizontal", tf("flip-h"), { title: `Flip horizontal (Alt+H), ${scope}; wedges swap so the stereoisomer is kept`, icon: "flip-h" })}
-        {act("sketch-flip-v", "Flip vertical", tf("flip-v"), { title: `Flip vertical (Alt+V), ${scope}; wedges swap so the stereoisomer is kept`, icon: "flip-v" })}
+        {act("sketch-flip-h", "Flip horizontal", tf("flip-h"), { title: `Flip horizontal (Ctrl+Shift+H or Alt+H), ${scope}; wedges swap so the stereoisomer is kept`, icon: "flip-h" })}
+        {act("sketch-flip-v", "Flip vertical", tf("flip-v"), { title: `Flip vertical (Ctrl+Shift+V or Alt+V), ${scope}; wedges swap so the stereoisomer is kept`, icon: "flip-v" })}
         <MoreMenu onTransform={p.onTransform} scope={scope} />
       </div>
       <div className="sk-group sk-actions">
         {act("sketch-fit", "Fit", p.onFit, { title: "Fit the drawing in view", icon: "fit" })}
         {act("sketch-clear", "Clear", p.onClear, { title: "Clear the drawing", icon: "clear" })}
-        {act("sketch-import", "Import", () => p.onPanel(p.panel === "import" ? null : "import"), { title: "Import: paste SMILES or a molfile, or drop a .mol/.sdf file", icon: "import" })}
+        {act("sketch-import", "Import", () => p.onPanel(p.panel === "import" ? null : "import"), { title: "Import: paste SMILES or a molfile, drop a .mol/.sdf file, or read an image of a structure (OCR; also drop or paste an image)", icon: "import" })}
         {act("sketch-export", "Export", () => p.onPanel(p.panel === "export" ? null : "export"), { title: "Export: image (SVG, PNG, PDF at true size; copy for Word, LaTeX, chemfig), SMILES, InChI, molfile", icon: "export" })}
       </div>
     </div>

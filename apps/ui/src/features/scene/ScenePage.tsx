@@ -1,40 +1,20 @@
 // ScenePage, #/scene?src=<url>: one scene file (packages/viz scene format) drawn by @ksmech/viz's
 // SceneView with no API call at all: the proof that a static page (the wiki) can embed the app's
 // views from precomputed JSON. `src` is resolved against the page and must stay on its origin
-// (a scene is data, but only this site's files are drawn). Without `src`: the list of
+// (a scene is data, but only this site's files are drawn); the loading and drawing is the shared
+// components/SceneEmbed.tsx, which the wiki's scene figures use too. Without `src`: the list of
 // public/scenes/index.json (the committed examples, written by `npm run scene:export`).
 //
-// DOM: <div data-testid="scene-page" data-state="loading|ready|error" data-src> with the
-// SceneView "scene-view", or scene-error (+ scene-errors > li per validation error), or the list
+// DOM: <div data-testid="scene-page" data-state="loading|ready|error" data-src> with the SceneView
+// "scene-view", or scene-error (+ scene-errors > li per validation error), or the list
 // scene-index > a[data-testid=scene-link-<file>].
-import { loadScene, SceneView, type LoadedScene } from "@ksmech/viz";
-import { useEffect, useState } from "react";
 import type { PageProps } from "../../registry";
-import { sameOriginUrl } from "./sceneUrl";
+import { SceneEmbed, useLoad } from "../../components/SceneEmbed";
 
 interface IndexEntry {
   file: string;
   type: string;
   title: string;
-}
-
-type Load<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "error"; message: string; errors: readonly string[] };
-
-function useLoad<T>(key: string, load: () => Promise<T>): Load<T> {
-  const [s, setS] = useState<Load<T>>({ state: "loading" });
-  useEffect(() => {
-    let live = true;
-    setS({ state: "loading" });
-    load().then(
-      (value) => live && setS({ state: "ready", value }),
-      (err: unknown) => live && setS({ state: "error", message: err instanceof Error ? err.message : String(err), errors: (err as { errors?: string[] }).errors ?? [] }),
-    );
-    return () => {
-      live = false;
-    };
-    // `key` stands for `load`
-  }, [key]);
-  return s;
 }
 
 async function loadIndex(): Promise<IndexEntry[]> {
@@ -65,32 +45,7 @@ function SceneIndex() {
   );
 }
 
-function SceneFile({ src }: { src: string }) {
-  const url = sameOriginUrl(src, window.location.href);
-  const scene = useLoad<LoadedScene>(url ?? "", () => (url ? loadScene(url) : Promise.reject(new Error(`${src}: only scenes of this site are drawn`))));
-  return (
-    <div className="stack" data-testid="scene-page" data-state={scene.state} data-src={src}>
-      {scene.state === "loading" && <p className="muted">loading {src}…</p>}
-      {scene.state === "error" && (
-        <div className="banner banner-error" data-testid="scene-error">
-          {scene.message}
-          {scene.errors.length > 0 && (
-            <ul data-testid="scene-errors">
-              {scene.errors.slice(0, 20).map((e, k) => (
-                <li key={k}>
-                  <code className="code">{e}</code>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-      {scene.state === "ready" && <SceneView scene={scene.value.doc} assets={scene.value.assets} />}
-    </div>
-  );
-}
-
 export function ScenePage({ route }: PageProps) {
   const src = route.params.get("src");
-  return src ? <SceneFile key={src} src={src} /> : <SceneIndex />;
+  return src ? <SceneEmbed key={src} src={src} /> : <SceneIndex />;
 }
