@@ -5884,8 +5884,9 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   `torch.load` started defaulting to `weights_only=True`: MolScribe calls it without the
   argument. The worker uses 2 threads by default (`KSMECH_OCR_THREADS`). Every direct
   dependency is pinned exactly; `exclude-newer = 2026-10-13` keeps every transitive one at
-  least two weeks old. Nothing has been locked or installed yet: `ksmech-serve ocr-setup` does
-  both, and OpenNMT-py's old torchtext pin may need an override then (`docs/ocr.md`).
+  least two weeks old. The first `ocr-setup` (same day) needed one override: MolScribe 1.1.1
+  declares `torch<2.0`, overridden to our 2.5.1 pin (`override-dependencies`); torchtext 0.5.0
+  imports as is. The lock is committed (`tools/ocr/uv.lock`); the real aspirin test passes.
 - **The capability is a file check, the checksum is the setup's.** `ocr` is on when the venv's
   python, the worker, the checkpoint and its `.verified` marker exist and agree. The marker is
   written only after the sha256 of the downloaded file matched, so `/api/meta` never hashes

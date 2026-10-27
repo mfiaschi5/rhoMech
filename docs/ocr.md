@@ -4,10 +4,13 @@
 out as drawn. The engine is MolScribe 1.1.1. It runs as one persistent worker process in an
 isolated environment, never inside the server's own environment.
 
-**Status: written, not installed.** The setup has not been run yet. No MolScribe code, no
-dependency of it and no weights have been downloaded. Until `ksmech-serve ocr-setup` has run,
-the `ocr` capability is off with the reason "OCR engine not installed: run `ksmech-serve
-ocr-setup`". `GET /api/ocr` says so, and `POST /api/ocr` answers 503 FEATURE_DISABLED.
+**Status: installed on the lab host (2026-10-27).** `ksmech-serve ocr-setup` locked
+`tools/ocr/uv.lock` (83 packages), synced `data/ocr/venv` and fetched the checkpoint with a
+matching sha256. The real aspirin round trip (`tests/test_serve_ocr.py::test_real_molscribe_reads_aspirin`)
+passes: about 50 s for the first image, which includes loading the model; later images reuse
+the worker. On a host without the setup, the `ocr` capability is off with the reason "OCR engine
+not installed: run `ksmech-serve ocr-setup`". `GET /api/ocr` says so, and `POST /api/ocr`
+answers 503 FEATURE_DISABLED.
 
 ## Install
 
@@ -79,23 +82,16 @@ transitive dependency to a release uploaded at least two weeks before the pins w
 
 Python is 3.11 (`requires-python = "==3.11.*"`). The resolution is limited to Linux x86_64.
 
-### Expected trouble at lock time (not verified: nothing has been locked)
+### What the lock needed
 
-- **torchtext.** OpenNMT-py 2.2.0 pins an old torchtext (0.5.0 in its setup.py) built for the
-  torch of its time. If the lock fails on it, or if torchtext does not import under torch
-  2.5.1, add an override to `tools/ocr/pyproject.toml`:
-
-  ```toml
-  [tool.uv]
-  override-dependencies = ["torchtext==<a version that resolves>"]
-  ```
-
-  MolScribe imports only OpenNMT-py's transformer modules. As a last resort the override can
-  point torchtext at an empty stub.
-- **RDKit.** MolScribe declares RDKit as `rdkit-pypi` (older releases) or `rdkit`. If the
-  resolver picks an RDKit without a cp311 wheel, constrain it with `constraint-dependencies`.
-- **Two OpenCV wheels.** Both install the `cv2` module. They are pinned to one version so the
-  files agree; if one is enough at lock time, drop the other.
+- **torch.** MolScribe 1.1.1 on PyPI declares `torch>=1.11.0,<2.0`, which has no build for
+  Python 3.11 here. `override-dependencies = ["torch==2.5.1"]` replaces that requirement with
+  our pin; inference runs on 2.5.1 (the aspirin test).
+- **torchtext.** OpenNMT-py 2.2.0 brings torchtext 0.5.0, a pure-Python release; MolScribe
+  imports only OpenNMT-py's transformer modules, and it imports fine. No override needed.
+- **RDKit.** It resolves to `rdkit-pypi` 2022.9.5 (cp311 wheel), alongside numpy 1.26.4.
+- **Two OpenCV wheels.** Both install the `cv2` module; they are pinned to one version so the
+  files agree.
 
 ## The worker
 
