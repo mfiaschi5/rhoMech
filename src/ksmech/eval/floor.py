@@ -41,18 +41,26 @@ def floor_ranks(batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def floor_report(samples: Iterable, batch_size: int = 16) -> dict:
-    """Top-1/3/5, the median rank and the unreachable count over `samples`."""
+    """Top-1/3/5, the median rank and the unreachable count over `samples`; `per_sample`
+    holds one row per sample (step id, 0-based rank, reachable) for paired comparisons."""
     samples = list(samples)
-    ranks, unreachable = [], 0
+    ranks, reach, unreachable = [], [], 0
     for start in range(0, len(samples), batch_size):
         batch = collate_samples(samples[start : start + batch_size])
         r, reachable = floor_ranks(batch)
         unreachable += int((~reachable).sum())
         ranks.append(r.numpy())
+        reach.append(reachable.numpy())
     r = np.concatenate(ranks) if ranks else np.zeros(0, dtype=np.int64)
+    ok = np.concatenate(reach) if reach else np.zeros(0, dtype=bool)
     out = {f"top{k}": float((r < k).mean()) if len(r) else 0.0 for k in (1, 3, 5)}
+    rows = [
+        {"step_id": getattr(s, "step_id", None), "rank": int(k), "reachable": bool(a)}
+        for s, k, a in zip(samples, r, ok, strict=True)
+    ]
     return out | {
         "median_rank": float(np.median(r)) if len(r) else 0.0,
         "n": len(r),
         "unreachable": unreachable,
+        "per_sample": rows,
     }

@@ -22,6 +22,7 @@ from ksmech.arrows.steps import (
 )
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps, source_dir
 from ksmech.data.io import steps_path as _steps_path
+from ksmech.data.provenance import StaleArtifact
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 
@@ -33,7 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("align", help="align arrows to tokens; predicted-arrow round trip")
     s = sub.add_parser("samples", help="sample store (geometry-free pair features) + split views")
     e = sub.add_parser("edit-labels", help="reaction-matrix labels (spec v8) and their coverage")
-    for p in (r, a, s, e):
+    f = sub.add_parser("freeze-splits", help="snapshot the split files as frozen splits")
+    f.add_argument("--strategy", nargs="+", required=True, choices=STRATEGIES)
+    for p in (r, a, s, e, f):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     r.add_argument("--include-resonance", action="store_true", help="also resonance steps")
@@ -73,8 +76,25 @@ def main(argv: list[str] | None = None) -> int:
         "align": cmd_align,
         "samples": cmd_samples,
         "edit-labels": cmd_edit_labels,
+        "freeze-splits": cmd_freeze_splits,
     }
     return commands[args.command](args, path, console)
+
+
+def cmd_freeze_splits(args: argparse.Namespace, path: Path, console: Console) -> int:
+    """`split_frozen_<strategy>.json` from each named strategy's current split file
+    (`arrows.steps.freeze_split_file`): from then on `samples` keeps every frozen step in its
+    part, places new groups by hash and counts SPLIT_CONFLICT."""
+    from ksmech.arrows.steps import freeze_split_file
+
+    for strategy in args.strategy:
+        try:
+            out = freeze_split_file(args.source, strategy, args.processed_dir)
+        except (FileExistsError, FileNotFoundError, StaleArtifact) as exc:
+            console.print(f"[red]{strategy}: {exc}[/red]")
+            return 1
+        console.print(f"wrote {out}")
+    return 0
 
 
 def _write(report: dict, args: argparse.Namespace, name: str, console: Console) -> Path:

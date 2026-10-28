@@ -5,6 +5,7 @@ from collections import Counter
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from rdkit import Chem
 
 from ksmech.arrows.delta_be import ReactionMatrix
@@ -50,6 +51,13 @@ def test_a_new_dianion_on_a_nonmetal_is_refused():
     assert lewis_apply(MECL_OH)(((5, 6, -1),), ((5, 2),)) == (None, "FORMAL_CHARGE_RANGE")
 
 
+def test_an_odd_lone_pair_entry_raises_instead_of_being_floored():
+    """A homolysis' +1 on each atom is a one-electron entry: d // 2 would floor it to no
+    change and score a wrong product. Until the electron counts of P6, it raises."""
+    with pytest.raises(ValueError, match="odd lone-pair entry 1"):
+        lewis_apply(MECL_OH)(((0, 1, -1),), ((0, 1), (1, 1)))
+
+
 def test_moving_only_the_pi_bond_is_resonance():
     formaldehyde = _sample(
         [6, 8, 1, 1], [0, 0, 0, 0], [(0, 1, 2), (0, 2, 1), (0, 3, 1)], [0, 2, 0, 0]
@@ -87,3 +95,36 @@ def test_report_counts_hits_misses_and_unlabelled_samples():
     r = decode_report(samples, decode)
     assert (r["n"], r["top1"], r["top3"], r["not_found"]) == (4, 0.25, 0.5, 2)
     assert r["skips"] == {"DECODE_NOTHING_FOUND": 1, "NO_EDIT_LABEL": 1}
+    rows = {row["step_id"]: (row["rank"], row["n_found"]) for row in r["per_sample"]}
+    assert rows == {"a": (0, 1), "b": (1, 2), "c": (None, 1), "d": (None, 0)}
+    for k in (1, 3):  # the per-sample ranks reproduce the report
+        assert sum(x is not None and x < k for x, _ in rows.values()) / r["n"] == r[f"top{k}"]
+
+
+def test_decode_takes_the_run_source_apart_from_the_decoded_samples():
+    from ksmech.eval.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["decode", "--run", "sparse_resonance", "--run-source", "pmechdb+reactmech"]
+    )
+    assert (args.source, args.run_source) == ("pmechdb", "pmechdb+reactmech")
+    assert build_parser().parse_args(["decode", "--run", "x"]).run_source is None
+
+
+def test_a_sample_version_mismatch_warns_and_is_recorded(tmp_path):
+    import io
+
+    from rich.console import Console
+
+    from ksmech.data import provenance as prov
+    from ksmech.eval.cli import _sample_versions
+
+    view = tmp_path / "samples_molecule_val.json"
+    prov.write_json(view, {"ids": []}, prov.stamp("samples", 17, {}, {}))
+    out = io.StringIO()
+    payload = {"provenance": {"config": {"sample_version": 15}}}
+    got = _sample_versions(view, payload, Console(file=out))
+    assert got == {"checkpoint_sample_version": 15, "view_sample_version": 17}
+    assert "v15" in out.getvalue() and "v17" in out.getvalue()
+    same = {"provenance": {"config": {"sample_version": 17}}}
+    assert _sample_versions(view, same, Console(file=io.StringIO()))["view_sample_version"] == 17

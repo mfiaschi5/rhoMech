@@ -8,13 +8,21 @@ Every strategy assigns whole *groups* of steps to one set:
 - molecule: steps that share any non-trivial molecule, on either side, form one group.
 
 `default_split(source)` names the strategy each source uses unless told otherwise.
+
+Frozen splits (`frozen`, step id -> part, from a `split_frozen_<strategy>.json` snapshot) keep
+every existing step in its part when steps are added: a group holding frozen steps keeps their
+part, a group whose frozen steps sit in two parts keeps them and sends its new steps to
+`conflict` (SPLIT_CONFLICT, counted), and a group with no frozen step is placed by
+sha256(seed, group key) against the fractions instead of the global permutation, which would
+reshuffle val and test whenever one group is added.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cache
 
@@ -36,9 +44,13 @@ class Split:
     val: list[str]
     test: list[str]
     excluded: list[str] = field(default_factory=list)  # steps the strategy cannot place
+    conflict: list[str] = field(default_factory=list)  # new steps of a group frozen in two parts
 
     def as_dict(self) -> dict[str, list[str]]:
         return {"train": self.train, "val": self.val, "test": self.test, "excluded": self.excluded}
+
+
+Frozen = Mapping[str, str]  # step id -> "train" | "val" | "test"
 
 
 def _check_fractions(fractions: Fractions) -> None:
@@ -50,13 +62,45 @@ def _pathway_key(step: ElementaryStep) -> str:
     return f"pathway:{step.pathway_id}" if step.pathway_id is not None else f"step:{step.step_id}"
 
 
-def _assign_groups(groups: dict[str, list[str]], fractions: Fractions, seed: int) -> Split:
+def _hash_part(key: str, fractions: Fractions, seed: int) -> str:
+    """The part of a group no frozen step pins: sha256(seed, group key) read as a uniform
+    number in [0, 1) against the fractions, so placing one group moves no other."""
+    u = int(hashlib.sha256(f"{seed}:{key}".encode()).hexdigest()[:15], 16) / 16**15
+    if u < fractions[0]:
+        return "train"
+    return "val" if u < fractions[0] + fractions[1] else "test"
+
+
+def _assign_frozen(groups: dict[str, list[str]], fractions: Fractions, seed: int, frozen: Frozen):
+    """The frozen path of `_assign_groups` (module docstring)."""
+    out: dict[str, list[str]] = {"train": [], "val": [], "test": []}
+    conflict: list[str] = []
+    for key in sorted(groups):
+        ids = groups[key]
+        parts = {frozen[i] for i in ids if i in frozen}
+        if len(parts) > 1:
+            for i in ids:
+                (out[frozen[i]] if i in frozen else conflict).append(i)
+            continue
+        out[parts.pop() if parts else _hash_part(key, fractions, seed)] += ids
+    if conflict:
+        log.warning("%d new steps join groups frozen in two parts: SPLIT_CONFLICT", len(conflict))
+    parts = (sorted(out[p]) for p in ("train", "val", "test"))
+    return Split(*parts, conflict=sorted(conflict))
+
+
+def _assign_groups(
+    groups: dict[str, list[str]], fractions: Fractions, seed: int, frozen: Frozen | None = None
+) -> Split:
     """Shuffle groups with `seed`, then fill train, val, test greedily, putting large groups
-    first (as in chemprop's balanced scaffold split) so they land in train, not test.
+    first (as in chemprop's balanced scaffold split) so they land in train, not test. With
+    `frozen`, existing steps keep their parts instead (module docstring).
 
     A group larger than the whole train target still goes to train (the target is overshot,
     with a warning): placing it in val or test would make a degenerate split."""
     _check_fractions(fractions)
+    if frozen is not None:
+        return _assign_frozen(groups, fractions, seed, frozen)
     keys = sorted(groups)
     keys = [keys[i] for i in np.random.default_rng(seed).permutation(len(keys))]
     n = sum(len(v) for v in groups.values())
@@ -78,17 +122,24 @@ def _assign_groups(groups: dict[str, list[str]], fractions: Fractions, seed: int
 
 
 def split_by_pathway(
-    steps: Sequence[ElementaryStep], fractions: Fractions = (0.8, 0.1, 0.1), seed: int = 0
+    steps: Sequence[ElementaryStep],
+    fractions: Fractions = (0.8, 0.1, 0.1),
+    seed: int = 0,
+    frozen: Frozen | None = None,
 ) -> Split:
     """Random split that never puts two steps of one pathway into different sets."""
     groups: dict[str, list[str]] = defaultdict(list)
     for s in steps:
         groups[_pathway_key(s)].append(s.step_id)
-    return _assign_groups(groups, fractions, seed)
+    return _assign_groups(groups, fractions, seed, frozen)
 
 
 def split_leave_one_class_out(
-    steps: Sequence[ElementaryStep], held_out: str, val_fraction: float = 0.1, seed: int = 0
+    steps: Sequence[ElementaryStep],
+    held_out: str,
+    val_fraction: float = 0.1,
+    seed: int = 0,
+    frozen: Frozen | None = None,
 ) -> Split:
     """Test = every step of class `held_out`. The other classes are split train/val by pathway.
 
@@ -107,12 +158,13 @@ def split_leave_one_class_out(
     leaky = [s.step_id for s in others if s.pathway_id in test_pathways]
     rest = [s for s in others if s.pathway_id not in test_pathways]
     # test fraction 0: groups that overflow val spill into "test" and are folded back into val
-    tv = split_by_pathway(rest, (1.0 - val_fraction, val_fraction, 0.0), seed)
+    tv = split_by_pathway(rest, (1.0 - val_fraction, val_fraction, 0.0), seed, frozen)
     return Split(
         tv.train,
         sorted(tv.val + tv.test),
         sorted(s.step_id for s in test),
         sorted(unlabelled + leaky),
+        tv.conflict,
     )
 
 
@@ -124,7 +176,11 @@ def leave_one_class_out_splits(
 
 
 def split_leave_one_class_out_all(
-    steps: Sequence[ElementaryStep], held_out: str, val_fraction: float = 0.1, seed: int = 0
+    steps: Sequence[ElementaryStep],
+    held_out: str,
+    val_fraction: float = 0.1,
+    seed: int = 0,
+    frozen: Frozen | None = None,
 ) -> Split:
     """Test = every step of class `held_out`; every other step, unlabelled ones included, is
     split train/val by molecule (`split_by_molecule`), so val is an in-distribution set.
@@ -146,9 +202,10 @@ def split_leave_one_class_out_all(
     others = [s for s in steps if s.mechanism_class != held_out]
     rest = [s for s in others if not leaks(s)]
     # test fraction 0: groups that overflow val spill into "test" and are folded back into val
-    tv = split_by_molecule(rest, (1.0 - val_fraction, val_fraction, 0.0), seed)
+    tv = split_by_molecule(rest, (1.0 - val_fraction, val_fraction, 0.0), seed, frozen)
     leaky = sorted({s.step_id for s in others} - {s.step_id for s in rest})
-    return Split(tv.train, sorted(tv.val + tv.test), sorted(s.step_id for s in test), leaky)
+    test_ids = sorted(s.step_id for s in test)
+    return Split(tv.train, sorted(tv.val + tv.test), test_ids, leaky, tv.conflict)
 
 
 def leave_one_class_out_all_splits(
@@ -193,7 +250,10 @@ def molecule_groups(steps: Sequence[ElementaryStep]) -> dict[str, list[str]]:
 
 
 def split_by_molecule(
-    steps: Sequence[ElementaryStep], fractions: Fractions = (0.8, 0.1, 0.1), seed: int = 0
+    steps: Sequence[ElementaryStep],
+    fractions: Fractions = (0.8, 0.1, 0.1),
+    seed: int = 0,
+    frozen: Frozen | None = None,
 ) -> Split:
     """No non-trivial molecule (maps stripped, stereo kept, more than 3 heavy atoms), as reactant
     or as product, appears in more than one of train/val/test. Products count too: otherwise
@@ -201,7 +261,7 @@ def split_by_molecule(
 
     Common reagents (HSO4-, AcO-, TsO-, Et3NH+, pyridine...) chain most of PMechDB into one
     group, which lands in train; val and test are the steps that share no molecule with it."""
-    return _assign_groups(molecule_groups(steps), fractions, seed)
+    return _assign_groups(molecule_groups(steps), fractions, seed, frozen)
 
 
 SplitFn = Callable[..., Split]
@@ -225,7 +285,10 @@ def largest_reactant_scaffold(reactants_smiles: str) -> str:
 
 
 def split_by_scaffold(
-    steps: Sequence[ElementaryStep], fractions: Fractions = (0.8, 0.1, 0.1), seed: int = 0
+    steps: Sequence[ElementaryStep],
+    fractions: Fractions = (0.8, 0.1, 0.1),
+    seed: int = 0,
+    frozen: Frozen | None = None,
 ) -> Split:
     """Group by the scaffold of the largest reactant. A step with a known pathway takes the
     scaffold of its pathway's first step, so a pathway never straddles two sets."""
@@ -240,4 +303,4 @@ def split_by_scaffold(
     for s in steps:
         anchor = first.get(s.pathway_id, s) if s.pathway_id is not None else s
         groups[largest_reactant_scaffold(anchor.reactants_smiles)].append(s.step_id)
-    return _assign_groups(groups, fractions, seed)
+    return _assign_groups(groups, fractions, seed, frozen)

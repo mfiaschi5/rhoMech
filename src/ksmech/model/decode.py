@@ -46,7 +46,7 @@ FORM, BREAK = 0, 1  # arrows.batches.ANCHOR_SIDE
 NONMETALS = frozenset({1, 5, 6, 7, 8, 9, 14, 15, 16, 17, 34, 35, 53})  # FORMAL_CHARGE_RANGE
 SIGN = {FORM: "form", BREAK: "break"}
 PAIR_VALUES = np.array([-1, 0, 1])
-ATOM_VALUES = np.array([-2, 0, 2])
+ATOM_VALUES = np.array([-2, 0, 2])  # model.decoder.ATOM_VALUES (no torch import here)
 ZERO = 1  # the class index of 0 in both
 
 

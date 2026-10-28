@@ -30,7 +30,7 @@ from ksmech.arrows.reactants import (
     TokenLoader,
 )
 from ksmech.data import chem
-from ksmech.data.schema import ElementaryStep
+from ksmech.data.schema import ElementaryStep, SourceKind
 from ksmech.processes import chunked, in_processes
 
 N_EXAMPLES = 3
@@ -59,8 +59,14 @@ def compare_products(result: ApplyResult, step: ElementaryStep) -> tuple[str, st
     return match_products(result, chem.parse_mapped(step.products_smiles), step.products_smiles)
 
 
+RADICAL_ARROW = "RADICAL_ARROW"  # a half-headed arrow: not replayed yet, counted (open-shell P6)
+
+
 def round_trip_step(step: ElementaryStep) -> RoundTrip:
-    """Apply the annotated arrows of `step` and compare with its products."""
+    """Apply the annotated arrows of `step` and compare with its products. A step with a
+    radical arrow is counted as RADICAL_ARROW instead of raising."""
+    if any(a.source_kind is SourceKind.RADICAL for a in step.arrows):
+        return RoundTrip(step.step_id, RADICAL_ARROW, RADICAL_ARROW, arrow_signature(step))
     result = apply_arrows(chem.parse_mapped(step.reactants_smiles), step.arrows)
     status, pattern = compare_products(result, step)
     if status in MATCH_STATUSES:

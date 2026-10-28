@@ -15,9 +15,10 @@ import torch
 from ksmech.arrows.batches import collate_samples
 from ksmech.arrows.delta_be import ReactionMatrix
 from ksmech.arrows.steps import MechanismSample, pair_stats, sample_for_step
-from ksmech.eval.floor import floor_ranks
+from ksmech.eval.floor import floor_ranks, floor_report
+from ksmech.model import decode
 from ksmech.model.config import ModelConfig
-from ksmech.model.decoder import BREAK, FORM
+from ksmech.model.decoder import ATOM_VALUES, BREAK, FORM
 from ksmech.model.inputs import (
     fit_feature_stats,
     pair_channels,
@@ -30,6 +31,7 @@ from ksmech.model.loss import (
     admissible_rows,
     anchor_log_probs,
     anchor_ranks,
+    atom_classes,
     edit_matches,
     greedy_edit,
     step_loss,
@@ -355,6 +357,8 @@ class _StubDecoder:
     probabilities 1/5, 3/5, 1/5; given (0,1) every entry class has probability 1/3, given
     (1,2) the zero class has 1/2 and the others 1/4; P(END_MECH) is 3/4."""
 
+    atom_values = ATOM_VALUES
+
     def stop_logits(self, h):
         return torch.tensor([math.log(3)])
 
@@ -414,6 +418,31 @@ def test_step_loss_by_hand():
         loss, parts = step_loss(_StubDecoder(), None, None, None, batch, 0.5)
         assert loss.item() == pytest.approx(-t1 + 0.5 * bce, rel=1e-6)
         assert parts["p_stop"].item() == pytest.approx(3 / 4)
+
+
+def test_atom_classes_keep_the_even_mapping_and_refuse_odd_entries():
+    """The class table gives the classes the old floor(r / 2) + 1 gave on {-2, 0, +2}, so the
+    loss of an even batch is unchanged; a real odd entry raises instead of being floored into
+    a class; an entry on a padding atom is ignored. The beam decoder's copy of the alphabet
+    (model.decode, which imports no torch) is the head's."""
+    r = torch.tensor([[-2, 0, 2, 0]], dtype=torch.int8)
+    real = torch.tensor([[True, True, True, False]])
+    old = torch.div(r.long(), 2, rounding_mode="floor") + 1
+    assert atom_classes(r, ATOM_VALUES, real).equal(old)
+    for odd in (1, -1):
+        with pytest.raises(ValueError, match="outside the head's alphabet"):
+            atom_classes(torch.tensor([[odd, 0]], dtype=torch.int8), ATOM_VALUES, real[:, :2])
+    pad = torch.tensor([[0, 1]], dtype=torch.int8)
+    assert atom_classes(pad, ATOM_VALUES, torch.tensor([[True, False]])).tolist() == [[1, 1]]
+    assert tuple(decode.ATOM_VALUES.tolist()) == ATOM_VALUES
+
+
+def test_an_odd_atom_entry_raises_in_the_step_loss():
+    one = ({(0, 1): 1}, {}, [(0, 1, FORM)])
+    batch = _hand_batch([one])
+    batch["r_atoms"][0, 0, 2] = 1
+    with pytest.raises(ValueError, match=r"atom entries \[1\]"):
+        step_loss(_StubDecoder(), None, None, None, batch)
 
 
 def test_anchor_nll_counts_an_anchor_shared_by_variants_once():
@@ -608,6 +637,15 @@ def test_floor_ranks_the_largest_pooled_gap_first(samples):
     b["r_anchors"][k, 0, i, j, sign] = True
     ranks, reachable = floor_ranks(b)
     assert (ranks == 0).all() and reachable.all()
+
+
+def test_floor_report_per_sample_ranks_reproduce_its_top_k(samples):
+    r = floor_report(samples, batch_size=2)
+    rows = r["per_sample"]
+    assert [row["step_id"] for row in rows] == [s.step_id for s in samples]
+    for k in (1, 3, 5):
+        assert np.mean([row["rank"] < k for row in rows]) == pytest.approx(r[f"top{k}"])
+    assert sum(not row["reachable"] for row in rows) == r["unreachable"]
 
 
 @pytest.mark.parametrize("encoder", ENCODERS)

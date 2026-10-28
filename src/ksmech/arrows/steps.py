@@ -94,6 +94,7 @@ log = logging.getLogger(__name__)
 
 SAMPLE_VERSION = 17  # 17: label classes closed under the pool's symmetry (`arrows.symmetry`)
 PARTS = ("train", "val", "test")
+FROZEN_SPLIT_SCHEMA = 1  # `split_frozen_<strategy>.json`, independent of SAMPLE_VERSION
 STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
 # which leaks molecules across sets on PMechDB (no pathway ids; docs/review_2026-10-21.md, D1)
@@ -111,6 +112,7 @@ class SkipReason(StrEnum):
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
     NOT_ELEMENTARY = "NOT_ELEMENTARY"
     H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"
+    RADICAL_ARROW = "RADICAL_ARROW"
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
 
@@ -464,33 +466,58 @@ def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9.-]+", "-", name).strip("-")
 
 
-def split_ids(steps: list[ElementaryStep], strategy: str, seed: int = 0) -> dict[str, list[str]]:
+def _frozen_parts(frozen: dict[str, list[str]] | None, name: str) -> dict[str, str] | None:
+    """step id -> part of the split `name` in a frozen snapshot; None without a snapshot, and
+    an empty map for a split the snapshot does not hold (a new class: placed by hash)."""
+    if frozen is None:
+        return None
+    return {sid: part for part in PARTS for sid in frozen.get(f"{name}_{part}", [])}
+
+
+def _loco(steps, seed, frozen, prefix: str, fn) -> dict[str, splits.Split]:
+    if not any(s.mechanism_class is not None for s in steps):
+        raise ValueError("no step has a mechanism_class; leave-one-class-out is impossible")
+    classes = sorted({s.mechanism_class for s in steps if s.mechanism_class is not None})
+    names = {c: f"{prefix}-{_safe(c)}" for c in classes}
+    return {
+        names[c]: fn(steps, c, seed=seed, frozen=_frozen_parts(frozen, names[c])) for c in classes
+    }
+
+
+def _strategy_splits(steps, strategy: str, seed: int, frozen) -> dict[str, splits.Split]:
+    simple = {
+        "molecule": splits.split_by_molecule,
+        "random_leaky": splits.split_by_pathway,
+        "scaffold": splits.split_by_scaffold,
+    }
+    if strategy in simple:
+        pinned = _frozen_parts(frozen, strategy)
+        return {strategy: simple[strategy](steps, seed=seed, frozen=pinned)}
+    if strategy == "loco":
+        return _loco(steps, seed, frozen, "loco", splits.split_leave_one_class_out)
+    if strategy == "loco_all":
+        return _loco(steps, seed, frozen, "locoall", splits.split_leave_one_class_out_all)
+    raise ValueError(f"unknown split strategy {strategy!r}; one of {STRATEGIES}")
+
+
+def split_ids(
+    steps: list[ElementaryStep],
+    strategy: str,
+    seed: int = 0,
+    frozen: dict[str, list[str]] | None = None,
+    conflicts: Counter | None = None,
+) -> dict[str, list[str]]:
     """Split name (`<strategy>_<part>`) -> step ids. Raises ValueError when the strategy
-    cannot run on these steps (leave-one-class-out without class labels)."""
+    cannot run on these steps (leave-one-class-out without class labels). With `frozen` (the
+    ids of a `split_frozen_<strategy>.json` snapshot) existing steps keep their parts
+    (`data.splits`); new steps of a group frozen in two parts are left out and counted per
+    split name in `conflicts` (SPLIT_CONFLICT)."""
     if strategy == "random":
         raise ValueError("the per-step split is now `random_leaky` and must be asked for by name")
-    if strategy == "molecule":
-        per = {"molecule": splits.split_by_molecule(steps, seed=seed)}
-    elif strategy == "random_leaky":
-        per = {"random_leaky": splits.split_by_pathway(steps, seed=seed)}
-    elif strategy == "scaffold":
-        per = {"scaffold": splits.split_by_scaffold(steps, seed=seed)}
-    elif strategy == "loco":
-        if not any(s.mechanism_class is not None for s in steps):
-            raise ValueError("no step has a mechanism_class; leave-one-class-out is impossible")
-        per = {
-            f"loco-{_safe(c)}": sp
-            for c, sp in splits.leave_one_class_out_splits(steps, seed=seed).items()
-        }
-    elif strategy == "loco_all":
-        if not any(s.mechanism_class is not None for s in steps):
-            raise ValueError("no step has a mechanism_class; leave-one-class-out is impossible")
-        per = {
-            f"locoall-{_safe(c)}": sp
-            for c, sp in splits.leave_one_class_out_all_splits(steps, seed=seed).items()
-        }
-    else:
-        raise ValueError(f"unknown split strategy {strategy!r}; one of {STRATEGIES}")
+    per = _strategy_splits(steps, strategy, seed, frozen)
+    if conflicts is not None:
+        for name, sp in per.items():
+            conflicts[name] += len(sp.conflict)
     return {f"{name}_{part}": getattr(sp, part) for name, sp in per.items() for part in PARTS}
 
 
@@ -521,6 +548,58 @@ def load_split_file(path: Path) -> dict[str, list[str]]:
     """The ids of a split file; raises StaleArtifact when its parquet changed."""
     prov.verify(path, "split", SAMPLE_VERSION)
     return json.loads(Path(path).read_text())["splits"]
+
+
+def frozen_split_path(
+    source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR
+) -> Path:
+    return source_dir(source, processed_dir) / f"split_frozen_{strategy}.json"
+
+
+def freeze_split_file(
+    source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR
+) -> Path:
+    """Snapshot the current split file of `strategy` as `split_frozen_<strategy>.json`: the
+    same ids under kind `split_frozen` and FROZEN_SPLIT_SCHEMA, stamped with no file input (a
+    content hash; the split file's own inputs only in `extra`, for tracing), so re-ingests and
+    SAMPLE_VERSION bumps never make it stale. An existing snapshot is never overwritten: a
+    re-split is an explicit new version (delete the file by hand)."""
+    src = splits_path(source, strategy, processed_dir)
+    ids = load_split_file(src)
+    out = frozen_split_path(source, strategy, processed_dir)
+    if out.exists():
+        raise FileExistsError(f"{out} exists: a frozen split is replaced only by hand")
+    old = prov.read_header(src)
+    config = {"strategy": strategy, "seed": old.config.get("seed")}
+    trace = {"from": src.name, "from_inputs": old.inputs, "from_built_at": old.built_at}
+    content = prov.sha256_text(json.dumps(ids, sort_keys=True))
+    header = prov.stamp("split_frozen", FROZEN_SPLIT_SCHEMA, {}, config, content, trace)
+    return prov.write_json(out, {"splits": ids}, header)
+
+
+def load_frozen_split(
+    source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR
+) -> dict[str, list[str]] | None:
+    """The ids of the strategy's frozen snapshot, None when there is none. Its kind, schema,
+    clean build and content hash are checked; no input can make it stale."""
+    path = frozen_split_path(source, strategy, processed_dir)
+    if not path.exists():
+        return None
+    header = prov.verify_clean(path, "split_frozen", FROZEN_SPLIT_SCHEMA)
+    ids = json.loads(path.read_text())["splits"]
+    if prov.sha256_text(json.dumps(ids, sort_keys=True)) != header.content_sha256:
+        raise prov.StaleArtifact(path, ["its ids differ from its content hash"])
+    return ids
+
+
+def frozen_excluded(frozen: dict[str, list[str]] | None, steps: list[ElementaryStep]) -> dict:
+    """Per split name, the frozen steps no longer among the training steps (a later rule
+    excluded them): counted, never silently dropped."""
+    if frozen is None:
+        return {}
+    have = {s.step_id for s in steps}
+    gone = {name: sum(i not in have for i in ids) for name, ids in frozen.items()}
+    return {name: n for name, n in gone.items() if n}
 
 
 def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> dict:
@@ -634,13 +713,18 @@ def write_strategy_views(
     statistics of every training part. A strategy that cannot run on the source is reported,
     not raised."""
     parquet = steps_path(source, processed_dir)
-    report: dict = {"splits": {}, "strategies_not_applicable": {}}
+    report: dict = {"splits": {}, "strategies_not_applicable": {}, "frozen": {}}
     for strategy in strategies:
+        frozen = load_frozen_split(source, strategy, processed_dir)
+        conflicts: Counter = Counter()
         try:
-            ids = split_ids(steps, strategy, seed)
+            ids = split_ids(steps, strategy, seed, frozen, conflicts)
         except ValueError as exc:
             report["strategies_not_applicable"][strategy] = str(exc)
             continue
+        if frozen is not None:
+            gone = frozen_excluded(frozen, steps)
+            report["frozen"][strategy] = {"SPLIT_CONFLICT": dict(conflicts), "excluded": gone}
         split_file = write_split_file(
             splits_path(source, strategy, processed_dir), strategy, seed, ids, parquet
         )

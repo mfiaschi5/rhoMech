@@ -34,6 +34,7 @@ class RejectReason(StrEnum):
     ARROW_ATOM_UNMAPPED = "ARROW_ATOM_UNMAPPED"  # arrow names a map number absent from reactants
     BOND_NOT_FOUND = "BOND_NOT_FOUND"  # a bond-source arrow names two atoms that are not bonded
     ARROWS_MISMATCH = "ARROWS_MISMATCH"  # the arrows applied to the reactants miss the products
+    RADICAL_ARROW = "RADICAL_ARROW"  # a half-headed arrow: one-electron steps are not replayed yet
     DUPLICATE_STEP = "DUPLICATE_STEP"  # same step_id seen before
 
 
@@ -123,12 +124,12 @@ def check_arrows_reproduce_products(
     """The arrows, applied to the reactants as one bond-electron-matrix edit
     (`ksmech.arrows.apply`), must give the products: the same canonical Kekulé SMILES, or the
     same sigma key. A step without arrows (ReactMech) has nothing to check. Radical arrows
-    are not implemented yet, so a step with one is logged and not checked."""
+    are not replayed yet (one-electron steps, open-shell plan P6), so a step with one is
+    rejected as RADICAL_ARROW and counted, never accepted unchecked."""
     if not arrows:
         return
     if any(a.source_kind is SourceKind.RADICAL for a in arrows):
-        log.info("radical arrows are not replayed yet; arrow check skipped")
-        return
+        raise StepRejected(RejectReason.RADICAL_ARROW, "half-headed arrows are not replayed yet")
     result = apply_arrows(reactants, arrows)
     status, pattern = match_products(result, products)
     if status not in MATCH_STATUSES:

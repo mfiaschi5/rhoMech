@@ -80,6 +80,8 @@ def lewis_apply(sample) -> Apply:
             q[i] -= d
             q[j] -= d
         for i, d in lone:
+            if d % 2:  # a one-electron entry: lone pairs cannot hold it (electron counts, P6)
+                raise ValueError(f"odd lone-pair entry {d} on atom {i}")
             lp[i] += d // 2
             q[i] -= d
         if (lp < 0).any():
@@ -125,8 +127,11 @@ def sample_decoder(model, cfg: DecodeConfig, scope: str = "all") -> Decode:
 
 def decode_report(samples: Iterable, decode: Decode, ks: tuple[int, ...] = (1, 3, 5)) -> dict:
     """Top-k exact-R hits over `samples`, the misses, the decoder's drop counts and the time
-    per sample. A sample without a label class is counted as NO_EDIT_LABEL and left out."""
+    per sample. A sample without a label class is counted as NO_EDIT_LABEL and left out.
+    `per_sample` holds one row per scored sample (step id, the 0-based rank of the first hit or
+    None, the completions found), so two decodes can be compared sample by sample."""
     ranks: list[int | None] = []
+    rows: list[dict] = []
     skips: Counter = Counter()
     seconds: list[float] = []
     for sample in samples:
@@ -137,6 +142,8 @@ def decode_report(samples: Iterable, decode: Decode, ks: tuple[int, ...] = (1, 3
         found = decode(sample, skips)
         seconds.append(time.perf_counter() - t0)
         ranks.append(hit_rank(found, sample.edit_label))
+        rows.append({"step_id": getattr(sample, "step_id", None), "rank": ranks[-1]})
+        rows[-1]["n_found"] = len(found)
         if not found:
             skips["DECODE_NOTHING_FOUND"] += 1
     n = len(ranks)
@@ -146,4 +153,5 @@ def decode_report(samples: Iterable, decode: Decode, ks: tuple[int, ...] = (1, 3
         "not_found": sum(r is None for r in ranks),
         "mean_seconds": float(np.mean(seconds)) if seconds else 0.0,
         "skips": dict(sorted(skips.items())),
+        "per_sample": rows,
     }

@@ -13,7 +13,12 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.data import mech_uspto, pmechdb, provenance, reactmech
-from ksmech.data.ingest import IngestResult, write_outputs
+from ksmech.data.ingest import (
+    IngestResult,
+    freeze_sample,
+    load_frozen_sample,
+    write_outputs,
+)
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, source_dir, steps_path
 from ksmech.data.schema import Source
 from ksmech.data.stats import compute_stats
@@ -38,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
                 "--sample", type=int, default=0, help="keep N random accepted steps (pilots)"
             )
             p.add_argument("--seed", type=int, default=0, help="the --sample generator's seed")
+    f = sub.add_parser("freeze-sample", help="snapshot a pilot's step ids (sample_frozen.json)")
+    f.add_argument("--source", required=True, choices=[str(s) for s in LOADERS])
+    f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     v = sub.add_parser("provenance", help="print an artifact's provenance chain, or backfill")
     v.add_argument("path", type=Path, nargs="?", help="artifact to describe")
     v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
@@ -55,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ingest(Source(args.source), args.raw, args.processed_dir, console, sample)
     if args.command == "provenance":
         return cmd_provenance(args, console)
+    if args.command == "freeze-sample":
+        out = freeze_sample(Source(args.source), args.processed_dir)
+        console.print(f"wrote {out}")
+        return 0
     return cmd_stats(Source(args.source), args.processed_dir, console)
 
 
@@ -93,7 +105,7 @@ def cmd_ingest(
         console.print(f"[red]cannot ingest {source}:[/red] {exc}")
         return 2
     if sample is not None:
-        result.keep_sample(*sample)
+        result.keep_sample(*sample, frozen=load_frozen_sample(source, processed))
     paths = write_outputs(result, processed)
     print_ingest_report(result, console)
     for kind, path in paths.items():

@@ -46,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="spawned processes loading the samples (host total <= 15)",
     )
+    g.add_argument(
+        "--score-only",
+        action="store_true",
+        help="no fit: score the stored ranker of --split on val and test, per-sample ranks",
+    )
     t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
     t.add_argument("--source", default="pmechdb", help="where the trained ranker lives")
     t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -302,9 +307,44 @@ def _read_all(args, loader, cfg, console: Console) -> tuple[dict, dict] | None:
     return train, parts
 
 
+def cmd_gbdt_score(args: argparse.Namespace, console: Console) -> int:
+    """The stored ranker of --split (`gbdt_lgbm_<split>_geomfree.npz`) scored on val and test
+    without a fit: the summary and one rank per step (`gbdt_lgbm_ranks_<split>_geomfree.json`),
+    so a later model is compared with it sample by sample, not refitted (a refit samples 80% of
+    the columns and does not reproduce)."""
+    from ksmech.physics import baseline as bl
+    from ksmech.physics import lgbm
+
+    out_dir, tag = source_dir(args.source, args.processed_dir), f"{args.split}_{FEATURES}"
+    path = out_dir / f"gbdt_lgbm_{tag}.npz"
+    model = lgbm.load_lgbm(path, bl.FEATURE_NAMES)
+    loader = TokenCache(args.tokens_dir, maxsize=128)
+    result, inputs = {}, prov.file_input(path)
+    for part in ("val", "test"):
+        sets = _read_kind(args, part, loader, "eval", None)["sets"]
+        ranks = bl.evaluate_scores(sets, model.score_sets([cs.X for cs in sets], args.n_jobs))
+        ranks = ranks["ranks"]
+        rows = [{"step_id": cs.step_id, "rank": r} for cs, r in zip(sets, ranks, strict=True)]
+        result[part] = {"summary": bl.summarize_ranks(ranks), "per_sample": rows}
+        inputs |= prov.file_input(
+            samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+        )
+    header = prov.stamp("gbdt_lgbm_ranks", 1, inputs, {"model": path.name, "split": args.split})
+    out = out_dir / f"gbdt_lgbm_ranks_{tag}.json"
+    prov.write_json(out, result, header)
+    for part, r in result.items():
+        tops = " / ".join(f"{r['summary'][f'top{k}']:.1%}" for k in (1, 3, 5))
+        console.print(f"{part}: n {r['summary']['n']}, top-1/3/5 {tops}")
+    console.print(f"wrote {out}")
+    return 0
+
+
 def cmd_gbdt(args: argparse.Namespace, console: Console) -> int:
     """The fast LightGBM ranker (`physics.lgbm`) on the geometry-free features."""
     from ksmech.physics.lgbm import LGBMConfig
+
+    if args.score_only:
+        return cmd_gbdt_score(args, console)
 
     cfg = LGBMConfig(n_hard=args.hard, n_random=args.random, n_jobs=args.n_jobs)
     loader = TokenCache(args.tokens_dir, maxsize=128)  # tokens only for the LMO energies

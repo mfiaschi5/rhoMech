@@ -42,8 +42,8 @@ from ksmech.eval.floor import floor_report
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.train.loop import DEFAULT_MODELS_DIR
 
-FLOOR_VERSION = 1
-DECODE_VERSION = 1
+FLOOR_VERSION = 2  # 2: per-sample ranks beside the report
+DECODE_VERSION = 2  # 2: run source, sample versions and per-sample hits
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,9 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _decode_parser(sub) -> None:
     d = sub.add_parser("decode", help="the beam decoder on stored samples: full-R top-k")
-    d.add_argument("--run", required=True, help="training run under <models-dir>/<source>/")
+    d.add_argument("--run", required=True, help="training run under <models-dir>/<run-source>/")
     d.add_argument("--checkpoint", default="best", choices=["best", "last"])
-    d.add_argument("--source", default="pmechdb", choices=[str(x) for x in Source])
+    d.add_argument("--source", default="pmechdb", choices=[str(x) for x in Source],
+                   help="the samples decoded")  # fmt: skip
+    d.add_argument("--run-source", help="the models directory of the run (default --source), "
+                   "e.g. pmechdb+reactmech")  # fmt: skip
     d.add_argument("--split", default="molecule", help="split strategy of the sample files")
     d.add_argument("--part", default="val", choices=["train", "val", "test"])
     d.add_argument("--limit", type=int, help="the first N samples of the part")
@@ -89,25 +92,45 @@ def _decode_parser(sub) -> None:
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
 
 
+def _sample_versions(path: Path, payload: dict, console: Console) -> dict:
+    """The sample version the checkpoint was trained on and the decoded view's. A mismatch
+    warns and is recorded; it never blocks (flex_first is v15, the pod runs v16): decoding
+    fails only when an input the checkpoint needs is missing from the store."""
+    trained = payload.get("provenance", {}).get("config", {}).get("sample_version")
+    header = prov.read_header(path)
+    view = header.schema_version if header else None
+    if trained != view:
+        console.print(f"[yellow]checkpoint trained on samples v{trained}, view is v{view}[/yellow]")
+    return {"checkpoint_sample_version": trained, "view_sample_version": view}
+
+
 def cmd_decode(args, console: Console) -> int:
     from ksmech.eval.decode import decode_report, sample_decoder
     from ksmech.model.decode import DecodeConfig
     from ksmech.train.loop import load_model
 
-    ckpt = args.models_dir / args.source / args.run / f"{args.checkpoint}.pt"
+    run_source = args.run_source or args.source
+    ckpt = args.models_dir / run_source / args.run / f"{args.checkpoint}.pt"
     model, payload = load_model(ckpt, "cpu")
     path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
     ids = sample_ids(path)
     ids = ids[: args.limit] if args.limit is not None else ids
     cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam)
     report = decode_report(load_samples(path, ids=ids), sample_decoder(model, cfg, args.scope))
-    config = {k: getattr(args, k) for k in ("split", "part", "limit", "beam", "scope")}
-    config["checkpoint"] = _checkpoint_text(args.checkpoint, payload)
+    hits = report.pop("per_sample")
+    config = {k: getattr(args, k) for k in ("source", "split", "part", "limit", "beam", "scope")}
+    config |= {"run_source": run_source, "checkpoint": _checkpoint_text(args.checkpoint, payload)}
+    config |= _sample_versions(path, payload, console)
     inputs = prov.file_input(path) | prov.file_input(ckpt)
     header = prov.stamp("decode", DECODE_VERSION, inputs, config)
-    suffix = f"_n{args.limit}" if args.limit is not None else ""
+    suffix = f"_{args.source}" if args.source != run_source else ""
+    suffix += f"_n{args.limit}" if args.limit is not None else ""
     out = ckpt.parent / f"decode_report_{args.split}_{args.part}{suffix}.json"
     prov.write_json(out, report, header)
+    hits_out = ckpt.parent / f"decode_hits_{args.split}_{args.part}{suffix}.json"
+    prov.write_json(
+        hits_out, {"per_sample": hits}, prov.stamp("decode_hits", DECODE_VERSION, inputs, config)
+    )
     table = Table(title=f"full-R decoding, {args.run} {args.checkpoint}, {args.split} {args.part}")
     for col in ("n", "top-1", "top-3", "top-5", "not found", "s / sample"):
         table.add_column(col)
@@ -117,19 +140,24 @@ def cmd_decode(args, console: Console) -> int:
     console.print(table)
     for code, count in report["skips"].items():
         console.print(f"  {code}: {count}")
-    console.print(f"wrote {out}")
+    console.print(f"wrote {out} and {hits_out.name}")
     return 0
 
 
 def cmd_floor(args, console: Console) -> int:
     results, inputs = {}, {}
+    ranks = {}
     for part in ("val", "test"):
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         inputs |= prov.file_input(path)
         results[part] = floor_report(load_samples(path))
+        ranks[part] = results[part].pop("per_sample")
     header = prov.stamp("anchor_floor", FLOOR_VERSION, inputs, {"split": args.split})
-    out = source_dir(args.source, args.processed_dir) / f"anchor_floor_report_{args.split}.json"
+    out_dir = source_dir(args.source, args.processed_dir)
+    out = out_dir / f"anchor_floor_report_{args.split}.json"
     prov.write_json(out, {"scorer": "|G^atom| over valid pairs", **results}, header)
+    ranks_header = prov.stamp("anchor_floor_ranks", FLOOR_VERSION, inputs, {"split": args.split})
+    prov.write_json(out_dir / f"anchor_floor_ranks_{args.split}.json", ranks, ranks_header)
     table = Table(title=f"anchor floor, {args.source} {args.split} split")
     for col in ("part", "n", "top-1", "top-3", "top-5", "median rank", "unreachable"):
         table.add_column(col)

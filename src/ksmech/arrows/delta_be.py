@@ -49,7 +49,7 @@ from ksmech.arrows.compare import MATCH_STATUSES, match_products
 from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.data import chem
 from ksmech.data.resonance import frozen_hydrogens, resonance_forms
-from ksmech.data.schema import ElementaryStep
+from ksmech.data.schema import ElementaryStep, SourceKind
 
 RESONANCE_CAP = 256  # product resonance structures enumerated for the label class
 
@@ -63,6 +63,7 @@ class EditSkip(StrEnum):
     NOT_ELEMENTARY = "NOT_ELEMENTARY"  # no candidate is an elementary step (`is_elementary`)
     H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"  # no unique donor -> acceptor pairing of the
     #   hydrogens that move (`arrows.hydrogens`; steps without arrows only)
+    RADICAL_ARROW = "RADICAL_ARROW"  # a half-headed arrow: one-electron edits are not built yet
 
 
 def _order(mol: Chem.Mol, i: int, j: int) -> int:
@@ -215,6 +216,8 @@ def mapped_matrix(reac: Chem.Mol, prod: Chem.Mol) -> ReactionMatrix:
 def dataset_matrix(step: ElementaryStep) -> tuple[Chem.Mol, Chem.Mol, ReactionMatrix] | EditSkip:
     """(reactants, product, R_data) of an annotated step, or why it has none: its arrows
     applied as one edit, or for a step without arrows the edit between its mapped sides."""
+    if any(a.source_kind is SourceKind.RADICAL for a in step.arrows):
+        return EditSkip.RADICAL_ARROW
     mol = chem.parse_mapped(step.reactants_smiles)
     want = chem.parse_mapped(step.products_smiles)
     try:
