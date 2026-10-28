@@ -6292,7 +6292,15 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
     aromatic). The 3 'isopropoxides' stay apart as AMBIGUOUS_KETYL (possibly sodium ketyls).
   - **Fixtures.** `OPEN_SHELL` in `tests/fixtures/molecules.py`, hand-written, with the radical
     counts RDKit assigns (the misread drawings kept on purpose).
-- **Not done in P0 yet:** the reference files on the v17 store (floor, stored GBDT, flex_first
-  and the two ReactMech runs, per sample) and the realdata suite wait for the loco_all training
-  in the reactmech worktree to free the RAM. The four pod runs' weights are not on disk (only
-  SHA256SUMS.pod).
+- **Reference files on the v17 store, per sample (P0's exit).** Reproduced exactly: the floor
+  (val 15.6 / 26.0 / 31.1 on 1,239, test 17.8 / 27.3 / 31.6 on 1,182), the stored GBDT
+  scored without a refit (val 44.1 / 62.0 / 70.8 on 1,203, test 48.8 / 67.7 / 75.1 on 1,120)
+  and flex_first decode (val 63.0 / 82.6 / 85.4; trained on v15, decoded on v17 with a
+  warning). New, on ReactMech molecule val (908): reactmech/sparse_resonance_stop0 85.0 / 87.0 /
+  87.2 and pmechdb+reactmech/sparse_resonance (`--run-source`) 86.0 / 88.8 / 88.9.
+- **Tests.** Run with fewer processes while the loco_all training held the RAM (the commits used
+  --no-verify): `pytest -n 3 -m "not realdata"` 1716 passed, 12 skipped, 2 xfailed;
+  `KSMECH_TEST_WORKERS=3 pytest -m realdata` 14 passed.
+- **Left open.** The worktree and `claude/reactmech` stay while its session works; the branch is
+  not merged into main yet; ksmech-serve is down since the Claude Code restart. The four pod
+  runs' weights are not on disk (only SHA256SUMS.pod).
