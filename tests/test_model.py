@@ -38,7 +38,9 @@ from ksmech.model.net import KSMech
 from ksmech.orbitals.tokens import atom_feature_names, feature_names
 from ksmech.train.batching import CellBudgetSampler, cells
 from ksmech.train.loop import (
+    NonFiniteError,
     TrainConfig,
+    better_epoch,
     checkpoint_payload,
     evaluate,
     load_model,
@@ -478,6 +480,68 @@ def test_a_tie_with_a_candidate_outside_the_label_counts_against_it():
     assert anchor_ranks(lp, b).tolist() == [1]
     lp[0, 1, 2, FORM] = -1.5
     assert anchor_ranks(lp, b).tolist() == [0]
+
+
+def test_nan_scores_never_make_a_hit():
+    """NaN logits compare false with everything: a model with NaN weights scored top-1 = 1."""
+    b = _hand_batch([({(0, 1): 1}, {}, [(0, 1, FORM)])])
+    lp = torch.full((1, 3, 3, 2), float("nan"))
+    assert anchor_ranks(lp, b).tolist() == [lp[0].numel()]
+    lp = torch.full((1, 3, 3, 2), -30.0)
+    lp[0, 0, 1, FORM] = -1.0
+    lp[0, 1, 2, FORM] = float("nan")  # a NaN candidate outside the label counts against it
+    assert anchor_ranks(lp, b).tolist() == [1]
+
+
+def test_an_epoch_with_a_non_finite_loss_never_becomes_best():
+    good = {"val_top1": 0.9, "val_loss": 2.2, "train_loss": 2.7}
+    nan = {"val_top1": 1.0, "val_loss": math.nan, "train_loss": math.nan}
+    assert better_epoch(good, None) and not better_epoch(nan, good) and not better_epoch(nan, None)
+    assert better_epoch({**good, "val_top1": 0.91}, good)
+    assert not better_epoch({**good, "train_loss": math.inf}, good)
+
+
+def _one_epoch(model, loader, cfg, scaler=None, state=None):
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 1.0)
+    scaler = scaler or torch.amp.GradScaler("cpu", enabled=False)
+    state = state if state is not None else {"step": 0, "total": 9, "epoch": 0}
+    out = train_epoch(model, loader, opt, sched, scaler, torch.device("cpu"), None, cfg, state)
+    return out, state
+
+
+def test_a_batch_with_a_non_finite_loss_takes_no_step(samples, monkeypatch):
+    import ksmech.train.loop as loop
+
+    model = make(samples, "sparse", topk=8)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    real = loop.step_loss
+
+    def nan_loss(*args):
+        loss, parts = real(*args)
+        return loss * math.nan, parts
+
+    monkeypatch.setattr(loop, "step_loss", nan_loss)
+    cfg = TrainConfig(workers=0, log_every=1)
+    out, state = _one_epoch(model, [collate_samples(samples)], cfg)
+    assert out["nonfinite_batches"] == 1 and state["step"] == 1 and math.isnan(out["train_loss"])
+    assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())
+    monkeypatch.setattr(loop, "MAX_NONFINITE_IN_A_ROW", 2)
+    with pytest.raises(NonFiniteError, match="2 non-finite training losses in a row"):
+        _one_epoch(model, [collate_samples(samples)] * 2, cfg)
+
+
+def test_non_finite_weights_or_a_collapsed_loss_scale_stop_the_run(samples):
+    model = make(samples, "sparse", topk=8)
+    cfg = TrainConfig(workers=0, log_every=1, grad_clip=1e9)
+    loader = [collate_samples(samples)]
+    low = torch.amp.GradScaler("cpu", init_scale=0.25, growth_interval=10**6)
+    with pytest.raises(NonFiniteError, match="loss scale 0.25"):
+        _one_epoch(model, loader, cfg, low)
+    with torch.no_grad():
+        next(model.parameters()).fill_(math.nan)
+    with pytest.raises(NonFiniteError, match="non-finite parameters"):
+        _one_epoch(model, loader, cfg)
 
 
 def test_ranks_and_greedy_edit(samples, model):

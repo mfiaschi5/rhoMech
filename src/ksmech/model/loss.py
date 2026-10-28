@@ -122,14 +122,18 @@ def anchor_ranks(lp_anchor: torch.Tensor, batch: dict) -> torch.Tensor:
     score at least as high (set marginalization: any admissible anchor of any variant counts).
     A tie with such a candidate counts against the label, so the rank does not depend on how
     the precision breaks ties: in bfloat16, equivalent atoms tie exactly and a tie used to count
-    as a hit (docs/decisions.md, 2026-10-26)."""
+    as a hit (docs/decisions.md, 2026-10-26). A NaN score counts against the label too, and a
+    NaN label score ranks last: NaN logits compare false with everything, so a model with NaN
+    weights used to score top-1 = 1 (docs/decisions.md, 2026-10-28)."""
     rows = admissible_rows(batch)
     b, _, i, j, sign = rows.unbind(1)
     best = torch.full((lp_anchor.shape[0],), float("-inf"), device=lp_anchor.device)
     best = best.scatter_reduce(0, b, lp_anchor[b, i, j, sign], "amax")
     label = torch.zeros_like(lp_anchor, dtype=torch.bool)
     label[b, i, j, sign] = True
-    return ((lp_anchor >= best[:, None, None, None]) & ~label).flatten(1).sum(1)
+    beats = (lp_anchor >= best[:, None, None, None]) | lp_anchor.isnan()
+    rank = (beats & ~label).flatten(1).sum(1)
+    return torch.where(best.isnan(), lp_anchor[0].numel(), rank)
 
 
 def greedy_edit(dec: EditDecoder, h, p, lp_anchor: torch.Tensor, batch: dict):

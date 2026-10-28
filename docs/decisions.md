@@ -6145,3 +6145,33 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   - The run lives in `data/models/pmechdb+reactmech/<run>/`; `run.json` lists every view.
   - The evaluation CLIs still take one source.
 
+
+## 2026-10-28: a non-finite run stops; NaN never makes a hit or a `best.pt`
+
+- **What happened.** The ReactMech-only sparse run (fp16, lambda_stop 0.5) went non-finite at
+  optimizer step ~9,480 (epoch 19 of 30). The fp16 GradScaler halved its scale on every
+  overflowing step until the scale was 0. At a scale of 0 the unscaled gradients are
+  0 * inf = NaN, and the scaler's inf check misses them: it tests the scaled gradients, which
+  are 0 (checked on the RX 6600 XT: `found_inf` 0, NaN gradients, NaN weights after AdamW).
+  The weights became NaN (257 of 261 tensors), and the run went on for 11 more epochs.
+- **NaN made a hit.** `anchor_ranks` counts the candidates outside the label that score at
+  least as high as the label. NaN compares false with everything, so with NaN logits every
+  rank was 0: validation top-1 = 1.000, and `best.pt` was overwritten with the NaN weights.
+  The good epoch-18 checkpoint (top-1 0.900) was lost.
+- **The fix** (`train.loop`, `model.loss`):
+  - a training batch whose loss is not finite takes no backward and no optimizer step. It is
+    logged with its step ids and its non-finite loss terms, and counted
+    (`nonfinite_batches` in `metrics.jsonl`). 50 such batches in a row stop the run.
+  - the run stops (`NonFiniteError`, CLI exit 3, `NONFINITE` in the log) when the fp16 loss
+    scale falls below 1, or when a parameter is no longer finite. The weights are checked every
+    `log_every` steps and at the end of each epoch.
+  - the run stops before the epoch's checkpoints are written, so `last.pt` and `best.pt` keep
+    the last finite epoch.
+  - a NaN score counts against the label, and a NaN label score ranks last: a NaN model scores
+    0, never 1.
+  - `better_epoch`: an epoch with a non-finite training or validation loss is never `best.pt`.
+- **Not settled: the cause of the overflow.** The ReactMech-only gradient norms ran about 10x
+  those of the combined run (median 116 vs 12). The one difference in configuration is
+  lambda_stop (0.5 vs 0, the smallest default of the two sources). The rerun uses
+  `--stop-weight 0`, as the combined run did, so the two runs compare like for like. The log
+  of a skipped batch now names the loss terms that were not finite.

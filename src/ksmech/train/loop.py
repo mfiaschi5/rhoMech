@@ -83,6 +83,15 @@ class TrainConfig:
 
 
 STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0}  # PMechDB: isolated steps, no stop labels
+# a non-finite run stops (docs/decisions.md, 2026-10-28): at a loss scale of 0 the unscaled
+# gradients are NaN and the scaler's inf check misses them (0 * inf); so many skipped batches
+# in a row is no glitch
+MIN_LOSS_SCALE, MAX_NONFINITE_IN_A_ROW = 1.0, 50
+
+
+class NonFiniteError(RuntimeError):
+    """The run cannot go on: its weights, its loss scale or its losses are no longer finite.
+    Raised before the epoch's checkpoints are written, so `last.pt` keeps the last good epoch."""
 
 
 def sources(cfg: TrainConfig) -> tuple[str, ...]:
@@ -280,6 +289,10 @@ def train_epoch(model, loader, opt, sched, scaler, device, dtype, cfg: TrainConf
             loss, parts = step_loss(model.decoder, h, p, y, batch, stop_weight(cfg))
             loss = loss + sum(aux.values())  # the sparse indexer's KL trains the indexer only
         opt.zero_grad(set_to_none=True)
+        if _skip_nonfinite(loss, parts | aux, batch, state):  # takes no optimizer step
+            sched.step()
+            state["step"] += 1
+            continue
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -289,7 +302,10 @@ def train_epoch(model, loader, opt, sched, scaler, device, dtype, cfg: TrainConf
         state["step"] += 1
         seen += len(batch["step_id"])
         losses.append(float(loss.detach()))
+        if scaler.is_enabled() and scaler.get_scale() < MIN_LOSS_SCALE:
+            raise NonFiniteError(f"step {state['step']}: fp16 loss scale {scaler.get_scale():g}")
         if state["step"] % cfg.log_every == 0:
+            check_finite_weights(model, state["step"])
             log.info(
                 "step %d / %d epoch %d loss %.4f anchor_nll %.4f grad %.2f lr %.2e %.1f samples/s",
                 state["step"],
@@ -301,10 +317,39 @@ def train_epoch(model, loader, opt, sched, scaler, device, dtype, cfg: TrainConf
                 sched.get_last_lr()[0],
                 seen / (time.time() - t0),
             )
+    check_finite_weights(model, state["step"])
     return {
         "train_loss": float(np.mean(losses)) if losses else float("nan"),
         "seconds": time.time() - t0,
+        "nonfinite_batches": state.pop("nonfinite_epoch", 0),
     }
+
+
+def _skip_nonfinite(loss: torch.Tensor, terms: dict, batch: dict, state: dict) -> bool:
+    """True when the training loss is not finite: the batch is skipped, logged with its steps
+    and its non-finite loss terms, and counted (`nonfinite_epoch`); `MAX_NONFINITE_IN_A_ROW`
+    in a row stop the run."""
+    if bool(torch.isfinite(loss.detach())):
+        state["nonfinite_row"] = 0
+        return False
+    state["nonfinite_epoch"] = state.get("nonfinite_epoch", 0) + 1
+    state["nonfinite_row"] = state.get("nonfinite_row", 0) + 1
+    bad = [k for k, v in terms.items() if torch.is_tensor(v) and not torch.isfinite(v).all()]
+    log.warning("step %d: non-finite loss (%s), batch skipped: %s", state["step"] + 1,
+                ", ".join(bad) or "the sum", " ".join(batch["step_id"]))  # fmt: skip
+    if state["nonfinite_row"] >= MAX_NONFINITE_IN_A_ROW:
+        raise NonFiniteError(f"step {state['step'] + 1}: {state['nonfinite_row']} non-finite "
+                             "training losses in a row")  # fmt: skip
+    return True
+
+
+def check_finite_weights(model: torch.nn.Module, step: int) -> None:
+    """Raise `NonFiniteError` when a parameter holds a NaN or an infinity (one sync)."""
+    params = [p for p in model.parameters() if p.is_floating_point()]
+    if bool(torch.stack([torch.isfinite(p).all() for p in params]).all()):
+        return
+    bad = [n for n, p in model.named_parameters() if not torch.isfinite(p).all()]
+    raise NonFiniteError(f"step {step}: {len(bad)} non-finite parameters, e.g. {bad[0]}")
 
 
 def checkpoint_payload(model: KSMech, header: prov.Provenance, **extra) -> dict:
@@ -386,9 +431,18 @@ def _resume(path: Path, header, model, opt, sched, scaler) -> dict:
     return {"epoch": ckpt["epoch"] + 1, "step": ckpt["step"], "best": ckpt["best"]}
 
 
+def better_epoch(metrics: dict, best: dict | None) -> bool:
+    """Whether an epoch's metrics make the new `best.pt`: a higher validation anchor top-1,
+    ties broken by the lower loss; never an epoch with a non-finite loss."""
+    if not (math.isfinite(metrics["val_loss"]) and math.isfinite(metrics["train_loss"])):
+        return False
+    key = (metrics["val_top1"], -metrics["val_loss"])
+    return best is None or key > (best["val_top1"], -best["val_loss"])
+
+
 def _end_epoch(run_dir: Path, model, header, opt, sched, scaler, state: dict, metrics: dict):
     """Append the metrics line, log it, and write `last.pt` (and `best.pt` when the validation
-    anchor top-1 improves, ties broken by the loss)."""
+    anchor top-1 improves, ties broken by the loss; never for an epoch with a non-finite loss)."""
     with open(run_dir / "metrics.jsonl", "a") as fh:
         fh.write(json.dumps(metrics) + "\n")
     log.info(
@@ -400,10 +454,8 @@ def _end_epoch(run_dir: Path, model, header, opt, sched, scaler, state: dict, me
         metrics["val_r_exact"],
         metrics["val_loss"],
     )
-    best = state["best"]
-    key = (metrics["val_top1"], -metrics["val_loss"])
-    is_best = best is None or key > (best["val_top1"], -best["val_loss"])
-    state["best"] = metrics if is_best else best
+    is_best = better_epoch(metrics, state["best"])
+    state["best"] = metrics if is_best else state["best"]
     payload = checkpoint_payload(
         model,
         header,
