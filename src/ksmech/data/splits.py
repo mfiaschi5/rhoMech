@@ -123,6 +123,41 @@ def leave_one_class_out_splits(
     return {c: split_leave_one_class_out(steps, c, val_fraction, seed) for c in classes}
 
 
+def split_leave_one_class_out_all(
+    steps: Sequence[ElementaryStep], held_out: str, val_fraction: float = 0.1, seed: int = 0
+) -> Split:
+    """Test = every step of class `held_out`; every other step, unlabelled ones included, is
+    split train/val by molecule (`split_by_molecule`), so val is an in-distribution set.
+
+    Excluded: the steps that share a non-trivial molecule or a pathway with a held-out step
+    (they would leak the held-out reactions into training)."""
+    if held_out not in {s.mechanism_class for s in steps}:
+        raise ValueError(f"class {held_out!r} not present")
+    test = [s for s in steps if s.mechanism_class == held_out]
+    tokens = {f"pathway:{s.pathway_id}" for s in test if s.pathway_id is not None}
+    for s in test:
+        tokens |= step_molecules(s.reactants_smiles, s.products_smiles)
+
+    def leaks(s: ElementaryStep) -> bool:
+        return f"pathway:{s.pathway_id}" in tokens or bool(
+            tokens & step_molecules(s.reactants_smiles, s.products_smiles)
+        )
+
+    others = [s for s in steps if s.mechanism_class != held_out]
+    rest = [s for s in others if not leaks(s)]
+    # test fraction 0: groups that overflow val spill into "test" and are folded back into val
+    tv = split_by_molecule(rest, (1.0 - val_fraction, val_fraction, 0.0), seed)
+    leaky = sorted({s.step_id for s in others} - {s.step_id for s in rest})
+    return Split(tv.train, sorted(tv.val + tv.test), sorted(s.step_id for s in test), leaky)
+
+
+def leave_one_class_out_all_splits(
+    steps: Sequence[ElementaryStep], val_fraction: float = 0.1, seed: int = 0
+) -> dict[str, Split]:
+    classes = sorted({s.mechanism_class for s in steps if s.mechanism_class is not None})
+    return {c: split_leave_one_class_out_all(steps, c, val_fraction, seed) for c in classes}
+
+
 @cache
 def step_molecules(reactants_smiles: str, products_smiles: str) -> frozenset[str]:
     """Non-trivial map-free molecules (more than 3 heavy atoms) on either side of a step."""

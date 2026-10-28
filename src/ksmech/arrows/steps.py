@@ -28,8 +28,10 @@ donor-acceptor pair) is a sample without ArrowLabels.
 `build_all_samples(source)` writes the sample store (`arrows.store`) and one
 `data/processed/<source>/samples_<split>.json` view per split, with
 `split = "<strategy>_<part>"`: strategy `molecule` (the default), `scaffold`, `loco-<class>`
-(leave one mechanism class out) or, only when named, `random_leaky` (per step), part `train`,
-`val` or `test`.
+(leave one mechanism class out), or, only when named, `locoall-<class>` (the class held out as
+test, every other step, unlabelled ones too, split by molecule into train and an in-distribution
+val) and `random_leaky` (per step), part `train`, `val` or `test`. `write_views_from_store`
+writes the views of more strategies over a store already built.
 `arrows.batches.collate_samples` pads a batch and builds the masks the model needs; it lives
 apart so that this module does not import torch.
 """
@@ -61,6 +63,7 @@ from ksmech.arrows.delta_be import (
     to_global,
 )
 from ksmech.arrows.drawings import Drawing, resonance_drawings
+from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.arrows.lewis import (
     MissingBondIndex,
     check_edit,
@@ -91,7 +94,7 @@ log = logging.getLogger(__name__)
 
 SAMPLE_VERSION = 17  # 17: label classes closed under the pool's symmetry (`arrows.symmetry`)
 PARTS = ("train", "val", "test")
-STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
+STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
 # which leaks molecules across sets on PMechDB (no pathway ids; docs/review_2026-10-21.md, D1)
 DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
@@ -107,12 +110,14 @@ class SkipReason(StrEnum):
     NO_ANCHOR = "NO_ANCHOR"
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
     NOT_ELEMENTARY = "NOT_ELEMENTARY"
+    H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
 
 
 READING_ALIGNED = "aligned"  # every arrow has its ArrowLabel
 READING_FILTERED = "LABEL_FILTERED"  # a label had no pair left that pair_valid allows
+READING_NO_ARROWS = "NO_ARROWS"  # the source has no arrows (ReactMech): R only, no ArrowLabels
 
 
 @dataclass
@@ -372,6 +377,9 @@ def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: Edi
 
 def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment) -> None:
     """The ArrowLabels restricted to valid pairs when every arrow aligns, and the reading."""
+    if alignment.n_arrows == 0:
+        sample.labels, sample.orbital_reading = [], READING_NO_ARROWS
+        return
     if not alignment.complete:
         sample.labels, sample.orbital_reading = [], str(alignment.unaligned[0].reason)
         return
@@ -386,7 +394,11 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
 def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
     """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
     the edit label, the other resonance drawings of the pool, and the ArrowLabels when every
-    arrow aligns (`orbital_reading`)."""
+    arrow aligns (`orbital_reading`). A step without arrows first has the hydrogens that move
+    written as atoms (`hydrogens.explicit_moving_hydrogens`)."""
+    step = explicit_moving_hydrogens(step)
+    if step is None:
+        return SkipReason.H_TRANSFER_AMBIGUOUS
     with prov.collecting() as used:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
@@ -469,6 +481,13 @@ def split_ids(steps: list[ElementaryStep], strategy: str, seed: int = 0) -> dict
         per = {
             f"loco-{_safe(c)}": sp
             for c, sp in splits.leave_one_class_out_splits(steps, seed=seed).items()
+        }
+    elif strategy == "loco_all":
+        if not any(s.mechanism_class is not None for s in steps):
+            raise ValueError("no step has a mechanism_class; leave-one-class-out is impossible")
+        per = {
+            f"locoall-{_safe(c)}": sp
+            for c, sp in splits.leave_one_class_out_all_splits(steps, seed=seed).items()
         }
     else:
         raise ValueError(f"unknown split strategy {strategy!r}; one of {STRATEGIES}")
@@ -595,9 +614,27 @@ def build_all_samples(
                 "label_filter",
             )
         },
-        "splits": {},
-        "strategies_not_applicable": {},
     }
+    return report | write_strategy_views(
+        source, strategies, steps, samples, skipped, index, seed, processed_dir
+    )
+
+
+def write_strategy_views(
+    source: str,
+    strategies: Iterable[str],
+    steps: list[ElementaryStep],
+    samples: dict[str, MechanismSample],
+    skipped: dict,
+    index: Path,
+    seed: int = 0,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+) -> dict:
+    """One split file per strategy, one view per split over the store `index`, and the pair
+    statistics of every training part. A strategy that cannot run on the source is reported,
+    not raised."""
+    parquet = steps_path(source, processed_dir)
+    report: dict = {"splits": {}, "strategies_not_applicable": {}}
     for strategy in strategies:
         try:
             ids = split_ids(steps, strategy, seed)
@@ -618,6 +655,25 @@ def build_all_samples(
                 stats_path = pair_stats_path(source, split[: -len("_train")], processed_dir)
                 write_pair_stats(stats_path, pair_stats(train), view, index)
     return report
+
+
+def write_views_from_store(
+    source: str,
+    strategies: Iterable[str],
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    seed: int = 0,
+) -> dict:
+    """`write_strategy_views` over the sample store already built: the store and the views of
+    the other strategies are left as they are."""
+    parquet = steps_path(source, processed_dir)
+    samples, skipped, index = store.load_store(
+        source_dir(source, processed_dir), MechanismSample, SAMPLE_VERSION
+    )
+    steps = read_training_steps(parquet)
+    report = {"n_training_steps": len(steps), "n_samples": len(samples), "views_only": True}
+    return report | write_strategy_views(
+        source, strategies, steps, samples, skipped, index, seed, processed_dir
+    )
 
 
 def pair_stats_path(source: str, name: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:

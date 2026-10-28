@@ -166,3 +166,31 @@ def test_group_bigger_than_train_target_still_goes_to_train(caplog):
     split = splits.split_by_pathway(big + STEPS[40:], (0.5, 0.25, 0.25), seed=0)
     assert {s.step_id for s in big} <= set(split.train)
     assert "train target" in caplog.text
+
+
+def test_leave_one_class_out_all_keeps_the_unlabelled_steps():
+    """Class X (every benzene step) is the test set; the unlabelled steps train too; no
+    training or validation step shares a molecule or a pathway with a held-out one."""
+    steps = [
+        replace(s, mechanism_class="X") if "c1ccccc1" in s.reactants_smiles else s for s in STEPS
+    ]
+    sp = splits.split_leave_one_class_out_all(steps, "X", val_fraction=0.2, seed=0)
+    _check_partition(sp)
+    by_id = {s.step_id: s for s in steps}
+    assert {by_id[i].mechanism_class for i in sp.test} == {"X"}
+    assert any(by_id[i].mechanism_class is None for i in sp.train + sp.val)
+    assert sp.train and sp.val and sp.excluded
+
+    def tokens(ids):
+        out = set()
+        for i in ids:
+            s = by_id[i]
+            out |= splits.step_molecules(s.reactants_smiles, s.products_smiles)
+            out |= {f"pathway:{s.pathway_id}"} if s.pathway_id else set()
+        return out
+
+    assert not tokens(sp.test) & tokens(sp.train + sp.val)
+    assert not tokens(sp.train) & tokens(sp.val) - {f"pathway:{None}"}
+    assert sp == splits.split_leave_one_class_out_all(steps, "X", val_fraction=0.2, seed=0)
+    with pytest.raises(ValueError, match="not present"):
+        splits.split_leave_one_class_out_all(steps, "Z")

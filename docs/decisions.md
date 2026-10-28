@@ -5442,6 +5442,56 @@ committed; the user kept two network views and all three step views.
   - A batch's label tensors are (B, V, A, A) and V now reaches 32: watch memory in the first
     training run.
 
+## 2026-10-26 — ReactMech: the loader checked on the released files, a 10,000-step pilot
+
+- **Download (user request).** FlowER (`data.zip`, Figshare 10.6084/m9.figshare.32513667, MIT),
+  ReactMech (Zenodo 10.5281/zenodo.20305780, CC BY 4.0) and mech-USPTO-31k (Figshare
+  10.6084/m9.figshare.24797220, CC BY 4.0) are in `data/raw/`. mech-USPTO-31k stays for
+  evaluation only (user). The model checkpoints of FlowER and DeepMech were not unpacked.
+- **The ReactMech loader** (`data.reactmech`, no longer `untested_on_real_data`;
+  docs/data_schema.md, "ReactMech").
+  - It reads the ID and OOD split files, each line once: 114,199 steps. 114,046 are accepted
+    and 153 rejected (0.13%).
+  - Classes come from the OOD mechanism files: 9,948 steps of Set1's 5 classes. Set2's 4
+    classes match no step, and the other 58 classes are not released.
+  - `ID_CRM.csv` and `PrebioMech/` are not read.
+  - The real-data test reads only the two val files: 2 min, against 12 for all six.
+- **Size of a full build** (estimated from the PMechDB QM manifest: GFN2 time and record size
+  per heavy-atom count).
+  - ReactMech has 108,615 distinct reactant molecules (median 26 heavy atoms, against 13 in
+    PMechDB). Its QM would take about 2,300 CPU-hours, with 62 GB of QM records and 68 GB of
+    tokens, more than this host has free (105 GB).
+  - FlowER has 1,134,119 distinct molecules, about ten times that. It also contains PMechDB
+    and RMechDB steps, which must leave it before any split with our PMechDB.
+  - Model tokens per step's reactant pool (median / p99): PMechDB 125 / 484, ReactMech
+    251 / 498, FlowER 336 / 1,022. 1.0% of FlowER's steps are over the 1,024 cap.
+- **A 10,000-step pilot (user decision).** `ksmech-data ingest --sample N --seed S` keeps N
+  accepted steps drawn at random over the sorted step ids, independent of file order; the
+  report records the draw.
+  - QM, bond indices and tokens run from the worktree `claude/reactmech`, at a fixed commit.
+    A batch of a day does not then block edits in the main checkout: an edit to a tracked
+    file there would make the batch's records dirty.
+  - The worktree has its own `data/cache`. The raw files are hard links. Provenance records
+    resolved paths relative to the repository, so files reached through a symlink into the
+    main checkout would be recorded by their absolute path, which does not travel to a pod.
+    The worktree's caches are moved into the main checkout's after the batch: their
+    relative paths stay valid there.
+- **d-metal geometries** (`tests/test_qm_dmetals.py`).
+  - RDKit's force fields type none of these metals (`EMBED_UFF_FALLBACK`), so GFN2 starts
+    from raw ETKDG coordinates.
+  - GFN2 then finds the right coordination:
+    - [PdCl4]2-: square planar, Pd-Cl 2.29 Å (experiment 2.30);
+    - trans-PdCl2(PMe3)2: square planar and trans, Pd-P 2.30 and Pd-Cl 2.28 Å (2.33 / 2.30);
+    - chromate: tetrahedral, Cr-O 1.62 Å (1.65);
+    - chromic acid as ReactMech draws it: tetrahedral, Cr=O 1.57 Å against Cr-OH 1.65 Å.
+  - 3-27 s per species.
+- **Open: the Pd(0) phosphines.** ReactMech writes a Pd(0)-phosphine as a phosphonium on a
+  neutral metal (`[P+]([Pd])`). That has an odd electron count, so the domain screen excludes it
+  as `OPEN_SHELL_METAL` (1,251 steps). Read as a dative bond (Pd-1, as rule R2 does for d0 / d10
+  acceptors), Pd(0) is d10 and closed shell; adding Pd and Pt to R2's acceptors is a decision
+  left to the user. FlowER draws the same complexes with a neutral four-bonded `[P]`, which
+  RDKit does not sanitize; its loader does not exist yet.
+
 ## 2026-10-26 — Five PMechDB runs on the molecule split: encoders and the resonance augmentation (schema 16)
 
 - **Setup.** One split (molecule), 30 epochs, seed 0, `d=256`, 8 layers, lr 3e-4, bf16, cell budget
@@ -6057,3 +6107,125 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   share a row; distinct groups each span the column, and zoomed out near levels may be drawn on
   top of each other. `levelSlots` no longer clusters by pixel distance; raise the threshold to
   put the toluene C-H groups (0.13 eV apart) side by side.
+
+## 2026-10-27: ReactMech samples without arrows: R from the mapped sides, moving hydrogens as atoms
+
+- **The need (user request: prepare the ReactMech pilot for training).** ReactMech has no
+  arrows, so `delta_be.dataset_matrix` applied an empty edit and every step would have been
+  skipped as PRODUCT_MISMATCH.
+- **R from the two mapped sides** (`delta_be.mapped_matrix`). A step without arrows takes as
+  R_data the difference of its sides on the reactant indices: every mapped atom is read on its
+  product partner, and unmapped atoms (spectators such as triethylamine or CO2, in 3,294 steps)
+  are taken as unchanged. The product check that arrow steps pass (`match_products`) then
+  verifies the edit. The label is the parsimonious class of that R_data, as for PMechDB.
+- **Moving hydrogens as atoms** (`arrows.hydrogens.explicit_moving_hydrogens`).
+  - ReactMech writes every hydrogen as a count on its heavy atom. A proton that moves from O to
+    Cl reads `[OH+:5]` -> `[O:5]` and `[Cl-:1]` -> `[ClH:1]`. The difference of the heavy atoms
+    alone shows the two lone-pair changes and no bond change, so the step has no anchor, and the
+    spec's R covers the hydrogens.
+  - Each hydrogen that moves is written as a mapped atom on both sides, as PMechDB draws it
+    (`[H:20]`): one hydrogen of the donor (a mapped atom that loses hydrogens) in the
+    reactants, one on the acceptor (a mapped atom that gains them) in the products, with a fresh
+    map number. Which of a donor's hydrogens moves is arbitrary; the symmetric closure of the
+    label (schema 17) makes equivalent hydrogens one.
+  - The pairing is unique when the step has one donor or one acceptor. A step with several of
+    both is skipped as H_TRANSFER_AMBIGUOUS. In the pilot's 9,183 training steps: 4,729 move no
+    hydrogen, 4,443 one donor to one acceptor, 11 two donors to one acceptor; none is ambiguous.
+  - Steps with arrows are left as they are: their arrows name their hydrogens. Over the mini
+    fixture, R from the mapped sides with the arrows removed is the arrows' label class (a test).
+- **Coverage on the pilot.** All 9,183 training steps get a label; R_data itself is in the class
+  for 8,503 (elsewhere a resonance form with fewer charges, then fewer entries, wins). On 300
+  random steps with tokens, 293 are samples and 7 lack tokens (a molecule without a QM record);
+  each of the 140 steps that move a hydrogen anchors on the hydrogen's new bond.
+- **No ArrowLabels.** A sample of a step without arrows has `orbital_reading` `NO_ARROWS` and no
+  ArrowLabels: the network trains on R and its anchors. The LightGBM reference
+  (`ksmech-physics gbdt`) ranks ArrowLabels, so it has nothing to rank on ReactMech.
+- **The pilot's sample store** (`ksmech-arrows samples --source reactmech --workers 8` from the
+  clean tree at e58af8c, 22 min, 650 MB): 8,999 samples from 9,183 training steps, 184 skipped
+  as MISSING_TOKENS. Label classes of 1 / 2 / 3 / 4+ variants: 5,575 / 2,067 / 839 / 518;
+  anchors 8,943 form and 56 break. Molecule split 7,189 / 908 / 902 samples (scaffold
+  7,212 / 888 / 899). The five leave-one-class-out splits use only the 856 classified steps
+  (train 417-734 samples each). Val pools: median 213 tokens, at most 483. A one-epoch run on
+  64 samples (`ksmech-train fit --source reactmech --limit 64`) trains and validates on the GPU.
+- **The pilot's failed molecules are left for later (user decision).** The TIMEOUT retry was
+  stopped after 3 minutes, before a record came out. The QM manifest now lists all 20,185
+  molecules: 19,543 ok and 642 failed, after the 209 failures of the pod and extra runs, whose
+  rows had never been merged, were appended to it (backup
+  `qm_manifest.before_merge_2026-10-27.parquet`). The steps that use a failed molecule are
+  skipped as MISSING_TOKENS.
+
+## 2026-10-28: PMechDB and ReactMech in one checkout; a run over several sources
+
+- **The request (user).** Two sparse-encoder runs on the molecule split: PMechDB and ReactMech
+  together, and ReactMech alone.
+- **One data tree.** Provenance resolves `file:` inputs against the checkout that runs the code,
+  and training reads only artifacts built from committed code, so both sources' samples, tokens,
+  bond indices and QM records must sit in one clean checkout: the `claude/reactmech` worktree.
+  - Main's `data/cache/{qm,bond_index,tokens}` and `data/processed/pmechdb` are hard-linked into
+    it (no disk space; main's files are never written in place, `prov.atomic_write`).
+  - 344 molecules are in both caches, computed by different runs (no file identical). Main's
+    copies win, so every PMechDB artifact stays valid as it is; the worktree's copies are kept
+    in `data/cache/overlap_reactmech/`. The ReactMech store was rebuilt on main's copies (e58af8c,
+    20 min): the same 8,999 samples and split counts.
+- **A run over several sources** (`--source pmechdb+reactmech`, `train.loop.sources`).
+  - The training parts are pooled. The pair statistics are fitted on the pool
+    (`arrows.steps.pair_stats`, as the samples build fits one source's on its part); a run of
+    one source still reads its stored `pair_feature_stats_<split>.json`.
+  - Validation runs on each source's part: `val_<source>_<metric>` per source and `val_<metric>`
+    pooled over every sample, which picks `best.pt`. The comparison with a ReactMech-only run is
+    `val_reactmech_*`.
+  - lambda_stop defaults to the smallest of the sources' defaults (0 with PMechDB); neither
+    source has stop labels, so the stop term is absent either way.
+  - The run lives in `data/models/pmechdb+reactmech/<run>/`; `run.json` lists every view.
+  - The evaluation CLIs still take one source.
+
+
+## 2026-10-28: a non-finite run stops; NaN never makes a hit or a `best.pt`
+
+- **What happened.** The ReactMech-only sparse run (fp16, lambda_stop 0.5) went non-finite at
+  optimizer step ~9,480 (epoch 19 of 30). The fp16 GradScaler halved its scale on every
+  overflowing step until the scale was 0. At a scale of 0 the unscaled gradients are
+  0 * inf = NaN, and the scaler's inf check misses them: it tests the scaled gradients, which
+  are 0 (checked on the RX 6600 XT: `found_inf` 0, NaN gradients, NaN weights after AdamW).
+  The weights became NaN (257 of 261 tensors), and the run went on for 11 more epochs.
+- **NaN made a hit.** `anchor_ranks` counts the candidates outside the label that score at
+  least as high as the label. NaN compares false with everything, so with NaN logits every
+  rank was 0: validation top-1 = 1.000, and `best.pt` was overwritten with the NaN weights.
+  The good epoch-18 checkpoint (top-1 0.900) was lost.
+- **The fix** (`train.loop`, `model.loss`):
+  - a training batch whose loss is not finite takes no backward and no optimizer step. It is
+    logged with its step ids and its non-finite loss terms, and counted
+    (`nonfinite_batches` in `metrics.jsonl`). 50 such batches in a row stop the run.
+  - the run stops (`NonFiniteError`, CLI exit 3, `NONFINITE` in the log) when the fp16 loss
+    scale falls below 1, or when a parameter is no longer finite. The weights are checked every
+    `log_every` steps and at the end of each epoch.
+  - the run stops before the epoch's checkpoints are written, so `last.pt` and `best.pt` keep
+    the last finite epoch.
+  - a NaN score counts against the label, and a NaN label score ranks last: a NaN model scores
+    0, never 1.
+  - `better_epoch`: an epoch with a non-finite training or validation loss is never `best.pt`.
+- **Not settled: the cause of the overflow.** The ReactMech-only gradient norms ran about 10x
+  those of the combined run (median 116 vs 12). The one difference in configuration is
+  lambda_stop (0.5 vs 0, the smallest default of the two sources). The rerun uses
+  `--stop-weight 0`, as the combined run did, so the two runs compare like for like. The log
+  of a skipped batch now names the loss terms that were not finite.
+
+## 2026-10-28: `loco_all`, leave one class out with the unlabelled steps; the test part scored each epoch
+
+- **Why.** Only 5 ReactMech classes are released (`data.reactmech`): 856 of the 10,000 pilot
+  steps carry a class. The `loco` split trains on the other labelled classes only (427 to
+  748 steps), too few to tell anything. Out of distribution, the ReactMech-only model scored
+  0.27 top-1 on PMechDB against 0.92 on its molecule-split val, so the in-distribution number
+  says little about unseen reaction types.
+- **`locoall-<class>`** (`splits.split_leave_one_class_out_all`, strategy `loco_all`, only
+  when named): test = every step of the held-out class. The steps sharing a non-trivial
+  molecule or a pathway with a held-out step are excluded: unlabelled steps may belong to the
+  same mechanisms. Every other step, unlabelled ones included, is split by molecule into train
+  and an in-distribution val (10%). On the pilot, holding out `acid_halide`: 7,809 train,
+  868 val, 381 test, 125 excluded.
+- **`ksmech-arrows samples --views-only`** writes the views of the named strategies over the
+  store already built. A rebuild takes an hour and rewrites the index, which makes every
+  other view stale.
+- **`ksmech-train fit --eval-test`** scores the split's test part after each epoch
+  (`test_*` in `metrics.jsonl`). It is reported only: `best.pt` is still chosen on val, so the
+  held-out class never selects the model.

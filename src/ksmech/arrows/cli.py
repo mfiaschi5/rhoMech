@@ -14,7 +14,12 @@ from rich.table import Table
 from ksmech.arrows.delta_be import label_report, step_label
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.roundtrip import evaluate_alignment, run_round_trip
-from ksmech.arrows.steps import DEFAULT_STRATEGIES, STRATEGIES, build_all_samples
+from ksmech.arrows.steps import (
+    DEFAULT_STRATEGIES,
+    STRATEGIES,
+    build_all_samples,
+    write_views_from_store,
+)
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps, source_dir
 from ksmech.data.io import steps_path as _steps_path
 from ksmech.data.schema import Source
@@ -43,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="random_leaky (the per-step split) only when named",
     )
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument(
+        "--views-only",
+        action="store_true",
+        help="write the strategies' views over the store already built, without rebuilding it",
+    )
     for p in (a, s):
         p.add_argument(
             "--workers", type=int, default=1, help="spawned processes (host total <= 15)"
@@ -129,6 +139,8 @@ def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
 
 
 def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
+    if args.views_only:
+        return _views_only(args, console)
     report = build_all_samples(
         args.source,
         args.strategy,
@@ -154,6 +166,16 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
     for strategy, why in report["strategies_not_applicable"].items():
         console.print(f"  [yellow]{strategy}: not applicable ({why})[/yellow]")
     _write(report, args, "samples_report.json", console)
+    return 0 if report["splits"] else 1
+
+
+def _views_only(args: argparse.Namespace, console: Console) -> int:
+    report = write_views_from_store(args.source, args.strategy, args.processed_dir, args.seed)
+    for split, r in report["splits"].items():
+        console.print(f"  {split}: {r['n_samples']}/{r['n_steps']} samples, skipped {r['skipped']}")
+    for strategy, why in report["strategies_not_applicable"].items():
+        console.print(f"  [yellow]{strategy}: not applicable ({why})[/yellow]")
+    _write(report, args, f"samples_report_{'+'.join(args.strategy)}.json", console)
     return 0 if report["splits"] else 1
 
 

@@ -17,7 +17,14 @@ from pathlib import Path
 
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.model.config import ModelConfig
-from ksmech.train.loop import DEFAULT_MODELS_DIR, TrainConfig, fit, rocm_override, select_device
+from ksmech.train.loop import (
+    DEFAULT_MODELS_DIR,
+    NonFiniteError,
+    TrainConfig,
+    fit,
+    rocm_override,
+    select_device,
+)
 
 
 def _add_fields(parser: argparse.ArgumentParser, cls) -> None:
@@ -70,7 +77,13 @@ def cmd_fit(args) -> int:
     _logging(run_dir)
     if override := rocm_override():
         logging.getLogger(__name__).info("set HSA_OVERRIDE_GFX_VERSION=%s (RDNA2 card)", override)
-    best = fit(cfg, model_cfg, run_dir, select_device(args.device), args.processed_dir, args.resume)
+    try:
+        best = fit(
+            cfg, model_cfg, run_dir, select_device(args.device), args.processed_dir, args.resume
+        )
+    except NonFiniteError as err:  # last.pt and best.pt hold the last finite epoch
+        logging.getLogger(__name__).error("NONFINITE: %s; the run stopped", err)
+        return 3
     logging.getLogger(__name__).info("best epoch %s: %s", best["epoch"], best)
     return 0
 

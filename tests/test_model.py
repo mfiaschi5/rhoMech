@@ -38,10 +38,13 @@ from ksmech.model.net import KSMech
 from ksmech.orbitals.tokens import atom_feature_names, feature_names
 from ksmech.train.batching import CellBudgetSampler, cells
 from ksmech.train.loop import (
+    NonFiniteError,
     TrainConfig,
+    better_epoch,
     checkpoint_payload,
     evaluate,
     load_model,
+    sources,
     stop_weight,
     train_epoch,
 )
@@ -479,6 +482,68 @@ def test_a_tie_with_a_candidate_outside_the_label_counts_against_it():
     assert anchor_ranks(lp, b).tolist() == [0]
 
 
+def test_nan_scores_never_make_a_hit():
+    """NaN logits compare false with everything: a model with NaN weights scored top-1 = 1."""
+    b = _hand_batch([({(0, 1): 1}, {}, [(0, 1, FORM)])])
+    lp = torch.full((1, 3, 3, 2), float("nan"))
+    assert anchor_ranks(lp, b).tolist() == [lp[0].numel()]
+    lp = torch.full((1, 3, 3, 2), -30.0)
+    lp[0, 0, 1, FORM] = -1.0
+    lp[0, 1, 2, FORM] = float("nan")  # a NaN candidate outside the label counts against it
+    assert anchor_ranks(lp, b).tolist() == [1]
+
+
+def test_an_epoch_with_a_non_finite_loss_never_becomes_best():
+    good = {"val_top1": 0.9, "val_loss": 2.2, "train_loss": 2.7}
+    nan = {"val_top1": 1.0, "val_loss": math.nan, "train_loss": math.nan}
+    assert better_epoch(good, None) and not better_epoch(nan, good) and not better_epoch(nan, None)
+    assert better_epoch({**good, "val_top1": 0.91}, good)
+    assert not better_epoch({**good, "train_loss": math.inf}, good)
+
+
+def _one_epoch(model, loader, cfg, scaler=None, state=None):
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 1.0)
+    scaler = scaler or torch.amp.GradScaler("cpu", enabled=False)
+    state = state if state is not None else {"step": 0, "total": 9, "epoch": 0}
+    out = train_epoch(model, loader, opt, sched, scaler, torch.device("cpu"), None, cfg, state)
+    return out, state
+
+
+def test_a_batch_with_a_non_finite_loss_takes_no_step(samples, monkeypatch):
+    import ksmech.train.loop as loop
+
+    model = make(samples, "sparse", topk=8)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    real = loop.step_loss
+
+    def nan_loss(*args):
+        loss, parts = real(*args)
+        return loss * math.nan, parts
+
+    monkeypatch.setattr(loop, "step_loss", nan_loss)
+    cfg = TrainConfig(workers=0, log_every=1)
+    out, state = _one_epoch(model, [collate_samples(samples)], cfg)
+    assert out["nonfinite_batches"] == 1 and state["step"] == 1 and math.isnan(out["train_loss"])
+    assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())
+    monkeypatch.setattr(loop, "MAX_NONFINITE_IN_A_ROW", 2)
+    with pytest.raises(NonFiniteError, match="2 non-finite training losses in a row"):
+        _one_epoch(model, [collate_samples(samples)] * 2, cfg)
+
+
+def test_non_finite_weights_or_a_collapsed_loss_scale_stop_the_run(samples):
+    model = make(samples, "sparse", topk=8)
+    cfg = TrainConfig(workers=0, log_every=1, grad_clip=1e9)
+    loader = [collate_samples(samples)]
+    low = torch.amp.GradScaler("cpu", init_scale=0.25, growth_interval=10**6)
+    with pytest.raises(NonFiniteError, match="loss scale 0.25"):
+        _one_epoch(model, loader, cfg, low)
+    with torch.no_grad():
+        next(model.parameters()).fill_(math.nan)
+    with pytest.raises(NonFiniteError, match="non-finite parameters"):
+        _one_epoch(model, loader, cfg)
+
+
 def test_ranks_and_greedy_edit(samples, model):
     b = collate_samples(samples)
     with torch.no_grad():
@@ -589,3 +654,85 @@ def test_rocm_override_only_for_rdna2_cards_without_kernels(tmp_path, monkeypatc
     assert loop.rocm_override(tmp_path) is None
     monkeypatch.setattr(loop.torch.version, "hip", None)
     assert loop.rocm_override(tmp_path) is None
+
+
+def test_a_run_names_its_sources_and_the_smallest_stop_weight():
+    cfg = TrainConfig(source="pmechdb+reactmech")
+    assert sources(cfg) == ("pmechdb", "reactmech")
+    assert stop_weight(cfg) == 0.0  # PMechDB's: neither source has stop labels
+
+
+def _two_source_stores(samples, root, names=("train", "val")) -> None:
+    """The fixture samples as two sources' stores under `root`, split `x`, each sample in
+    every view of `names` (the training and the validation view by default)."""
+    from ksmech.arrows import store
+    from ksmech.arrows.steps import SAMPLE_VERSION, write_split_file
+
+    for source in ("pmechdb", "reactmech"):
+        d = root / source
+        d.mkdir()
+        parquet = d / "steps.parquet"
+        parquet.write_bytes(b"stand-in parquet")
+        by_id = {
+            f"{source}-{s.step_id}": replace(s, step_id=f"{source}-{s.step_id}") for s in samples
+        }
+        ids = sorted(by_id)
+        parts = {f"x_{part}": ids for part in names}
+        split = write_split_file(d / "splits_x.json", "x", 0, parts, parquet)
+        index = store.write_store(d, by_id, {}, parquet, SAMPLE_VERSION)
+        for part in names:
+            config = {"split": f"x_{part}", "sample_version": SAMPLE_VERSION}
+            store.write_view(d / f"samples_x_{part}.json", ids, {}, index, split, config)
+
+
+def test_a_run_on_two_sources_pools_training_and_validates_each(samples, tmp_path):
+    import json
+
+    from ksmech.train.loop import fit
+
+    _two_source_stores(samples, tmp_path)
+    cfg = TrainConfig(
+        source="pmechdb+reactmech", split="x", epochs=1, workers=0, cell_budget=10**7, warmup=1
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    best = fit(cfg, TINY, run_dir, torch.device("cpu"), tmp_path)
+    n = len(samples)
+    assert best["val_n"] == 2 * n and best["val_pmechdb_n"] == best["val_reactmech_n"] == n
+    pooled = (best["val_pmechdb_top1"] + best["val_reactmech_top1"]) / 2
+    assert best["val_top1"] == pytest.approx(pooled)
+    header = json.loads((run_dir / "run.json").read_text())["provenance"]
+    views = [k for k in header["inputs"] if "samples_x_" in k]
+    assert len(views) == 4  # both sources' training and validation views
+    assert not any("pair_feature_stats" in k for k in header["inputs"])  # fitted on the pool
+    train = header["extra"]["parts"]["train"]
+    assert train["used"] == 2 * n and set(train["sources"]) == {"pmechdb", "reactmech"}
+
+
+def test_the_test_part_is_scored_every_epoch_and_never_picks_best(samples, tmp_path):
+    import json
+
+    from ksmech.train.loop import fit
+
+    _two_source_stores(samples, tmp_path, ("train", "val", "test"))
+    cfg = TrainConfig(
+        source="pmechdb+reactmech",
+        split="x",
+        epochs=2,
+        workers=0,
+        cell_budget=10**7,
+        warmup=1,
+        eval_test=True,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    fit(cfg, TINY, run_dir, torch.device("cpu"), tmp_path)
+    lines = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    n = len(samples)
+    for m in lines:
+        assert m["test_n"] == 2 * n and m["test_reactmech_n"] == n
+        assert {"test_top1", "test_r_exact", "test_loss"} <= set(m)
+        assert set(m["skipped"]) == {"train", "val", "test"}
+    header = json.loads((run_dir / "run.json").read_text())["provenance"]
+    assert len([k for k in header["inputs"] if "samples_x_" in k]) == 6
+    assert "test" in header["extra"]["parts"]

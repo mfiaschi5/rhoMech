@@ -10,6 +10,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from ksmech.data.io import source_dir, write_resonance_pairs, write_steps
 from ksmech.data.schema import ElementaryStep, Source
 from ksmech.data.validation import Rejection, RejectReason, StepRejected
@@ -26,6 +28,7 @@ class IngestResult:
     rejections: list[Rejection] = field(default_factory=list)
     notes: Counter[str] = field(default_factory=Counter)  # non-fatal normalizations, counted
     _seen: set[str] = field(default_factory=set, repr=False)
+    sample: dict | None = None  # (`keep_sample`) n, seed and the accepted steps drawn from
 
     def add(self, step_id: str, raw: str, make: Callable[[], ElementaryStep]) -> None:
         """Run one record through `make` and record either the step or the rejection."""
@@ -44,6 +47,17 @@ class IngestResult:
     def reject(self, step_id: str, raw: str, exc: StepRejected) -> None:
         log.warning("rejected %s [%s] %s", step_id, exc.reason, exc.detail)
         self.rejections.append(Rejection(step_id, exc.reason, exc.detail, raw))
+
+    def keep_sample(self, n: int, seed: int) -> None:
+        """Keep `n` accepted steps drawn uniformly at random (seeded; independent of file order:
+        the draw is over the sorted step ids); the rest are counted in `sample`, not rejected.
+        Rejections stay those of every record read."""
+        if n >= len(self.steps):
+            return
+        ids = sorted(s.step_id for s in self.steps)
+        keep = set(np.random.default_rng(seed).choice(ids, size=n, replace=False).tolist())
+        self.sample = {"n": n, "seed": seed, "of_accepted": len(self.steps)}
+        self.steps = [s for s in self.steps if s.step_id in keep]
 
     def reason_counts(self) -> Counter[str]:
         return Counter(str(r.reason) for r in self.rejections)
@@ -70,6 +84,7 @@ class IngestResult:
             "rejected_fraction": self.rejected_fraction,
             "rejections_by_reason": dict(self.reason_counts().most_common()),
             "notes": dict(self.notes.most_common()),
+            "sample": self.sample,
         }
 
 

@@ -194,6 +194,24 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader):
     assert held_out["n_steps"] == 2 and held_out["skipped"] == {"MISSING_TOKENS": 1}
 
 
+def test_views_of_a_new_strategy_over_the_built_store(mini_processed, token_loader):
+    """`write_views_from_store` adds a strategy's views without touching the store or the
+    views already written."""
+    from ksmech.arrows.steps import write_views_from_store
+
+    build_all_samples("pmechdb", ["molecule"], mini_processed, token_loader)
+    index = mini_processed / "pmechdb" / "samples" / "index.json"
+    before = index.read_bytes(), samples_path("pmechdb", "molecule_train", mini_processed)
+    kept = before[1].read_bytes()
+    report = write_views_from_store("pmechdb", ["loco_all"], mini_processed)
+    assert index.read_bytes() == before[0] and before[1].read_bytes() == kept
+    names = set(report["splits"])
+    assert any(n.startswith("locoall-substitution_") for n in names)
+    for split, r in report["splits"].items():
+        path = samples_path("pmechdb", split, mini_processed)
+        assert len(load_samples(path)) == r["n_samples"]
+
+
 def test_pair_stats_are_those_of_the_stored_valid_cells(mini_processed, token_loader):
     """The statistics file equals a refit on the samples as loaded (valid cells, float16
     values), counts only valid defined entries, and is refused once its view changes."""

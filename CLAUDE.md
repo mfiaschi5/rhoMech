@@ -144,8 +144,10 @@ uv run pre-commit install     # enable the commit hook: ruff, then the two pytes
 
 Main CLI entry points are added phase by phase and listed here as they land:
 
-- Data: `uv run ksmech-data ingest --source pmechdb` (steps parquet, `resonance_pairs.parquet`,
-  rejections and report under `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
+- Data: `uv run ksmech-data ingest --source pmechdb|reactmech [--sample N --seed S]` (steps parquet,
+  `resonance_pairs.parquet`, rejections and report under `data/processed/<source>/`; `--sample`
+  keeps N random accepted steps for a pilot; ReactMech reads its ID and OOD split files once each,
+  classes from the OOD mechanism files), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
@@ -177,7 +179,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   resonance drawings of the pool with their labels (`arrows.drawings`), and the orbital-pair labels
   where every arrow aligns; one `samples_<strategy>_<part>.json` view per
   split of `molecule`, `scaffold` and
-  `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
+  `loco`; the per-step `random_leaky` split and `loco_all` (the class held out as test, the
+  unlabelled steps in train and val) only when named with `--strategy`; `--views-only` writes
+  the named strategies' views over the store already built; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`)
 - Physics: `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--workers 8]
@@ -221,7 +225,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
-  [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; each epoch every training
+  [--resume] [--no-resonance-draws] [--eval-test]` (the spec-v9 model on one split; `--source pmechdb+reactmech`
+  pools several sources' training parts, validates each and the pool, pair statistics fitted on the pool; each epoch every training
   sample in a random one of its resonance drawings unless `--no-resonance-draws`; `--encoder`: `dense` the pair track of spec v9,
   `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
   learned indexer, dense during the LR warm-up; `--stop-weight` is lambda_stop of the END_MECH head,
@@ -229,7 +234,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   the views and pair statistics, `train.log` in the `step n / total` format `ksmech-eta` reads,
   `metrics.jsonl` per epoch, `last.pt` and `best.pt` by validation anchor top-1; batches by a
   padded-cell budget, samples over `--max-tokens` skipped as TOO_LARGE and counted; the override is
-  for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); every `ModelConfig` field is an option,
+  for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); `--eval-test` also scores the test part each epoch (`test_*`, never for `best.pt`);
+  every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
   run)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
