@@ -38,6 +38,7 @@ from ksmech.arrows.steps import MechanismSample, load_samples, sample_ids, sampl
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir, steps_path
 from ksmech.data.schema import Source
+from ksmech.eval.cohorts import SLICES, covered_fraction, load_cohort, restrict, sliced
 from ksmech.eval.floor import floor_report
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.train.loop import DEFAULT_MODELS_DIR
@@ -53,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--source", required=True, choices=[str(x) for x in Source])
     f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     f.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    _cohort_args(f)
     _decode_parser(sub)
     e = sub.add_parser("embedding", help="one sample through a trained model, as an HTML page")
     e.add_argument("--run", required=True, help="training run under <models-dir>/<source>/")
@@ -90,6 +92,24 @@ def _decode_parser(sub) -> None:
                    "between two molecules only")  # fmt: skip
     d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    _cohort_args(d)
+
+
+def _cohort_args(p) -> None:
+    p.add_argument("--cohort", default="all", help="score only cohort_<name>.json's steps")
+    p.add_argument("--slice", choices=sorted(SLICES), help="also report with and without it")
+
+
+def _cohort_ids(args, path: Path) -> list[str]:
+    return restrict(sample_ids(path), load_cohort(args.source, args.cohort, args.processed_dir))
+
+
+def _extras(args, rows: list[dict], samples: list, view: Path) -> dict:
+    """The report's cohort, covered fraction and (with --slice) the with / without numbers."""
+    out = {"cohort": args.cohort, "covered": covered_fraction(view)}
+    if args.slice:
+        out["slice"] = sliced(rows, {s.step_id: s for s in samples}, args.slice)
+    return out
 
 
 def _sample_versions(path: Path, payload: dict, console: Console) -> dict:
@@ -113,17 +133,21 @@ def cmd_decode(args, console: Console) -> int:
     ckpt = args.models_dir / run_source / args.run / f"{args.checkpoint}.pt"
     model, payload = load_model(ckpt, "cpu")
     path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
-    ids = sample_ids(path)
+    ids = _cohort_ids(args, path)
     ids = ids[: args.limit] if args.limit is not None else ids
     cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam)
-    report = decode_report(load_samples(path, ids=ids), sample_decoder(model, cfg, args.scope))
+    samples = load_samples(path, ids=ids)
+    report = decode_report(samples, sample_decoder(model, cfg, args.scope))
     hits = report.pop("per_sample")
-    config = {k: getattr(args, k) for k in ("source", "split", "part", "limit", "beam", "scope")}
+    report |= _extras(args, hits, samples, path)
+    keys = ("source", "split", "part", "limit", "beam", "scope", "cohort", "slice")
+    config = {k: getattr(args, k) for k in keys}
     config |= {"run_source": run_source, "checkpoint": _checkpoint_text(args.checkpoint, payload)}
     config |= _sample_versions(path, payload, console)
     inputs = prov.file_input(path) | prov.file_input(ckpt)
     header = prov.stamp("decode", DECODE_VERSION, inputs, config)
     suffix = f"_{args.source}" if args.source != run_source else ""
+    suffix += f"_{args.cohort}" if args.cohort != "all" else ""
     suffix += f"_n{args.limit}" if args.limit is not None else ""
     out = ckpt.parent / f"decode_report_{args.split}_{args.part}{suffix}.json"
     prov.write_json(out, report, header)
@@ -150,14 +174,18 @@ def cmd_floor(args, console: Console) -> int:
     for part in ("val", "test"):
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         inputs |= prov.file_input(path)
-        results[part] = floor_report(load_samples(path))
+        samples = load_samples(path, ids=_cohort_ids(args, path))
+        results[part] = floor_report(samples)
         ranks[part] = results[part].pop("per_sample")
-    header = prov.stamp("anchor_floor", FLOOR_VERSION, inputs, {"split": args.split})
+        results[part] |= _extras(args, ranks[part], samples, path)
+    config = {"split": args.split, "cohort": args.cohort, "slice": args.slice}
+    header = prov.stamp("anchor_floor", FLOOR_VERSION, inputs, config)
     out_dir = source_dir(args.source, args.processed_dir)
-    out = out_dir / f"anchor_floor_report_{args.split}.json"
+    tag = args.split + (f"_{args.cohort}" if args.cohort != "all" else "")
+    out = out_dir / f"anchor_floor_report_{tag}.json"
     prov.write_json(out, {"scorer": "|G^atom| over valid pairs", **results}, header)
-    ranks_header = prov.stamp("anchor_floor_ranks", FLOOR_VERSION, inputs, {"split": args.split})
-    prov.write_json(out_dir / f"anchor_floor_ranks_{args.split}.json", ranks, ranks_header)
+    ranks_header = prov.stamp("anchor_floor_ranks", FLOOR_VERSION, inputs, config)
+    prov.write_json(out_dir / f"anchor_floor_ranks_{tag}.json", ranks, ranks_header)
     table = Table(title=f"anchor floor, {args.source} {args.split} split")
     for col in ("part", "n", "top-1", "top-3", "top-5", "median rank", "unreachable"):
         table.add_column(col)

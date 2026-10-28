@@ -95,7 +95,10 @@ Measured facts about the grammar:
 Other notes:
 
 - 55 records write a metal as a bare bracket atom with no H and no charge (`[K]`, `[CuH2]`).
-  RDKit gives these atoms radical electrons. They are spectators and no arrow touches them.
+  RDKit gives these atoms radical electrons. They are not all spectators: since 2026-10-21
+  (odd fragments) and 2026-10-24 (RADICAL_DRAWN) the domain screen excludes them, and the
+  open-shell survey (`ksmech-data open-shell-survey`, `open_shell_survey.json`) gives each one a
+  subclass (BARE_ALKALI, CUH2_LIGAND, SN_PLACEHOLDER, PLACEHOLDER, ...).
 - Explicit `[H]` atoms appear both mapped (`[H:20]`) and unmapped (`[H][C@]...`). Mapped H
   atoms must be kept, because arrows reference them.
 
@@ -194,7 +197,7 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 | `mechanism_class` | string, nullable | null for PMechDB (not in the release) |
 | `conditions` | string, nullable | null for PMechDB (not in the release) |
 | `resonance_step` | bool | reactants and products are resonance structures; dropped from the training target |
-| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL` or `CHARGE_UNREPAIRED` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). Null otherwise |
+| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). Null otherwise |
 | `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an explicit ingest rule changed a formal charge (`CHARGE_REPAIRED`; the step stays); the SMILES columns hold the repaired sides |
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,

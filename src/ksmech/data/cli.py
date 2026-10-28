@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
                 "--sample", type=int, default=0, help="keep N random accepted steps (pilots)"
             )
             p.add_argument("--seed", type=int, default=0, help="the --sample generator's seed")
+    o = sub.add_parser("open-shell-survey", help="subclass every excluded step (read-only)")
+    o.add_argument("--source", required=True, choices=[str(s) for s in LOADERS])
+    o.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     f = sub.add_parser("freeze-sample", help="snapshot a pilot's step ids (sample_frozen.json)")
     f.add_argument("--source", required=True, choices=[str(s) for s in LOADERS])
     f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -63,11 +66,27 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ingest(Source(args.source), args.raw, args.processed_dir, console, sample)
     if args.command == "provenance":
         return cmd_provenance(args, console)
+    if args.command == "open-shell-survey":
+        return cmd_survey(Source(args.source), args.processed_dir, console)
     if args.command == "freeze-sample":
         out = freeze_sample(Source(args.source), args.processed_dir)
         console.print(f"wrote {out}")
         return 0
     return cmd_stats(Source(args.source), args.processed_dir, console)
+
+
+def cmd_survey(source: Source, processed: Path, console: Console) -> int:
+    """`open_shell_survey.json`: every excluded step's subclass (`data.survey`)."""
+    from ksmech.data.survey import write_survey
+
+    out, result = write_survey(str(source), processed)
+    for code, counts in result["counts"].items():
+        console.print(f"{code}: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
+    if "spin_parity_molecules" in result:
+        kinds = result["spin_parity_molecules"]
+        console.print("SPIN_PARITY molecules: " + ", ".join(f"{k} {v}" for k, v in kinds.items()))
+    console.print(f"wrote {out}")
+    return 0
 
 
 def cmd_provenance(args: argparse.Namespace, console: Console) -> int:

@@ -3572,7 +3572,8 @@ is now v7.5, sha256 6c6a023f66dd).
   - SCF_NOT_CONVERGED, tblite's 250 cycles: 58 (47);
   - TIMEOUT, more than 900 s: 23 (21);
   - EMBED_FAILED, arynes: 6 (2);
-  - SPIN_PARITY, Fe radicals in products: 100 (0).
+  - SPIN_PARITY, Fe radicals in products: 100 (0). *Corrected 2026-10-28 (open-shell survey):
+    not Fe radicals: Cu 41, placeholder metals 34, Fe 20, Ti charge errors 4 and one P.*
 - **Decision (user).** Retry with relaxed convergence only and the same method string:
   - `--timeout 3600`;
   - `--maxiter 2000`, a new CLI flag on `QMConfig.maxiter`;
@@ -6229,3 +6230,69 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
 - **`ksmech-train fit --eval-test`** scores the split's test part after each epoch
   (`test_*` in `metrics.jsonl`). It is reported only: `best.pt` is still chosen on val, so the
   held-out class never selects the model.
+
+## 2026-10-28: Open shells: the plan, its decisions, and phase P0
+
+- **The plan (user request: include the open-shell molecules excluded at the start).**
+  `docs/open_shell_plan.md` holds it: why open shells were deferred rule by rule (none of the
+  290 excluded PMechDB and ReactMech-pilot steps is a radical step; most exclusions are drawing
+  errors), the phases P0, P0a, P0b, P1-P9, S1-S3 and D1-D3, the spec changes per version
+  (v9.1, v9.2, v10), the evaluation and what stays out. Drafted by three planners, merged,
+  checked by three reviewers and a fact-check of every decision against code and data.
+- **The user's decisions, one by one.** The recommendation on 21 of the 23 decisions; their own
+  choice on U6 (all 10 training steps and 2 resonance pairs of genuine PMechDB radicals, the
+  Et3B + O2 step included, as a counted exemption) and U9 (Cu(II) and Fe(III) enter together).
+  Then the user asked that the model stay general and learn only from physics and data, with no
+  limitation inserted arbitrarily. A generality audit found the model's inputs clean (no
+  taxonomy reaches the network) and the hand rules around it (d-type acceptor cells deleted from
+  the store, the own-antibond and site rule, Kekule swaps in 9.4% of ReactMech labels, decoder
+  caps from PMechDB, the spectral-set truncation, element- and parity-gated metal repairs), and
+  in the plan (spin clauses, a 0.1 e go/no-go gate, a percentile delta, a strict decode screen,
+  a -1 mask inside the loss). The user approved all its corrections and a new phase **P0a**
+  before any baseline. **Governing principle:** every rule left in the model path is a physical
+  law or exact bookkeeping, a QM-derived input the model weighs, or an option behind a flag
+  whose default an ablation justifies here; data curation stays, counted, one law per
+  phenomenon.
+- **P0, on the branch `claude/open-shell-p0`.**
+  - **Merge of `claude/reactmech`** (its last commit, `loco_all`, landed first). The only
+    conflict was this file. The worktree's data was copied into `data/` by `cp -a
+    --reflink=always` (btrfs, copy-on-write, no disk used), not hard links: steps.parquet, the
+    QM manifest, index.sqlite and metrics.jsonl are written in place and a hard link would write
+    through (fact-check of U14). The running loco_all run was not copied; the worktree stays.
+  - **Odd entries fail loudly.** The atom head's alphabet is an explicit table
+    (`model.decoder.ATOM_VALUES`): the loss raised nothing before and floored an odd entry into
+    a class (`floor(r / 2) + 1`); now it raises. eval's `lewis_apply` raises on an odd
+    lone-pair entry instead of `d // 2`. Even batches give the same classes.
+  - **Radical arrows counted.** RADICAL_ARROW at ingest (it only logged and accepted the step
+    unchecked), in the edit label and in the round trip. 0 steps in either source.
+  - **Evaluation fields.** decode's `--run-source`, the sample versions (warn, never refuse:
+    flex_first is v15), per-sample hits and ranks for paired comparisons (U20's McNemar), the
+    stored GBDT scored without a refit (a refit samples 80% of the columns), cohorts
+    (`cohort_<name>.json`, pinned once, no file inputs), the fermi_smeared slice and the
+    covered fraction. FLOOR_VERSION and DECODE_VERSION 2.
+  - **Frozen splits.** `_assign_groups` re-ran a global permutation, so one added group moved
+    others between val and test, and `keep_sample` redrew the pilot when the accepted set
+    changed. Snapshots `split_frozen_<strategy>.json` (FROZEN_SPLIT_SCHEMA 1, independent of
+    SAMPLE_VERSION, no file inputs, content hash) of PMechDB molecule and scaffold and ReactMech
+    molecule, scaffold, loco and loco_all, and the pilot's 10,000 ids (`sample_frozen.json`).
+    With a snapshot a group holding frozen steps keeps their part, a group frozen in two parts
+    sends its new steps to SPLIT_CONFLICT (counted), a new group goes where sha256(seed, key)
+    puts it, and frozen steps a later rule removes are counted. Re-splitting reproduces every
+    frozen part (`tests/test_split_stability.py`).
+  - **Survey.** `ksmech-data open-shell-survey` (read-only) reproduces the plan's oracle: PMechDB
+    RADICAL_DRAWN 52 = 12 genuine radical steps (11 spectator, 1 reactive) / 10 carbenes / 2 CO
+    / 9 C3 methyls / 8 Sn / 4 bare alkali / 3 ambiguous ketyls / 1 beta-lactam N / 1 Al / 1
+    nitrone / 1 four-bonded P; OPEN_SHELL_METAL 78 = Fe 43 / Cu 35 (25 + 6 CuH2 + 4 CuI2);
+    kept placeholder-shaped 24 + 3 [Cl][Zn+]; SPIN_PARITY 100 = Cu 41 / placeholders 34 / Fe 20
+    / Ti 4 / P 1 (the 2026-10-24 entry called them Fe radicals; corrected there). ReactMech pilot:
+    CDI 62, Pd dative 96 + Pd already -1 2, L1Pd 109, kept onium Pd/Ni 49 and Cr(IV) 10,
+    SPIN_PARITY 291 all Pd. The 12 genuine radicals were read: Birch radical anion, peroxyl
+    deprotonations and eliminations, superoxide protonation, Et3B + O2, and two resonance steps
+    with a spectator ethyl radical. The CDI test is topological (RDKit does not flag that C
+    aromatic). The 3 'isopropoxides' stay apart as AMBIGUOUS_KETYL (possibly sodium ketyls).
+  - **Fixtures.** `OPEN_SHELL` in `tests/fixtures/molecules.py`, hand-written, with the radical
+    counts RDKit assigns (the misread drawings kept on purpose).
+- **Not done in P0 yet:** the reference files on the v17 store (floor, stored GBDT, flex_first
+  and the two ReactMech runs, per sample) and the realdata suite wait for the loco_all training
+  in the reactmech worktree to free the RAM. The four pod runs' weights are not on disk (only
+  SHA256SUMS.pod).

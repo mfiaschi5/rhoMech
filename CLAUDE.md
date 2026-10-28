@@ -30,9 +30,11 @@ the labels recomputed.
 the model; this section summarizes it.
 
 Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are
-Pipek-Mezey localized in the occupied and the virtual block separately (the singly occupied
-MOs of a radical apart from the doubly occupied ones), started deterministically from the
-canonical MOs, so one QM record always gives the same tokens.
+localized in the occupied and the virtual block separately (the singly occupied MOs of a
+radical apart from the doubly occupied ones) by IBO, the Pipek-Mezey functional with Lowdin
+populations and exponent 4, started deterministically from a pivoted Cholesky factorization of
+each block's density matrix (`orbitals.localize.PMConfig`; Pipek-Mezey with Mulliken
+populations is only the comparison), so one QM record always gives the same tokens.
 
 An orbital token carries only continuous physical descriptors; they are its whole model
 input:
@@ -110,7 +112,7 @@ ranked a step's first arrow worse than G alone.
 |---|---|
 | PMechDB | Curated polar mechanistic steps. Development set. |
 | ReactMech | 67 reaction classes. Out-of-distribution splits. |
-| FlowER dataset | About 1.4M steps. Scale-up. |
+| FlowER dataset | About 2.14M numeric-suffix lines (train+val+test). Scale-up. Its RS/RC lines (RMechDB, radical steps) are the open-shell plan's source. |
 | mech-USPTO-31K | Held-out benchmark. Never trained on. |
 | QMugs | QM pretraining. |
 
@@ -120,7 +122,10 @@ ranked a step's first arrow worse than G alone.
   schema in `docs/data_schema.md`.
 - Every featurization function has a unit test on the fixed molecule set in
   `tests/fixtures/molecules.py`: ethane, ethanol, acetone, acetaldehyde, methyl acetate,
-  chloromethane, methylamine, acetonitrile, benzene, acrolein.
+  chloromethane, methylamine, acetonitrile, benzene, acrolein. A function an open-shell phase
+  changes is also tested on the hand-written `OPEN_SHELL` list there (radicals, superoxide, the
+  benzene radical anion, triplet O2, Br., .OH, NO, Cl[C]Cl, [C]=O, [N]=[N], ozone, CuCl2,
+  FeBr4-).
 - No silent failures. Every skipped molecule is logged with a reason code and counted, and
   the counts are reported at the end of the run.
 - All QM results are cached on disk, keyed by canonical SMILES plus conformer id.
@@ -151,7 +156,15 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
-  (STALE_ARTIFACT); only `textbook` takes `--allow-stale`.
+  (STALE_ARTIFACT); only `textbook` takes `--allow-stale`. `uv run ksmech-data
+  open-shell-survey --source S` (read-only: a subclass for every excluded step and every kept
+  step with a suspicious metal, the SPIN_PARITY failures by kind, `open_shell_survey.json`; the
+  open-shell plan's oracle), `uv run ksmech-data freeze-sample --source reactmech` (the pilot's
+  step ids as `sample_frozen.json`; `ingest --sample` then keeps exactly them),
+  `uv run ksmech-arrows freeze-splits --source S --strategy molecule scaffold ...` (the split
+  files as `split_frozen_<strategy>.json`, FROZEN_SPLIT_SCHEMA, no file inputs: `samples` then
+  keeps every frozen step in its part, places new groups by hash and counts SPLIT_CONFLICT;
+  a snapshot is replaced only by hand). The open-shell plan is `docs/open_shell_plan.md`.
 - QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
@@ -240,11 +253,18 @@ Main CLI entry points are added phase by phase and listed here as they land:
   run)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, no learned parameter, val and test
-  top-1/3/5, `anchor_floor_report_<split>.json`), `uv run ksmech-eval decode --run NAME
-  [--part val|test] [--limit N] [--beam 5] [--scope all|inter]` (the beam decoder of
+  top-1/3/5, `anchor_floor_report_<split>.json` and per-sample `anchor_floor_ranks_<split>.json`),
+  `uv run ksmech-eval decode --run NAME [--run-source pmechdb+reactmech] [--part val|test]
+  [--limit N] [--beam 5] [--scope all|inter]` (the beam decoder of
   `model.decode` on the stored samples, B + R checked on the sample's Lewis structure: full-R
-  top-1/3/5, a hit when a completion is a variant of the label class, the drop counts;
-  `decode_report_<split>_<part>[_n<limit>].json` beside the checkpoint), `uv run ksmech-eval embedding --run NAME
+  top-1/3/5, a hit when a completion is a variant of the label class, the drop counts, the
+  checkpoint's and the view's sample versions (a mismatch warns);
+  `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
+  `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
+  it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
+  `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared` (with and without), and
+  report the covered fraction; `uv run ksmech-physics gbdt --score-only` scores the stored
+  ranker of `--split` without a refit (`gbdt_lgbm_ranks_<split>_geomfree.json`); `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
   under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts
