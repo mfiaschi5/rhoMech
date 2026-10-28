@@ -80,6 +80,7 @@ class TrainConfig:
     log_every: int = 20  # optimizer steps
     stop_weight: float = -1.0  # lambda_stop; < 0: the source's (0.5, 0 on PMechDB)
     resonance_draws: bool = True  # each epoch, every training sample in a random drawing
+    eval_test: bool = False  # also score the split's test part each epoch (test_*), never for best
 
 
 STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0}  # PMechDB: isolated steps, no stop labels
@@ -454,6 +455,15 @@ def _end_epoch(run_dir: Path, model, header, opt, sched, scaler, state: dict, me
         metrics["val_r_exact"],
         metrics["val_loss"],
     )
+    if "test_top1" in metrics:
+        log.info(
+            "epoch %d test: top1 %.3f top5 %.3f r_exact %.3f loss %.4f",
+            metrics["epoch"] + 1,
+            metrics["test_top1"],
+            metrics["test_top5"],
+            metrics["test_r_exact"],
+            metrics["test_loss"],
+        )
     is_best = better_epoch(metrics, state["best"])
     state["best"] = metrics if is_best else state["best"]
     payload = checkpoint_payload(
@@ -485,13 +495,16 @@ def fit(
     dtype = amp_dtype(device, cfg.amp)
     by_source, train_info = load_part(cfg, "train", processed_dir)
     val, val_info = load_part(cfg, "val", processed_dir)
+    held = load_part(cfg, "test", processed_dir) if cfg.eval_test else ({}, None)
     train = [s for part in by_source.values() for s in part]
     stats_path, stats = run_pair_stats(cfg, train, processed_dir)
     model = KSMech(model_cfg, fit_feature_stats(train), stats).to(device)
-    header = _run_header(cfg, model_cfg, {"train": train_info, "val": val_info}, stats_path)
+    parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})
+    header = _run_header(cfg, model_cfg, parts, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)
     train_loader = make_loader(train, cfg, True, cfg.resonance_draws)
     val_loaders = {s: make_loader(part, cfg, False) for s, part in val.items()}
+    test_loaders = {s: make_loader(part, cfg, False) for s, part in held[0].items()}
     total = cfg.epochs * len(train_loader.batch_sampler)
     opt = _optimizer(model, cfg)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, cfg.warmup, total))
@@ -509,7 +522,7 @@ def fit(
         other = sum(s.n_drawings > 1 for s in train)
         log.info("resonance draws: %d of %d training samples have other drawings, %d in all",
                  other, len(train), sum(s.n_drawings - 1 for s in train))  # fmt: skip
-    skipped = {"train": train_info["skipped"], "val": val_info["skipped"]}
+    skipped = {p: info["skipped"] for p, info in parts.items()}
     for epoch in range(state["epoch"], cfg.epochs):
         state["epoch"] = epoch
         train_loader.batch_sampler.set_epoch(epoch)
@@ -517,6 +530,9 @@ def fit(
         warm = state["step"] < cfg.warmup
         res = evaluate_sources(model, val_loaders, device, dtype, warm, stop_weight(cfg))
         metrics |= {f"val_{k}": v for k, v in res.items()}
+        if test_loaders:  # reported only: best.pt is chosen on val
+            res = evaluate_sources(model, test_loaders, device, dtype, warm, stop_weight(cfg))
+            metrics |= {f"test_{k}": v for k, v in res.items()}
         metrics |= {"epoch": epoch, "step": state["step"], "skipped": skipped}
         _end_epoch(run_dir, model, header, opt, sched, scaler, state, metrics)
     return state["best"]

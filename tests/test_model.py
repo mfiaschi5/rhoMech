@@ -662,9 +662,9 @@ def test_a_run_names_its_sources_and_the_smallest_stop_weight():
     assert stop_weight(cfg) == 0.0  # PMechDB's: neither source has stop labels
 
 
-def _two_source_stores(samples, root) -> None:
+def _two_source_stores(samples, root, names=("train", "val")) -> None:
     """The fixture samples as two sources' stores under `root`, split `x`, each sample in
-    both the training and the validation view."""
+    every view of `names` (the training and the validation view by default)."""
     from ksmech.arrows import store
     from ksmech.arrows.steps import SAMPLE_VERSION, write_split_file
 
@@ -677,10 +677,10 @@ def _two_source_stores(samples, root) -> None:
             f"{source}-{s.step_id}": replace(s, step_id=f"{source}-{s.step_id}") for s in samples
         }
         ids = sorted(by_id)
-        parts = {"x_train": ids, "x_val": ids}
+        parts = {f"x_{part}": ids for part in names}
         split = write_split_file(d / "splits_x.json", "x", 0, parts, parquet)
         index = store.write_store(d, by_id, {}, parquet, SAMPLE_VERSION)
-        for part in ("train", "val"):
+        for part in names:
             config = {"split": f"x_{part}", "sample_version": SAMPLE_VERSION}
             store.write_view(d / f"samples_x_{part}.json", ids, {}, index, split, config)
 
@@ -707,3 +707,32 @@ def test_a_run_on_two_sources_pools_training_and_validates_each(samples, tmp_pat
     assert not any("pair_feature_stats" in k for k in header["inputs"])  # fitted on the pool
     train = header["extra"]["parts"]["train"]
     assert train["used"] == 2 * n and set(train["sources"]) == {"pmechdb", "reactmech"}
+
+
+def test_the_test_part_is_scored_every_epoch_and_never_picks_best(samples, tmp_path):
+    import json
+
+    from ksmech.train.loop import fit
+
+    _two_source_stores(samples, tmp_path, ("train", "val", "test"))
+    cfg = TrainConfig(
+        source="pmechdb+reactmech",
+        split="x",
+        epochs=2,
+        workers=0,
+        cell_budget=10**7,
+        warmup=1,
+        eval_test=True,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    fit(cfg, TINY, run_dir, torch.device("cpu"), tmp_path)
+    lines = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    n = len(samples)
+    for m in lines:
+        assert m["test_n"] == 2 * n and m["test_reactmech_n"] == n
+        assert {"test_top1", "test_r_exact", "test_loss"} <= set(m)
+        assert set(m["skipped"]) == {"train", "val", "test"}
+    header = json.loads((run_dir / "run.json").read_text())["provenance"]
+    assert len([k for k in header["inputs"] if "samples_x_" in k]) == 6
+    assert "test" in header["extra"]["parts"]

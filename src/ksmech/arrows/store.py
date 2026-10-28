@@ -279,6 +279,21 @@ def _iter_shards(path: Path, by_shard: dict[str, list[int]], cls, version: int, 
         yield from _load_shard(root / name, members, cls, version, allow_stale)
 
 
+def load_store(
+    view_dir: Path, cls: type[MechanismSample], version: int
+) -> tuple[dict[str, MechanismSample], dict[str, str], Path]:
+    """(every stored sample by step id, the skipped steps' reason codes, the index path),
+    verified like a view: the index and every shard."""
+    index_path = store_dir(view_dir) / "index.json"
+    prov.verify_clean(index_path, "sample_index", version)
+    body = json.loads(index_path.read_text())
+    root, samples = store_dir(view_dir), {}
+    for name, ids in sorted(body["shards"].items()):
+        for s in _load_shard(root / name, list(range(len(ids))), cls, version, False):
+            samples[s.step_id] = s
+    return samples, body["skipped"], index_path
+
+
 def load_view(
     path: Path,
     cls: type[MechanismSample],

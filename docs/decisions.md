@@ -6175,3 +6175,23 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   lambda_stop (0.5 vs 0, the smallest default of the two sources). The rerun uses
   `--stop-weight 0`, as the combined run did, so the two runs compare like for like. The log
   of a skipped batch now names the loss terms that were not finite.
+
+## 2026-10-28: `loco_all`, leave one class out with the unlabelled steps; the test part scored each epoch
+
+- **Why.** Only 5 ReactMech classes are released (`data.reactmech`): 856 of the 10,000 pilot
+  steps carry a class. The `loco` split trains on the other labelled classes only (427 to
+  748 steps), too few to tell anything. Out of distribution, the ReactMech-only model scored
+  0.27 top-1 on PMechDB against 0.92 on its molecule-split val, so the in-distribution number
+  says little about unseen reaction types.
+- **`locoall-<class>`** (`splits.split_leave_one_class_out_all`, strategy `loco_all`, only
+  when named): test = every step of the held-out class. The steps sharing a non-trivial
+  molecule or a pathway with a held-out step are excluded: unlabelled steps may belong to the
+  same mechanisms. Every other step, unlabelled ones included, is split by molecule into train
+  and an in-distribution val (10%). On the pilot, holding out `acid_halide`: 7,809 train,
+  868 val, 381 test, 125 excluded.
+- **`ksmech-arrows samples --views-only`** writes the views of the named strategies over the
+  store already built. A rebuild takes an hour and rewrites the index, which makes every
+  other view stale.
+- **`ksmech-train fit --eval-test`** scores the split's test part after each epoch
+  (`test_*` in `metrics.jsonl`). It is reported only: `best.pt` is still chosen on val, so the
+  held-out class never selects the model.
