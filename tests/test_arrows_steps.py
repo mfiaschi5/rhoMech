@@ -186,10 +186,22 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader):
     names = set(report["splits"])
     assert {"molecule_train", "scaffold_test"} <= names
     assert any(n.startswith("loco-substitution_") for n in names)
+    from ksmech.arrows.delta_be import smallest_variant
+
+    assert report["kekule_closest"] == 0 and "resonance_truncated" in report
     for split, r in report["splits"].items():
         path = samples_path("pmechdb", split, mini_processed)
-        assert path.exists() and len(load_samples(path)) == r["n_samples"]
+        samples = load_samples(path)
+        assert path.exists() and len(samples) == r["n_samples"]
         assert r["n_samples"] + sum(r["skipped"].values()) == r["n_steps"]
+        # per part, the label maxima: the largest smallest-variant bond and atom counts
+        smallest = [smallest_variant(s.edit_label) for s in samples]
+        want = {
+            "bonds": max((len(v.bonds) for v in smallest), default=0),
+            "atoms": max((len(v.lone) for v in smallest), default=0),
+        }
+        assert r["label_maxima"] == want, split
+        assert json.loads(path.read_text())["report"]["label_maxima"] == want
     held_out = report["splits"]["loco-substitution_test"]
     assert held_out["n_steps"] == 2 and held_out["skipped"] == {"MISSING_TOKENS": 1}
 

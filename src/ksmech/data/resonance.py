@@ -11,11 +11,16 @@ kept (`is_resonance_step`) is a resonance step and leaves the training target; a
 exchange, whose sides are the same molecules but whose atoms change partners, is a real step.
 
 `resonance_forms` enumerates the forms themselves, for the edit-label class (`arrows.delta_be`)
-and for input augmentation. It runs RDKit's `ResonanceMolSupplier` on a copy whose H counts are
-frozen (`frozen_hydrogens`) and keeps only the structures with the input's H count on every
-atom, its total charge and its radical electrons. RDKit re-derives the implicit H of an
-unbracketed atom in each structure (a nitro O came out as [OH2+]) and also returns structures
-with unpaired electrons (CCN([O+])[O-], an azide as N=N[N]); neither is a resonance form.
+and for input augmentation. The product it gets for a label is the one the step's edit gives:
+for a step without arrows, the product in the Kekule structure closest to the reactant
+(`delta_be.mapped_closest`), not the dataset's own kekulization. The enumeration does not take
+every Kekule structure (KEKULE_ALL): that would multiply the label class, and RESONANCE_CAP
+already cuts it short for many ReactMech products. It runs RDKit's `ResonanceMolSupplier` on a
+copy whose H counts are frozen (`frozen_hydrogens`) and keeps only the structures with the
+input's H count on every atom, its total charge and its radical electrons. RDKit re-derives the
+implicit H of an unbracketed atom in each structure (a nitro O came out as [OH2+]) and also
+returns structures with unpaired electrons (CCN([O+])[O-], an azide as N=N[N]); neither is a
+resonance form.
 """
 
 from __future__ import annotations

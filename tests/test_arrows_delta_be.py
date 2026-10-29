@@ -151,6 +151,30 @@ def test_reaction_matrix_round_trips_through_lists(delta):
     assert r.mapped({0: 7, 3: 2}) == ReactionMatrix(((2, 7, delta),), ((7, -2 * delta),))
 
 
+def test_label_counts_name_the_rules_and_the_smallest_variants_maxima():
+    """KEKULE_CLOSEST and RESONANCE_CAP are counted per label; the maxima are the largest bond
+    and atom counts of each label's smallest variant, fewer bonds first where two members
+    split one size differently (4 entries: 3 bonds + 1 atom, or 2 bonds + 2 atoms)."""
+    from ksmech.arrows.delta_be import label_counts, smallest_variant
+
+    three = ReactionMatrix(((0, 1, 1), (1, 2, -1), (2, 3, 1)), ((3, -2),))
+    two = ReactionMatrix(((0, 1, 1), (1, 2, -1)), ((0, -2), (2, 2)))
+    big = ReactionMatrix(tuple((k, k + 1, (-1) ** k) for k in range(5)), ((0, 2),))
+    mixed = EditLabel((three, two), (three.anchors(), two.anchors()), True, 2, False)
+    swapped = EditLabel((big,), (big.anchors(),), True, 256, True, kekule_closest=6)
+    assert smallest_variant(mixed) == two
+    got = label_counts([mixed, swapped])
+    assert got == {
+        "kekule_closest": 1,
+        "resonance_truncated": 1,
+        "label_maxima": {"bonds": 5, "atoms": 2},
+    }
+    assert label_counts([])["label_maxima"] == {"bonds": 0, "atoms": 0}
+    assert EditLabel.from_dict(swapped.to_dict()) == swapped
+    v17 = {k: v for k, v in swapped.to_dict().items() if k != "kekule_closest"}
+    assert EditLabel.from_dict(v17).kekule_closest == 0  # a label stored before the rule
+
+
 def test_edit_labels_cli_reports_coverage_and_gates_it(
     mini_processed,  # noqa: F811
     token_loader,
@@ -166,6 +190,9 @@ def test_edit_labels_cli_reports_coverage_and_gates_it(
     report = json.loads((mini_processed / "pmechdb" / "edit_labels_report.json").read_text())
     assert report["n_steps"] == 5 and report["n_labeled"] == 4  # the resonance step is not one
     assert report["skipped"] == {"MISSING_TOKENS": 1}
+    assert report["kekule_closest"] == 0 and report["resonance_truncated"] == 0
+    # the E2: O-H forms, C-H breaks, C=C forms, C-Br breaks; O and Br change lone pairs
+    assert report["label_maxima"] == {"bonds": 4, "atoms": 2}
     assert code == 1  # 80% labeled: below the 95% gate
 
 
@@ -195,7 +222,8 @@ def test_variants_the_key_check_rejects_give_way_to_the_next_cost_level():
     step = _step(
         "[S-][CH+:20][NH2:10]", "[S-][CH:20]=[NH2+:10]", [Arrow("lone_pair", (10,), "atom", (20,))]
     )
-    mol, prod, r_data = dataset_matrix(step)
+    mol, prod, r_data, removed = dataset_matrix(step)
+    assert removed == 0  # a step with arrows: KEKULE_CLOSEST never applies
     best, _, _, rejected = parsimonious_class(mol, prod, r_data)
     assert r_data not in best and rejected == 0 and all(_conserves_charge(r) for r in best)
     fallback, _, _, rejected = parsimonious_class(mol, prod, r_data, accept=lambda r: False)
