@@ -22,10 +22,10 @@ oracle. Radical drawings, first match wins, drawing errors before genuine radica
 Metals: OSM_FE3, OSM_CU2, CUH2_LIGAND, CU_SUSPECT (Cu=C, CuI2), PD_DATIVE (an odd Pd fragment
 with an uncompensated onium), PD_ALREADY_NEG (a step holding an odd Pd already at -1), L1PD
 ([Pd] bonded only to an onium P, on a METAL_PLACEHOLDER step), PLACEHOLDER; on kept steps
-PLACEHOLDER_EVEN, ZNCL_ION, ONIUM_PD_NI_EVEN and CR_IV. Each metal's oxidation state counts
-the charge, a +1 per bond order to another non-metal that is not an onium donor (donors are
-L-type), +1 per H, and metal-metal bonds by Pauling electronegativity. SPIN_PARITY failures
-are named by what they hold (a placeholder metal, else the first open-shell-capable metal).
+PLACEHOLDER_EVEN (the P0 placeholder shape: a non-s-block metal with at most one neighbour, of
+either charge), ZNCL_ION, ONIUM_PD_NI_EVEN and CR_IV. Each metal's oxidation state and d count
+are `data.domain.oxidation_state` and `d_count` (moved there in P0a). SPIN_PARITY failures are
+named by what they hold (a placeholder shape, else the first open-shell-capable metal).
 """
 
 from __future__ import annotations
@@ -36,32 +36,20 @@ from pathlib import Path
 from rdkit import Chem, rdBase
 
 from ksmech.data import chem
-from ksmech.data.domain import _S_BLOCK, METALS, is_odd, is_placeholder
+from ksmech.data.domain import _S_BLOCK, METALS, d_count, is_odd, oxidation_state
 
 ALKALI = frozenset([3, 11, 19, 37, 55])
-PAULING = {"Pd": 2.20, "Ni": 1.91, "Cu": 1.90, "Fe": 1.83, "Cr": 1.66, "Ti": 1.54, "Zn": 1.65}
-GROUP = {**{z: z - 18 for z in range(21, 31)}, **{z: z - 36 for z in range(39, 49)}}
-GROUP |= {z: z - 68 for z in range(71, 81)}
 
 
-def oxidation_state(atom: Chem.Atom) -> int:
-    """The metal's formal oxidation state (module docstring)."""
-    os = atom.GetFormalCharge() + atom.GetTotalNumHs()
-    for bond in atom.GetBonds():
-        other = bond.GetOtherAtom(atom)
-        order = int(bond.GetBondTypeAsDouble())
-        if other.GetAtomicNum() in METALS:
-            mine = PAULING.get(atom.GetSymbol(), 1.8)
-            os += order if PAULING.get(other.GetSymbol(), 1.8) > mine else 0
-        elif other.GetFormalCharge() <= 0 or other.GetAtomicNum() == 6:
-            os += order  # an onium donor (a cation other than C) gives a dative, L-type bond
-    return os
-
-
-def d_count(atom: Chem.Atom) -> int | None:
-    """d electrons of a transition metal at its oxidation state, None for the others."""
-    group = GROUP.get(atom.GetAtomicNum())
-    return None if group is None else group - oxidation_state(atom)
+def placeholder_shape(frag: Chem.Mol) -> bool:
+    """The P0 survey's placeholder shape: a non-s-block metal with at most one neighbour (H
+    included), whatever its charge. A survey label; the domain law is `domain.is_placeholder`."""
+    return any(
+        a.GetAtomicNum() in METALS
+        and a.GetAtomicNum() not in _S_BLOCK
+        and a.GetDegree() + a.GetTotalNumHs() <= 1
+        for a in frag.GetAtoms()
+    )
 
 
 def _radical(atom: Chem.Atom) -> int:
@@ -151,7 +139,7 @@ def _kept_metal_class(frag: Chem.Mol) -> str | None:
             continue
         if a.GetSymbol() == "Zn" and a.GetFormalCharge() == 1 and a.GetDegree() == 1:
             return "ZNCL_ION"
-        if is_placeholder(frag):
+        if placeholder_shape(frag):
             return "PLACEHOLDER_EVEN"
         oniums = [n for n in a.GetNeighbors() if n.GetFormalCharge() > 0 and n.GetSymbol() != "C"]
         if a.GetSymbol() in ("Pd", "Ni") and oniums:
@@ -177,7 +165,7 @@ def spin_parity_kind(smiles: str) -> str:
         mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return "UNPARSED"
-    if is_placeholder(mol):
+    if placeholder_shape(mol):
         return "placeholder"
     symbols = {a.GetSymbol() for a in mol.GetAtoms()}
     for sym in ("Cu", "Fe", "Pd", "Ni", "Cr", "Ti", "Sc", "Zn", "P"):

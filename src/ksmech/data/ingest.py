@@ -91,12 +91,25 @@ class IngestResult:
                 Counter(s.domain_exclusion for s in self.steps if s.domain_exclusion).most_common()
             ),
             "n_charge_repaired": sum(s.charge_repair is not None for s in self.steps),
+            "charge_repairs_by_rule": dict(repair_rule_counts(self.steps).most_common()),
+            "domain_class": dict(
+                Counter(s.domain_class for s in self.steps if s.domain_class).most_common()
+            ),
             "n_rejected": len(self.rejections),
             "rejected_fraction": self.rejected_fraction,
             "rejections_by_reason": dict(self.reason_counts().most_common()),
             "notes": dict(self.notes.most_common()),
             "sample": self.sample,
         }
+
+
+def repair_rule_counts(steps: list[ElementaryStep]) -> Counter[str]:
+    """Steps per repair rule (`data.domain`; a step repaired on both sides counts once)."""
+    out: Counter[str] = Counter()
+    for s in steps:
+        if s.charge_repair:
+            out.update({r["rule"] for r in json.loads(s.charge_repair)["repairs"]})
+    return out
 
 
 def write_outputs(result: IngestResult, processed_dir: Path) -> dict[str, Path]:
