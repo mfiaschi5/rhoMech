@@ -1,7 +1,8 @@
-# Reaction networks: searching towards a product and without one, several valid outcomes, a thermodynamic stop, the previous step, graph search
+# Reaction networks: searching towards a product and without one, several valid outcomes, a thermodynamic stop, the previous step, graph search, joining branches, the search from a product alone
 
-Status: proposed 2026-10-29, extended the same day with the previous-step model (item H) and
-the graph search (item I); nothing implemented. To start after P0b of `docs/open_shell_plan.md`.
+Status: proposed 2026-10-29, extended the same day with the previous-step model (item H), the
+graph search (item I), joining branches on a species graph (item J) and the search from a
+product alone (item K); nothing implemented. To start after P0b of `docs/open_shell_plan.md`.
 Nothing here changes the forward model's loss or the training presets, so the P0b comparison
 (GENERAL against LEGACY) stays paired. Written on branch `claude/reaction-network-plan` from main f6aa758: the
 open-shell plan, `eval/paired.py`, the closed_base cohort and the v18 store it cites are on
@@ -240,8 +241,8 @@ channel counts as a negative.
   by-products (Cl-, water, salts), or the atoms do not balance. Dataset pools are complete. With
   the reactants known, the atom balance reactants - product gives the by-products' formula, the
   atom map says which atoms they hold, and their protonation states are enumerated at fixed total
-  charge. From a product alone, without reactants, it becomes mechanistic retrosynthesis: out of
-  scope (section 8).
+  charge. From a product alone, without reactants, it becomes mechanistic retrosynthesis:
+  item K.
 - **Uses**, in order of value: the bidirectional search (I1); the round-trip check, a forward
   step trusted more when the backward model, from the child, finds the parent again (I5); more
   signal for a shared encoder; completing a mechanism with a missing step, from a known
@@ -251,8 +252,9 @@ channel counts as a negative.
 
 The network is an implicit graph that the models generate on demand: nodes are pool states,
 edges elementary steps. In the pool graph a step that joins two branches (A -> B, C -> D,
-B + D -> E) is still one simple path, because the pool holds every molecule, so no AND-OR search
-over species is needed. Each question gets its algorithm:
+B + D -> E) is still one simple path, because the pool holds every molecule, but every
+interleaving of the two branches is a path of its own; item J keeps such branches apart on a
+species graph. On the pool graph each question gets its algorithm:
 
 - **I1. One pathway from reactants to product.** A* with edge cost -log p and the heuristic
   "remaining dB divided by the most entries one step can change", a lower bound on the steps
@@ -290,18 +292,85 @@ over species is needed. Each question gets its algorithm:
   - Cost: frontier nodes expanded in batches in one model pass on the GPU, QM in parallel
     workers over the existing cache; budgets (nodes, depth) are flags and every cut is counted.
 
-### J. Documents and tests
+### J. Branches that join: the species graph and AND-OR search (medium to large)
+
+- **Why a second graph.** When two branches made independently meet (A -> ... -> B,
+  C -> ... -> D, then B + D -> E), the pool graph holds one path per interleaving of the two
+  branches, so its states multiply with the number of independent branches. The species graph
+  keeps them apart:
+  - OR nodes are species: a species can come from any of the steps that make it;
+  - AND nodes are elementary steps: a step needs all of its reactant species, and a step
+    between species of different branches is the join;
+  - a pathway becomes a hyperpath: the set of steps that makes the target from the starting
+    species, a derivation DAG whose joins are AND nodes with several inputs.
+- **Same models, two graphs.** The model's input is already a pool of one or two species (plus
+  the reservoir), i.e. one AND node; QM and G are per species (cache, item B). The pool graph
+  stays for one-pot mechanisms where the counter-ions and proton shuttles of one pool matter;
+  the species graph serves mixtures, independent branches and the product-only search of item K.
+  A hyperpath linearized in any order the DAG allows is a pool-graph pathway, and the partial-
+  order reduction of I2 maps it back, so results compare across the two.
+- **Expansion without a product.** Species by species: every new species reacts with itself, the
+  core species and the reservoir; it joins the core when the probability mass reaching it
+  exceeds a flagged tolerance, with partners at fixed concentration (pseudo-first order), as in
+  I4. Once rates exist (section 6) the same loop runs on flux from a microkinetic simulation,
+  as RMG does.
+- **One algorithm per question, as in item I:**
+  - one hyperpath to the target: the shortest-B-hyperpath procedure of Gallo, Longo, Pallottino
+    and Nguyen (a Dijkstra for additive costs, a step costing -log p), or AO* with an admissible
+    heuristic when the target is mapped;
+  - several alternative mechanisms: the k shortest hyperpaths of Nielsen, Andersen and
+    Pretolani, classes taken up to the order of independent steps;
+  - all hyperpaths with their weights: the model's branching ratios with partners at fixed
+    concentration, and atom-flux analysis. Every step carries its atom map, so the flux of each
+    target atom traces back through the network as an ordinary graph; the dominant pathways are
+    extracted per atom and merged. Hyperpath weights are not products of step probabilities
+    once bimolecular steps compete for partners, so these weights are the fixed-concentration
+    approximation until a microkinetic simulation with rates replaces them; the end state
+    always comes from the thermodynamic equilibrium of item F;
+  - what forms without a product: the expansion above, with the end species and their shares.
+
+### K. The previous step from a product alone (mechanistic retrosynthesis; large)
+
+- **Start:** the target molecule only; the reactants and the by-products are unknown.
+- **By-products from a reservoir.** Going back, a step that released a by-product forward
+  (C -> D + X) needs X to join D. The reservoir is the set of small species that leave pools in
+  the recorded steps (leaving groups, ions, water, solvent), counted from the datasets, not a
+  hand list. At each backward expansion the backward model (item H) scores the current pool
+  alone and the pools current + x for the most frequent x (how many: a flag); a step on an
+  enlarged pool counts only if it uses x. A step that splits a species going back (an addition
+  forward) needs no by-product.
+- **AND-OR search on the species graph (item J).** A backward step that splits C into A + B
+  makes two subgoals, each solved on its own (AND); a species with several possible origins is
+  an OR node. The remaining dB is not available (no map to unknown reactants), so the search is
+  Retro* (best-first on the AND-OR tree with a learned value), proof-number search, or Monte
+  Carlo tree search; budgets are flags and every cut is counted.
+- **Where to stop.** A leaf is a plausible starting material:
+  - a building-block catalogue (eMolecules, ZINC or similar: a new data dependency);
+  - a species that is thermodynamically stable on its own at T (item F: a sink by itself);
+  - later, a START head trained on the first pools of pathways (the ReactMech chains and the
+    human benchmark reactants, item G).
+  The first two from the start, the third in section 6.
+- **Forward verification.** From the reactants found, the forward search (I1, I3) with
+  thermodynamics must reach the target; only verified retro-mechanisms are reported, ranked by
+  the forward criterion.
+- **Scope:** one reaction (one pot), up to a flagged number of elementary steps (the human
+  benchmark goes to 7). Several pots in sequence would chain this with a reaction-level
+  retrosynthesis tool (AiZynthFinder or similar): section 6.
+
+### L. Documents and tests
 
 - The spec (`docs/ksmech_architecture.tex`), "Inference": the target mode, the Markov chain, the
-  thermodynamic stop, the backward model and the search algorithms. Edited only while no build
-  runs (tracked edits make artifacts stale).
+  thermodynamic stop, the backward model, the search algorithms, the species graph and the
+  product-only search. Edited only while no build runs (tracked edits make artifacts stale).
 - `docs/decisions.md`: D1-D3 and every later choice, with dates.
 - Tests: thermochemistry on the fixed molecule set and on the OPEN_SHELL list; backward labels on
   the fixed set (applying -R to the product pool gives the reactant pool back); network, chain,
   reverse edges and sinks with the server's synthetic chemistry; laws as tests: detailed balance
-  (the stationary distribution equals Boltzmann), flux conservation in transition path theory,
-  A* with the dB heuristic returning the same best pathway as exhaustive search on small
-  synthetic graphs, and the k-pathway classes invariant under permuting independent steps.
+  (the stationary distribution equals Boltzmann), flux conservation in transition path theory
+  and in the atom-flux analysis, A* with the dB heuristic and the shortest-B-hyperpath procedure
+  returning the same best result as exhaustive search on small synthetic graphs, the k-pathway
+  classes invariant under permuting independent steps, a hyperpath linearized and reduced back
+  giving the same class, and the reservoir counted from the data, never listed by hand.
 
 ## 5. Evaluation
 
@@ -314,6 +383,12 @@ over species is needed. Each question gets its algorithm:
 - All pathways: the share of the reactive flux (I3) on the recorded pathway's class.
 - Backward model: backward top-k on the molecule split (3 seeds, paired); the round-trip check
   as a reranker of the forward beam, forward top-1 on val with and without it.
+- Species graph: on reactions whose pathways have independent branches, the nodes expanded by
+  the species graph against the pool graph for the same pathway found, and the same pathway
+  class from both.
+- From a product alone: given only the product (human benchmark, ReactMech chains,
+  mech-USPTO-31K), top-k recovery of the recorded reactants (map-free) and of the mechanism
+  class, the share of results that pass the forward verification, nodes expanded.
 - Stop: false sinks on recorded reactions (about zero); true sinks on a small set of negative
   controls (pools known not to react at a given temperature), to be built, since the datasets
   hold only reactions that happened.
@@ -331,8 +406,11 @@ over species is needed. Each question gets its algorithm:
   and repeat (expert iteration). The risk is the model reinforcing its own errors, so the found
   pathways are filtered by thermodynamics and by the round-trip check, and measured only on
   benchmarks the loop never used.
+- The START head of item K, trained on the first pools of pathways (item G).
+- Several pots in sequence: item K chained with a reaction-level retrosynthesis tool.
 - Conditions as inputs, once a source has them.
-- Kinetics (barriers), if the climb bound needs it.
+- Kinetics (barriers), if the climb bound needs it; with rates, the species graph of item J is
+  expanded and weighted by microkinetic flux.
 
 ## 7. Order
 
@@ -342,14 +420,16 @@ over species is needed. Each question gets its algorithm:
 4. H: backward labels and store, 3-seed training, backward top-k, then the round-trip reranker.
 5. I1 bidirectional.
 6. E and F, then I3 and I4 on the Markov chain.
-7. Evaluation (section 5) and calibration of the flags.
-8. Section 6, with new training runs.
+7. J: the species graph, its expansion and the hyperpath algorithms, checked against the pool
+   graph on the same pathways.
+8. K: the reservoir counted from the data, the AND-OR search with the backward model, the
+   stopping rules and the forward verification.
+9. Evaluation (section 5) and calibration of the flags.
+10. Section 6, with new training runs.
 
 ## 8. Not doing
 
 - A loss over any valid outcome for chemically distinct outcomes (D1).
 - A kinetic stop (D2).
 - Cutting edges because they are uphill.
-- The previous step from a product alone, without the reactants (mechanistic retrosynthesis).
-- An AND-OR search over a species hypergraph: the pool graph keeps joined branches as simple
-  paths.
+- A by-product list written by hand: the reservoir of item K is counted from the data.
