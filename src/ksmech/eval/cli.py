@@ -4,6 +4,8 @@
     ksmech-eval embedding --run flex_first --step-id pmechdb-018a36c64ec74e5e
     ksmech-eval embedding --run flex_first --smiles 'CC(=O)C.[OH-]'
     ksmech-eval decode --run flex_first --part val --limit 200
+    ksmech-eval pin --source pmechdb --name closed_base --workers 4
+    ksmech-eval compare --a <GENERAL hit files> --b <LEGACY hit files> --out FILE
 
 `floor` ranks each step's anchor by |G^atom| (no learned parameter) on the validation and test
 parts and writes `anchor_floor_report_<split>.json`, the reference every trained model is
@@ -16,6 +18,15 @@ checkpoint. `--caps legacy` (the default: at most 8 bond and 2 atom changes, 48 
 or `--caps labels` (the label maxima of the training part of --source, never val or test),
 then `--max-bonds`, `--max-atoms`, `--max-candidates`; the header records the caps, and caps
 other than the legacy ones add `_caps<bonds>-<atoms>-<candidates>` to the file names.
+
+`pin` pins every sample of a split's three parts as a cohort, its two GBDT subsets (the
+samples with ArrowLabels on the valid cells and on every cell) and `baseline_<name>.json`, the
+per-sample digests of every named column (`eval.pin`); each file is written once.
+
+`compare` pairs two arms of decode runs sample by sample (`eval.paired`): arm A fails when its
+mean top-k is lower than B's by more than max(2 x pooled SD, 1 point); beside it, the exact
+one-sided McNemar test on the majority-of-seeds hits and on every seed pair. Hit files decoded
+on other samples or another way are refused.
 
 `embedding` traces one sample through a trained model (`eval.embedding`) and writes one
 self-contained HTML page (`eval.embedding_page`): the tokens on the Lewis structure, the parts
@@ -65,6 +76,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _cohort_args(f)
     _decode_parser(sub)
+    c = sub.add_parser("compare", help="two arms of decode runs, paired: tolerance and McNemar")
+    c.add_argument("--a", nargs="+", type=Path, required=True, help="arm A's hit files (GENERAL)")
+    c.add_argument("--b", nargs="+", type=Path, required=True, help="arm B's hit files (LEGACY)")
+    c.add_argument("--k", type=int, default=1, help="top-k of a hit")
+    c.add_argument("--out", type=Path, help="the report (JSON)")
+    pin = sub.add_parser("pin", help="pin a split's samples as a cohort with per-column digests")
+    pin.add_argument("--source", required=True, choices=[str(x) for x in Source])
+    pin.add_argument("--name", required=True, help="cohort name, e.g. closed_base")
+    pin.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    pin.add_argument("--workers", type=int, default=1, help="spawned processes reading shards")
+    pin.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     e = sub.add_parser("embedding", help="one sample through a trained model, as an HTML page")
     e.add_argument("--run", required=True, help="training run under <models-dir>/<source>/")
     e.add_argument("--checkpoint", default="best", choices=["best", "last"])
@@ -195,6 +217,48 @@ def cmd_decode(args, console: Console) -> int:
     for code, count in report["skips"].items():
         console.print(f"  {code}: {count}")
     console.print(f"wrote {out} and {hits_out.name}")
+    return 0
+
+
+def cmd_compare(args, console: Console) -> int:
+    from ksmech.eval.paired import compare_arms
+
+    try:
+        report = compare_arms(args.a, args.b, args.k)
+    except ValueError as err:
+        console.print(f"[red]{err}")
+        return 2
+    d, m = report["decision"], report["majority"]
+    console.print(f"n {report['n']}, top-{args.k} per run: A {report['top_k']['a']}, "
+                  f"B {report['top_k']['b']}")  # fmt: skip
+    console.print(f"mean A {d['mean_a']:.2f}, mean B {d['mean_b']:.2f}, difference "
+                  f"{d['difference']:+.2f}, pooled SD {d['pooled_sd']:.2f}, tolerance "
+                  f"{d['tolerance']:.2f}: A {'fails' if d['a_fails'] else 'passes'}")  # fmt: skip
+    console.print(f"McNemar (majority of seeds, H1 A worse): A miss / B hit {m['a_miss_b_hit']}, "
+                  f"A hit / B miss {m['a_hit_b_miss']}, p {m['p']:.3g}")  # fmt: skip
+    if args.out:
+        inputs = {}
+        for path in [*args.a, *args.b]:
+            inputs |= prov.file_input(path)
+        header = prov.stamp("decode_compare", DECODE_VERSION, inputs, {"k": args.k})
+        prov.write_json(args.out, report, header)
+        console.print(f"wrote {args.out}")
+    return 0
+
+
+def cmd_pin(args, console: Console) -> int:
+    from ksmech.eval.pin import pin_cohort
+
+    out = pin_cohort(args.source, args.name, args.split, args.processed_dir, args.workers)
+    table = Table(title=f"cohort {args.name}: {args.source} {args.split} split")
+    for col in ("part", "samples", "GBDT valid cells", "GBDT all cells"):
+        table.add_column(col)
+    for part in ("train", "val", "test"):
+        c = out[part]
+        table.add_row(part, str(c["samples"]), str(c["gbdt_valid"]), str(c["gbdt_all"]))
+    console.print(table)
+    for path in out["written"]:
+        console.print(f"wrote {path}")
     return 0
 
 
@@ -343,7 +407,13 @@ def _print_trace(console: Console, tr: dict, sample: MechanismSample) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    commands = {"floor": cmd_floor, "decode": cmd_decode, "embedding": cmd_embedding}
+    commands = {
+        "floor": cmd_floor,
+        "decode": cmd_decode,
+        "embedding": cmd_embedding,
+        "pin": cmd_pin,
+        "compare": cmd_compare,
+    }
     return commands[args.command](args, Console())
 
 

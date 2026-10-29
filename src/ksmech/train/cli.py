@@ -2,6 +2,11 @@
 
     ksmech-train fit --source pmechdb --split molecule --run first
     ksmech-train fit --run smoke --limit 64 --epochs 1        # a smoke run
+    ksmech-train fit --run dense_plain_general_s0 --preset general --seed 0 --no-resonance-draws
+
+`--preset general|legacy` sets the P0a flags of `model.config.PRESETS` as the defaults of their
+options (GENERAL: every pair cell, the orbital extras; LEGACY: the v17 inputs); an option given
+explicitly wins. run.json records the resulting flags.
 
 On the ROCm build an RDNA2 card without kernels of its own (the RX 6600 XT, gfx1032) gets
 HSA_OVERRIDE_GFX_VERSION=10.3.0 unless the variable is already set (`train.loop.rocm_override`).
@@ -16,7 +21,7 @@ from dataclasses import fields
 from pathlib import Path
 
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
-from ksmech.model.config import ModelConfig
+from ksmech.model.config import PRESETS, ModelConfig
 from ksmech.train.loop import (
     DEFAULT_MODELS_DIR,
     NonFiniteError,
@@ -27,19 +32,27 @@ from ksmech.train.loop import (
 )
 
 
-def _add_fields(parser: argparse.ArgumentParser, cls) -> None:
-    """One option per field of a configuration dataclass, with its default."""
+def _add_fields(parser: argparse.ArgumentParser, cls, defaults: dict | None = None) -> None:
+    """One option per field of a configuration dataclass, with its default (or `defaults`')."""
     for f in fields(cls):
         flag = "--" + f.name.replace("_", "-")
+        default = (defaults or {}).get(f.name, f.default)
         if isinstance(f.default, bool):
-            parser.add_argument(flag, action=argparse.BooleanOptionalAction, default=f.default)
+            parser.add_argument(flag, action=argparse.BooleanOptionalAction, default=default)
         elif isinstance(f.default, tuple):
-            parser.add_argument(flag, nargs="*", default=list(f.default))
+            parser.add_argument(flag, nargs="*", default=list(default))
         else:
-            parser.add_argument(flag, type=type(f.default), default=f.default)
+            parser.add_argument(flag, type=type(f.default), default=default)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _preset(argv: list[str] | None) -> str | None:
+    """The --preset of a command line, read before the full parser is built."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--preset", choices=sorted(PRESETS))
+    return pre.parse_known_args(sys.argv[1:] if argv is None else argv)[0].preset
+
+
+def build_parser(preset: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ksmech-train", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     f = sub.add_parser("fit", help="train one run")
@@ -48,8 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     f.add_argument("--device", default="auto", help="auto | cpu | cuda (ROCm is cuda)")
     f.add_argument("--resume", action="store_true", help="continue from the run's last.pt")
+    f.add_argument("--preset", choices=sorted(PRESETS), default=preset,
+                   help="the P0a flags of GENERAL or LEGACY as defaults")  # fmt: skip
     _add_fields(f, TrainConfig)
-    _add_fields(f, ModelConfig)
+    _add_fields(f, ModelConfig, PRESETS.get(preset or "", {}))
     return parser
 
 
@@ -75,6 +90,9 @@ def cmd_fit(args) -> int:
         return 2
     run_dir.mkdir(parents=True, exist_ok=True)
     _logging(run_dir)
+    if args.preset:
+        flags = {k: getattr(model_cfg, k) for k in PRESETS[args.preset]}
+        logging.getLogger(__name__).info("preset %s: %s", args.preset, flags)
     if override := rocm_override():
         logging.getLogger(__name__).info("set HSA_OVERRIDE_GFX_VERSION=%s (RDNA2 card)", override)
     try:
@@ -89,7 +107,7 @@ def cmd_fit(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = build_parser(_preset(argv)).parse_args(argv)
     return {"fit": cmd_fit}[args.command](args)
 
 

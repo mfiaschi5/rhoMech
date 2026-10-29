@@ -6538,3 +6538,40 @@ the GBDT reproduce; which default the GENERAL configuration takes is an ablation
   KEPT ZNCL_ION 3; ReactMech RADICAL_DRAWN CDI 62, OPEN_SHELL_METAL PD_ALREADY_NEG 2, no
   METAL_PLACEHOLDER, KEPT ONIUM_PD_NI_EVEN 209, ML1 45, CR_IV 10 (the 49 re-charged and 205
   returned steps).
+
+## 2026-10-29: Open-shell P0b: the closed_base cohort, the paired comparison and the presets
+
+Phase P0b of `docs/open_shell_plan.md`, on branch `claude/open-shell-p0b` (from
+`claude/open-shell-p0a`).
+
+- **closed_base is every sample of the PMechDB molecule split on the v18 store**
+  (`ksmech-eval pin`, `eval.pin`). The cohort file holds the sample ids of train, val and test
+  (the plan's 12,396 was an estimate; the build has 9,979 / 1,238 / 1,182). Beside it, two
+  cohorts of the samples a first-arrow ranker scores, one per cell set (`closed_base_gbdt_valid`,
+  `closed_base_gbdt_all`: the samples with ArrowLabels on the valid cells, `labels`, or on every
+  cell, `labels_all`), so the GBDT's denominators are pinned too.
+- **Digests by named column, per sample, without file inputs.** `baseline_closed_base.json`
+  holds the column names once and, per sample, a 64-bit truncated sha256 of each column's
+  content: the ids (step id and fragment keys), atom_categorical[:, :2], every atom column by
+  name (values zeroed where missing, plus the missing mask), every orbital column by name, the
+  spectral sets, every pair feature by name (zeroed where undefined, plus the definition mask:
+  a value in an undefined cell is not content), pair_valid, the edit label and both ArrowLabel
+  lists. Like a cohort it has no file inputs and a content hash, so no rebuild makes it stale;
+  the views it was read from and the sample version are in its note. A later store is compared
+  column by column over the samples both hold (`compare_digests`), and a column only one side
+  has is reported, not failed, so later phases add columns. The digests are taken on the
+  samples as the store returns them (after its float16 packing of pair_z), and the realdata
+  test rebuilds 30 samples from their tokens through the same packing.
+- **The paired rule (`ksmech-eval compare`, `eval.paired`).** One-sided: arm A (GENERAL) fails
+  against arm B (LEGACY) when its mean top-1 is lower by more than max(2 x pooled SD, 1 point);
+  the pooled SD is the within-arm SD of all six runs with 4 degrees of freedom. Beside it, the
+  exact McNemar test of "A is worse" (p = P(X >= n_ab), X ~ Binomial(n_ab + n_ba, 1/2), exact
+  integer arithmetic, no SciPy) on the majority-of-seeds hits (a sample is a hit when more than
+  half an arm's runs hit it) and on each of the 9 seed pairs. Hit files decoded on other
+  samples, parts, cohorts, scopes, beams, caps or decode versions are refused.
+- **Presets.** `ksmech-train fit --preset general|legacy` sets the P0a flags of
+  `model.config.PRESETS` as option defaults (general: `pair_cells all`, `orbital_extra
+  retained_fraction energy_ev`; legacy: `pair_cells valid`, no extras); `frontier_blocks` and
+  the FD columns stay at their legacy settings in both (P9 ablates them); an explicit option
+  wins; run.json records the resulting flags and the seed.
+

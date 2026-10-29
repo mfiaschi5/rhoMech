@@ -894,3 +894,35 @@ def test_the_test_part_is_scored_every_epoch_and_never_picks_best(samples, tmp_p
     header = json.loads((run_dir / "run.json").read_text())["provenance"]
     assert len([k for k in header["inputs"] if "samples_x_" in k]) == 6
     assert "test" in header["extra"]["parts"]
+
+
+@pytest.mark.parametrize("preset", ["general", "legacy"])
+def test_a_preset_sets_the_p0a_flags_and_a_smoke_fit_runs(samples, tmp_path, preset):
+    import json
+
+    from ksmech.arrows.steps import SAMPLE_VERSION
+    from ksmech.model.config import PRESETS
+    from ksmech.train.cli import main as train_main
+
+    _two_source_stores(samples, tmp_path)
+    tiny = ["--d", "32", "--d-pair", "16", "--layers", "2", "--heads", "4"]
+    tiny += ["--decoder-hidden", "16", "--physics-hidden", "8", "--no-checkpoint"]
+    argv = ["fit", "--run", "r", "--source", "pmechdb+reactmech", "--split", "x", "--epochs", "1"]
+    argv += ["--workers", "0", "--cell-budget", str(10**7), "--warmup", "1", "--seed", "2"]
+    argv += ["--device", "cpu", "--processed-dir", str(tmp_path)]
+    argv += ["--models-dir", str(tmp_path / "models"), "--preset", preset, *tiny]
+    assert train_main(argv) == 0
+    run = json.loads((tmp_path / "models" / "pmechdb+reactmech" / "r" / "run.json").read_text())
+    config = run["provenance"]["config"]
+    assert config["sample_version"] == SAMPLE_VERSION and config["train"]["seed"] == 2
+    model = ModelConfig.from_dict(config["model"])
+    assert {k: getattr(model, k) for k in PRESETS[preset]} == PRESETS[preset]
+    assert model.frontier_blocks == "window"
+
+
+def test_an_explicit_option_wins_over_the_preset():
+    from ksmech.train.cli import _preset, build_parser
+
+    argv = ["fit", "--run", "r", "--preset", "general", "--pair-cells", "valid"]
+    args = build_parser(_preset(argv)).parse_args(argv)
+    assert args.pair_cells == "valid" and args.orbital_extra == ["retained_fraction", "energy_ev"]

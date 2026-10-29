@@ -42,3 +42,13 @@ class ModelConfig:
         kw["drop_pair_features"] = tuple(kw.get("drop_pair_features", ()))
         kw["orbital_extra"] = tuple(kw.get("orbital_extra", ()))
         return cls(**kw)
+
+
+# The two configurations of the open-shell plan's P0b comparison (U2): GENERAL, the reference,
+# reads every pair cell with the exclusion flags as channels and the two orbital extras; LEGACY
+# turns every P0a flag off (the v17 inputs). frontier_blocks and the FD columns stay at their
+# legacy settings in both: P9 ablates them. Explicit options override a preset.
+PRESETS: dict[str, dict[str, Any]] = {
+    "general": {"pair_cells": "all", "orbital_extra": ("retained_fraction", "energy_ev")},
+    "legacy": {"pair_cells": "valid", "orbital_extra": ()},
+}

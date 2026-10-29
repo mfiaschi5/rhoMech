@@ -253,7 +253,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
-  [--resume] [--no-resonance-draws] [--eval-test]` (the spec-v9 model on one split; `--source pmechdb+reactmech`
+  [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy]` (the spec-v9 model on one split;
+  `--preset` sets the P0a flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
+  orbital extras, legacy = the v17 inputs; an explicit option wins; `--source pmechdb+reactmech`
   pools several sources' training parts, validates each and the pool, pair statistics fitted on the pool; each epoch every training
   sample in a random one of its resonance drawings unless `--no-resonance-draws`; `--encoder`: `dense` the pair track of spec v9,
   `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
@@ -281,7 +283,13 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
   it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
   `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared` (with and without), and
-  report the covered fraction; `uv run ksmech-physics gbdt --score-only [--model PATH
+  report the covered fraction; `uv run ksmech-eval pin --source pmechdb --name closed_base [--workers N]`
+  (open-shell plan P0b: the molecule split's samples as a cohort, its GBDT subsets `<name>_gbdt_valid|all`
+  and `baseline_<name>.json`, per-sample digests of every named column, `eval.pin`; each written once),
+  `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--out FILE]` (two arms of decode runs
+  paired by sample: A fails when its mean top-k is below B's by more than max(2 x pooled SD, 1 point),
+  the exact one-sided McNemar test on majority-of-seeds hits and every seed pair; arms decoded on other
+  samples, cohorts, caps or decode versions refused, `eval.paired`); `uv run ksmech-physics gbdt --score-only [--model PATH
   --allow-stale]` scores the stored ranker of `--split` (or a reference copy) without a refit
   (`gbdt_lgbm_ranks_<split>_geomfree[_<model>].json`); P0a: `uv run python scripts/p0a_changes.py
   --source S` (every step the P0a build changed, removed, returned or flagged, by rule,
