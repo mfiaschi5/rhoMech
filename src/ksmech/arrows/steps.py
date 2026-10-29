@@ -80,7 +80,7 @@ from ksmech.arrows.reactants import (
     TokenLoader,
 )
 from ksmech.arrows.symmetry import symmetric_closure
-from ksmech.data import chem, splits
+from ksmech.data import chem, domain, splits
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
 from ksmech.data.resonance import sigma_key
@@ -795,7 +795,8 @@ def write_strategy_views(
         for split, members in ids.items():
             counts = split_report(split, members, samples, skipped)
             view = samples_path(source, split, processed_dir)
-            config = _config(split, seed)
+            # the domain classes the training steps admitted (`read_training_steps`)
+            config = _config(split, seed) | {"admit": domain.admit_config(source)}
             store.write_view(view, members, counts, index, split_file, config)
             report["splits"][split] = counts
             if split.endswith("_train"):

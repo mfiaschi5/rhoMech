@@ -78,7 +78,10 @@ def test_oxidation_states_and_d_counts():
     pd = next(a for a in _mol("Br[Pd-](Br)(C)[P+](C)(C)C").GetAtoms() if a.GetSymbol() == "Pd")
     assert (sv.oxidation_state(fe), sv.d_count(fe)) == (3, 5)
     assert (sv.oxidation_state(cu), sv.d_count(cu)) == (2, 9)
-    assert sv.oxidation_state(pd) == 2  # -1 charge, two Br and a methyl; the P+ is a dative L
+    # -1 charge, two Br and a methyl, and the P+ bond: the onium's +1 and the Pd's compensating
+    # -1 cancel (an L ligand), so the neutral, odd PdBr2Me(PMe3) reads Pd(III) (domain.py, P0a;
+    # the P0 helper read 2 because it dropped the P+ bond, which made [Pd-][P+]R3 read Pd(-I))
+    assert sv.oxidation_state(pd) == 3
 
 
 def test_spin_parity_failures_are_named_by_what_they_hold():

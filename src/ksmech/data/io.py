@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 
 import pyarrow as pa
@@ -63,6 +63,10 @@ def read_steps(path: Path) -> list[ElementaryStep]:
     return [ElementaryStep.from_dict(row) for row in table.to_pylist()]
 
 
-def read_training_steps(path: Path) -> list[ElementaryStep]:
-    """The training target: resonance steps dropped, `step_index` renumbered per pathway."""
-    return training_steps(read_steps(path))
+def read_training_steps(
+    path: Path, admit: Mapping[str, Collection[str]] | None = None
+) -> list[ElementaryStep]:
+    """The training target: resonance steps dropped, `step_index` renumbered per pathway, the
+    excluded steps and the `domain_class` values outside the admit set (`training_steps`)
+    left out."""
+    return training_steps(read_steps(path), admit)

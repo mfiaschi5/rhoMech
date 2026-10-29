@@ -25,12 +25,18 @@ resonance form.
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 
 from rdkit import Chem, rdBase
 from rdkit.Chem import rdchem
 
+from ksmech.data.domain import admitted
 from ksmech.data.schema import ElementaryStep
+
+log = logging.getLogger(__name__)
 
 _FLAGS = (
     rdchem.ResonanceFlags.UNCONSTRAINED_CATIONS
@@ -134,12 +140,26 @@ def resonance_forms(mol: Chem.Mol, max_structures: int) -> tuple[list[Chem.Mol],
     return [f for f in raw if f is not None and _electron_state(f) == ref], n
 
 
-def training_steps(steps: list[ElementaryStep]) -> list[ElementaryStep]:
+def training_steps(
+    steps: list[ElementaryStep], admit: Mapping[str, Collection[str]] | None = None
+) -> list[ElementaryStep]:
     """The training target: drop resonance steps and renumber `step_index` 0.. within each
     pathway (input order), then drop the steps outside the closed-shell domain
-    (`domain_exclusion`, `data.domain`) without renumbering, so a pathway that lost one keeps
-    the gap in its indices."""
-    return [s for s in _renumbered(steps) if s.domain_exclusion is None]
+    (`domain_exclusion`, `data.domain`) and those whose `domain_class` holds a class their
+    source's admit set lacks (`admit`, source -> classes; default `data.domain.ADMIT`), without
+    renumbering, so a pathway that lost one keeps the gap in its indices. The steps left out
+    by the admit set are logged by class (`not_admitted` counts them)."""
+    kept = [s for s in _renumbered(steps) if s.domain_exclusion is None]
+    if counts := not_admitted(kept, admit):
+        log.info("not admitted by domain_class: %s", dict(counts))
+    return [s for s in kept if admitted(s, admit)]
+
+
+def not_admitted(
+    steps: list[ElementaryStep], admit: Mapping[str, Collection[str]] | None = None
+) -> Counter[str]:
+    """`domain_class` values of the steps their source's admit set leaves out."""
+    return Counter(s.domain_class for s in steps if not admitted(s, admit))
 
 
 def _renumbered(steps: list[ElementaryStep]) -> list[ElementaryStep]:

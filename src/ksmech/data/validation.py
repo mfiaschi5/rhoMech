@@ -187,20 +187,24 @@ def build_step(
         resonance_step=resonance,
         domain_exclusion=None if screen.code is None else str(screen.code),
         charge_repair=note,
+        domain_class=screen.domain_class,
     )
 
 
 def screened(
     reactants: Chem.Mol, products: Chem.Mol, arrows: list[Arrow], require_arrows: bool
 ) -> Screen:
-    """`domain.screen_step`, keeping its charge repairs only if the repaired step validates
-    (charge balance, maps, arrow replay); otherwise the step is screened without repairs."""
-    screen = screen_step(reactants, products)
-    if not screen.repairs:
-        return screen
+    """`domain.screen_step`, keeping its repairs (R1, the dative law) only if the repaired
+    sides parse and the repaired step validates (charge balance, maps, arrow replay); otherwise
+    the step is screened as drawn, without repairs."""
     try:
-        validate(screen.reactants, screen.products, arrows, require_arrows)
+        screen = screen_step(reactants, products)
+        if screen.repairs:
+            validate(screen.reactants, screen.products, arrows, require_arrows)
     except StepRejected as exc:
-        log.info("charge repair dropped (%s): %s", exc.reason, exc.detail)
+        log.warning("charge repair dropped (%s): %s", exc.reason, exc.detail)
+        return screen_step(reactants, products, repair=False)
+    except (chem.SanitizeError, chem.SmilesParseError) as exc:
+        log.warning("charge repair dropped (%s): %s", RejectReason.SANITIZE_FAILED, exc)
         return screen_step(reactants, products, repair=False)
     return screen
