@@ -57,6 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="no fit: score the stored ranker of --split on val and test, per-sample ranks",
     )
+    g.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="--score-only: this stored ranker instead of the split's (a reference copy)",
+    )
+    g.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="--score-only: score a ranker whose training views changed (logged; a legacy gate)",
+    )
     t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
     t.add_argument("--source", default="pmechdb", help="where the trained ranker lives")
     t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -332,8 +343,9 @@ def cmd_gbdt_score(args: argparse.Namespace, console: Console) -> int:
     from ksmech.physics import lgbm
 
     out_dir, tag = source_dir(args.source, args.processed_dir), _tag(args)
-    path = out_dir / f"gbdt_lgbm_{tag}.npz"
-    model = lgbm.load_lgbm(path, bl.feature_names(_cells(args)))
+    path = getattr(args, "model", None) or out_dir / f"gbdt_lgbm_{tag}.npz"
+    stale = getattr(args, "allow_stale", False)
+    model = lgbm.load_lgbm(path, bl.feature_names(_cells(args)), allow_stale=stale)
     loader = TokenCache(args.tokens_dir, maxsize=128)
     result, inputs = {}, prov.file_input(path)
     for part in ("val", "test"):
@@ -347,7 +359,8 @@ def cmd_gbdt_score(args: argparse.Namespace, console: Console) -> int:
         )
     config = {"model": path.name, "split": args.split, "cells": _cells(args)}
     header = prov.stamp("gbdt_lgbm_ranks", 1, inputs, config)
-    out = out_dir / f"gbdt_lgbm_ranks_{tag}.json"
+    suffix = f"_{Path(path).stem}" if getattr(args, "model", None) else ""
+    out = out_dir / f"gbdt_lgbm_ranks_{tag}{suffix}.json"
     prov.write_json(out, result, header)
     for part, r in result.items():
         tops = " / ".join(f"{r['summary'][f'top{k}']:.1%}" for k in (1, 3, 5))

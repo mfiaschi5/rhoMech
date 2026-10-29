@@ -132,3 +132,6 @@ def test_the_cells_switch_names_its_files_and_parses():
     assert _tag(SimpleNamespace(split="molecule")) == "molecule_geomfree"  # v17 names kept
     args = build_parser().parse_args(["gbdt", "--source", "pmechdb", "--cells", "all"])
     assert args.cells == "all" and _tag(args) == "molecule_geomfree_allcells"
+    ref = ["gbdt", "--source", "pmechdb", "--score-only", "--model", "v17.npz", "--allow-stale"]
+    args = build_parser().parse_args(ref)
+    assert args.model.name == "v17.npz" and args.allow_stale and args.score_only
