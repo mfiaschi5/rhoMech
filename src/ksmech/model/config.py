@@ -21,6 +21,8 @@ class ModelConfig:
     drop_pair_features: tuple[str, ...] = ()  # ablation: these z entries are zero and masked
     pair_cells: str = "valid"  # valid (v17: z and pooling on pair_valid only) | all (every cell,
     #   the exclusion flags and the legacy mask as channels; open-shell plan P0a, item 1)
+    orbital_extra: tuple[str, ...] = ()  # orbital inputs beyond v17: retained_fraction, energy_ev
+    frontier_blocks: str = "window"  # window (0.05 eV, v17) | exact (1e-4 eV) frontier columns
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)
@@ -31,10 +33,12 @@ class ModelConfig:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["drop_pair_features"] = list(self.drop_pair_features)
+        d["orbital_extra"] = list(self.orbital_extra)
         return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModelConfig:
         kw = {f.name: d[f.name] for f in fields(cls) if f.name in d}
         kw["drop_pair_features"] = tuple(kw.get("drop_pair_features", ()))
+        kw["orbital_extra"] = tuple(kw.get("orbital_extra", ()))
         return cls(**kw)

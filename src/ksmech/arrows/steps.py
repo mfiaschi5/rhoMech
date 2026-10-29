@@ -84,7 +84,13 @@ from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
 from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import ElementaryStep
-from ksmech.orbitals.tokens import MoleculeTokens
+from ksmech.orbitals.tokens import (
+    STORED_ATOM_FEATURES,
+    STORED_ORBITAL_FEATURES,
+    MoleculeTokens,
+    atom_feature_names,
+    feature_names,
+)
 from ksmech.physics.pairs import (
     PAIR_CELLS,
     PairStats,
@@ -111,6 +117,10 @@ STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
 # which leaks molecules across sets on PMechDB (no pathway ids; docs/review_2026-10-21.md, D1)
 DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
+
+
+LEGACY_ATOM_FEATURES = tuple(atom_feature_names())  # the atom columns of a v17 sample
+LEGACY_ORBITAL_FEATURES = tuple(feature_names())  # and its orbital columns
 
 
 class SkipReason(StrEnum):
@@ -140,12 +150,12 @@ class MechanismSample:
     source: str
     fragment_keys: list[str]  # token-cache key (map-free canonical SMILES) per fragment
     atom_categorical: np.ndarray  # (A, 2) int64: atomic number, formal charge
-    atom_features: np.ndarray  # (A, Fa) float32, missing values 0
+    atom_features: np.ndarray  # (A, Fa) float32 in `atom_columns` order, missing values 0
     atom_missing: np.ndarray  # (A, Fa) bool
     atom_fragment: np.ndarray  # (A,) int64
     atom_map: np.ndarray  # (A,) int64 atom-map number, 0 for unmapped atoms
     atom_positions: np.ndarray  # (A, 3) float32 Angstrom, for distances only
-    orbital_features: np.ndarray  # (O, Fo) float32
+    orbital_features: np.ndarray  # (O, Fo) float32 in `orbital_columns` order
     orbital_spectra: np.ndarray  # (O, 8, 2) float32
     orbital_fragment: np.ndarray  # (O,) int64
     orbital_occupied: np.ndarray  # (O,) bool
@@ -176,6 +186,9 @@ class MechanismSample:
     #   sample was built from (`file:<path>` -> content sha256)
     pair_features: tuple[str, ...] = STAGE_A_FEATURES  # the columns of pair_z / pair_defined
     drawings: list[Drawing] = field(default_factory=list)  # the pool's other resonance drawings
+    atom_columns: tuple[str, ...] = LEGACY_ATOM_FEATURES  # the columns of atom_features (v18:
+    #   `tokens.STORED_ATOM_FEATURES`, the v17 ones then the stored extras); readers select by name
+    orbital_columns: tuple[str, ...] = LEGACY_ORBITAL_FEATURES  # the columns of orbital_features
     drawing_skips: dict[str, int] = field(default_factory=dict)  # drawings dropped, by reason
 
     @property
@@ -251,6 +264,14 @@ def make_sample(
     return sample
 
 
+def _atom_inputs(t: MoleculeTokens) -> tuple[np.ndarray, np.ndarray]:
+    """(values, missing) of the stored atom columns: the v17 inputs, then the extras (the
+    finite-difference f+ / f-, the exact-degeneracy frontier set), missing values 0."""
+    extra = t.atom_extra()
+    values = np.hstack([t.atom_features(), np.nan_to_num(extra, nan=0.0)])
+    return values, np.hstack([t.atom_missing(), np.isnan(extra)])
+
+
 def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
     hand-built reactant sets, e.g. the textbook selectivity checks). The pair feature
@@ -264,12 +285,14 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
         source=source,
         fragment_keys=[f.key for f in rt.fragments],
         atom_categorical=np.concatenate([t.atom_categorical() for t in tok]),
-        atom_features=np.concatenate([t.atom_features() for t in tok]).astype(np.float32),
-        atom_missing=np.concatenate([t.atom_missing() for t in tok]),
+        atom_features=np.concatenate([_atom_inputs(t)[0] for t in tok]).astype(np.float32),
+        atom_missing=np.concatenate([_atom_inputs(t)[1] for t in tok]),
         atom_fragment=rt.atom_fragment.astype(np.int64),
         atom_map=_atom_maps(rt),
         atom_positions=rt.atom_positions.astype(np.float32),
-        orbital_features=np.concatenate([t.orbital_features() for t in tok]).astype(np.float32),
+        orbital_features=np.concatenate(
+            [np.hstack([t.orbital_features(), t.orbital_extra()]) for t in tok]
+        ).astype(np.float32),
         orbital_spectra=np.concatenate([t.orbital_spectra() for t in tok]).astype(np.float32),
         orbital_fragment=rt.orbital_fragment.astype(np.int64),
         orbital_occupied=rt.occupied.copy(),
@@ -283,6 +306,8 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
         pair_valid=valid_pairs(tok, rt.candidate),
         fermi_smeared=any(t.fermi_smeared for t in tok),
         pair_features=STORED_PAIR_FEATURES,
+        atom_columns=STORED_ATOM_FEATURES,
+        orbital_columns=STORED_ORBITAL_FEATURES,
     )
     sample.pair_z = with_pair_bond_orders(sample, lewis_bonds(rt))
     return sample

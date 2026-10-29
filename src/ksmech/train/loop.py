@@ -49,7 +49,7 @@ from ksmech.arrows.steps import (
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.model.config import ModelConfig
-from ksmech.model.inputs import FeatureStats, fit_feature_stats, to_device
+from ksmech.model.inputs import FeatureStats, fit_feature_stats, to_device, token_columns
 from ksmech.model.loss import anchor_ranks, edit_matches, greedy_edit, step_loss
 from ksmech.model.net import KSMech
 from ksmech.physics.pairs import PairStats
@@ -499,7 +499,8 @@ def fit(
     held = load_part(cfg, "test", processed_dir) if cfg.eval_test else ({}, None)
     train = [s for part in by_source.values() for s in part]
     stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells)
-    model = KSMech(model_cfg, fit_feature_stats(train), stats).to(device)
+    feature_stats = fit_feature_stats(train, *token_columns(model_cfg))
+    model = KSMech(model_cfg, feature_stats, stats).to(device)
     parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})
     header = _run_header(cfg, model_cfg, parts, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)

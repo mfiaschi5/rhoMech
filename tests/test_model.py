@@ -20,6 +20,7 @@ from ksmech.model import decode
 from ksmech.model.config import ModelConfig
 from ksmech.model.decoder import ATOM_VALUES, BREAK, FORM
 from ksmech.model.inputs import (
+    FeatureStats,
     fit_feature_stats,
     pair_channels,
     pair_channels_at,
@@ -27,6 +28,8 @@ from ksmech.model.inputs import (
     pooled_gap,
     real_cells,
     standardized_pair_z,
+    token_columns,
+    token_inputs,
 )
 from ksmech.model.loss import (
     admissible_rows,
@@ -162,6 +165,57 @@ def test_valid_cells_reproduce_a_v17_batch_bit_for_bit(samples):
         new, ref = model.encode(b_new), model.encode(b_old)
     for x, y in zip(new[:3], ref[:3], strict=True):
         assert torch.equal(x, y)
+
+
+def _legacy_columns(s: MechanismSample) -> MechanismSample:
+    """The sample with only the v17 token columns, as a v17 store held it."""
+    k, m = len(atom_feature_names()), len(feature_names())
+    return replace(
+        s,
+        atom_features=s.atom_features[:, :k],
+        atom_missing=s.atom_missing[:, :k],
+        orbital_features=s.orbital_features[:, :m],
+        atom_columns=tuple(atom_feature_names()),
+        orbital_columns=tuple(feature_names()),
+    )
+
+
+def test_default_token_inputs_are_the_v17_ones_bit_for_bit(samples):
+    """With orbital_extra () and frontier_blocks 'window', statistics and standardized token
+    inputs on v18 samples equal those of the v17 columns; statistics without names (a v17
+    checkpoint) read the same columns."""
+    old = [_legacy_columns(s) for s in samples]
+    stats, ref = fit_feature_stats(samples), fit_feature_stats(old)
+    for a in ("atom_mean", "atom_std", "orbital_mean", "orbital_std", "energy_mean"):
+        assert np.array_equal(getattr(stats, a), getattr(ref, a)), a
+    v17 = FeatureStats.from_dict({k: v for k, v in stats.to_dict().items() if "names" not in k})
+    assert v17.names() == stats.names() == (tuple(atom_feature_names()), tuple(feature_names()))
+    new, legacy = (
+        token_inputs(collate_samples(samples), v17),
+        token_inputs(collate_samples(old), v17),
+    )
+    for key in ("atom_x", "orbital_x", "spectra"):
+        assert torch.equal(new[key], legacy[key]), key
+
+
+def test_extra_token_columns_are_selected_by_name(samples):
+    cfg = replace(TINY, orbital_extra=("retained_fraction", "energy_ev"), frontier_blocks="exact")
+    atoms, orbitals = token_columns(cfg)
+    assert orbitals[-2:] == ("retained_fraction", "energy_ev")
+    assert "fmo_exact_homo" in atoms and "fmo_homo" not in atoms and "f_plus_fmo_exact" in atoms
+    stats = fit_feature_stats(samples, atoms, orbitals)
+    assert FeatureStats.from_dict(stats.to_dict()).names() == (atoms, orbitals)
+    inp = token_inputs(collate_samples(samples), stats)
+    assert inp["orbital_x"].shape[-1] == len(feature_names()) + 2
+    assert inp["atom_x"].shape[-1] == 2 * len(atom_feature_names())
+    torch.manual_seed(0)
+    model = KSMech(cfg, stats, pair_stats(samples)).eval()
+    with torch.no_grad():
+        assert torch.isfinite(model.encode(collate_samples(samples))[0]).all()
+    with pytest.raises(ValueError, match="orbital_extra"):
+        token_columns(replace(TINY, orbital_extra=("occupation_squared",)))
+    with pytest.raises(ValueError, match="frontier_blocks"):
+        token_columns(replace(TINY, frontier_blocks="wide"))
 
 
 def test_all_cells_feed_the_flags_and_pool_every_cell(samples):

@@ -5,7 +5,11 @@ y_ij of the decoder with the pooled gap factor G^atom (spec v9, "Edit decoder").
 
 The pair features z_rs are stored at K = 1 (`physics.params.REDUCED`); here they are taken to
 the fixed K and standardized with the training statistics (`pair_feature_stats_<split>.json`).
-The token features are standardized with `FeatureStats`, fitted on the training samples.
+The token features are standardized with `FeatureStats`, fitted on the training samples. Like
+the pair features they are selected by name from the sample's stored columns (`token_columns`:
+the v17 inputs by default, the retained spectral weight and E_r with `orbital_extra`, the
+exact-degeneracy frontier set with `frontier_blocks='exact'`); statistics without names are a
+v15-v17 checkpoint's and read the v17 columns.
 Which (occupied, virtual) cells the model reads is `ModelConfig.pair_cells` (spec v9.1): with
 'valid' (the default, v17) every pair feature is undefined outside `pair_valid` and G^atom and
 the pooled means run over the valid pairs only, so the donor's own antibond is not among them
@@ -23,6 +27,12 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from ksmech.orbitals.tokens import (
+    EXACT_COLUMNS,
+    ORBITAL_EXTRA_FEATURES,
+    atom_feature_names,
+    feature_names,
+)
 from ksmech.physics.pairs import PAIR_CELLS, PAIR_VALID, PairStats
 from ksmech.physics.params import SCALING
 
@@ -32,6 +42,7 @@ GRAPH_CAP = 6  # graph distances are capped at 6; another molecule counts as 6
 DIST_BUCKETS = GRAPH_CAP + 2  # 0..6, and 7 for an atom of another molecule
 KINDS = 5  # pair kind: atom-atom, atom-orbital, orbital-atom, orbital-orbital, MECH
 Y_EXTRA = 3  # y_ij beyond the pooled features: log1p(pooled weight), asinh(G^atom), WBI
+NAME_FIELDS = ("atom_names", "orbital_names")  # the FeatureStats fields that are column names
 
 
 @dataclass(frozen=True)
@@ -46,14 +57,51 @@ class FeatureStats:
     orbital_std: np.ndarray
     energy_mean: float
     energy_std: float
+    atom_names: tuple[str, ...] = ()  # the atom columns (none: a v17 checkpoint's, the v17 ones)
+    orbital_names: tuple[str, ...] = ()
+
+    def names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """(atom columns, orbital columns) the statistics are of."""
+        return (
+            self.atom_names or tuple(atom_feature_names()),
+            self.orbital_names or tuple(feature_names()),
+        )
 
     def to_dict(self) -> dict:
-        return {k: np.asarray(v).tolist() for k, v in self.__dict__.items()}
+        return {
+            k: list(v) if k in NAME_FIELDS else np.asarray(v).tolist()
+            for k, v in self.__dict__.items()
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> FeatureStats:
-        arrays = {k: np.asarray(v, dtype=np.float64) for k, v in d.items()}
-        return cls(**{k: (float(v) if v.ndim == 0 else v) for k, v in arrays.items()})
+        names = {k: tuple(d.get(k, ())) for k in NAME_FIELDS}
+        arrays = {k: np.asarray(v, dtype=np.float64) for k, v in d.items() if k not in names}
+        return cls(**{k: (float(v) if v.ndim == 0 else v) for k, v in arrays.items()}, **names)
+
+
+def token_columns(cfg) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(atom, orbital) input columns of a `ModelConfig`: the v17 atom inputs, with the
+    exact-degeneracy frontier set in place of the 0.05 eV one when `frontier_blocks` is
+    'exact'; the v17 orbital inputs and `orbital_extra`."""
+    if cfg.frontier_blocks not in ("window", "exact"):
+        raise ValueError(f"frontier_blocks {cfg.frontier_blocks!r}, expected window or exact")
+    unknown = set(cfg.orbital_extra) - set(ORBITAL_EXTRA_FEATURES)
+    if unknown:
+        raise ValueError(f"orbital_extra {sorted(unknown)}, not in {ORBITAL_EXTRA_FEATURES}")
+    atoms = tuple(atom_feature_names())
+    if cfg.frontier_blocks == "exact":
+        atoms = tuple(EXACT_COLUMNS.get(n, n) for n in atoms)
+    return atoms, (*feature_names(), *cfg.orbital_extra)
+
+
+def select_columns(x, stored, names):
+    """The columns `names` of `x` (last axis in `stored` order), by name."""
+    stored = tuple(stored)
+    missing = [n for n in names if n not in stored]
+    if missing:
+        raise ValueError(f"input columns {missing} are not stored ({len(stored)} stored)")
+    return x[..., [stored.index(n) for n in names]]
 
 
 def _mean_std(x: np.ndarray, keep: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -66,17 +114,28 @@ def _mean_std(x: np.ndarray, keep: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return mean, np.where(std > 0, std, 1.0)
 
 
-def fit_feature_stats(samples: Iterable) -> FeatureStats:
+def fit_feature_stats(samples: Iterable, atom_names=None, orbital_names=None) -> FeatureStats:
+    """The statistics of the token inputs `atom_names` and `orbital_names` (default: the v17
+    columns) over `samples`, selected by name from each sample's stored columns."""
     samples = list(samples)
-    atoms = np.concatenate([s.atom_features for s in samples]).astype(np.float64)
-    missing = np.concatenate([s.atom_missing for s in samples])
-    orbitals = np.concatenate([s.orbital_features for s in samples]).astype(np.float64)
+    atom_names = tuple(atom_names or atom_feature_names())
+    orbital_names = tuple(orbital_names or feature_names())
+
+    def cols(s, kind: str, names):
+        return select_columns(getattr(s, f"{kind}_features"), getattr(s, f"{kind}_columns"), names)
+
+    atoms = np.concatenate([cols(s, "atom", atom_names) for s in samples]).astype(np.float64)
+    missing = np.concatenate(
+        [select_columns(s.atom_missing, s.atom_columns, atom_names) for s in samples]
+    )
+    orbitals = np.concatenate([cols(s, "orbital", orbital_names) for s in samples])
+    orbitals = orbitals.astype(np.float64)
     spectra = np.concatenate([s.orbital_spectra.reshape(-1, 2) for s in samples])
     energies = spectra[spectra[:, 1] > 0, 0].astype(np.float64)
     am, asd = _mean_std(atoms, ~missing)
     om, osd = _mean_std(orbitals, np.ones_like(orbitals, dtype=bool))
     em, esd = _mean_std(energies[:, None], np.ones((len(energies), 1), dtype=bool))
-    return FeatureStats(am, asd, om, osd, float(em[0]), float(esd[0]))
+    return FeatureStats(am, asd, om, osd, float(em[0]), float(esd[0]), atom_names, orbital_names)
 
 
 def to_device(batch: dict, device: torch.device) -> dict:
@@ -93,12 +152,13 @@ def _t(x, like: torch.Tensor) -> torch.Tensor:
 def token_inputs(batch: dict, stats: FeatureStats) -> dict:
     """Standardized atom inputs with their missing flags, orbital inputs, and spectral sets
     (energy standardized, weight as is) with the mask of their real entries."""
-    a = batch["atom_features"]
-    missing = batch["atom_missing"]
+    atom_names, orbital_names = stats.names()
+    a = select_columns(batch["atom_features"], batch["atom_columns"], atom_names)
+    missing = select_columns(batch["atom_missing"], batch["atom_columns"], atom_names)
     ax = torch.where(missing, 0.0, (a - _t(stats.atom_mean, a)) / _t(stats.atom_std, a))
     n_atoms = a.shape[1]
     orb_real = batch["is_orbital"][:, n_atoms:]
-    o = batch["orbital_features"]
+    o = select_columns(batch["orbital_features"], batch["orbital_columns"], orbital_names)
     ox = (o - _t(stats.orbital_mean, o)) / _t(stats.orbital_std, o) * orb_real[..., None]
     e, p = batch["orbital_spectra"][..., 0], batch["orbital_spectra"][..., 1]
     real = p > 0

@@ -88,6 +88,9 @@ def test_atom_model_input_has_no_taxonomy(sp_record):
         "aromatic",
         "fg_id",
         "position",
+        "f_plus_fmo_exact",
+        "f_minus_fmo_exact",
+        "fmo_weights_exact",
     }
     assert set(ATOM_CATEGORICAL) == {"atomic_number", "formal_charge"}
     assert atom_feature_names()[:4] == ["mulliken_charge", "f_plus_fmo", "f_minus_fmo", "dual"]

@@ -254,6 +254,7 @@ def trace(model: KSMech, sample: MechanismSample, device: str = "cpu", top: int 
         "d_attn": stack("d_attn"),
         "d_ffn": stack("d_ffn"),
         "inputs": {k: inp[k][0].float().cpu().numpy() for k in ("atom_x", "orbital_x")},
+        "input_names": model.feature_stats.names(),
         "readout": anchor_readout(model, h, p, y, batch, top),
         "errors": {
             "embedding": float((h0 - calls[0].args[0]).abs().max()),

@@ -5,6 +5,7 @@ SQLite index of a cache root (`qm.index`)."""
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections import Counter
@@ -50,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="retry only the failures with these reason codes",
     )
     run.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    run.add_argument(
+        "--steps-from",
+        type=Path,
+        default=None,
+        help="only the molecules of the steps a JSON file lists (its 'qm_steps', else 'ids')",
+    )
     run.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     qm = sub.add_parser("qmugs", help="GFN2 single points at the QMugs geometries")
     qm.add_argument("--tar", type=Path, default=qmugs.DEFAULT_TAR)
@@ -75,6 +82,17 @@ def build_parser() -> argparse.ArgumentParser:
     idx.add_argument("--rebuild", action="store_true", help="refresh: empty the index first")
     idx.add_argument("--no-refresh", action="store_true", help="stats: read the index as it is")
     return parser
+
+
+def steps_from(path: Path | None) -> list[str] | None:
+    """The step ids of a JSON file: its `qm_steps` list (`p0a_changes.json`: the re-charged
+    kept steps), else its `ids` (a view or a cohort); None without a file."""
+    if path is None:
+        return None
+    body = json.loads(Path(path).read_text())
+    if "qm_steps" not in body and "ids" not in body:
+        raise ValueError(f"{path} has neither 'qm_steps' nor 'ids'")
+    return list(body.get("qm_steps", body.get("ids")))
 
 
 def cmd_bond_index(args: argparse.Namespace, console: Console) -> int:
@@ -181,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
             retry_failed=not args.no_retry_failed,
             console=console,
             retry_reasons=args.retry_reason,
+            step_ids=steps_from(args.steps_from),
         )
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]; run `ksmech-data ingest --source {args.source}` first")

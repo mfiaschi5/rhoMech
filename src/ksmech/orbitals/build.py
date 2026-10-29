@@ -26,6 +26,7 @@ from ksmech.data.provenance import StaleArtifact
 from ksmech.orbitals.classify import UNRESOLVED_TYPES, ClassifyConfig, OrbitalType
 from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.fgroups import NONE_ID, UNK_ID
+from ksmech.orbitals.frontier import DEGENERACY_EV, EXACT_EV, frontier_blocks
 from ksmech.orbitals.localize import PMConfig
 from ksmech.orbitals.tokens import (
     CandidateConfig,
@@ -93,6 +94,8 @@ class BuildRow:
     spectral_hist: dict[str, int] = field(default_factory=dict)  # spectral entries -> tokens
     masks: dict[str, int] = field(default_factory=dict)  # candidate-mask and d-type counts
     chirality: dict[str, int] = field(default_factory=dict)  # "+1" / "-1" / "0" -> atoms
+    frontier_merged: dict[str, bool] = field(default_factory=dict)  # tolerance -> blocks differ
+    #   from the exact ones (`frontier_merges`); empty for a Fermi-smeared molecule
     # model inputs of every token, float32, for the distributions in the summary
     orbital_inputs: np.ndarray | None = field(default=None, repr=False)
     spectral_inputs: np.ndarray | None = field(default=None, repr=False)  # top p, its E, kept
@@ -100,6 +103,7 @@ class BuildRow:
 
 
 ARRAY_FIELDS = ("orbital_inputs", "spectral_inputs", "atom_inputs")
+FRONTIER_TOLERANCES = (EXACT_EV, 0.01, DEGENERACY_EV, 0.1)  # eV, reported per source
 SPECTRAL_SUMMARY = ("spectral_top_weight", "spectral_top_energy", "retained_fraction")
 QUANTILES = (0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0)
 
@@ -141,6 +145,26 @@ def _input_arrays(t: MoleculeTokens) -> dict[str, np.ndarray]:
     )
 
 
+def frontier_merges(t: MoleculeTokens) -> dict[str, bool]:
+    """Per tolerance of `FRONTIER_TOLERANCES`, whether the closed-shell frontier blocks
+    (`frontier.frontier_blocks`) over the canonical levels the tokens carry differ from the
+    exact ones (1e-4 eV): the 0.05 eV window of the legacy columns merges distinct levels
+    there. Empty for a Fermi-smeared molecule (outside the closed-shell domain)."""
+    if t.fermi_smeared:
+        return {}
+    occ, virt = t.occupied(), t.virtual()
+    e_occ = occ[0].descriptors.full_energies if occ else np.zeros(0)
+    e_virt = virt[0].descriptors.full_energies if virt else np.zeros(0)
+    energies = np.concatenate([e_occ, e_virt]).astype(float)
+    occupations = np.concatenate([np.full(len(e_occ), 2.0), np.zeros(len(e_virt))])
+
+    def blocks(tol: float) -> dict:
+        return {k: tuple(v) for k, v in frontier_blocks(energies, occupations, tol).items()}
+
+    exact = blocks(EXACT_EV)
+    return {f"{tol:g}": blocks(tol) != exact for tol in FRONTIER_TOLERANCES}
+
+
 def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
     occ, virt = t.occupied(), t.virtual()
     heavy = [a for a in t.atoms if a.atomic_number > 1]
@@ -172,6 +196,7 @@ def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
         spectral_hist=dict(Counter(str(o.descriptors.n_spectral()) for o in t.orbitals)),
         masks=_mask_counts(t),
         chirality=dict(Counter(f"{a.chirality:+.0f}" if a.chirality else "0" for a in t.atoms)),
+        frontier_merged=frontier_merges(t),
         **_input_arrays(t),
     )
 
@@ -342,6 +367,13 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
             n_molecules=sum(r.fermi_smeared for r in ok),
             smiles=sorted(r.smiles for r in ok if r.fermi_smeared),
         ),
+        frontier_blocks=dict(
+            n_closed_shell=sum(bool(r.frontier_merged) for r in ok),
+            differ_from_exact={
+                f"{tol:g}": sum(r.frontier_merged.get(f"{tol:g}", False) for r in ok)
+                for tol in FRONTIER_TOLERANCES
+            },
+        ),
     )
 
 
@@ -493,6 +525,13 @@ def print_summary(summary: dict, console: Console, show_worst: bool = False) -> 
     _print_descriptor_distributions(s, console)
     _print_inputs(s, console)
     _print_fermi_smeared(s, console)
+    fb = s.get("frontier_blocks")
+    if fb:
+        diff = ", ".join(f"{tol} eV {n}" for tol, n in fb["differ_from_exact"].items())
+        console.print(
+            f"frontier blocks differing from the exact (1e-4 eV) ones, of "
+            f"{fb['n_closed_shell']} closed-shell molecules: {diff}"
+        )
     if s["failures"]:
         console.print(
             f"[red]{len(s['failures'])} failures[/red]; first: {next(iter(s['failures'].items()))}"

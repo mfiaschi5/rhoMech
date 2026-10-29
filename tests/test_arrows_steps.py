@@ -533,3 +533,33 @@ def test_the_parallel_build_matches_the_sequential_one(mini_steps, mini_token_ca
         assert np.allclose(other.pair_z, s.pair_z, rtol=1e-12, atol=1e-12)
         assert other.edit_label == s.edit_label and np.array_equal(other.bonds, s.bonds)
         assert np.array_equal(other.wiberg, s.wiberg)
+
+
+def test_samples_store_the_extra_token_columns_after_the_v17_ones(mini_steps, token_loader):
+    """v18: the atom columns are the v17 inputs then the finite-difference f+ / f- and the
+    exact-degeneracy frontier set; the orbital columns the v17 inputs then the retained
+    spectral weight and E_r, read from the token files (open-shell plan P0a, items 2-3)."""
+    from ksmech.orbitals.tokens import (
+        STORED_ATOM_FEATURES,
+        STORED_ORBITAL_FEATURES,
+        atom_feature_names,
+        feature_names,
+    )
+
+    s = sample_for_step(mini_steps["sn2"], token_loader)
+    tok = s.tokens(token_loader)
+    assert s.atom_columns == STORED_ATOM_FEATURES and s.orbital_columns == STORED_ORBITAL_FEATURES
+    k, m = len(atom_feature_names()), len(feature_names())
+    legacy = np.concatenate([t.atom_features() for t in tok]).astype(np.float32)
+    assert np.array_equal(s.atom_features[:, :k], legacy)
+    assert np.array_equal(s.atom_missing[:, :k], np.concatenate([t.atom_missing() for t in tok]))
+    extra = np.concatenate([t.atom_extra() for t in tok])
+    assert np.array_equal(s.atom_missing[:, k:], np.isnan(extra))
+    assert np.array_equal(s.atom_features[:, k:], np.nan_to_num(extra).astype(np.float32))
+    orbitals = [o for t in tok for o in t.orbitals]
+    assert np.array_equal(
+        s.orbital_features[:, :m],
+        np.concatenate([t.orbital_features() for t in tok]).astype(np.float32),
+    )
+    expect = [[o.descriptors.retained_fraction, o.descriptors.energy_ev] for o in orbitals]
+    assert np.array_equal(s.orbital_features[:, m:], np.array(expect, dtype=np.float32))

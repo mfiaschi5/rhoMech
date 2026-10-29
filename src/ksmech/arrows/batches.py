@@ -45,6 +45,14 @@ def _pad2(arrays: list[np.ndarray], rows: int, cols: int, fill=0) -> torch.Tenso
     return torch.from_numpy(out)
 
 
+def _shared(batch: list[MechanismSample], name: str) -> tuple[str, ...]:
+    """The column names `name` every sample of the batch shares."""
+    names = tuple(getattr(batch[0], name))
+    if any(tuple(getattr(s, name)) != names for s in batch):
+        raise ValueError(f"a batch mixes samples with different {name}")
+    return names
+
+
 def _pair_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
     """The pair track's inputs, padded in each sample's (occupied r, virtual s) layout: z_rs at
     K = 1 in `pair_features` order (unstandardized: `params.to_params` at the physical K and
@@ -225,6 +233,8 @@ def collate_samples(batch: list[MechanismSample]) -> dict:
         "product_key": [s.product_key for s in batch],
         "orbital_reading": [s.orbital_reading for s in batch],
         "atom_categorical": _pad([s.atom_categorical for s in batch], n_atoms),
+        "atom_columns": _shared(batch, "atom_columns"),
+        "orbital_columns": _shared(batch, "orbital_columns"),
         "atom_features": _pad([s.atom_features for s in batch], n_atoms),
         "atom_missing": _pad([s.atom_missing for s in batch], n_atoms, False),
         "atom_positions": _pad([s.atom_positions for s in batch], n_atoms),

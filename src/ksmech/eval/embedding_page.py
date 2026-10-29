@@ -163,14 +163,16 @@ def _attention(attn: np.ndarray) -> dict:
 def _features(sample: MechanismSample, tr: dict) -> dict:
     """The raw and the standardized model inputs of every atom and orbital token, the missing
     flags of the atoms and the spectral sets (energy in eV, weight)."""
-    n_atom = len(atom_feature_names())
+    atom_names, orbital_names = tr.get("input_names", (atom_feature_names(), feature_names()))
+    a_cols = [list(sample.atom_columns).index(n) for n in atom_names]
+    o_cols = [list(sample.orbital_columns).index(n) for n in orbital_names]
     return {
-        "atom_names": atom_feature_names(),
-        "orbital_names": feature_names(),
-        "atom_raw": _r(sample.atom_features),
-        "atom_std": _r(tr["inputs"]["atom_x"][:, :n_atom], 3),
-        "atom_missing": sample.atom_missing.astype(int).tolist(),
-        "orbital_raw": _r(sample.orbital_features),
+        "atom_names": list(atom_names),
+        "orbital_names": list(orbital_names),
+        "atom_raw": _r(sample.atom_features[:, a_cols]),
+        "atom_std": _r(tr["inputs"]["atom_x"][:, : len(atom_names)], 3),
+        "atom_missing": sample.atom_missing[:, a_cols].astype(int).tolist(),
+        "orbital_raw": _r(sample.orbital_features[:, o_cols]),
         "orbital_std": _r(tr["inputs"]["orbital_x"], 3),
         "spectra": [_r(s[s[:, 1] > 0], 3) for s in sample.orbital_spectra],
     }

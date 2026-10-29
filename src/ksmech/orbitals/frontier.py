@@ -5,6 +5,10 @@ energy, with the Mulliken populations summed over the block. HOMO-1 is the next 
 below the HOMO block, LUMO+1 the next above the LUMO block. This generalizes the frozen-orbital
 f+ / f- (LUMO / HOMO populations) to four levels and handles degenerate pairs (benzene e1g).
 Rows are NaN when a level does not exist (zero-electron species, no virtuals).
+
+Token schema 10 stores a second set beside these: the same blocks with `EXACT_EV` = 1e-4 eV, so
+only numerically degenerate levels are summed (open-shell plan P0a, item 3); a model reads one
+set or the other (`ModelConfig.frontier_blocks`).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from ksmech.qm.fukui import OCC_THRESHOLD, homo_index
 from ksmech.qm.records import QMRecord
 
 DEGENERACY_EV = 0.05
+EXACT_EV = 1e-4  # numerical degeneracy: the tolerance of the exact-degeneracy frontier columns
 LEVELS = ("homo_minus_1", "homo", "lumo", "lumo_plus_1")
 
 

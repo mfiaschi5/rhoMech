@@ -37,15 +37,14 @@ import numpy as np
 from ksmech.arrows.align import ArrowLabel
 from ksmech.arrows.reactants import TokenLoader
 from ksmech.arrows.steps import MechanismSample
-from ksmech.orbitals.descriptors import feature_names
-from ksmech.orbitals.tokens import atom_feature_names
+from ksmech.orbitals.descriptors import feature_names as orbital_feature_names
 from ksmech.physics.pairs import cell_columns
 from ksmech.physics.stage_a import cell_features
 
 TOP_K = (1, 3, 5)
 TOKEN_FEATURES = (
-    [f"donor_{n}" for n in feature_names()]
-    + [f"acceptor_{n}" for n in feature_names()]
+    [f"donor_{n}" for n in orbital_feature_names()]
+    + [f"acceptor_{n}" for n in orbital_feature_names()]
     + ["donor_site_f_minus", "acceptor_site_f_plus", "donor_energy_ev", "acceptor_energy_ev"]
 )
 
@@ -169,10 +168,11 @@ def candidate_set(
     allowed = sample.pair_valid if cells == "valid" else np.ones_like(sample.pair_valid)
     rows, cols = np.nonzero(allowed)
     main = main_centres(sample)
-    names = atom_feature_names()
+    names = list(sample.atom_columns)
     f_minus = sample.atom_features[:, names.index("f_minus_fmo")]
     f_plus = sample.atom_features[:, names.index("f_plus_fmo")]
-    desc = sample.orbital_features.astype(np.float64)
+    orbital = [list(sample.orbital_columns).index(n) for n in orbital_feature_names()]  # v17
+    desc = sample.orbital_features[:, orbital].astype(np.float64)
     X = np.column_stack(
         [
             _pair_columns(sample, cells)[rows, cols],

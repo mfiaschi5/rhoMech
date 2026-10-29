@@ -45,7 +45,12 @@ from ksmech.orbitals.descriptors import (
     feature_names,
 )
 from ksmech.orbitals.fgroups import FGVocab, default_vocab
-from ksmech.orbitals.frontier import LEVELS, frontier_weights, frozen_orbital_fukui_blocks
+from ksmech.orbitals.frontier import (
+    EXACT_EV,
+    LEVELS,
+    frontier_weights,
+    frozen_orbital_fukui_blocks,
+)
 from ksmech.orbitals.localize import (
     LocalizedOrbitals,
     PMConfig,
@@ -109,7 +114,10 @@ class AtomToken:
 
     Hybridization, the aromatic flag and the functional-group id are chemists' taxonomies:
     stored for tests, the interface and ablations, never model input. So are the
-    finite-difference f+ / f- (relaxation-dominated) and the absolute position.
+    finite-difference f+ / f- (relaxation-dominated) and the absolute position. The frontier
+    weights and frozen-orbital f+ / f- with exactly degenerate blocks (`frontier.EXACT_EV`,
+    schema 10) are stored inputs a model selects by name (`ATOM_EXTRA_FEATURES`), not columns
+    of `atom_features()`.
     """
 
     token_id: int = _atom_diag()
@@ -130,6 +138,9 @@ class AtomToken:
     aromatic: bool = _atom_diag()
     fg_id: int = _atom_diag()  # functional-group vocabulary index (0 none, 1 unk)
     position: np.ndarray = _atom_diag()  # (3,) Angstrom; geometry enters through distances
+    f_plus_fmo_exact: float = _atom_diag()  # f+ / f- / frontier weights of blocks within EXACT_EV
+    f_minus_fmo_exact: float = _atom_diag()
+    fmo_weights_exact: np.ndarray = _atom_diag()  # (4,) as fmo_weights
 
 
 def atom_feature_names() -> list[str]:
@@ -140,6 +151,34 @@ def atom_feature_names() -> list[str]:
             continue
         names += [f"fmo_{lv}" for lv in LEVELS] if f.name == "fmo_weights" else [f.name]
     return names
+
+
+# stored atom inputs beyond `atom_feature_names()`, appended to a sample's atom columns (v18):
+# the finite-difference f+ / f- and the exact-degeneracy frontier set
+ATOM_EXTRA_FEATURES = (
+    "f_plus",
+    "f_minus",
+    "f_plus_fmo_exact",
+    "f_minus_fmo_exact",
+    *(f"fmo_exact_{lv}" for lv in LEVELS),
+)
+# the legacy column -> its exact-degeneracy counterpart (`ModelConfig.frontier_blocks='exact'`)
+EXACT_COLUMNS = {
+    "f_plus_fmo": "f_plus_fmo_exact",
+    "f_minus_fmo": "f_minus_fmo_exact",
+    **{f"fmo_{lv}": f"fmo_exact_{lv}" for lv in LEVELS},
+}
+# stored orbital inputs beyond `feature_names()` (bookkeeping descriptors read as inputs, v18)
+ORBITAL_EXTRA_FEATURES = ("retained_fraction", "energy_ev")
+STORED_ATOM_FEATURES = (*atom_feature_names(), *ATOM_EXTRA_FEATURES)  # a v18 sample's atom columns
+STORED_ORBITAL_FEATURES = (*feature_names(), *ORBITAL_EXTRA_FEATURES)  # and its orbital columns
+
+
+def _atom_extra_row(a: AtomToken) -> np.ndarray:
+    return np.array(
+        [a.f_plus, a.f_minus, a.f_plus_fmo_exact, a.f_minus_fmo_exact, *a.fmo_weights_exact],
+        dtype=float,
+    )
 
 
 def _atom_row(a: AtomToken) -> np.ndarray:
@@ -380,6 +419,17 @@ class MoleculeTokens:
         (finite-difference dual after FUKUI_SCF_FAIL, a frontier level that does not exist)."""
         return np.isnan(self._atom_raw())
 
+    def atom_extra(self) -> np.ndarray:
+        """(n_atoms, len(ATOM_EXTRA_FEATURES)) the stored atom inputs beyond `atom_features()`,
+        NaN where unavailable."""
+        n = len(ATOM_EXTRA_FEATURES)
+        return np.array([_atom_extra_row(a) for a in self.atoms], dtype=float).reshape(-1, n)
+
+    def orbital_extra(self) -> np.ndarray:
+        """(n_orbitals, len(ORBITAL_EXTRA_FEATURES)) the retained spectral weight and E_r."""
+        rows = [[getattr(o.descriptors, f) for f in ORBITAL_EXTRA_FEATURES] for o in self.orbitals]
+        return np.array(rows, dtype=float).reshape(-1, len(ORBITAL_EXTRA_FEATURES))
+
     def atom_categorical(self) -> np.ndarray:
         """(n_atoms, 2) integer inputs that are embedded: atomic number, formal charge."""
         rows = [[getattr(a, f) for f in ATOM_CATEGORICAL] for a in self.atoms]
@@ -441,8 +491,9 @@ def _value(arr: np.ndarray, i: int) -> float:
 
 def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomToken]:
     out = []
-    fmo = frontier_weights(rec)
+    fmo, fmo_exact = frontier_weights(rec), frontier_weights(rec, EXACT_EV)
     f_plus_fmo, f_minus_fmo = frozen_orbital_fukui_blocks(rec)
+    f_plus_exact, f_minus_exact = frozen_orbital_fukui_blocks(rec, EXACT_EV)
     chirality = chirality_signs(mol, rec.coords_ang)
     for i, atom in enumerate(mol.GetAtoms()):
         out.append(
@@ -465,6 +516,9 @@ def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomTo
                 position=rec.coords_ang[i].copy(),
                 fg_id=int(fg_ids[i]),
                 fmo_weights=fmo[i].copy(),
+                f_plus_fmo_exact=float(f_plus_exact[i]),
+                f_minus_fmo_exact=float(f_minus_exact[i]),
+                fmo_weights_exact=fmo_exact[i].copy(),
             )
         )
     return out
@@ -607,6 +661,9 @@ _ATOM_FIELDS = (
     "position",
     "fg_id",
     "fmo_weights",
+    "f_plus_fmo_exact",
+    "f_minus_fmo_exact",
+    "fmo_weights_exact",
 )
 _ORB_DIAG_SCALARS = ("s_share", "p_share", "d_share", "overlap_population")
 _DESC_FIELDS = tuple(f.name for f in fields(OrbitalDescriptors))
@@ -703,14 +760,20 @@ def save_tokens(
     return out
 
 
+_EXACT_FIELDS = {"f_plus_fmo_exact": (), "f_minus_fmo_exact": (), "fmo_weights_exact": (4,)}
+
+
 def _load_atoms(z: dict) -> list[AtomToken]:
     n = len(z["atom_atom_index"])
+    for f, shape in _EXACT_FIELDS.items():  # a schema-9 file read unverified: NaN, unavailable
+        z.setdefault(f"atom_{f}", np.full((n, *shape), np.nan))
     cols = {f: z[f"atom_{f}"] for f in _ATOM_FIELDS}
     atoms = []
     for i in range(n):
         kw = {f: cols[f][i] for f in _ATOM_FIELDS}
         kw["position"] = np.asarray(kw["position"], dtype=float)
         kw["fmo_weights"] = np.asarray(kw["fmo_weights"], dtype=float)
+        kw["fmo_weights_exact"] = np.asarray(kw["fmo_weights_exact"], dtype=float)
         kw["hybridization"] = str(kw["hybridization"])
         for f in ("atom_index", "map_number", "atomic_number", "formal_charge", "fg_id"):
             kw[f] = int(kw[f])
@@ -724,6 +787,8 @@ def _load_atoms(z: dict) -> list[AtomToken]:
             "f_minus_fmo",
             "vbur",
             "chirality",
+            "f_plus_fmo_exact",
+            "f_minus_fmo_exact",
         ):
             kw[f] = float(kw[f])
         atoms.append(AtomToken(token_id=i, **kw))

@@ -95,7 +95,9 @@ def unpack(
 
     meta = dict(meta)
     n_feat = meta.pop("n_pair_features")
-    meta["pair_features"] = tuple(meta["pair_features"])
+    for name in ("pair_features", "atom_columns", "orbital_columns"):
+        if name in meta:
+            meta[name] = tuple(meta[name])
     shape = arrays["pair_valid"].shape
     binary = _binary_columns(meta["pair_features"])
     rest = [k for k in range(n_feat) if k not in binary]

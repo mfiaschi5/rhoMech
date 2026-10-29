@@ -173,14 +173,20 @@ def _run_molecule(task: MolTask) -> list[dict]:
 
 
 def collect_molecules(
-    source: str, processed_dir: Path = DEFAULT_PROCESSED_DIR
+    source: str,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    step_ids: Collection[str] | None = None,
 ) -> tuple[list[str], list[dict]]:
-    """Unique map-free canonical SMILES of every fragment, plus rows for fragments that fail."""
-    table = pq.read_table(
-        steps_path(source, processed_dir), columns=["reactants_smiles", "products_smiles"]
+    """Unique map-free canonical SMILES of every fragment (of the steps `step_ids` only, when
+    given), plus rows for fragments that fail."""
+    columns = ["reactants_smiles", "products_smiles"] + (
+        ["step_id"] if step_ids is not None else []
     )
-    sides = set(table.column("reactants_smiles").to_pylist())
-    sides |= set(table.column("products_smiles").to_pylist())
+    table = pq.read_table(steps_path(source, processed_dir), columns=columns).to_pylist()
+    if step_ids is not None:
+        wanted = set(step_ids)  # an empty list selects nothing
+        table = [r for r in table if r["step_id"] in wanted]
+    sides = {r["reactants_smiles"] for r in table} | {r["products_smiles"] for r in table}
     keys: set[str] = set()
     failures: dict[str, dict] = {}
     for side in sorted(sides):
@@ -392,13 +398,14 @@ def featurize_dataset(
     retry_failed: bool = True,
     console: Console | None = None,
     retry_reasons: Collection[str] | None = None,
+    step_ids: Collection[str] | None = None,
 ) -> pd.DataFrame:
-    """Featurize every unique molecule of `source`; resumable. Returns this run's manifest rows.
-    Earlier failures are retried (`retry_failed`), or only those whose reason code is in
-    `retry_reasons`."""
+    """Featurize every unique molecule of `source` (of the steps `step_ids` only, when given);
+    resumable. Returns this run's manifest rows. Earlier failures are retried (`retry_failed`),
+    or only those whose reason code is in `retry_reasons`."""
     config = config or QMConfig()
     console = console or Console()
-    smiles_list, canon_failures = collect_molecules(source, processed_dir)
+    smiles_list, canon_failures = collect_molecules(source, processed_dir, step_ids)
     if limit is not None and limit < len(smiles_list):
         smiles_list = sorted(random.Random(0).sample(smiles_list, limit))
     path = manifest_path(source, processed_dir)
