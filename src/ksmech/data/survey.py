@@ -22,8 +22,10 @@ oracle. Radical drawings, first match wins, drawing errors before genuine radica
 Metals: OSM_FE3, OSM_CU2, CUH2_LIGAND, CU_SUSPECT (Cu=C, CuI2), PD_DATIVE (an odd Pd fragment
 with an uncompensated onium), PD_ALREADY_NEG (a step holding an odd Pd already at -1), L1PD
 ([Pd] bonded only to an onium P, on a METAL_PLACEHOLDER step), PLACEHOLDER; on kept steps
-PLACEHOLDER_EVEN (the P0 placeholder shape: a non-s-block metal with at most one neighbour, of
-either charge), ZNCL_ION, ONIUM_PD_NI_EVEN and CR_IV. Each metal's oxidation state and d count
+PLACEHOLDER_EVEN (a shape the placeholder law `domain.is_placeholder` excludes: none after P0a;
+P0 counted its own shape here, a non-s-block metal with at most one neighbour of either charge,
+24 PMechDB steps), ZNCL_ION, ML1 (a metal whose one neighbour is an onium donor it compensates,
+the law's exemption: L1Pd(0)), ONIUM_PD_NI_EVEN and CR_IV. Each metal's oxidation state and d count
 are `data.domain.oxidation_state` and `d_count` (moved there in P0a). SPIN_PARITY failures are
 named by what they hold (a placeholder shape, else the first open-shell-capable metal).
 """
@@ -36,7 +38,15 @@ from pathlib import Path
 from rdkit import Chem, rdBase
 
 from ksmech.data import chem
-from ksmech.data.domain import _S_BLOCK, METALS, d_count, is_odd, oxidation_state
+from ksmech.data.domain import (
+    _S_BLOCK,
+    METALS,
+    d_count,
+    is_odd,
+    is_onium_donor,
+    is_placeholder,
+    oxidation_state,
+)
 
 ALKALI = frozenset([3, 11, 19, 37, 55])
 
@@ -133,14 +143,23 @@ def classify_metal(sides: list[Chem.Mol], code: str) -> str:
     return next((name for name in METAL_ORDER if name in found), "OTHER")
 
 
+def _is_ml1(atom: Chem.Atom) -> bool:
+    """The placeholder law's exemption: one neighbour (H counted), an onium donor the metal
+    compensates with its negative charge."""
+    one = atom.GetDegree() == 1 and atom.GetTotalNumHs() == 0
+    return one and atom.GetFormalCharge() < 0 and is_onium_donor(atom.GetNeighbors()[0])
+
+
 def _kept_metal_class(frag: Chem.Mol) -> str | None:
     for a in frag.GetAtoms():
         if a.GetAtomicNum() not in METALS or a.GetAtomicNum() in _S_BLOCK:
             continue
         if a.GetSymbol() == "Zn" and a.GetFormalCharge() == 1 and a.GetDegree() == 1:
             return "ZNCL_ION"
-        if placeholder_shape(frag):
+        if is_placeholder(frag):
             return "PLACEHOLDER_EVEN"
+        if _is_ml1(a):
+            return "ML1"
         oniums = [n for n in a.GetNeighbors() if n.GetFormalCharge() > 0 and n.GetSymbol() != "C"]
         if a.GetSymbol() in ("Pd", "Ni") and oniums:
             return "ONIUM_PD_NI_EVEN"

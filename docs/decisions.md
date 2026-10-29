@@ -6440,3 +6440,99 @@ the GBDT reproduce; which default the GENERAL configuration takes is an ablation
   store. `ksmech-qm run --steps-from FILE` featurizes only the fragments of the steps a JSON
   file lists (`qm_steps`, else `ids`). The v17 processed directories were copied by reflink to
   `data/processed_v17/` and the P0 decode hits to `<run>/p0_reference/` before the rebuild.
+- **The rebuild (item 7), 2026-10-29 03:42-06:23, from the clean commit 4f075a0.**
+  `ksmech-data ingest` (PMechDB 44 s; ReactMech pilot, frozen ids, 12 min 49 s), `stats`,
+  `scripts/p0a_changes.py` per source, `ksmech-qm run --source reactmech --steps-from
+  data/processed/reactmech/p0a_changes.json` (the 49 re-charged steps: 116 unique species, 57
+  cache hits, 59 computed in 28 min 44 s at 8 workers, 51 ok, 8 failed: 6 OPT_NOT_CONVERGED, 2
+  SCF_NOT_CONVERGED, tombstoned), `bond-index` (51 new sidecars), `ksmech-orbitals build` (PMechDB
+  14,232 files in 19 min 41 s; ReactMech 19,204 built and 344 already rebuilt by the PMechDB pass
+  in 44 min 47 s), `ksmech-arrows samples` (PMechDB 17 min 43 s, ReactMech with `loco` and
+  `loco_all` 31 min 23 s).
+  - **p0a_changes.json equals the oracle.** PMechDB: PLACEHOLDER removed 24 (21 molecule train,
+    1 val, 2 outside the split: the resonance pairs), relabelled from RADICAL_DRAWN 8 (Sn); no
+    DATIVE, no METAL_SUSPECT, no KEKULE_CLOSEST (every step has arrows): 32 changed steps.
+    ReactMech: DATIVE changed 49 (20 train, 29 val) and returned 205 (none in the frozen split),
+    KEKULE_CLOSEST 908 kept steps without arrows (734 / 68 / 85, and 21 returned steps outside
+    the split; 868 of them have samples, the number measured read-only on v17), METAL_SUSPECT 35
+    (9 / 16 / 10); OTHER empty: no other step changed a side, a code or the resonance flag.
+  - **Tokens.** Every file is schema 10 and kept its schema-9 payload: 0 of 14,232 (PMechDB) and
+    0 of 19,153 (ReactMech) replaced files changed a stored field. The 0.05 eV frontier window
+    differs from the exact (1e-4 eV) blocks on 3,124 of 14,184 closed-shell PMechDB molecules
+    and 4,310 of 19,310 ReactMech ones (0.01 eV: 481 and 423; 0.1 eV: 6,101 and 8,872): the
+    reach of `frontier_blocks exact`.
+  - **Samples.** PMechDB: 12,399 samples of 12,442 training steps (MISSING_TOKENS 43; v17
+    12,418 of 12,464); molecule split 9,979 / 1,238 / 1,182 (v17 9,997 / 1,239 / 1,182); label
+    maxima 6 bonds, 2 atoms; fermi_smeared 18 / 2 / 8 (v17 24 / 2 / 8). ReactMech: 9,003 of
+    9,388 (MISSING_TOKENS 385: the 205 returned steps, REPAIRED_DATIVE, waiting for P5; 2
+    re-charged train steps whose species failed QM; 178 as before); molecule split 7,190 / 911
+    / 902 (v17 7,189 / 908 / 902: 4 re-charged steps whose old drawing had no QM record now
+    have one); label maxima 8 / 3; kekule_closest 868. The returned steps are not in the frozen
+    splits and their groups straddle two parts (SPLIT_CONFLICT 188-204 per strategy, counted);
+    they have no samples, so P5 places them. The report gains `skipped_by_domain_class`
+    (added after the build, e75fe3e; this build's split was measured from the store index: 205
+    REPAIRED_DATIVE, 2 REPAIRED_DATIVE re-charged, 2 METAL_SUSPECT and 176 without a class).
+  - **New references (valid cells unless named).** Floor, molecule split: PMechDB val 15.6 /
+    26.0 / 31.1, test 17.8 / 27.3 / 31.6; ReactMech val 5.2 / 11.5 / 14.3, test 7.1 / 11.8 /
+    14.7. With `--cells all` the floor falls (PMechDB test 13.3 / 22.9 / 27.0, ReactMech 5.7 /
+    7.9 / 9.9): the untrained |G| ranks own-antibond and d-acceptor cells high and has no way to
+    discount them; the flags are for learned readers. GBDT (PMechDB, geometry-free, first
+    arrow), refitted on v18: molecule test 48.1 / 67.8 / 75.4 (val top-5 70.7), scaffold 45.5
+    / 66.1 / 76.0 (68.0); the v17 models gave 48.8 / 67.7 / 75.1 and 45.1 / 66.1 / 75.3. With
+    every cell as a candidate and the flags as features: molecule 50.4 / 66.6 / 74.9 (70.8),
+    scaffold 45.7 / 63.4 / 74.6 (66.2). One fit each, differences within 3 points and of both
+    signs: no evidence for either cell set, so `pair_cells` stays `valid` until P0b's
+    ablation.
+- **The legacy reproduction gate (item 8): passed** (`tests/test_legacy_reproduction.py`, 9
+  passed). With every new flag off, on every sample P0a did not change (`changed_steps`), per
+  sample: the floor (PMechDB val 1,238 and test 1,182 identical; test top-k 17.8 / 27.3 / 31.6
+  exactly; the one val sample gone is a placeholder removal), the stored v17 GBDT model scored
+  on the v18 store (val 1,202, test 1,120 identical), and the three decodes with legacy caps
+  (flex_first on PMechDB val: 1,238 identical, 62.9 / 82.6 / 85.4 against 63.0 / 82.6 / 85.4
+  on 1,239; sparse_resonance_stop0 and the PMechDB+ReactMech sparse_resonance on ReactMech
+  val: 814 identical each). Every sample that differs is a changed one.
+  - **ReactMech val moves with its labels, not with the models.** The same checkpoints score
+    91.1 / 93.0 / 93.2 (stop0, 911) and 91.9 / 94.7 / 95.6 (joint) against P0's 85.0 / 87.0 /
+    87.2 and 86.0 / 88.8 / 88.9 (908); without the 49 re-charged steps 94.1 / 96.0 / 96.0 and
+    94.3 / 97.1 / 97.1 (882) against 87.4 / 89.3 / 89.3 and 87.5 / 89.9 / 89.9. In both runs 61
+    KEKULE_CLOSEST samples go from a miss to a top-1 hit: their old label held Kekule swaps no
+    prediction reproduces. 1-2 KEKULE_CLOSEST samples go the other way (an equal-cost member
+    or a smaller class the model does not emit), and the 29 re-charged val steps, drawn
+    differently from what the checkpoints were trained on, mostly stay misses (stop0: 18
+    miss to miss, 1 hit to miss; joint: 16, 5 and 1 miss to hit). So P0's ReactMech val numbers
+    were understated by about 6 points of label noise. The checkpoints still trained on the old
+    labels (734 training labels changed); a v18 retrain is P0b's comparison.
+- **GENERAL configuration smoke (item 7's exit).** `ksmech-train fit --pair-cells all
+  --orbital-extra retained_fraction energy_ev --limit 64 --epochs 1` on the RX 6600 XT: 5
+  steps, finite loss, no non-finite batch. `ksmech-eval decode --caps labels --limit 20` read
+  6 / 2 / 48 from the PMechDB training view and wrote `_caps6-2-48` files (0 hits from a
+  5-step model, as expected).
+- **Threshold reach on v18 (item 9, `scripts/probes/threshold_reach.py`,
+  `data/processed/<source>/threshold_reach.json`; molecule split, train samples PMechDB 9,979
+  and ReactMech 7,190; self-check 0 at the current values).** Samples whose inputs change,
+  train / val / test, PMechDB then ReactMech:
+  - `tau_atom` 0.10: 6,742 / 548 / 558 and 6,432 / 797 / 747 (gold anchor atom-specifically
+    touched in 2,224 and 2,042 train samples; 10,334 and 23,006 train cells flip
+    `pair_valid`); 0.20: 6,410 / 615 / 601 and 6,692 / 830 / 808 (strict 2,363 and 2,529).
+  - spectral-set merge at 1e-4, 0.01, 0.1 eV (today 0.05): 9,070-9,446 train PMechDB samples
+    and 7,156-7,175 ReactMech (nearly all); no atom-specific change, only the set inputs.
+  - fractional band 0.1-1.9: 8 / 2 / 3 and 31 / 5 / 2 (4 PMechDB train samples change a
+    labelled token's mask); 0.4-1.6: 1 / 1 / 2 and 16 / 2 / 2.
+  - SMEAR_TOL 0.025: at most 10 samples per part; 0.1: at most 21; all flag flips.
+  - block split 0.25-1.75: at most 4 (PMechDB) and 23 (ReactMech) molecules re-blocked per
+    part; 0.75-1.25: at most 2 and 7.
+  A variant in the token path costs a token rebuild of about 3.0 (PMechDB) and 3.2
+  (ReactMech) CPU-h plus the sample store. Proposed, not decided: `tau_atom` and the spectral
+  merge become P9 ablation flags (their reach is most samples); the band, SMEAR_TOL and the
+  block split stay fixed at their values, since none touches more than 0.6% of a part.
+- **The open-shell survey follows the placeholder law on kept steps.** P0's survey named a kept
+  step PLACEHOLDER_EVEN by its own shape (a non-s-block metal with at most one neighbour, any
+  charge), so on v18 it called 49 returned L1Pd(0) steps placeholders, which the law exempts
+  as ML1. Its kept classes now use `domain.is_placeholder` (PLACEHOLDER_EVEN: a kept step the
+  law would exclude, 0 after P0a) and a new ML1 class (one neighbour, H counted, an onium donor
+  the metal compensates); a step is named by its first suspicious fragment, reactants first.
+  The realdata oracle is now P0a's: PMechDB RADICAL_DRAWN 44 (12 genuine radicals, 10
+  carbenes, 9 C3 methyls), METAL_PLACEHOLDER 56, OPEN_SHELL_METAL unchanged (Fe(III) 43, Cu 35),
+  KEPT ZNCL_ION 3; ReactMech RADICAL_DRAWN CDI 62, OPEN_SHELL_METAL PD_ALREADY_NEG 2, no
+  METAL_PLACEHOLDER, KEPT ONIUM_PD_NI_EVEN 209, ML1 45, CR_IV 10 (the 49 re-charged and 205
+  returned steps).

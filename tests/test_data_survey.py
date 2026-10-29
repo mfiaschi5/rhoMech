@@ -61,7 +61,10 @@ def test_one_fixture_per_metal_subclass(smiles, code, subclass):
 @pytest.mark.parametrize(
     ("smiles", "subclass"),
     [
-        ("C=[O+][Zn-]", "PLACEHOLDER_EVEN"),
+        ("C[Cu]", "PLACEHOLDER_EVEN"),
+        ("C=[O+][Zn-]", "ML1"),
+        ("[Pd-][P+](C)(C)C", "ML1"),
+        ("C=[O+][AlH3-]", None),
         ("Cl[Zn+]", "ZNCL_ION"),
         ("Cl[Ni-2](C)([P+](C)(C)C)[P+](C)(C)C", "ONIUM_PD_NI_EVEN"),
         ("O=[Cr](O)O", "CR_IV"),
@@ -99,7 +102,11 @@ def test_a_kept_step_without_a_suspicious_metal_has_no_row():
 
 
 @pytest.mark.realdata
-def test_the_survey_matches_the_p0_oracle():
+def test_the_survey_matches_the_p0a_oracle():
+    """The v18 ingest (P0a's domain laws). P0 read, on the v17 ingest: PMechDB RADICAL_DRAWN 52
+    (the 8 Sn steps, now METAL_PLACEHOLDER, among them), KEPT PLACEHOLDER_EVEN 24 (now
+    excluded); ReactMech OPEN_SHELL_METAL PD_DATIVE 96, METAL_PLACEHOLDER L1PD 109 (both
+    returned by the dative law and its ML1 exemption), KEPT ONIUM_PD_NI_EVEN 49 (re-charged)."""
     import pandas as pd
 
     from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
@@ -113,17 +120,19 @@ def test_the_survey_matches_the_p0_oracle():
     radical = pm["counts"]["RADICAL_DRAWN"]
     genuine = radical["RADICAL_SPECTATOR"] + radical["RADICAL_REACTIVE"]
     assert (sum(radical.values()), genuine, radical["CARBENE"], radical["C3_METHYL"]) == (
-        52,
+        44,
         12,
         10,
         9,
     )
     osm = pm["counts"]["OPEN_SHELL_METAL"]
     assert osm["OSM_FE3"] == 43 and osm["OSM_CU2"] + osm["CUH2_LIGAND"] + osm["CU_SUSPECT"] == 35
-    assert pm["counts"]["KEPT"] == {"PLACEHOLDER_EVEN": 24, "ZNCL_ION": 3}
+    assert pm["counts"]["METAL_PLACEHOLDER"] == {"PLACEHOLDER": 56}
+    assert pm["counts"]["KEPT"] == {"ZNCL_ION": 3}
     assert pm["spin_parity_molecules"] == {"Cu": 41, "placeholder": 34, "Fe": 20, "Ti": 4, "P": 1}
     rm = counts("reactmech")
     assert rm["counts"]["RADICAL_DRAWN"] == {"CDI_IMIDAZOLYL": 62}
-    assert rm["counts"]["OPEN_SHELL_METAL"] == {"PD_DATIVE": 96, "PD_ALREADY_NEG": 2}
-    assert rm["counts"]["METAL_PLACEHOLDER"] == {"L1PD": 109}
-    assert rm["counts"]["KEPT"] == {"ONIUM_PD_NI_EVEN": 49, "CR_IV": 10}
+    assert rm["counts"]["OPEN_SHELL_METAL"] == {"PD_ALREADY_NEG": 2}
+    assert "METAL_PLACEHOLDER" not in rm["counts"]
+    # 49 re-charged + 205 returned, each named by its first suspicious fragment, reactants first
+    assert rm["counts"]["KEPT"] == {"ONIUM_PD_NI_EVEN": 209, "ML1": 45, "CR_IV": 10}
