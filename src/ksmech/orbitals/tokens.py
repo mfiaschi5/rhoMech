@@ -61,7 +61,7 @@ from ksmech.qm.bond_index import as_dict, lewis_bond_indices
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10  # 10: the exact-degeneracy (1e-4 eV) frontier set beside the 0.05 eV one
 
 
 class OrbitalKind(StrEnum):

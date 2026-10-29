@@ -774,6 +774,28 @@ def test_layered_loader_resolves_inputs_against_the_layer_root(tmp_path, synthet
     assert LayeredTokenLoader([shared], SYNTHETIC_METHOD, roots=[root]).path_of("CCl") is None
 
 
+def test_a_token_file_of_an_older_schema_is_refused_never_read(tmp_path, synthetic_settings):  # noqa: F811
+    """After a token schema bump (P0a: 9 -> 10) serve's own token files are stale: the loader
+    skips them with TOKENS_STALE and reads none of their fields, so they are recomputed."""
+    from dataclasses import replace
+
+    from ksmech.data import provenance as prov
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.orbitals.tokens import SCHEMA_VERSION
+    from ksmech.serve.chem.loader import LayeredTokenLoader, token_header_problems
+    from ksmech.serve.chem.synthetic import SYNTHETIC_METHOD
+
+    _, src = _synthetic_files(synthetic_settings, "CCl")
+    old = tokens_path(tmp_path / "serve", "CCl", 0, SYNTHETIC_METHOD)
+    with np.load(src) as z:
+        arrays = {k: z[k] for k in z.files if k != prov.HEADER_KEY}
+    prov.save_npz(old, arrays, replace(prov.read_header(src), schema_version=SCHEMA_VERSION - 1))
+    assert any("schema_version" in p for p in token_header_problems(old))
+    loader = LayeredTokenLoader([old.parent], SYNTHETIC_METHOD)
+    assert loader.path_of("CCl") is None and loader("CCl") is None
+    assert [e["code"] for e in loader.drain_events()] == ["TOKENS_STALE"]
+
+
 # ---- a token rebuild under the running server
 
 

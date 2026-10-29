@@ -46,8 +46,8 @@ from ksmech.eval.floor import floor_report
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.train.loop import DEFAULT_MODELS_DIR
 
-FLOOR_VERSION = 2  # 2: per-sample ranks beside the report
-DECODE_VERSION = 2  # 2: run source, sample versions and per-sample hits
+FLOOR_VERSION = 3  # 3: --cells valid|all (pooling over the pair_valid cells or every cell)
+DECODE_VERSION = 3  # 3: decoder caps legacy | labels, recorded in the header
 
 
 def build_parser() -> argparse.ArgumentParser:

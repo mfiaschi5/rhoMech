@@ -111,7 +111,8 @@ from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 17  # 17: label classes closed under the pool's symmetry (`arrows.symmetry`)
+SAMPLE_VERSION = 18  # 18: every pair cell with the exclusion flags, the stored token extras,
+#   Kekule-closest labels without arrows, domain_class (open-shell plan P0a)
 PARTS = ("train", "val", "test")
 FROZEN_SPLIT_SCHEMA = 1  # `split_frozen_<strategy>.json`, independent of SAMPLE_VERSION
 STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")

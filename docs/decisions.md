@@ -6304,3 +6304,84 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
 - **Left open.** The worktree and `claude/reactmech` stay while its session works; the branch is
   not merged into main yet; ksmech-serve is down since the Claude Code restart. The four pod
   runs' weights are not on disk (only SHA256SUMS.pod).
+
+## 2026-10-29: Open-shell P0a: generality fixes and unified domain laws (SAMPLE_VERSION 18)
+
+Phase P0a of `docs/open_shell_plan.md`, on branch `claude/open-shell-p0a` after spec v9.1. Each
+new behaviour is a flag whose default is the v17 behaviour, so old checkpoints, the floor and
+the GBDT reproduce; which default the GENERAL configuration takes is an ablation's (P0b, P9).
+
+- **Every pair cell stored; the three exclusions as flags (item 1).** `physics.pairs.pair_flags`
+  returns `d_acceptor` (the virtual token is a d polarization function, `tokens.is_d_type`,
+  whatever `allow_d_acceptors` says), `own_antibond` and `site_self` on every (occupied,
+  virtual) cell; a sample stores them as 0/1 pair features after the v17 ones
+  (`stage_a.STORED_PAIR_FEATURES`, bit-packed with `inter`, `clash`, `bonded`) and the store
+  keeps every cell (v17 kept the `pair_valid` cells, about 89%), `pair_valid` as the legacy mask.
+  On the fixed molecules `pair_valid` = donor x empty acceptor x no flag
+  (`tests/test_physics_pairs.py`). Readers select pair features by name (`pairs.cell_columns`,
+  `inputs.named_pair_z`), so a v15-v17 checkpoint reads a v18 batch.
+  `ModelConfig.pair_cells`: `valid` (default) leaves every feature undefined outside `pair_valid`
+  and pools G^atom and y_ij over the valid cells, bit for bit the v17 inputs and outputs
+  (`tests/test_model.py::test_valid_cells_reproduce_a_v17_batch_bit_for_bit`); `all` reads
+  every cell with the flags and `pair_valid` as channels and pooled means. Pair statistics are
+  written for both (`pair_feature_stats_<split>.json`, `..._allcells.json`). The floor and the
+  GBDT take `--cells valid|all` (`anchor_floor_*_<split>_allcells.json`,
+  `gbdt_lgbm_*_<split>_geomfree_allcells.*`); with `all` the GBDT's candidates are every cell
+  and the flags and `pair_valid` are features.
+  - **Labels on every cell: stored, not refiltered at load.** The plan said the orbital-pair
+    labels would be stored unfiltered and the legacy filter applied at load. The filter needs
+    the reactant tokens (teacher pair, leaving bonds, the group of each rejected cell), which a
+    loaded sample does not hold, so both are stored: `labels` as in v17 (filtered, its
+    LABEL_FILTERED counts unchanged) and `labels_all` (the aligned labels on every cell, the
+    teacher pair chosen among all of them), read by the `all` readers.
+- **The spectral truncation and the FD and exact-frontier columns as stored inputs (items 2,
+  3).** A sample stores its token inputs as the v17 columns followed by the extras, named by
+  `atom_columns` / `orbital_columns`: the orbital extras `retained_fraction` and `energy_ev`
+  (E_r; both already in every token file as diagnostics), the atom extras the
+  finite-difference f+ / f- and the exact-degeneracy frontier set (`f_plus_fmo_exact`,
+  `f_minus_fmo_exact`, `fmo_exact_<level>`). The exact set groups only levels within
+  `frontier.EXACT_EV` = 1e-4 eV (numerical degeneracy) and is stored in the token files beside
+  the 0.05 eV set, whose content is unchanged: token SCHEMA_VERSION 9 -> 10, additive.
+  `FeatureStats` carries the column names it was fitted on; statistics without names are a
+  v15-v17 checkpoint's and read the v17 columns. `ModelConfig.orbital_extra` (default `()`) and
+  `frontier_blocks` (`window` default, `exact`) select the extras; with the defaults the
+  standardized token inputs are bit for bit the v17 ones
+  (`test_default_token_inputs_are_the_v17_ones_bit_for_bit`). The FD f+ / f- stay unselected
+  until P2b's switch. The GBDT keeps its v17 columns (it already reads E_r).
+- **ReactMech labels from the Kekule structure closest to the reactant (item 4).** A step
+  without arrows takes R_data = `without_kekule_cycles(mapped_matrix(reac, prod), reac)`
+  (`delta_be.mapped_closest`): the two sides are kekulized independently, and an unchanged ring
+  written the other way round entered R as a swap the step does not make. Every label records
+  the entries removed (`EditLabel.kekule_closest`, rule KEKULE_CLOSEST) and each part's report
+  counts them with the labels still cut at RESONANCE_CAP. Steps with arrows are untouched (0
+  PMechDB labels change). Measured read-only on the v17 ReactMech samples (train / val / test):
+  the rule fires on 719 / 68 / 81 = 868 (the plan's estimate, from removing cycles out of the
+  stored variants, was 695 / 66 / 75 = 836: rebuilding the class on the closest product also
+  shrinks labels whose old cheapest member moved the charge into the swapped ring, such as the
+  ortho carbanion of a toluene-type deprotonation); 866 shrink, 2 keep their size and gain an
+  equal-cost member (oxindole deprotonations: the enolate O- joins the aromatic carbanion);
+  none gains entries; labels over 8 bond entries go from 212 / 13 / 12 to 0; RESONANCE_CAP
+  still cuts 2,964 / 317 / 243 (unchanged: `resonance_forms` keeps its cap).
+- **Decoder caps per source (item 5).** `DecodeConfig` keeps 8 bonds, 2 atoms, 48 candidates as
+  defaults (`--caps legacy`). `ksmech-eval decode --caps labels` reads the label maxima of the
+  training view of the source decoded, never val or test (the largest bond and atom counts of
+  a label's smallest variant: fewest entries, then fewest bond entries), then `--max-bonds`,
+  `--max-atoms`, `--max-candidates`; the header records the caps, and caps other than the legacy
+  ones add `_caps<b>-<a>-<c>` to the file names so the legacy hit files stay comparable.
+  Measured on v17: PMechDB 6 / 2 on every part (7 / 2 with the fewer-atoms tie-break: 280
+  training labels split their size differently); ReactMech train 33 / 4 before item 4 and 8 /
+  3 after it, val and test 6 / 2. The single 3-atom training label,
+  `reactmech-7172766faa0ff062`, is a P-N cleavage of a Mitsunobu betaine (1 bond, 1 atom)
+  whose class also rewrites a spectator quinolinium-olate zwitterion into its neutral form,
+  because the class is chosen by fewest formal charges over the whole product pool; so it was
+  in v17 too (19 bonds, 3 atoms). An open label-cost question, not changed here.
+- **Gate support.** A token build compares every token file it replaces field by field
+  (`tokens.legacy_differences`, NaN-aware and exact, the schema number and the fields only the
+  new file has left out) and counts the files whose stored fields changed
+  (`summary["replaced"]`); the summary is also kept per source as
+  `data/processed/<source>/tokens_summary.json`, and counts the closed-shell molecules whose
+  frontier blocks at 0.01, 0.05 and 0.1 eV differ from the exact ones. `ksmech-physics gbdt
+  --score-only --model PATH --allow-stale` scores a reference copy of a ranker on the new
+  store. `ksmech-qm run --steps-from FILE` featurizes only the fragments of the steps a JSON
+  file lists (`qm_steps`, else `ids`). The v17 processed directories were copied by reflink to
+  `data/processed_v17/` and the P0 decode hits to `<run>/p0_reference/` before the rebuild.
