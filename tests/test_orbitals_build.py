@@ -162,3 +162,29 @@ def test_workers_are_spawned_single_threaded(monkeypatch):
     import os
 
     assert os.environ["OMP_NUM_THREADS"] == "16" and "OPENBLAS_NUM_THREADS" not in os.environ
+
+
+def test_a_rebuild_compares_the_replaced_files_field_by_field(dataset):
+    """A forced rebuild over the same records changes no stored field (deterministic
+    localization: the legacy gate of a token schema bump); a file whose stored values differ is
+    named with its fields. Every closed-shell molecule gets its frontier-block comparison."""
+    import numpy as np
+
+    from ksmech.data import provenance as prov
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.qm.xtb_calc import QMConfig
+
+    processed, config = dataset
+    first = run(processed, config)
+    assert first["replaced"]["n_replaced"] == 0
+    assert first["frontier_blocks"]["n_closed_shell"] == 3
+    assert first["frontier_blocks"]["differ_from_exact"]["0.0001"] == 0
+    path = tokens_path(config.out_dir, "O", 0, QMConfig().method)
+    with np.load(path, allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files if k != prov.HEADER_KEY}
+    arrays["atom_mulliken_charge"] = arrays["atom_mulliken_charge"] + 1.0
+    np.savez(path, **arrays, **{prov.HEADER_KEY: np.array(prov.read_header(path).to_json())})
+    forced = BuildConfig(qm_cache_dir=config.qm_cache_dir, out_dir=config.out_dir, force=True)
+    again = run(processed, forced)["replaced"]
+    assert again["n_replaced"] == 3 and again["n_differing"] == 1
+    assert again["fields"] == {"atom_mulliken_charge": 1} and again["smiles"] == ["O"]

@@ -33,6 +33,7 @@ from ksmech.orbitals.tokens import (
     MoleculeTokens,
     atom_feature_names,
     build_molecule_tokens,
+    legacy_differences,
     load_tokens,
     save_tokens,
     token_config,
@@ -94,6 +95,8 @@ class BuildRow:
     spectral_hist: dict[str, int] = field(default_factory=dict)  # spectral entries -> tokens
     masks: dict[str, int] = field(default_factory=dict)  # candidate-mask and d-type counts
     chirality: dict[str, int] = field(default_factory=dict)  # "+1" / "-1" / "0" -> atoms
+    legacy_diff: list[str] | None = None  # payload fields that differ from the token file this
+    #   build replaced (`tokens.legacy_differences`); None when no file was replaced
     frontier_merged: dict[str, bool] = field(default_factory=dict)  # tolerance -> blocks differ
     #   from the exact ones (`frontier_merges`); empty for a Fermi-smeared molecule
     # model inputs of every token, float32, for the distributions in the summary
@@ -227,8 +230,11 @@ def process_molecule(smiles: str, config: BuildConfig) -> BuildRow:
         except StaleArtifact as exc:
             return BuildRow(smiles, "stale_qm", str(exc))
         tokens = build_molecule_tokens(record, pm_config=config.pm, classify_config=config.classify)
+        replaced = legacy_differences(out, tokens) if out.is_file() else None
         save_tokens(tokens, out, prov.file_input(qm_path), tok_config)
-        return _row_from_tokens(smiles, "built", tokens)
+        row = _row_from_tokens(smiles, "built", tokens)
+        row.legacy_diff = replaced
+        return row
     except Exception as exc:  # noqa: BLE001 - one bad molecule must not stop the batch
         log.exception("token build failed for %s", smiles)
         return BuildRow(smiles, "failed", f"{type(exc).__name__}: {exc}")
@@ -310,6 +316,19 @@ def _pm_summary(ok: list[BuildRow]) -> dict:
     )
 
 
+def _replaced_summary(ok: list[BuildRow]) -> dict:
+    """The token files a build replaced and those whose stored fields changed (a schema bump
+    that only adds fields changes none: open-shell plan P0a, the legacy reproduction gate)."""
+    replaced = [r for r in ok if r.legacy_diff is not None]
+    differ = [r for r in replaced if r.legacy_diff]
+    return dict(
+        n_replaced=len(replaced),
+        n_differing=len(differ),
+        fields=dict(Counter(f for r in differ for f in r.legacy_diff).most_common()),
+        smiles=sorted(r.smiles for r in differ)[:50],
+    )
+
+
 def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> dict:
     ok = [r for r in rows if r.status in ("built", "loaded")]
     status = Counter(r.status for r in rows)
@@ -367,6 +386,7 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
             n_molecules=sum(r.fermi_smeared for r in ok),
             smiles=sorted(r.smiles for r in ok if r.fermi_smeared),
         ),
+        replaced=_replaced_summary(ok),
         frontier_blocks=dict(
             n_closed_shell=sum(bool(r.frontier_merged) for r in ok),
             differ_from_exact={
@@ -525,6 +545,13 @@ def print_summary(summary: dict, console: Console, show_worst: bool = False) -> 
     _print_descriptor_distributions(s, console)
     _print_inputs(s, console)
     _print_fermi_smeared(s, console)
+    rep = s.get("replaced")
+    if rep and rep["n_replaced"]:
+        colour = "red" if rep["n_differing"] else "green"
+        console.print(
+            f"[{colour}]{rep['n_differing']} of {rep['n_replaced']} replaced token files changed "
+            f"a stored field[/{colour}]" + (f": {rep['fields']}" if rep["n_differing"] else "")
+        )
     fb = s.get("frontier_blocks")
     if fb:
         diff = ", ".join(f"{tol} eV {n}" for tol, n in fb["differ_from_exact"].items())

@@ -720,6 +720,23 @@ def _payload(t: MoleculeTokens) -> dict[str, np.ndarray]:
     return pay
 
 
+def legacy_differences(path: Path, tokens: MoleculeTokens) -> list[str]:
+    """The payload fields of the token file at `path` (written under an older schema) that
+    `tokens` holds differently, NaN-aware and exact; the fields only `tokens` has and the schema
+    number are not compared. A rebuild that only adds fields returns []."""
+    new = _payload(tokens)
+    with np.load(Path(path), allow_pickle=False) as z:
+        old = {k: z[k] for k in z.files if k not in (prov.HEADER_KEY, "schema_version")}
+    out = []
+    for k, v in old.items():
+        w = new.get(k)
+        nan_aware = v.dtype.kind in "fc"
+        same = w is not None and v.shape == w.shape and np.array_equal(v, w, equal_nan=nan_aware)
+        if not same:
+            out.append(k)
+    return out
+
+
 def token_config(
     pm_config: PMConfig | None = None, descriptor_config: DescriptorConfig | None = None
 ) -> dict:
