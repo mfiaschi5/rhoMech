@@ -6,9 +6,12 @@ y_ij of the decoder with the pooled gap factor G^atom (spec v9, "Edit decoder").
 The pair features z_rs are stored at K = 1 (`physics.params.REDUCED`); here they are taken to
 the fixed K and standardized with the training statistics (`pair_feature_stats_<split>.json`).
 The token features are standardized with `FeatureStats`, fitted on the training samples.
-G^atom and the pooled means run over the valid (occupied, virtual) pairs only (`pair_valid`):
-the store keeps no others, and the donor's own antibond is not among them (decisions.md,
-2026-10-25).
+Which (occupied, virtual) cells the model reads is `ModelConfig.pair_cells` (spec v9.1): with
+'valid' (the default, v17) every pair feature is undefined outside `pair_valid` and G^atom and
+the pooled means run over the valid pairs only, so the donor's own antibond is not among them
+(decisions.md, 2026-10-25); with 'all' every cell enters, and the three exclusion flags and the
+legacy mask are pair features (`pairs.PAIR_FLAGS`, `pairs.PAIR_VALID`). The features are
+selected by the names of the pair statistics, so a checkpoint reads a store with more features.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from ksmech.physics.pairs import PairStats
+from ksmech.physics.pairs import PAIR_CELLS, PAIR_VALID, PairStats
 from ksmech.physics.params import SCALING
 
 MAX_Z = 118
@@ -108,15 +111,45 @@ def token_inputs(batch: dict, stats: FeatureStats) -> dict:
     }
 
 
-def standardized_pair_z(batch: dict, pair_stats: PairStats, dropped: Iterable[str], K: float):
-    """(z_hat, defined), both (B, R, C, F): z_rs at the fixed K, standardized with the training
-    statistics, 0 where undefined; the `dropped` features (ablation) are undefined everywhere."""
-    names = tuple(batch["pair_features"])
-    if names != tuple(pair_stats.names):
-        raise ValueError(f"pair features {names}, statistics for {pair_stats.names}")
-    z = batch["pair_z"]
+def real_cells(batch: dict) -> torch.Tensor:
+    """(B, R, C) the (occupied, virtual) cells of the padded pair block that exist."""
+    return (batch["pair_row_pos"] >= 0)[:, :, None] & (batch["pair_col_pos"] >= 0)[:, None, :]
+
+
+def cell_mask(batch: dict, cells: str = "valid") -> torch.Tensor:
+    """(B, R, C) the cells a reader of `cells` sees: `pair_valid`, or every real cell."""
+    if cells not in PAIR_CELLS:
+        raise ValueError(f"pair cells {cells!r}, expected one of {PAIR_CELLS}")
+    return batch["pair_valid"] if cells == "valid" else real_cells(batch)
+
+
+def named_pair_z(batch: dict, names, cells: str = "valid"):
+    """(z, defined), (B, R, C, len(names)): the batch's pair features `names`, selected by name
+    from its stored ones (`PAIR_VALID`: the legacy mask as a 0/1 column on every real cell),
+    undefined outside `cell_mask(batch, cells)` (`physics.pairs.cell_columns` on a batch)."""
+    stored = tuple(batch["pair_features"])
+    missing = [n for n in names if n != PAIR_VALID and n not in stored]
+    if missing:
+        raise ValueError(f"pair features {missing} are not in the batch ({stored})")
+    z, d = batch["pair_z"], batch["pair_defined"]
+    real = real_cells(batch)
+    cols = [
+        batch["pair_valid"].to(z.dtype) if n == PAIR_VALID else z[..., stored.index(n)]
+        for n in names
+    ]
+    defs = [real if n == PAIR_VALID else d[..., stored.index(n)] for n in names]
+    return torch.stack(cols, -1), torch.stack(defs, -1) & cell_mask(batch, cells)[..., None]
+
+
+def standardized_pair_z(
+    batch: dict, pair_stats: PairStats, dropped: Iterable[str], K: float, cells: str = "valid"
+):
+    """(z_hat, defined), both (B, R, C, F): the features of the statistics (`named_pair_z` on
+    the cells `cells`) at the fixed K, standardized with the training statistics, 0 where
+    undefined; the `dropped` features (ablation) are undefined everywhere."""
+    names = tuple(pair_stats.names)
+    z, defined = named_pair_z(batch, names, cells)
     scale = [K ** SCALING[n][1] if SCALING[n][0] == "K" else 1.0 for n in names]
-    defined = batch["pair_defined"].clone()
     for n in dropped:
         defined[..., names.index(n)] = False
     z = (z * _t(scale, z) - _t(pair_stats.mean, z)) / _t(
@@ -145,22 +178,23 @@ def centre_weights(batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
     return _rows(inc, batch["pair_row_pos"]), _rows(inc, batch["pair_col_pos"])
 
 
-def pooled_gap(batch: dict, weights=None) -> torch.Tensor:
-    """G^atom (B, A, A), Eq. (Gatom) over the valid (occupied, virtual) pairs: the gap factor G
-    of every valid orbital pair, weighted by w_i^r w_j^s + w_j^r w_i^s."""
+def pooled_gap(batch: dict, weights=None, cells: str = "valid") -> torch.Tensor:
+    """G^atom (B, A, A), Eq. (Gatom) over the (occupied, virtual) pairs of `cells` (the valid
+    ones, or all): the gap factor G of every such orbital pair, weighted by
+    w_i^r w_j^s + w_j^r w_i^s."""
     w_occ, w_virt = weights or centre_weights(batch)
     g = batch["pair_z"][..., tuple(batch["pair_features"]).index("g")]
-    g = torch.where(batch["pair_valid"], g.float(), 0.0)
+    g = torch.where(cell_mask(batch, cells), g.float(), 0.0)
     return _pool(w_occ, g[..., None], w_virt)[..., 0]
 
 
-def atom_pair_physics(batch: dict, z_hat: torch.Tensor, defined: torch.Tensor):
+def atom_pair_physics(batch: dict, z_hat: torch.Tensor, defined: torch.Tensor, cells="valid"):
     """(y, g_atom): y_ij (B, A, A, F + 3) holds the weighted mean of the standardized pair
-    features over the valid orbital pairs the two atoms carry (spec, "Atom-pair physics"),
+    features over the orbital pairs of `cells` the two atoms carry (spec, "Atom-pair physics"),
     log1p of the pooled weight, asinh(G^atom) and the Wiberg index; g_atom is `pooled_gap`."""
     w_occ, w_virt = centre_weights(batch)
-    valid = batch["pair_valid"]
-    g_atom = pooled_gap(batch, (w_occ, w_virt))
+    valid = cell_mask(batch, cells)
+    g_atom = pooled_gap(batch, (w_occ, w_virt), cells)
     m = (defined & valid[..., None]).float()
     num, den = _pool(w_occ, z_hat * m, w_virt), _pool(w_occ, m, w_virt)
     mean = torch.where(den > 0, num / den.clamp(min=1e-12), 0.0)

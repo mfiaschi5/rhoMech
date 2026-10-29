@@ -40,13 +40,81 @@ def _pairwise(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1)
 
 
+PAIR_FLAGS = ("d_acceptor", "own_antibond", "site_self")  # stored 0/1 pair features (v18)
+PAIR_VALID = "pair_valid"  # the legacy mask read as a 0/1 feature (pair_cells 'all')
+PAIR_CELLS = ("valid", "all")  # `ModelConfig.pair_cells`: the cells a reader sees
+
+
+def cell_columns(z, defined, valid, stored, names, cells: str = "valid"):
+    """(z, defined), (..., len(names)): the features `names` selected by name from the `stored`
+    columns of (z, defined), so a reader built for fewer features reads a larger store.
+    `PAIR_VALID` is the legacy mask `valid` as a 0/1 column, defined on every cell. With
+    `cells` 'valid' every column is undefined outside `valid` (what a v17 store held); with
+    'all' every cell keeps its entries."""
+    if cells not in PAIR_CELLS:
+        raise ValueError(f"pair cells {cells!r}, expected one of {PAIR_CELLS}")
+    missing = [n for n in names if n != PAIR_VALID and n not in stored]
+    if missing:
+        raise ValueError(f"pair features {missing} are not stored (stored: {tuple(stored)})")
+    zs, ds = [], []
+    for n in names:
+        if n == PAIR_VALID:
+            zs.append(valid.astype(z.dtype))
+            ds.append(np.ones(valid.shape, dtype=bool))
+        else:
+            zs.append(z[..., stored.index(n)])
+            ds.append(defined[..., stored.index(n)])
+    z_out, d_out = np.stack(zs, -1), np.stack(ds, -1)
+    if cells == "valid":
+        d_out &= valid[..., None]
+    return z_out, d_out
+
+
+def _fragment_blocks(fragments: list[MoleculeTokens], config: CandidateConfig):
+    """(own_antibond, site_self), both (n_occ, n_virt): the two within-fragment exclusions of
+    every (occupied, virtual) cell, False across fragments (centres are atoms of one
+    fragment)."""
+    n_occ = sum(len(t.occupied()) for t in fragments)
+    n_virt = sum(len(t.virtual()) for t in fragments)
+    own = np.zeros((n_occ, n_virt), dtype=bool)
+    site = np.zeros((n_occ, n_virt), dtype=bool)
+    r0 = np.cumsum([0, *[len(t.occupied()) for t in fragments]])
+    c0 = np.cumsum([0, *[len(t.virtual()) for t in fragments]])
+    for f, t in enumerate(fragments):
+        o_f, v_f = t.occupied(), t.virtual()
+        if not o_f or not v_f:
+            continue
+        block = (slice(r0[f], r0[f + 1]), slice(c0[f], c0[f + 1]))
+        own[block] = antibonding_partner_matrix(o_f, v_f)
+        site[block] = site_excluded_matrix(t, o_f, v_f, config.site_weight)
+    return own, site
+
+
+def pair_flags(
+    fragments: list[MoleculeTokens], config: CandidateConfig | None = None
+) -> dict[str, np.ndarray]:
+    """The three exclusions of `valid_pairs` as (n_occ, n_virt) bool arrays named by
+    `PAIR_FLAGS`, on every cell: `d_acceptor` (the virtual token is a d polarization function,
+    `tokens.is_d_type`, whatever `allow_d_acceptors` says), `own_antibond` (the donor's own
+    antibond) and `site_self` (every site pair is a bond interacting with itself). Stored as
+    pair features, so a model may read them as channels instead of having the cells deleted
+    (open-shell plan P0a, item 1)."""
+    config = config or CandidateConfig()
+    occ = [o for t in fragments for o in t.occupied()]
+    d_type = np.array([t.is_d_type(o) for t in fragments for o in t.virtual()], dtype=bool)
+    own, site = _fragment_blocks(fragments, config)
+    d_acc = np.broadcast_to(d_type[None, :], (len(occ), len(d_type))).copy()
+    return {"d_acceptor": d_acc, "own_antibond": own, "site_self": site}
+
+
 def valid_pairs(fragments: list[MoleculeTokens], config: CandidateConfig | None = None):
     """(n_occ, n_virt) arrow-candidate filter: a doubly occupied donor, an empty acceptor that
     is not d-type (unless allowed), and, within one fragment, not the donor's own antibond and
     not a pair whose every site pair is a bond interacting with itself (sites identical or
     bonded, and the acceptor carries >= `config.site_weight` on the donor's site or the donor
     on the acceptor's: `tokens.site_excluded_matrix`). Every criterion is read from descriptors
-    and the record geometry (`ksmech.orbitals.tokens`)."""
+    and the record geometry (`ksmech.orbitals.tokens`). Since v18 it is the legacy mask of
+    `ModelConfig.pair_cells = 'valid'`: the store keeps every cell and `pair_flags`."""
     config = config or CandidateConfig()
     donors = {id(o) for t in fragments for o in t.donor_candidates(config)}
     acceptors = {id(o) for t in fragments for o in t.acceptor_candidates(config)}
@@ -54,17 +122,8 @@ def valid_pairs(fragments: list[MoleculeTokens], config: CandidateConfig | None 
     virt = [o for t in fragments for o in t.virtual()]
     ok_d = np.array([id(o) in donors for o in occ], dtype=bool)
     ok_a = np.array([id(o) in acceptors for o in virt], dtype=bool)
-    out = ok_d[:, None] & ok_a[None, :]
-    r0 = np.cumsum([0, *[len(t.occupied()) for t in fragments]])
-    c0 = np.cumsum([0, *[len(t.virtual()) for t in fragments]])
-    for f, t in enumerate(fragments):  # centres are atoms of one fragment
-        o_f, v_f = t.occupied(), t.virtual()
-        if not o_f or not v_f:
-            continue
-        own = antibonding_partner_matrix(o_f, v_f)
-        bad = own | site_excluded_matrix(t, o_f, v_f, config.site_weight)
-        out[r0[f] : r0[f + 1], c0[f] : c0[f + 1]] &= ~bad
-    return out
+    own, site = _fragment_blocks(fragments, config)
+    return ok_d[:, None] & ok_a[None, :] & ~(own | site)
 
 
 def atom_coulomb_matrix(fragments: list[MoleculeTokens], params: KSParams | None = None):

@@ -43,10 +43,11 @@ from ksmech.arrows.steps import (
     load_pair_stats,
     load_samples,
     pair_stats,
+    pair_stats_path,
     samples_path,
 )
 from ksmech.data import provenance as prov
-from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir
+from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.model.config import ModelConfig
 from ksmech.model.inputs import FeatureStats, fit_feature_stats, to_device
 from ksmech.model.loss import anchor_ranks, edit_matches, greedy_edit, step_loss
@@ -396,14 +397,14 @@ def _optimizer(model: KSMech, cfg: TrainConfig) -> torch.optim.AdamW:
     return torch.optim.AdamW(groups, lr=cfg.lr)
 
 
-def run_pair_stats(cfg: TrainConfig, train: list, processed_dir: Path):
-    """(the statistics file or None, the pair statistics): one source's stored
-    `pair_feature_stats_<split>.json`; for several, fitted here on the pooled training
-    samples, as `ksmech-arrows samples` fits one source's on its own."""
+def run_pair_stats(cfg: TrainConfig, train: list, processed_dir: Path, cells: str = "valid"):
+    """(the statistics file or None, the pair statistics of the cells `cells`): one source's
+    stored `pair_feature_stats_<split>[_allcells].json`; for several, fitted here on the
+    pooled training samples, as `ksmech-arrows samples` fits one source's on its own."""
     if len(sources(cfg)) == 1:
-        path = source_dir(cfg.source, processed_dir) / f"pair_feature_stats_{cfg.split}.json"
+        path = pair_stats_path(cfg.source, cfg.split, processed_dir, cells)
         return path, load_pair_stats(path)
-    return None, pair_stats(train)
+    return None, pair_stats(train, cells=cells)
 
 
 def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_path: Path | None):
@@ -497,7 +498,7 @@ def fit(
     val, val_info = load_part(cfg, "val", processed_dir)
     held = load_part(cfg, "test", processed_dir) if cfg.eval_test else ({}, None)
     train = [s for part in by_source.values() for s in part]
-    stats_path, stats = run_pair_stats(cfg, train, processed_dir)
+    stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells)
     model = KSMech(model_cfg, fit_feature_stats(train), stats).to(device)
     parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})
     header = _run_header(cfg, model_cfg, parts, stats_path)

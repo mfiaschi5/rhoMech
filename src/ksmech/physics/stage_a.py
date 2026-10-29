@@ -19,6 +19,9 @@ For an ordered (occupied r, virtual s) pair of the reactant set:
   of s, each with another centre), the cosine of the site-partner-partner-site dihedral (-1 is
   antiperiplanar); undefined otherwise.
 No contact geometry and no Klopman-Salem energy: the model has neither.
+
+A sample stores them with the three 0/1 exclusion flags of `pairs.pair_flags`
+(`STORED_PAIR_FEATURES`, v18). `cell_features` names what a reader of a cell set takes.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from ksmech.orbitals.descriptors import DescriptorConfig
 from ksmech.orbitals.localize import P_AXIS_ORDER
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
 from ksmech.physics.ks_terms import cross_center_coupling_matrix, gap_kernel_matrix, wh_matrix
-from ksmech.physics.pairs import LOG_FLOOR, PairBlock
+from ksmech.physics.pairs import LOG_FLOOR, PAIR_CELLS, PAIR_FLAGS, PAIR_VALID, PairBlock
 from ksmech.physics.params import REDUCED, KSParams
 from ksmech.qm.embed import prepare_mol
 
@@ -48,6 +51,18 @@ STAGE_A_FEATURES = (
     "dihedral_cos",
 )
 A = {name: k for k, name in enumerate(STAGE_A_FEATURES)}
+STORED_PAIR_FEATURES = (*STAGE_A_FEATURES, *PAIR_FLAGS)  # the pair_z columns of a v18 sample
+
+
+def cell_features(cells: str = "valid") -> tuple[str, ...]:
+    """The pair features a reader of the cell set `cells` takes: the v17 features on the valid
+    cells (the flags are 0 there), or every stored feature and the legacy mask as a 0/1 column
+    on every cell (`pairs.cell_columns`)."""
+    if cells not in PAIR_CELLS:
+        raise ValueError(f"pair cells {cells!r}, expected one of {PAIR_CELLS}")
+    return STAGE_A_FEATURES if cells == "valid" else (*STORED_PAIR_FEATURES, PAIR_VALID)
+
+
 GRAPH_CAP = 6
 
 

@@ -19,6 +19,8 @@ class ModelConfig:
     physics_hidden: int = 32  # width of MLP_Y over the atom-pair physics y_ij
     K: float = 1.75  # Wolfsberg-Helmholz constant of the cross-centre coupling (fixed)
     drop_pair_features: tuple[str, ...] = ()  # ablation: these z entries are zero and masked
+    pair_cells: str = "valid"  # valid (v17: z and pooling on pair_valid only) | all (every cell,
+    #   the exclusion flags and the legacy mask as channels; open-shell plan P0a, item 1)
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)

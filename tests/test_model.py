@@ -25,6 +25,7 @@ from ksmech.model.inputs import (
     pair_channels_at,
     pair_context,
     pooled_gap,
+    real_cells,
     standardized_pair_z,
 )
 from ksmech.model.loss import (
@@ -38,6 +39,8 @@ from ksmech.model.loss import (
 )
 from ksmech.model.net import KSMech
 from ksmech.orbitals.tokens import atom_feature_names, feature_names
+from ksmech.physics.pairs import PAIR_FLAGS, PAIR_VALID
+from ksmech.physics.stage_a import STAGE_A_FEATURES, cell_features
 from ksmech.train.batching import CellBudgetSampler, cells
 from ksmech.train.loop import (
     NonFiniteError,
@@ -125,6 +128,69 @@ def test_pooled_gap_is_the_weighted_sum_over_valid_pairs(samples):
                 if s.pair_valid[r, c]:
                     expect += s.pair_z[r, c, g_col] * (np.outer(w[o], w[v]) + np.outer(w[v], w[o]))
         np.testing.assert_allclose(g_atom[k, : s.n_atoms, : s.n_atoms], expect, atol=1e-4)
+
+
+def _as_v17(s: MechanismSample) -> MechanismSample:
+    """The sample as a v17 store held it: the v17 pair features only, every cell outside
+    pair_valid zero and undefined."""
+    k, valid = len(STAGE_A_FEATURES), s.pair_valid[..., None]
+    return replace(
+        s,
+        pair_z=np.where(valid, s.pair_z[..., :k], 0.0).astype(np.float32),
+        pair_defined=s.pair_defined[..., :k] & valid,
+        pair_features=STAGE_A_FEATURES,
+    )
+
+
+def test_valid_cells_reproduce_a_v17_batch_bit_for_bit(samples):
+    """pair_cells 'valid' on a v18 batch (every cell, the exclusion flags) gives a model with
+    v17 statistics (a v17 checkpoint's names) exactly the z_hat, G^atom, y_ij and outputs of
+    the v17-shaped batch; the v17 statistics are those of the v18 samples."""
+    old = [_as_v17(s) for s in samples]
+    stats = pair_stats(old)
+    for a in ("mean", "std", "count"):
+        assert np.array_equal(getattr(stats, a), getattr(pair_stats(samples), a)), a
+    torch.manual_seed(0)
+    model = KSMech(TINY, fit_feature_stats(samples), stats).eval()
+    assert model.pair_stats.names == STAGE_A_FEATURES
+    b_new, b_old = collate_samples(samples), collate_samples(old)
+    assert b_new["pair_z"].shape[-1] == len(STAGE_A_FEATURES) + len(PAIR_FLAGS)
+    assert torch.equal(pooled_gap(b_new), pooled_gap(b_old))
+    for x, y in zip(model.prepare(b_new)[1:], model.prepare(b_old)[1:], strict=True):
+        assert torch.equal(x, y)
+    with torch.no_grad():
+        new, ref = model.encode(b_new), model.encode(b_old)
+    for x, y in zip(new[:3], ref[:3], strict=True):
+        assert torch.equal(x, y)
+
+
+def test_all_cells_feed_the_flags_and_pool_every_cell(samples):
+    """pair_cells 'all': the statistics name every stored feature and the legacy mask, every
+    real cell is defined for the flags, G^atom pools every (occupied, virtual) pair."""
+    stats = pair_stats(samples, cells="all")
+    assert stats.names == cell_features("all")
+    b = collate_samples(samples)
+    z_hat, defined = standardized_pair_z(b, stats, (), TINY.K, "all")
+    real = real_cells(b)
+    for name in (*PAIR_FLAGS, PAIR_VALID):
+        assert torch.equal(defined[..., stats.names.index(name)], real), name
+    g_atom = pooled_gap(b, cells="all").numpy()
+    g_col = samples[0].pair_features.index("g")
+    for k, s in enumerate(samples):
+        w = np.zeros((s.n_orbitals, s.n_atoms))
+        rows = s.incidence
+        w[rows[:, 0].astype(int), rows[:, 1].astype(int)] = rows[:, 2]
+        w_occ, w_virt = w[s.orbital_occupied], w[~s.orbital_occupied]
+        g = s.pair_z[..., g_col].astype(np.float64)
+        expect = np.einsum("ra,rc,cb->ab", w_occ, g, w_virt)
+        np.testing.assert_allclose(
+            g_atom[k, : s.n_atoms, : s.n_atoms], expect + expect.T, atol=1e-4
+        )
+    torch.manual_seed(0)
+    model = KSMech(replace(TINY, pair_cells="all"), fit_feature_stats(samples), stats).eval()
+    with torch.no_grad():
+        h, p, y, _ = model.encode(b)
+    assert y.shape[-1] == len(stats.names) + 3 and torch.isfinite(h).all()
 
 
 def _channels(samples, model):

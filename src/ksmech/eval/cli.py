@@ -54,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--source", required=True, choices=[str(x) for x in Source])
     f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     f.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    f.add_argument(
+        "--cells",
+        default="valid",
+        choices=["valid", "all"],
+        help="pool G^atom over the pair_valid cells (v17) or over every (occupied, virtual) cell",
+    )
     _cohort_args(f)
     _decode_parser(sub)
     e = sub.add_parser("embedding", help="one sample through a trained model, as an HTML page")
@@ -175,15 +181,17 @@ def cmd_floor(args, console: Console) -> int:
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         inputs |= prov.file_input(path)
         samples = load_samples(path, ids=_cohort_ids(args, path))
-        results[part] = floor_report(samples)
+        results[part] = floor_report(samples, cells=args.cells)
         ranks[part] = results[part].pop("per_sample")
         results[part] |= _extras(args, ranks[part], samples, path)
-    config = {"split": args.split, "cohort": args.cohort, "slice": args.slice}
+    config = {"split": args.split, "cohort": args.cohort, "slice": args.slice, "cells": args.cells}
     header = prov.stamp("anchor_floor", FLOOR_VERSION, inputs, config)
     out_dir = source_dir(args.source, args.processed_dir)
     tag = args.split + (f"_{args.cohort}" if args.cohort != "all" else "")
+    tag += "_allcells" if args.cells == "all" else ""
     out = out_dir / f"anchor_floor_report_{tag}.json"
-    prov.write_json(out, {"scorer": "|G^atom| over valid pairs", **results}, header)
+    scorer = f"|G^atom| over {'valid' if args.cells == 'valid' else 'all'} pairs"
+    prov.write_json(out, {"scorer": scorer, **results}, header)
     ranks_header = prov.stamp("anchor_floor_ranks", FLOOR_VERSION, inputs, config)
     prov.write_json(out_dir / f"anchor_floor_ranks_{tag}.json", ranks, ranks_header)
     table = Table(title=f"anchor floor, {args.source} {args.split} split")

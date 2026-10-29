@@ -98,11 +98,11 @@ def test_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path
         a, b = getattr(back, name), getattr(s, name)
         assert a.dtype == b.dtype and np.array_equal(a, b), name
     assert (back.orbital_features == s.orbital_features).all()
-    valid = s.pair_valid
-    assert np.array_equal(back.pair_valid, valid)
-    assert np.array_equal(back.pair_defined[valid], s.pair_defined[valid])
-    assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-6)  # float16
-    assert not back.pair_defined[~valid].any() and back.pair_z.dtype == np.float32
+    assert np.array_equal(back.pair_valid, s.pair_valid)  # every cell is stored (v18)
+    assert np.array_equal(back.pair_defined, s.pair_defined)
+    assert np.allclose(back.pair_z, s.pair_z, rtol=1e-3, atol=1e-6)  # float16
+    assert np.array_equal(back.pair_gap_sign, s.pair_gap_sign) and back.pair_z.dtype == np.float32
+    assert back.labels_all == s.labels_all
     assert back.drawings == s.drawings == []  # 2-bromopropane and ethoxide: one drawing each
 
 
@@ -226,11 +226,27 @@ def test_pair_stats_are_those_of_the_stored_valid_cells(mini_processed, token_lo
     for refit in (pair_stats(train), pair_stats(built)):  # as loaded, and as just built
         for a in ("mean", "std", "count"):
             assert np.array_equal(getattr(stats, a), getattr(refit, a)), a
-    valid = sum((s.pair_defined & s.pair_valid[..., None]).sum((0, 1)) for s in built)
+    k = len(STAGE_A_FEATURES)
+    valid = sum((s.pair_defined[..., :k] & s.pair_valid[..., None]).sum((0, 1)) for s in built)
     assert np.array_equal(stats.count, valid)
-    assert (sum(s.pair_defined.sum((0, 1)) for s in built) > valid).any()  # invalid cells exist
+    every = sum(s.pair_defined[..., :k].sum((0, 1)) for s in built)
+    assert (every > valid).any()  # invalid cells exist
     header = prov.read_header(path)
     assert header.kind == "pair_stats" and header.config["cells"] == "valid"
+    from ksmech.physics.stage_a import cell_features
+
+    path_all = pair_stats_path("pmechdb", "molecule", mini_processed, "all")
+    stats_all = load_pair_stats(path_all)  # every cell, the flags and the legacy mask
+    assert path_all.name == "pair_feature_stats_molecule_allcells.json"
+    assert stats_all.names == cell_features("all")
+    assert prov.read_header(path_all).config["cells"] == "all"
+    assert np.array_equal(stats_all.count[:k], every)
+    n_cells = sum(s.pair_valid.size for s in built)
+    assert (stats_all.count[k:] == n_cells).all()
+    n_valid = sum(int(s.pair_valid.sum()) for s in built)
+    assert np.isclose(stats_all.mean[-1], n_valid / n_cells)  # the mean of the legacy mask
+    for a in ("mean", "std", "count"):
+        assert np.array_equal(getattr(stats_all, a), getattr(pair_stats(train, cells="all"), a))
     from ksmech.arrows import store
     from ksmech.arrows.steps import splits_path
 
@@ -341,19 +357,25 @@ def test_loader_and_cli(mini_processed, token_loader, monkeypatch, capsys):
 def test_sample_stores_the_pair_block(mini_steps, token_loader):
     import numpy as np
 
-    from ksmech.physics.pairs import valid_pairs
+    from ksmech.physics.pairs import PAIR_FLAGS, pair_flags, valid_pairs
     from ksmech.physics.params import REDUCED
-    from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+    from ksmech.physics.stage_a import STAGE_A_FEATURES, STORED_PAIR_FEATURES, stage_a_block
 
     step = mini_steps["sn2"]
     s = sample_for_step(step, token_loader)
     n_occ, n_virt = int(s.orbital_occupied.sum()), int((~s.orbital_occupied).sum())
-    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(STAGE_A_FEATURES))
+    assert s.pair_features == STORED_PAIR_FEATURES
+    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(STORED_PAIR_FEATURES))
     assert s.pair_z.dtype == np.float32 and s.pair_valid.shape == (n_occ, n_virt)
     tokens = s.tokens(token_loader)
     block = stage_a_block(tokens, REDUCED)
-    assert np.allclose(s.pair_z, block.z, rtol=1e-6, atol=1e-6)
-    assert np.array_equal(s.pair_defined, block.defined)
+    k = len(STAGE_A_FEATURES)
+    assert np.allclose(s.pair_z[..., :k], block.z, rtol=1e-6, atol=1e-6)
+    assert np.array_equal(s.pair_defined[..., :k], block.defined)
+    flags = pair_flags(tokens)
+    for c, name in enumerate(PAIR_FLAGS):
+        assert np.array_equal(s.pair_z[..., k + c], flags[name]), name
+    assert s.pair_defined[..., k:].all()
     assert np.array_equal(s.pair_gap_sign, block.gap_sign)
     assert np.array_equal(s.pair_valid, valid_pairs(tokens))
     donors = s.donor_mask[s.orbital_occupied]
@@ -476,20 +498,23 @@ def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader):
 
 
 def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path):
-    from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+    from ksmech.arrows.store import BINARY_FEATURES
+    from ksmech.physics.pairs import PAIR_FLAGS
+    from ksmech.physics.stage_a import STAGE_A_FEATURES, STORED_PAIR_FEATURES, stage_a_block
 
     s = sample_for_step(mini_steps["e2"], token_loader)
-    assert s.pair_features == STAGE_A_FEATURES
-    assert s.pair_z.shape[-1] == len(STAGE_A_FEATURES)
+    assert s.pair_features == STORED_PAIR_FEATURES
+    assert s.pair_z.shape[-1] == len(STORED_PAIR_FEATURES)
     block = stage_a_block(s.tokens(token_loader))
-    assert np.allclose(s.pair_z, block.z, rtol=1e-6, atol=1e-6)
+    assert np.allclose(s.pair_z[..., : len(STAGE_A_FEATURES)], block.z, rtol=1e-6, atol=1e-6)
     (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))
-    assert back.pair_features == STAGE_A_FEATURES
-    valid = s.pair_valid
-    assert np.array_equal(back.pair_defined[valid], s.pair_defined[valid])
-    assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-3)  # float16
-    k = STAGE_A_FEATURES.index("bonded")
-    assert np.array_equal(back.pair_z[valid][:, k], s.pair_z[valid][:, k])  # bits, exact
+    assert back.pair_features == STORED_PAIR_FEATURES
+    assert np.array_equal(back.pair_defined, s.pair_defined)
+    assert np.allclose(back.pair_z, s.pair_z, rtol=1e-3, atol=1e-3)  # float16
+    assert set(PAIR_FLAGS) <= set(BINARY_FEATURES)
+    for name in ("bonded", *PAIR_FLAGS):  # bits, exact, on every cell
+        k = STORED_PAIR_FEATURES.index(name)
+        assert np.array_equal(back.pair_z[..., k], s.pair_z[..., k]), name
 
 
 def test_the_parallel_build_matches_the_sequential_one(mini_steps, mini_token_cache):

@@ -4,12 +4,16 @@ standardization of the pair features."""
 import numpy as np
 import pytest
 
-from ksmech.orbitals.tokens import build_molecule_tokens
+from ksmech.orbitals.tokens import CandidateConfig, build_molecule_tokens
 from ksmech.physics.coulomb import coulomb, vdw_sum
 from ksmech.physics.pairs import (
+    PAIR_FLAGS,
+    PAIR_VALID,
     PairStats,
     atom_coulomb_matrix,
+    cell_columns,
     fit_pair_stats,
+    pair_flags,
     standardize,
     valid_pairs,
 )
@@ -87,3 +91,81 @@ def test_atom_coulomb_matrix(pair):
     r = vdw_sum(atoms[a].atomic_number, atoms[c].atomic_number)
     assert M[a, c] == pytest.approx(COULOMB_EV_ANG * q / (4.0 * r))
     assert np.allclose(atom_coulomb_matrix([methanol, chloromethane], REDUCED), 4.0 * M)
+
+
+@pytest.fixture(scope="module")
+def fixed_tokens(sp_record, smiles):
+    return {name: build_molecule_tokens(sp_record(smi)) for name, smi in smiles.items()}
+
+
+def _ids(tokens: list) -> set[int]:
+    return {id(o) for o in tokens}
+
+
+def test_pair_valid_is_donor_acceptor_and_no_exclusion_flag(fixed_tokens):
+    """On every fixed molecule the legacy mask is a donor x an empty acceptor (d functions
+    allowed) without any of the three stored exclusion flags (open-shell plan P0a, item 1)."""
+    with_d = CandidateConfig(allow_d_acceptors=True)
+    for name, t in fixed_tokens.items():
+        flags = pair_flags([t])
+        assert tuple(flags) == PAIR_FLAGS
+        donors, acceptors = _ids(t.donor_candidates()), _ids(t.acceptor_candidates(with_d))
+        ok_d = np.array([id(o) in donors for o in t.occupied()])
+        ok_a = np.array([id(o) in acceptors for o in t.virtual()])
+        excluded = flags["d_acceptor"] | flags["own_antibond"] | flags["site_self"]
+        expected = ok_d[:, None] & ok_a[None, :] & ~excluded
+        assert np.array_equal(valid_pairs([t]), expected), name
+
+
+def test_d_acceptor_marks_the_chlorine_d_functions(fixed_tokens):
+    t = fixed_tokens["chloromethane"]
+    d_cols = [k for k, o in enumerate(t.virtual()) if t.is_d_type(o)]
+    flag = pair_flags([t])["d_acceptor"]
+    assert d_cols and flag[:, d_cols].all()
+    assert not np.delete(flag, d_cols, axis=1).any()
+    assert not pair_flags([fixed_tokens["ethane"]])["d_acceptor"].any()
+
+
+@pytest.mark.parametrize("name", ["acetone", "acrolein"])
+def test_own_antibond_marks_the_carbonyl_pi_to_pi_star_cell(fixed_tokens, name):
+    t = fixed_tokens[name]
+    own = pair_flags([t])["own_antibond"]
+    occ, virt = t.occupied(), t.virtual()
+
+    def carbonyl_pi(o) -> bool:
+        return {t.symbol(a) for a in leading(o)} == {
+            "C",
+            "O",
+        } and o.descriptors.cos_character() < 0.5
+
+    cells = [
+        (r, s)
+        for r, s in zip(*np.nonzero(own), strict=True)
+        if carbonyl_pi(occ[r]) and carbonyl_pi(virt[s])
+    ]
+    assert cells, name
+    assert all(occ[r].descriptors.overlap_population > 0 for r, _ in cells)
+
+
+def test_exclusions_stay_within_a_fragment(pair):
+    methanol, chloromethane, _ = pair
+    flags = pair_flags([methanol, chloromethane])
+    n_occ, n_virt = len(methanol.occupied()), len(methanol.virtual())
+    for name in ("own_antibond", "site_self"):
+        assert not flags[name][:n_occ, n_virt:].any() and not flags[name][n_occ:, :n_virt].any()
+    assert flags["own_antibond"][:n_occ, :n_virt].any()
+
+
+def test_cell_columns_select_by_name_and_mask_the_legacy_cells():
+    stored = ("g", "inter", "d_acceptor")
+    z = np.arange(2 * 3 * 3, dtype=float).reshape(2, 3, 3)
+    defined = np.ones((2, 3, 3), dtype=bool)
+    valid = np.array([[True, False, True], [False, False, True]])
+    zv, dv = cell_columns(z, defined, valid, stored, ("inter", "g"))
+    assert np.array_equal(zv, z[..., [1, 0]]) and np.array_equal(dv, np.stack([valid] * 2, -1))
+    za, da = cell_columns(z, defined, valid, stored, (*stored, PAIR_VALID), "all")
+    assert da.all() and np.array_equal(za[..., 3], valid.astype(float))
+    with pytest.raises(ValueError, match="not stored"):
+        cell_columns(z, defined, valid, stored, ("wbi",))
+    with pytest.raises(ValueError, match="pair cells"):
+        cell_columns(z, defined, valid, stored, ("g",), "some")

@@ -54,13 +54,38 @@ def test_candidate_features(sets):
     assert bl.FEATURE_NAMES[:n_pair] == list(STAGE_A_FEATURES) and len(bl.FEATURE_NAMES) == 61
     for s, cs in zip(samples, cs_list, strict=True):
         assert cs.X.shape == (int(s.pair_valid.sum()), len(bl.FEATURE_NAMES))
-        undefined = ~s.pair_defined[cs.rows, cs.cols]
+        undefined = ~s.pair_defined[cs.rows, cs.cols, :n_pair]
         assert np.array_equal(np.isnan(cs.X[:, :n_pair]), undefined)
         assert np.isfinite(cs.X[:, n_pair:]).all()
         assert np.array_equal(cs.positive, bl.label_pairs(s, bl.first_label(s))[cs.rows, cs.cols])
         assert cs.positive.any() and not (cs.positive & cs.ignore).any()
         assert np.allclose(bl.gap_score(cs), -s.pair_z[cs.rows, cs.cols, 0])
         assert cs.rank(np.where(cs.positive, 1.0, 0.0)) == 0  # a perfect score ranks first
+
+
+def test_candidates_on_every_cell_read_the_flags_and_the_unfiltered_labels(sets, token_loader):
+    """cells='all': every (occupied, virtual) pair is a candidate, the exclusion flags and the
+    legacy mask are columns after the v17 pair features, the positives come from labels_all;
+    on the valid cells the shared columns equal the v17 ones."""
+    from ksmech.physics.pairs import PAIR_FLAGS
+
+    names = bl.feature_names("all")
+    n_pair = len(STAGE_A_FEATURES)
+    assert names[: n_pair + 4] == [*STAGE_A_FEATURES, *PAIR_FLAGS, "pair_valid"]
+    for s in sets[0]:
+        cs = bl.candidate_set(s, token_loader, "all")
+        legacy = bl.candidate_set(s, token_loader)
+        assert cs.X.shape == (s.pair_valid.size, len(names)) and cs.valid.all()
+        flags = cs.X[:, n_pair : n_pair + 4]
+        assert np.isin(flags, (0.0, 1.0)).all()
+        assert np.array_equal(flags[:, 3], s.pair_valid[cs.rows, cs.cols])
+        assert not flags[flags[:, 3] == 1, :3].any()  # a valid cell has no exclusion flag
+        on_valid = s.pair_valid[cs.rows, cs.cols]
+        assert np.array_equal(cs.X[on_valid][:, :n_pair], legacy.X[:, :n_pair], equal_nan=True)
+        assert np.array_equal(cs.X[on_valid][:, n_pair + 4 :], legacy.X[:, n_pair:])
+        first = bl.label_pairs(s, bl.first_label(s, "all"))
+        assert np.array_equal(cs.positive, first[cs.rows, cs.cols])
+        assert (first >= bl.label_pairs(s, bl.first_label(s))).all()  # unfiltered: a superset
 
 
 def test_main_centres_are_the_largest_weight(sets):
@@ -97,3 +122,13 @@ def test_gbdt_reader_skips_and_counts_samples_without_an_orbital_label(
     )
     n_view, n, no_reading = cli._read_part(args, "train", token_loader, lambda *a: 0)
     assert no_reading == 1 and n == n_view - 1
+
+
+def test_the_cells_switch_names_its_files_and_parses():
+    from types import SimpleNamespace
+
+    from ksmech.physics.cli import _tag, build_parser
+
+    assert _tag(SimpleNamespace(split="molecule")) == "molecule_geomfree"  # v17 names kept
+    args = build_parser().parse_args(["gbdt", "--source", "pmechdb", "--cells", "all"])
+    assert args.cells == "all" and _tag(args) == "molecule_geomfree_allcells"

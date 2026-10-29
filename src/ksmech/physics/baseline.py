@@ -5,7 +5,9 @@ convention shared by the LightGBM ranker (`physics.lgbm`) and the textbook suite
 Candidates of a step: every (occupied, virtual) token pair of its reactant side that passes
 `MechanismSample.pair_valid` (doubly occupied donor, empty acceptor, no d polarization function,
 within a fragment not the donor's own antibond nor a pair whose every site pair is a bond
-interacting with itself; read from descriptors and the record geometry). Target: the first
+interacting with itself; read from descriptors and the record geometry). With `cells='all'`
+(spec v9.1) every (occupied, virtual) pair is a candidate, the labels are the unfiltered ones
+(`labels_all`) and the three exclusion flags and the legacy mask are features. Target: the first
 labeled arrow of the step (smallest `arrow_index`), whose labeled pairs are its donor set x
 acceptor set. The labeled pairs of the step's other arrows are left out of training (neither
 positive nor negative), never out of the evaluation. Metric: top-k accuracy under multi-label
@@ -16,8 +18,8 @@ best labeled pair). A step whose labeled pairs are all filtered out is a miss, c
 
 Features of a candidate pair (donor r, acceptor s), no type one-hot (`FEATURE_NAMES`):
 
-- the geometry-free pair features as stored (`physics.stage_a.STAGE_A_FEATURES`), NaN where
-  undefined;
+- the geometry-free pair features as stored (`physics.stage_a.cell_features`: the v17 ones, or
+  with `cells='all'` also the exclusion flags and `pair_valid`), NaN where undefined;
 - the continuous descriptors of r and of s (the model inputs `orbital_features`);
 - the frozen-orbital f- on r's main centre and f+ on s's main centre;
 - the diagnostic LMO energies E_r and E_s.
@@ -37,7 +39,8 @@ from ksmech.arrows.reactants import TokenLoader
 from ksmech.arrows.steps import MechanismSample
 from ksmech.orbitals.descriptors import feature_names
 from ksmech.orbitals.tokens import atom_feature_names
-from ksmech.physics.stage_a import STAGE_A_FEATURES
+from ksmech.physics.pairs import cell_columns
+from ksmech.physics.stage_a import cell_features
 
 TOP_K = (1, 3, 5)
 TOKEN_FEATURES = (
@@ -45,11 +48,23 @@ TOKEN_FEATURES = (
     + [f"acceptor_{n}" for n in feature_names()]
     + ["donor_site_f_minus", "acceptor_site_f_plus", "donor_energy_ev", "acceptor_energy_ev"]
 )
-FEATURE_NAMES = list(STAGE_A_FEATURES) + TOKEN_FEATURES
 
 
-def first_label(sample: MechanismSample) -> ArrowLabel:
-    return min(sample.labels, key=lambda lab: lab.arrow_index)
+def feature_names(cells: str = "valid") -> list[str]:
+    """The ranker's columns for the candidates of `cells` (valid: the v17 columns)."""
+    return list(cell_features(cells)) + TOKEN_FEATURES
+
+
+FEATURE_NAMES = feature_names("valid")
+
+
+def sample_labels(sample: MechanismSample, cells: str = "valid") -> list[ArrowLabel]:
+    """The labels a ranker of `cells` reads: filtered to pair_valid, or on every cell."""
+    return sample.labels if cells == "valid" else sample.labels_all
+
+
+def first_label(sample: MechanismSample, cells: str = "valid") -> ArrowLabel:
+    return min(sample_labels(sample, cells), key=lambda lab: lab.arrow_index)
 
 
 def orbital_positions(sample: MechanismSample) -> tuple[np.ndarray, np.ndarray]:
@@ -127,21 +142,32 @@ def main_centres(sample: MechanismSample) -> np.ndarray:
     return out
 
 
-def _pair_columns(sample: MechanismSample) -> np.ndarray:
-    """(n_occ, n_virt, F) the geometry-free pair features as stored, NaN where undefined."""
-    if tuple(sample.pair_features) != STAGE_A_FEATURES:
-        raise ValueError(f"{sample.step_id}: pair features {sample.pair_features[:2]}...")
-    return np.where(sample.pair_defined, sample.pair_z.astype(np.float64), np.nan)
+def _pair_columns(sample: MechanismSample, cells: str = "valid") -> np.ndarray:
+    """(n_occ, n_virt, F) the pair features of `cells` (`stage_a.cell_features`) selected by
+    name from the stored ones, NaN where undefined."""
+    z, defined = cell_columns(
+        sample.pair_z,
+        sample.pair_defined,
+        sample.pair_valid,
+        tuple(sample.pair_features),
+        cell_features(cells),
+        cells,
+    )
+    return np.where(defined, z.astype(np.float64), np.nan)
 
 
-def candidate_set(sample: MechanismSample, loader: TokenLoader) -> CandidateSet:
-    """The valid pairs of `sample` with the columns of `FEATURE_NAMES`."""
+def candidate_set(
+    sample: MechanismSample, loader: TokenLoader, cells: str = "valid"
+) -> CandidateSet:
+    """The candidate pairs of `sample` (the valid ones, or every pair with `cells='all'`) with
+    the columns of `feature_names(cells)`."""
     tokens = sample.tokens(loader)
     e_occ = np.array([o.energy_ev for t in tokens for o in t.occupied()])
     e_virt = np.array([o.energy_ev for t in tokens for o in t.virtual()])
     occ_idx = np.flatnonzero(sample.orbital_occupied)
     virt_idx = np.flatnonzero(~sample.orbital_occupied)
-    rows, cols = np.nonzero(sample.pair_valid)
+    allowed = sample.pair_valid if cells == "valid" else np.ones_like(sample.pair_valid)
+    rows, cols = np.nonzero(allowed)
     main = main_centres(sample)
     names = atom_feature_names()
     f_minus = sample.atom_features[:, names.index("f_minus_fmo")]
@@ -149,7 +175,7 @@ def candidate_set(sample: MechanismSample, loader: TokenLoader) -> CandidateSet:
     desc = sample.orbital_features.astype(np.float64)
     X = np.column_stack(
         [
-            _pair_columns(sample)[rows, cols],
+            _pair_columns(sample, cells)[rows, cols],
             desc[occ_idx[rows]],
             desc[virt_idx[cols]],
             f_minus[main[occ_idx[rows]]],
@@ -158,9 +184,10 @@ def candidate_set(sample: MechanismSample, loader: TokenLoader) -> CandidateSet:
             e_virt[cols],
         ]
     )
-    first = label_pairs(sample, first_label(sample)) if sample.labels else sample.pair_valid & False
+    labels = sample_labels(sample, cells)
+    first = label_pairs(sample, first_label(sample, cells)) if labels else np.zeros_like(allowed)
     others = np.zeros_like(first)
-    for lab in sample.labels:
+    for lab in labels:
         others |= label_pairs(sample, lab)
     return CandidateSet(
         sample.step_id,
@@ -169,7 +196,7 @@ def candidate_set(sample: MechanismSample, loader: TokenLoader) -> CandidateSet:
         cols,
         first[rows, cols],
         (others & ~first)[rows, cols],
-        sample.pair_valid,
+        allowed,
         first,
     )
 

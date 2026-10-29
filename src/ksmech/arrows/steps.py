@@ -85,9 +85,21 @@ from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_di
 from ksmech.data.resonance import sigma_key
 from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import MoleculeTokens
-from ksmech.physics.pairs import PairStats, fit_pair_stats, valid_pairs
+from ksmech.physics.pairs import (
+    PAIR_CELLS,
+    PairStats,
+    cell_columns,
+    fit_pair_stats,
+    pair_flags,
+    valid_pairs,
+)
 from ksmech.physics.params import REDUCED, KSParams, to_params
-from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+from ksmech.physics.stage_a import (
+    STAGE_A_FEATURES,
+    STORED_PAIR_FEATURES,
+    cell_features,
+    stage_a_block,
+)
 from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
@@ -144,9 +156,12 @@ class MechanismSample:
     pair_z: np.ndarray  # (n_occ, n_virt, F) float32 z_rs at K = eps = 1, `pair_features` order
     pair_defined: np.ndarray  # (n_occ, n_virt, F) bool
     pair_gap_sign: np.ndarray  # (n_occ, n_virt) int8 sign of G (bookkeeping, not a feature)
-    pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair
+    pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair (the
+    #   legacy mask of pair_cells 'valid'; every cell is stored, with `pairs.PAIR_FLAGS`)
     labels: list[ArrowLabel] = field(default_factory=list)  # empty unless `orbital_reading`
     #   is READING_ALIGNED
+    labels_all: list[ArrowLabel] = field(default_factory=list)  # the aligned labels on every
+    #   cell (no pair_valid filter; pair_cells 'all'); empty when an arrow does not align
     product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
     edit_label: EditLabel | None = None  # the R class and its anchors on the global atoms
     bonds: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.int16))  # (E, 3)
@@ -242,6 +257,8 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
     `bond_order` is read on the side as drawn."""
     tok = [f.tokens for f in rt.fragments]
     block = stage_a_block(tok, REDUCED)
+    flags = pair_flags(tok, rt.candidate)
+    flag_z = np.stack([flags[n] for n in STORED_PAIR_FEATURES[len(STAGE_A_FEATURES) :]], -1)
     sample = MechanismSample(
         step_id=step_id,
         source=source,
@@ -260,12 +277,12 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
         acceptor_mask=rt.acceptor_ok.copy(),
         orbital_centroids=rt.centroids.astype(np.float32),
         incidence=_incidence(rt),
-        pair_z=block.z.astype(np.float32),
-        pair_defined=block.defined,
+        pair_z=np.concatenate([block.z, flag_z], -1).astype(np.float32),
+        pair_defined=np.concatenate([block.defined, np.ones_like(flag_z)], -1),
         pair_gap_sign=block.gap_sign,
         pair_valid=valid_pairs(tok, rt.candidate),
         fermi_smeared=any(t.fermi_smeared for t in tok),
-        pair_features=STAGE_A_FEATURES,
+        pair_features=STORED_PAIR_FEATURES,
     )
     sample.pair_z = with_pair_bond_orders(sample, lewis_bonds(rt))
     return sample
@@ -294,26 +311,18 @@ def _filter_group(rt: ReactantTokens, lab: ArrowLabel, r: int, s: int, w: float)
     return f"{sym}: other"
 
 
-def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabel] | None:
-    """The labels restricted to the pairs `pair_valid` allows (the bonded-site filter and the
-    antibonding-partner rule). A donor (acceptor) with no valid partner in the other set leaves
-    its set and the label is flagged LABEL_FILTERED; every rejected cell is counted by group in
-    `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells, and the
-    leaving bonds are read on the teacher arrows in step order (`leaving_labels`). None when a
-    label has no valid cell left (the sample then keeps no ArrowLabels: READING_FILTERED)."""
-    row, col = _pair_index(sample)
-
-    def valid(r: int, s: int) -> bool:
-        return r in row and s in col and bool(sample.pair_valid[row[r], col[s]])
-
+def _restricted_labels(sample: MechanismSample, rt: ReactantTokens, valid, counts: dict | None):
+    """The labels restricted to the cells `valid(r, s)` allows, their teacher pairs and leaving
+    bonds; rejected cells are counted by group in `counts` (when given). None when a label has
+    no allowed cell left."""
     out = []
     w = rt.candidate.site_weight
     for lab in sample.labels:
         for r in lab.donor_ids:
             for s in lab.acceptor_ids:
-                if not valid(r, s):
+                if counts is not None and not valid(r, s):
                     key = _filter_group(rt, lab, r, s, w)
-                    sample.label_filter[key] = sample.label_filter.get(key, 0) + 1
+                    counts[key] = counts.get(key, 0) + 1
         donors = frozenset(r for r in lab.donor_ids if any(valid(r, s) for s in lab.acceptor_ids))
         acceptors = frozenset(s for s in lab.acceptor_ids if any(valid(r, s) for r in donors))
         if not donors or not acceptors:
@@ -330,6 +339,28 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
     ]
     leaving = leaving_labels(rt, arrows, out)
     return [with_leaving(x, lab) for x, lab in zip(out, leaving, strict=True)]
+
+
+def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabel] | None:
+    """The labels restricted to the pairs `pair_valid` allows (the bonded-site filter and the
+    antibonding-partner rule). A donor (acceptor) with no valid partner in the other set leaves
+    its set and the label is flagged LABEL_FILTERED; every rejected cell is counted by group in
+    `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells, and the
+    leaving bonds are read on the teacher arrows in step order (`leaving_labels`). None when a
+    label has no valid cell left (the sample then keeps no ArrowLabels: READING_FILTERED)."""
+    row, col = _pair_index(sample)
+
+    def valid(r: int, s: int) -> bool:
+        return r in row and s in col and bool(sample.pair_valid[row[r], col[s]])
+
+    return _restricted_labels(sample, rt, valid, sample.label_filter)
+
+
+def unfiltered_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabel]:
+    """The labels on every (occupied, virtual) cell (`labels_all`, read with pair_cells
+    'all'): no cell is rejected, the teacher pair is chosen among all of them."""
+    row, col = _pair_index(sample)
+    return _restricted_labels(sample, rt, lambda r, s: r in row and s in col, None) or []
 
 
 @dataclass(frozen=True)
@@ -385,6 +416,7 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
     if not alignment.complete:
         sample.labels, sample.orbital_reading = [], str(alignment.unaligned[0].reason)
         return
+    sample.labels_all = unfiltered_labels(sample, rt)
     labels = filter_labels(sample, rt)
     if labels is None:
         log.info("%s: a label has no valid pair: %s", sample.step_id, sample.label_filter)
@@ -656,7 +688,7 @@ def _config(split: str, seed: int) -> dict:
         "split": split,
         "seed": seed,
         "sample_version": SAMPLE_VERSION,
-        "pair_features": list(STAGE_A_FEATURES),
+        "pair_features": list(STORED_PAIR_FEATURES),
     }
 
 
@@ -736,8 +768,10 @@ def write_strategy_views(
             report["splits"][split] = counts
             if split.endswith("_train"):
                 train = [samples[i] for i in members if i in samples]
-                stats_path = pair_stats_path(source, split[: -len("_train")], processed_dir)
-                write_pair_stats(stats_path, pair_stats(train), view, index)
+                for cells in PAIR_CELLS:
+                    name = split[: -len("_train")]
+                    stats_path = pair_stats_path(source, name, processed_dir, cells)
+                    write_pair_stats(stats_path, pair_stats(train, cells=cells), view, index, cells)
     return report
 
 
@@ -760,39 +794,49 @@ def write_views_from_store(
     )
 
 
-def pair_stats_path(source: str, name: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
-    """`pair_feature_stats_<name>.json`: the standardization statistics of one split
-    strategy, fitted on its training part."""
-    return source_dir(source, processed_dir) / f"pair_feature_stats_{name}.json"
+def pair_stats_path(
+    source: str, name: str, processed_dir: Path = DEFAULT_PROCESSED_DIR, cells: str = "valid"
+) -> Path:
+    """`pair_feature_stats_<name>.json` (`..._<name>_allcells.json` for pair_cells 'all'): the
+    standardization statistics of one split strategy, fitted on its training part."""
+    suffix = "" if cells == "valid" else "_allcells"
+    return source_dir(source, processed_dir) / f"pair_feature_stats_{name}{suffix}.json"
 
 
-def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -> PairStats:
-    """Statistics of the pair features of `samples` at the physical K and eps, over what a
-    loaded sample holds: the defined entries of the valid cells (`pair_valid`; the store keeps
-    no others), with the values rounded to float16 as stored. The statistics of samples just
-    built therefore equal those refitted from the store."""
+def pair_stats(
+    samples: list[MechanismSample], params: KSParams | None = None, cells: str = "valid"
+) -> PairStats:
+    """Statistics of the pair features a reader of `cells` takes (`stage_a.cell_features`) over
+    `samples` at the physical K and eps, on the defined entries of those cells (`valid`: the
+    `pair_valid` cells, the v17 statistics; `all`: every cell), with the values rounded to
+    float16 as stored. The statistics of samples just built therefore equal those refitted
+    from the store."""
     params = params or KSParams()
-    names = samples[0].pair_features if samples else STAGE_A_FEATURES
-    if any(s.pair_features != names for s in samples):
+    names = cell_features(cells)
+    stored = samples[0].pair_features if samples else STORED_PAIR_FEATURES
+    if any(s.pair_features != stored for s in samples):
         raise ValueError("pair statistics over samples with different pair features")
-    blocks = (
-        (
-            to_params(s.pair_z.astype(np.float16), params, names),
-            s.pair_defined & s.pair_valid[..., None],
+
+    def block(s: MechanismSample):
+        z, defined = cell_columns(
+            s.pair_z.astype(np.float16), s.pair_defined, s.pair_valid, stored, names, cells
         )
-        for s in samples
-    )
-    return fit_pair_stats(blocks, names)
+        return to_params(z, params, names), defined
+
+    return fit_pair_stats((block(s) for s in samples), names)
 
 
-def write_pair_stats(path: Path, stats: PairStats, view: Path, index: Path) -> Path:
+def write_pair_stats(
+    path: Path, stats: PairStats, view: Path, index: Path, cells: str = "valid"
+) -> Path:
     """The statistics with a provenance header: the training view and the store index they were
-    fitted on are its inputs, the physical K and eps and the features its configuration."""
+    fitted on are its inputs, the physical K and eps, the features and the cells its
+    configuration."""
     params = KSParams()
     config = {
         "sample_version": SAMPLE_VERSION,
         "pair_features": list(stats.names),
-        "cells": "valid",
+        "cells": cells,
         "params": {"K": params.K, "eps": params.eps},
     }
     body = {"features": stats.to_dict()}
