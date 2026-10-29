@@ -6575,3 +6575,42 @@ Phase P0b of `docs/open_shell_plan.md`, on branch `claude/open-shell-p0b` (from
   the FD columns stay at their legacy settings in both (P9 ablates them); an explicit option
   wins; run.json records the resulting flags and the seed.
 
+- **Pinned (P0b steps 1-2, code d1b869b, 2026-10-29).** closed_base holds 12,399 samples (train
+  9,979, val 1,238, test 1,182); the GBDT subsets hold 9,432 / 1,202 / 1,120 on the valid
+  cells and 9,433 / 1,203 / 1,120 on every cell. The baseline has 64 columns per sample (18.7
+  MB). `tests/test_closed_base_rescore.py` (realdata) checks every number below that has a P0a
+  reference.
+- **Re-scored on closed_base (float32, per-sample hits; old checkpoints with every flag off and
+  the legacy caps).** Top-1 / 3 / 5:
+
+  | scorer | val | test |
+  |---|---|---|
+  | floor, valid cells | 15.6 / 26.0 / 31.1 | 17.8 / 27.3 / 31.6 |
+  | floor, every cell | 14.4 / 23.7 / 28.8 | 13.3 / 22.9 / 27.0 |
+  | GBDT v18, valid cells (first arrow, 1,202 / 1,120) | 45.0 / 62.3 / 70.7 | 48.1 / 67.8 / 75.4 |
+  | GBDT v18, every cell (1,203 / 1,120) | 44.3 / 62.5 / 70.8 | 50.4 / 66.6 / 74.9 |
+  | flex_first (trained on v15), full R | 62.9 / 82.6 / 85.4 | 62.7 / 77.8 / 81.6 |
+  | pmechdb+reactmech/sparse_resonance (v17), full R | 61.6 / 79.3 / 81.6 | 64.1 / 82.4 / 84.2 |
+
+  The floor ranks and the flex_first val hits are those of the P0a gate, sample by sample, and
+  the GBDT rank files cover exactly their subsets' val and test samples. The test numbers of
+  the two checkpoints are a report of what exists, not a selection: no new configuration was
+  chosen on them. Decoding took 0.7 s per sample (flex_first) and 0.9 s (sparse) on the CPU,
+  15-18 min per part.
+- **ReactMech test, read for the first time: the molecule split puts two reagent families in
+  test.** On ReactMech molecule test (902) sparse_resonance_stop0 scores 72.1 / 74.7 / 75.5 and
+  the joint sparse_resonance 70.4 / 73.9 / 74.9, against 91.1 and 91.9 top-1 on val. The
+  sulfonium steps of the Swern oxidation ([S+] in the reactants: train 13, val 4, test 188) and
+  the chromium oxidations (Cr: 6, 1, 25) sit almost all in test, because steps that share a
+  molecule share a part: 186 of the 188 test sulfonium samples are one molecule group of 223
+  steps (the activated-DMSO intermediates join them), and 23 of the 25 Cr samples sit in two
+  groups of 14 and 11 steps. On those 213 samples
+  the runs score 25.8 and 15.5 top-1; on the other 689, 86.4 / 89.7 / 90.7 and 87.4 / 91.6 /
+  92.3, close to val. So ReactMech test is partly an unseen-family test, and a ReactMech result
+  is reported on both subsets. The split stays as frozen (P0); a class-aware split is a later
+  decision, not a P0b one.
+- **Timing of the presets on the RX 6600 XT** (`--epochs 1 --no-resonance-draws --seed 0`, the
+  full PMechDB molecule train, 3 TOO_LARGE samples skipped). One epoch: 429 s (general) and 435 s
+  (legacy), about 23 samples/s, against about 90 s on the pod's RTX 5080. Thirty epochs take
+  about 3.6 h per run, so the 6 runs of step 3 take about 22 h here and about 4.5 h on a pod.
+  Both presets trained with finite losses.
