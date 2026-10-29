@@ -722,6 +722,16 @@ def _config(split: str, seed: int) -> dict:
     }
 
 
+def skipped_by_domain_class(steps: list[ElementaryStep], skipped: dict) -> dict:
+    """Skip reason -> the step's `domain_class` value ('none' without one) -> count: the steps
+    the domain laws admitted before their QM exists are counted here, never silently."""
+    classes = {s.step_id: s.domain_class or "none" for s in steps}
+    out: dict[str, Counter] = {}
+    for step_id, reason in skipped.items():
+        out.setdefault(str(reason), Counter())[classes[step_id]] += 1
+    return {r: dict(c.most_common()) for r, c in sorted(out.items())}
+
+
 def build_all_samples(
     source: str,
     strategies: Iterable[str] = DEFAULT_STRATEGIES,
@@ -744,6 +754,7 @@ def build_all_samples(
         "n_training_steps": len(steps),
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
+        "skipped_by_domain_class": skipped_by_domain_class(steps, skipped),
         **{
             k: every[k]
             for k in (

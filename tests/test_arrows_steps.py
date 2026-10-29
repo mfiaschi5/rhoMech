@@ -23,6 +23,7 @@ from ksmech.arrows.steps import (
     pair_stats_path,
     sample_for_step,
     samples_path,
+    skipped_by_domain_class,
     write_split_file,
 )
 from ksmech.data import chem
@@ -175,6 +176,21 @@ def test_the_edit_label_takes_the_reactant_to_the_drawn_product(mini_steps, toke
         assert any(_reproduces(s, prod, r) for r in s.edit_label.variants), name
 
 
+def test_skipped_steps_are_counted_by_domain_class():
+    from types import SimpleNamespace as Step
+
+    steps = [
+        Step(step_id="a", domain_class="REPAIRED_DATIVE"),
+        Step(step_id="b", domain_class=None),
+        Step(step_id="c", domain_class="REPAIRED_DATIVE+METAL_SUSPECT"),
+        Step(step_id="d", domain_class=None),
+    ]
+    skipped = {i: SkipReason.MISSING_TOKENS for i in "abc"}
+    assert skipped_by_domain_class(steps, skipped) == {
+        "MISSING_TOKENS": {"REPAIRED_DATIVE": 1, "REPAIRED_DATIVE+METAL_SUSPECT": 1, "none": 1}
+    }
+
+
 def test_samples_build_for_every_split_strategy(mini_processed, token_loader):
     report = build_all_samples(
         "pmechdb",
@@ -183,6 +199,7 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader):
     )
     assert not report["strategies_not_applicable"]
     assert report["skipped"] == {"MISSING_TOKENS": 1}
+    assert report["skipped_by_domain_class"] == {"MISSING_TOKENS": {"none": 1}}
     names = set(report["splits"])
     assert {"molecule_train", "scaffold_test"} <= names
     assert any(n.startswith("loco-substitution_") for n in names)
