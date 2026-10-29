@@ -6614,3 +6614,33 @@ Phase P0b of `docs/open_shell_plan.md`, on branch `claude/open-shell-p0b` (from
   (legacy), about 23 samples/s, against about 90 s on the pod's RTX 5080. Thirty epochs take
   about 3.6 h per run, so the 6 runs of step 3 take about 22 h here and about 4.5 h on a pod.
   Both presets trained with finite losses.
+
+## 2026-10-29: the v18 training set on a private Hugging Face dataset
+
+- **Where (user request).** The dataset `mfiaschi5/rhoMech-data` on Hugging Face is private,
+  revision 7aef081976cb6324687088855a1c0a55968fa102: 210 files, 9.63 GB. It holds what a pod
+  needs to train and evaluate on sample store version 18 (code 4f075a0) for PMechDB and the
+  ReactMech pilot:
+  - `data/processed/<source>/`: the store shards and index, every split view, the splits and
+    frozen splits, the pair-feature statistics, the steps and resonance-pair parquets, the
+    cohorts with `baseline_closed_base.json`, and the ingest reports;
+  - the 20,885 token files and 20,885 Wiberg sidecars the shards read (their header inputs),
+    packed as `archives/tokens_<0-f>.tar` (by the key's first hex digit, about 500 MB each) and
+    `archives/bond_index.tar`, with checkout paths inside so extraction at the repo root
+    restores them;
+  - `SHA256SUMS` (41,959 files) and a README with the restore commands.
+  The old `contacts_*` folders in the store directory (stage B) are left out. The GitHub repo
+  `mfiaschi5/rhoMech-data` still holds schema 16 and the flex_first weights. For v18, the
+  plan's "push the v18 stores to rhoMech-data before any pod run" is met by this dataset.
+- **Why tars on Hugging Face.** GitHub caps a file at 100 MB and a push at 2 GB, and the token
+  set alone is 7.6 GiB in 41,770 small files. Seventeen tars keep the upload and the pod's
+  download to a few large files, and the loaders still verify every file by its sha256 after
+  extraction. The token files are already compressed npz, so the tars are not compressed.
+- **Verified.** The revision was downloaded into an empty folder, the archives extracted, and
+  every one of the 41,959 sha256 sums matched; the README is byte-identical. The upload took 73
+  min at about 2.2 MB/s and the download 20 min.
+- **Access.** The dataset is private because it is derived from PMechDB (via the PMechRP release;
+  redistribution terms not established) and from ReactMech (CC BY 4.0). A pod gets a
+  fine-grained read-only token scoped to this repository, which is deleted from the pod after
+  the download, as was done with the GitHub deploy key. The staging script is not in the repo:
+  the README and this entry describe the layout.
