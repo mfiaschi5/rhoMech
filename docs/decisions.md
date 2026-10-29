@@ -6427,9 +6427,11 @@ the GBDT reproduce; which default the GENERAL configuration takes is an ablation
   - **Spec wording.** Spec v9.1's bullet says "a non-alkali metal with at most one neighbour
     ... except [Pd]-P+R3" and omits the charge clause; the code follows the plan's law
     (non-s-block, exactly one neighbour, charge <= 0, ML1 compensated, free ions and MX+
-    defined), which is what was measured. The spec text is to be aligned (with the caps
-    parenthetical "8 and 2 on PMechDB", which are the legacy caps; the PMechDB label maxima
-    are 6 and 2).
+    defined), which is what was measured. The spec text was aligned after the build (three
+    sentences of v9.1, no version change): the placeholder bullet now states the law, the
+    dative bullet adds the clause that the side's net charge stays >= 0, and the decoder's caps
+    are the training part's label maxima (6 bonds and 2 atoms on PMechDB), the version-9 caps
+    8 and 2 being the legacy setting.
 - **Gate support.** A token build compares every token file it replaces field by field
   (`tokens.legacy_differences`, NaN-aware and exact, the schema number and the fields only the
   new file has left out) and counts the files whose stored fields changed
