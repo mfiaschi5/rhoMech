@@ -21,7 +21,7 @@ from rich.table import Table
 
 from ksmech.data import chem
 from ksmech.data import provenance as prov
-from ksmech.data.io import DEFAULT_PROCESSED_DIR, steps_path
+from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir, steps_path
 from ksmech.data.provenance import StaleArtifact
 from ksmech.orbitals.classify import UNRESOLVED_TYPES, ClassifyConfig, OrbitalType
 from ksmech.orbitals.descriptors import feature_names
@@ -605,6 +605,9 @@ def build_dataset(
     out = Path(config.out_dir) / SUMMARY_NAME
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(summary, indent=1) + "\n")
+    per_source = source_dir(source, processed_dir) / "tokens_summary.json"  # kept per source
+    if per_source.parent.is_dir():
+        per_source.write_text(json.dumps(summary, indent=1) + "\n")
     print_summary(summary, console, show_worst=summary["occupied_unresolved_fraction"] > 0.10)
     console.print(f"wrote summary: {out}")
     return summary

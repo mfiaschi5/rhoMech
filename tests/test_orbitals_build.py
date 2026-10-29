@@ -54,6 +54,7 @@ def test_build_skips_missing_records_and_writes_summary(dataset):
     assert summary["n_built"] == 3 and summary["n_missing_qm"] == 1 and summary["n_failed"] == 0
     assert len(list(config.out_dir.glob("*.npz"))) == 3
     on_disk = json.loads((config.out_dir / build.SUMMARY_NAME).read_text())
+    assert json.loads((processed / "pmechdb" / "tokens_summary.json").read_text()) == on_disk
     assert on_disk["n_missing_qm"] == 1 and on_disk["method"] == config.method
     assert summary["type_counts"]["occupied"]["delocalized_pi"] == 3  # benzene
     assert summary["type_counts"]["virtual"]["sigma_star"] >= 2
