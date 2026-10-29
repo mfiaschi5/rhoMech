@@ -1,8 +1,9 @@
-# Reaction networks: searching towards a product and without one, several valid outcomes, a thermodynamic stop
+# Reaction networks: searching towards a product and without one, several valid outcomes, a thermodynamic stop, the previous step, graph search
 
-Status: proposed 2026-10-29; nothing implemented. To start after P0b of `docs/open_shell_plan.md`.
-Nothing here changes the loss or the training presets, so the P0b comparison (GENERAL against
-LEGACY) stays paired. Written on branch `claude/reaction-network-plan` from main f6aa758: the
+Status: proposed 2026-10-29, extended the same day with the previous-step model (item H) and
+the graph search (item I); nothing implemented. To start after P0b of `docs/open_shell_plan.md`.
+Nothing here changes the forward model's loss or the training presets, so the P0b comparison
+(GENERAL against LEGACY) stays paired. Written on branch `claude/reaction-network-plan` from main f6aa758: the
 open-shell plan, `eval/paired.py`, the closed_base cohort and the v18 store it cites are on
 `claude/open-shell-p0b` until that branch is merged.
 
@@ -83,9 +84,14 @@ channel counts as a negative.
 - **The network exists in the server** (`serve/predict/network.py`, pure: no file I/O, no RDKit).
   Nodes are pool states merged by pool key (the multiset of sigma keys, so up to resonance);
   edges are elementary steps with the predictor's log p. `NetParams`: beam 5, `max_steps` 8,
-  `max_nodes` 200, turnover cycles detected, pathways ranked by summed log weights. Terminal
-  reasons: NO_CANDIDATES, NO_APPLICABLE_PROPOSAL, TURNOVER, MAX_STEPS, NODE_BUDGET.
-  `NetParams.temperature` is the predictor's softmax temperature, not a physical one.
+  `max_nodes` 200, turnover cycles detected. The graph grows by a layered beam that does not
+  know any target; `rank_pathways` then lists simple paths best-first by summed log weights
+  with a priority queue. Terminal reasons: NO_CANDIDATES, NO_APPLICABLE_PROPOSAL, TURNOVER,
+  MAX_STEPS, NODE_BUDGET. `NetParams.temperature` is the predictor's softmax temperature, not a
+  physical one.
+- **The graph is implicit and expanding a node costs seconds**: xTB for new molecules (cached by
+  canonical SMILES), tokens, and the model (0.6-0.8 s per sample on CPU in the P0b decodes). The
+  measure of a search algorithm is the number of nodes it expands.
 - **No target, no stop, no reverse steps.** The network has no goal. END_MECH is not read
   (`serve/predict/network_predictor.py`), and no source has stop labels, so the stop head has
   never been trained, on ReactMech either (`val_p_stop` is an untrained output). Only the
@@ -93,7 +99,9 @@ channel counts as a negative.
 - **The engine never imports `ksmech.serve`**, so a headless evaluation on benchmarks cannot use
   the server's network as it stands.
 - **QM records** hold the GFN2 energy (`energy_ha`) with ALPB water for every calculation and one
-  conformer. There is no Hessian, so no free energy, and no other solvent.
+  conformer. There is no Hessian, so no free energy, and no other solvent. The batch computes the
+  fragments of both sides of every step (`qm/batch.collect_molecules` reads `reactants_smiles`
+  and `products_smiles`), so product species have records.
 - **No conditions.** `conditions` is null in PMechDB and in the ReactMech pilot. The PMechRP human
   benchmark (`data/raw/pmechrp/pathway_datasets/human_benchmark/pathways/350_HumanBenchmark.csv`,
   350 pathways from Clayden, 2-7 steps, mean 3.0) gives a temperature on 168 rows ("n/a" on the
@@ -143,15 +151,15 @@ channel counts as a negative.
 - Arrival test on two levels: the exact sigma key, or the heavy-atom skeleton without H and
   charges (up to proton transfers, since datasets often draw the worked-up neutral product).
   Terminal reason TARGET_REACHED with its level.
-- Guidance from the start: the atom map reactants -> target (an atom mapper) gives
-  dB = B_target - B_current; best-first search with cost -log p plus a weight times the remaining
-  dB (the weight a flag). Detours (protonate to activate, then deprotonate) cost but are allowed;
-  this is bookkeeping, not a chemical rule. Where mapping fails, a map-free similarity to the
-  target, counted under MAPPING_FAILED.
-- Best-first replaces the layered beam, which prunes unlikely but productive branches.
+- The atom map reactants -> target (an atom mapper) gives dB = B_target - B_current, the change
+  still to make. Detours (protonate to activate, then deprotonate) cost but are allowed; this is
+  bookkeeping, not a chemical rule. Where mapping fails, a map-free similarity to the target,
+  counted under MAPPING_FAILED.
+- The search itself is item I1 (A* with the remaining dB, then bidirectional with item H); it
+  replaces the layered beam, which prunes unlikely but productive branches.
 - Output: the pathways that reach the target with p(pathway | reaches) = p(pathway) /
   sum over reaching pathways, i.e. the alternative mechanisms of one transformation with their
-  relative weights.
+  relative weights (items I2 and I3).
 
 ### E. Prediction without a product (medium)
 
@@ -162,9 +170,10 @@ channel counts as a negative.
   Boltzmann over the pools: the model shapes the pathways, QM fixes where they end.
 - The explored graph as a Markov chain: absorption probabilities by a sparse linear solve
   (scipy.sparse). Absorbing states: sinks at T (item F), turnover, no outgoing step.
-- Exploration by probability mass instead of a beam: expand the unexpanded node most likely to be
-  reached, stop when the unexplored mass is below a flagged tolerance, and report that mass as
-  the uncertainty. The enolate, unlikely but the only way to the aldol, is no longer pruned.
+- Exploration by probability mass instead of a beam (item I4): expand the unexpanded node most
+  likely to be reached, stop when the unexplored mass is below a flagged tolerance, and report
+  that mass as the uncertainty. The enolate, unlikely but the only way to the aldol, is no longer
+  pruned.
 - Reservoir species: always available, never consumed, with their chemical potential in the G
   balance. Without them a pool runs out of reactants after one bimolecular step.
 - Network predictor only: floor and gbdt scores are not probabilities.
@@ -202,30 +211,126 @@ channel counts as a negative.
 - ORD_USPTO (133 transformations) and mech-USPTO-31K (never trained on) as final tests.
 - Every new file inspected first and documented in `docs/data_schema.md`.
 
-### H. Documents and tests
+### H. The previous step (backward model; medium, with training)
 
-- The spec (`docs/ksmech_architecture.tex`), "Inference": the target mode, the Markov chain and
-  the thermodynamic stop. Edited only while no build runs (tracked edits make artifacts stale).
+- **The object is the same.** If B_child = B_parent + R, the previous step seen from the child is
+  -R, an elementary step by microscopic reversibility, on the same atoms and under the same laws.
+  Its anchor is a bond that forms in -R, i.e. one the forward step broke; when the forward step
+  broke none (a pure addition), -R forms none and its -1 entries are the anchors, as the loss
+  already allows.
+- **A separate model, not the forward model run on -R.** The forward model scoring -R at the
+  child gives the probability that the child reverts (the reversibility used for the reverse
+  edges of item E), not where it came from. At equilibrium the two coincide (detailed balance);
+  the datasets are trajectories directed from reactants to products, and the backward model
+  learns exactly that direction. Example: from a tetrahedral intermediate the forward model says
+  what it does next (expel the leaving group or revert), the backward model says where it came
+  from (the reverse of the addition). Going back is more ambiguous (an alkoxide can come from a
+  deprotonation, an addition to a carbonyl or an epoxide opening), so its top-1 will be lower
+  than the forward one.
+- **Data.** QM already covers the product species (section 3); token coverage of every product
+  species is checked first. Labels: the edit-label build with the sides swapped, the class of -R
+  on the product pool with its resonance drawings and the symmetry closure. A separate backward
+  store; the molecule split already groups the molecules of both sides, so no leakage.
+- **Model.** The same architecture, first as a separate model (a direction option of
+  `ksmech-train fit`), 3 seeds; then one encoder with the direction as an input, so every
+  recorded step gives two examples, if the paired comparison says it helps.
+- **Decode and evaluation.** The same decoder, with B_parent = B_child - R checked by the same
+  laws (octet, charges); backward top-k on the molecule split, compared with the P0b tools.
+- **The full pool.** Going back starts from the child's whole pool, the product with its
+  by-products (Cl-, water, salts), or the atoms do not balance. Dataset pools are complete. With
+  the reactants known, the atom balance reactants - product gives the by-products' formula, the
+  atom map says which atoms they hold, and their protonation states are enumerated at fixed total
+  charge. From a product alone, without reactants, it becomes mechanistic retrosynthesis: out of
+  scope (section 8).
+- **Uses**, in order of value: the bidirectional search (I1); the round-trip check, a forward
+  step trusted more when the backward model, from the child, finds the parent again (I5); more
+  signal for a shared encoder; completing a mechanism with a missing step, from a known
+  intermediate (the step targets of the human benchmark).
+
+### I. Graph search over the network (medium)
+
+The network is an implicit graph that the models generate on demand: nodes are pool states,
+edges elementary steps. In the pool graph a step that joins two branches (A -> B, C -> D,
+B + D -> E) is still one simple path, because the pool holds every molecule, so no AND-OR search
+over species is needed. Each question gets its algorithm:
+
+- **I1. One pathway from reactants to product.** A* with edge cost -log p and the heuristic
+  "remaining dB divided by the most entries one step can change", a lower bound on the steps
+  left, so A* stays exact. Then bidirectional search: forward from the reactants with the
+  forward model, backward from the full product pool with the backward model (item H), meeting
+  on the pool key. With b candidates per state and d steps the cost falls from about b^d to
+  about 2 b^(d/2) (b = 20, d = 6: about 16,000 expansions instead of 64 million), and a step
+  that is unlikely but needed (the enolate on the way to the aldol) only has to appear among the
+  candidates of one state instead of surviving the beam for several layers. A pathway found from
+  two sides is rescored with one criterion (I5) before it is ranked.
+- **I2. Several alternative mechanisms.** The k best pathways: Yen and Eppstein on the explored
+  graph, K* (lazy, A*-driven) on the implicit one. Two pathways that differ only in the order of
+  independent steps (two proton transfers) are one mechanism: the dependency DAG of spec v9
+  defines the classes, and the enumeration yields classes, not permutations (partial-order
+  reduction). Output: k distinct mechanisms with p(pathway | reaches).
+- **I3. All pathways, each with its weight.** Transition path theory on the Markov chain of item
+  E: the forward committor q+(x), the probability of reaching the product before returning to
+  the reactants, by a sparse linear solve; the reactive flux on each edge; its decomposition
+  into dominant pathways by repeatedly extracting the largest-bottleneck path, each with its
+  share of the flux. The committor of each intermediate also says how productive it is. This is
+  the probabilistic form of I1: the ensemble of mechanisms, weighted, instead of one pathway.
+- **I4. What forms, without a product.** Best-first by probability mass (item E), deterministic
+  and with the unexplored mass as its error bound. Option behind a flag: Monte Carlo tree search,
+  rollouts with the forward model, the end states valued by their thermodynamic stability (item
+  F) or by END_MECH once trained, UCT keeping improbable branches explored; for deep networks
+  where the mass expansion is too slow.
+- **I5. How the models enter the search.**
+  - Edge cost -log p_forward(R | parent) - lambda log p_backward(-R | child), lambda a flag whose
+    default an ablation sets (the two models normalize differently). Disagreement between them
+    marks the steps to review in curation and to weigh less in the network.
+  - Thermodynamics as a constraint (sinks at T, the climb budget of item F), never as an
+    additive cost, which would mix two units.
+  - Heuristic towards the target: the remaining dB (exact A*), or a learned value function
+    (faster, not exact; section 6).
+  - Cost: frontier nodes expanded in batches in one model pass on the GPU, QM in parallel
+    workers over the existing cache; budgets (nodes, depth) are flags and every cut is counted.
+
+### J. Documents and tests
+
+- The spec (`docs/ksmech_architecture.tex`), "Inference": the target mode, the Markov chain, the
+  thermodynamic stop, the backward model and the search algorithms. Edited only while no build
+  runs (tracked edits make artifacts stale).
 - `docs/decisions.md`: D1-D3 and every later choice, with dates.
-- Tests: thermochemistry on the fixed molecule set and on the OPEN_SHELL list; network, chain,
-  reverse edges and sinks with the server's synthetic chemistry; detailed balance as a law test
-  (the stationary distribution equals Boltzmann).
+- Tests: thermochemistry on the fixed molecule set and on the OPEN_SHELL list; backward labels on
+  the fixed set (applying -R to the product pool gives the reactant pool back); network, chain,
+  reverse edges and sinks with the server's synthetic chemistry; laws as tests: detailed balance
+  (the stationary distribution equals Boltzmann), flux conservation in transition path theory,
+  A* with the dB heuristic returning the same best pathway as exhaustive search on small
+  synthetic graphs, and the k-pathway classes invariant under permuting independent steps.
 
 ## 5. Evaluation
 
-- With a product: arrival rate (exact and up to protons), step targets found, rank of the
-  recorded pathway compared as the set of steps plus the final pool (spec v9, "Inference").
+- With a product: arrival rate within a node budget (exact and up to protons), step targets
+  found, rank of the recorded pathway compared as the set of steps plus the final pool (spec v9,
+  "Inference"), nodes expanded. A*, bidirectional search and the k-pathway classes are compared
+  on the same budgets.
 - Without a product: top-k final pool against the recorded outcomes (multi-reference),
   calibration of the outcome probabilities.
+- All pathways: the share of the reactive flux (I3) on the recorded pathway's class.
+- Backward model: backward top-k on the molecule split (3 seeds, paired); the round-trip check
+  as a reranker of the forward beam, forward top-1 on val with and without it.
 - Stop: false sinks on recorded reactions (about zero); true sinks on a small set of negative
   controls (pools known not to react at a given temperature), to be built, since the datasets
   hold only reactions that happened.
+- Benchmarks: the 350 human pathways with their step targets, the ReactMech chains once
+  ingested (item G), mech-USPTO-31K.
 
 ## 6. Later (needs training)
 
 - The stop head, trained on the labels of item G.
 - A target-conditioned policy: dB as a pair-track channel, trained on the ReactMech and FlowER
   chains, with every later state of a pathway used as a target.
+- A learned value function for the search (I5), without pathway data: solve the reactant ->
+  product pairs of USPTO (millions, no mechanism; those of mech-USPTO-31K excluded, it stays the
+  test) with the search, train the value function on the pathways found, then the step models,
+  and repeat (expert iteration). The risk is the model reinforcing its own errors, so the found
+  pathways are filtered by thermodynamics and by the round-trip check, and measured only on
+  benchmarks the loop never used.
 - Conditions as inputs, once a source has them.
 - Kinetics (barriers), if the climb bound needs it.
 
@@ -233,12 +338,18 @@ channel counts as a negative.
 
 1. A: small and useful at once.
 2. G and B in parallel: data work, and the thermochemistry batch runs for hours.
-3. C, then D, then E, then F.
-4. Evaluation (section 5) and calibration of the flags.
-5. Section 6, with new training runs.
+3. C, then D with I1 as A* on the forward model, and I2: no new training.
+4. H: backward labels and store, 3-seed training, backward top-k, then the round-trip reranker.
+5. I1 bidirectional.
+6. E and F, then I3 and I4 on the Markov chain.
+7. Evaluation (section 5) and calibration of the flags.
+8. Section 6, with new training runs.
 
 ## 8. Not doing
 
 - A loss over any valid outcome for chemically distinct outcomes (D1).
 - A kinetic stop (D2).
 - Cutting edges because they are uphill.
+- The previous step from a product alone, without the reactants (mechanistic retrosynthesis).
+- An AND-OR search over a species hypergraph: the pool graph keeps joined branches as simple
+  paths.
