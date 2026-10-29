@@ -6644,3 +6644,87 @@ Phase P0b of `docs/open_shell_plan.md`, on branch `claude/open-shell-p0b` (from
   fine-grained read-only token scoped to this repository, which is deleted from the pod after
   the download, as was done with the GitHub deploy key. The staging script is not in the repo:
   the README and this entry describe the layout.
+
+## 2026-10-29: P0b general runs on the pod, and the cross-source evaluation
+
+Plan step 3 of P0b (`docs/open_shell_plan.md`), on a RunPod RTX 5090. The code went over as a
+git bundle of `claude/open-shell-p0b` (`uv sync --no-group rocm --group cuda`, torch
+2.14.1+cu130). The data came from the private Hugging Face dataset (previous entry), and every
+sha256 was verified. All runs use dense_plain: dense encoder, `--no-resonance-draws`, 30 epochs,
+molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each. Timings:
+- PMechDB: 75 min a run.
+- ReactMech pilot: 95 min a run (15,330 steps by the padded-cell budget).
+- A decode on CPU (8 threads, 0.6-0.8 s a sample): about 10 min for 1,238 samples.
+
+- **User decisions.**
+  - General first, PMechDB alone, then general on the ReactMech pilot alone, right after
+    ("niente pmechdb solo reactmech"). Then legacy on both sources, separately.
+  - Before legacy, a cross-source evaluation of the general models ("to measure the out of
+    distribution"). The legacy lanes were then started while the last decodes still ran on
+    CPU.
+  - The stop weight keeps its default: 0 on PMechDB, 0.5 on ReactMech.
+- **General on PMechDB, full-R decode on closed_base val** (1,238 samples, best.pt at epochs
+  17, 24 and 21). Top-1/3/5 by seed: 67.7/86.2/88.6, 64.1/82.3/84.4 and 65.1/82.2/86.9, a mean
+  top-1 of 65.6. The old checkpoints on the same samples:
+  - flex_first: 62.9. McNemar on the majority-of-seeds hits: 94 losses, 129 wins, p 0.011
+    that general is better.
+  - joint sparse_resonance: 61.6, with 81 losses and 132 wins, p 0.0003.
+  Those were trained on v15 / v17 (the joint also on ReactMech), so this is context, not the
+  P0b decision, which is general vs legacy on v18.
+- **Decode caps.**
+  - PMechDB: the label caps (6-2-48) and the legacy ones (8-2-48) give identical ranks on
+    every val sample, in all three seeds.
+  - ReactMech: the label caps are 8-3-48. A third changed atom lets more candidates compete,
+    and it costs 2, 2 and 5 top-1 hits per seed, never gains one.
+  The caps stay legacy.
+- **General on ReactMech**: val anchor top-1 is 95.4, 95.4 and 95.3 at epochs 21, 17 and 23.
+  Full-R decode on val (911 samples): 94.7, 92.9 and 94.4, a mean of 94.0.
+- **Cross-source evaluation** (val only, the test parts untouched). Each checkpoint carries
+  its own feature and pair statistics, so `ksmech-eval decode --run-source A --source B`
+  normalizes B's samples as A's training did. Full-R top-1, mean of three seeds:
+
+  | trained on \ evaluated on | PMechDB closed_base val | ReactMech val |
+  |---|---|---|
+  | PMechDB | 65.6 | 52.3 |
+  | ReactMech | 27.7 | 94.0 |
+
+  Both cross arms fail the paired comparison against the source's own models
+  (`ksmech-eval compare`):
+  - on ReactMech: -41.7 points, 371 vs 5 discordant, p 4e-103;
+  - on PMechDB: -38.0 points, 547 vs 67 discordant, p 7e-95.
+  Split by distance from the model's training part:
+  - "shared": a non-trivial molecule (> 3 heavy atoms) in common;
+  - "new element": an element no training step has;
+  - "novel": neither.
+
+  | model -> val | novel | shared molecule | new element |
+  |---|---|---|---|
+  | PMechDB -> PMechDB | 66.2 (1,213) | - | 37.3 (25; As, Ca) |
+  | PMechDB -> ReactMech | 53.0 (849) | 54.1 (45) | 5.6 (30; Cr, Ni, Pd) |
+  | ReactMech -> ReactMech | 95.3 (895) | - | 20.8 (16; K) |
+  | ReactMech -> PMechDB | 27.6 (1,159) | 38.1 (14) | 26.2 (70; As, Ca, Cu, K, Sn, Ti, Zn) |
+
+- **Reading.**
+  - The two sources barely overlap: 45 ReactMech val steps share a molecule with PMechDB
+    train, and 14 the other way. So the cross arms measure transfer to another distribution
+    almost entirely.
+  - Transfer is asymmetric. PMechDB's broad set keeps 80% of its in-distribution top-1 on
+    ReactMech (53.0 vs 66.2 on novel steps) but stays 42 points below ReactMech's own
+    models.
+  - The ReactMech pilot's narrow set does not reach PMechDB (27.6). Its 94% in distribution
+    says that its molecule split still holds out molecules within known reaction templates.
+    Leave-one-class-out (`loco`, `loco_all`) is the out-of-distribution measure inside
+    ReactMech.
+  - An unseen element (an untrained z embedding) is worst where it is in the edit, meaning a
+    mapped atom of it changes a bond or its charge. Top-1 by where the unseen element sits:
+
+    | model -> val | in the edit | spectator |
+    |---|---|---|
+    | PMechDB -> ReactMech (Cr, Ni, Pd) | 0.0 (25) | 33.3 (5) |
+    | PMechDB -> PMechDB (As, Ca) | 20.8 (8) | 45.1 (17) |
+    | ReactMech -> PMechDB | 22.9 (16) | 27.2 (54) |
+    | ReactMech -> ReactMech (K) | - | 20.8 (16) |
+
+    A spectator costs too, but less; the counts are small. Within ReactMech, the K steps fall
+    from 95 to 21.
+  - Not done: k-fold or leave-one-class-out retraining, which needs new runs.
