@@ -50,9 +50,10 @@ input:
 - the spectral set: (energy, weight) over the canonical MOs of the block, weight >= 0.01, at
   most 8 entries, renormalized. It is embedded by a set encoder.
 
-The LMO energy E_r, the full spectrum (which the gap kernel G uses), the centroid, the centre
-atoms and the coefficient vector are bookkeeping. An orbital inherits its atoms' embeddings
-through its centre weights.
+The full spectrum (which the gap kernel G uses), the centroid, the centre atoms and the
+coefficient vector are bookkeeping. The LMO energy E_r and the spectral weight the set keeps
+before renormalizing are stored as inputs a model selects (`ModelConfig.orbital_extra`, off by
+default; spec v9.1). An orbital inherits its atoms' embeddings through its centre weights.
 
 An atom token's model input:
 
@@ -61,7 +62,9 @@ An atom token's model input:
 - frozen-orbital f+ and f-;
 - the finite-difference dual descriptor;
 - the frontier weights for HOMO-1, HOMO, LUMO and LUMO+1, with degenerate blocks within
-  0.05 eV summed;
+  0.05 eV summed (a second set with blocks within 1e-4 eV is stored beside it,
+  `ModelConfig.frontier_blocks = 'exact'`; the finite-difference f+ / f- are stored too,
+  unselected);
 - %Vbur;
 - the chirality sign, set only where the SMILES specifies the stereocentre.
 
@@ -79,7 +82,10 @@ They serve tests (`pytest -m diagnostic`), alignment diagnostics, the interface 
 "added back as input" ablations. They never decide which arrows are legal: the arrow
 candidate masks use descriptors. A donor is a doubly occupied token. An acceptor is an empty
 token that is not a d-type polarization function (unless configured) and not the
-antibonding partner of the donor's own bond. Until the radical extension, a token with
+antibonding partner of the donor's own bond. Since v18 these exclusions are stored as 0/1 pair
+flags on every cell (`physics.pairs.pair_flags`) rather than deleting the cells:
+`ModelConfig.pair_cells = 'valid'` (default) reads only the `pair_valid` cells, as before;
+`'all'` reads every cell with the flags as channels. Until the radical extension, a token with
 0.2 < n < 1.8 (a SOMO, or a Fermi-smeared level) is neither; its fractional occupation stays
 the continuous input. A molecule with an MO more than 0.05 from its aufbau occupation is
 flagged `fermi_smeared`: its GFN2 gap vanishes and it lies outside the closed-shell domain.
@@ -115,6 +121,14 @@ ranked a step's first arrow worse than G alone.
 | FlowER dataset | About 2.14M numeric-suffix lines (train+val+test). Scale-up. Its RS/RC lines (RMechDB, radical steps) are the open-shell plan's source. |
 | mech-USPTO-31K | Held-out benchmark. Never trained on. |
 | QMugs | QM pretraining. |
+
+Ingest screens every step with one law per domain phenomenon, for every element and parity
+(`data.domain`, spec v9.1): a -1 on a four-bonded group-14 atom is removed; an onium bonded to
+a metal or B is a dative donor and the acceptor is re-charged where that leaves the fragment
+even, the side's net charge >= 0 and both sides' totals equal (rule 'D dative onium->M'); a
+non-s-block metal with exactly one neighbour and charge <= 0 is a ligand-dropped placeholder
+(METAL_PLACEHOLDER) unless it compensates an onium donor (ML1); an even fragment with a 3d
+metal left d1-d9 by the bookkeeping is flagged METAL_SUSPECT (`domain_class`), never excluded.
 
 ## Engineering rules
 
@@ -165,7 +179,7 @@ Main CLI entry points are added phase by phase and listed here as they land:
   files as `split_frozen_<strategy>.json`, FROZEN_SPLIT_SCHEMA, no file inputs: `samples` then
   keeps every frozen step in its part, places new groups by hash and counts SPLIT_CONFLICT;
   a snapshot is replaced only by hand). The open-shell plan is `docs/open_shell_plan.md`.
-- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
+- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8 [--steps-from FILE]` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`; `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
   codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,
@@ -198,11 +212,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`)
 - Physics: `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--workers 8]
-  [--n-jobs 14]` (the fast LightGBM lambdarank reference on the geometry-free pair features over
+  [--n-jobs 14] [--cells valid|all]` (the fast LightGBM lambdarank reference on the geometry-free pair features over
   all training, ranking each step's first arrow: all positives + 20 hard (best by the gap kernel
   G) + 30 random negatives per step, early stopping on val top-5, the untrained gap kernel as the
   floor; `gbdt_lgbm_report_<split>_geomfree.json` with times and peak RSS, the models
-  `gbdt_lgbm_<split>_geomfree[_textbook-held-out].npz`; `--workers` load the samples, `--n-jobs`
+  `gbdt_lgbm_<split>_geomfree[_textbook-held-out].npz`; `--cells all`: every pair a candidate,
+  the exclusion flags as features, files tagged `_allcells`; `--workers` load the samples, `--n-jobs`
   LightGBM threads fit and score, one after the other), `uv run ksmech-physics textbook [--gbdt
   PATH] [--allow-stale]` (five textbook selectivity cases, expected vs top-3, with the untrained
   gap kernel and the two geometry-free LightGBM models of the molecule split, cases seen in a
@@ -251,20 +266,28 @@ Main CLI entry points are added phase by phase and listed here as they land:
   every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
   run)
-- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
-  anchors ranked by |G^atom| over the valid orbital pairs, no learned parameter, val and test
+- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]` (the physics floor:
+  anchors ranked by |G^atom| over the valid orbital pairs, or every pair, no learned parameter, val and test
   top-1/3/5, `anchor_floor_report_<split>.json` and per-sample `anchor_floor_ranks_<split>.json`),
   `uv run ksmech-eval decode --run NAME [--run-source pmechdb+reactmech] [--part val|test]
-  [--limit N] [--beam 5] [--scope all|inter]` (the beam decoder of
+  [--limit N] [--beam 5] [--scope all|inter] [--caps legacy|labels] [--max-bonds B --max-atoms A
+  --max-candidates C]` (the beam decoder of
   `model.decode` on the stored samples, B + R checked on the sample's Lewis structure: full-R
   top-1/3/5, a hit when a completion is a variant of the label class, the drop counts, the
-  checkpoint's and the view's sample versions (a mismatch warns);
+  checkpoint's and the view's sample versions (a mismatch warns); caps legacy = 8 bonds, 2
+  atoms, 48 candidates, labels = the label maxima of --source's training part, caps other than
+  legacy tag the files `_caps<b>-<a>-<c>`;
   `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
   `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
   it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
   `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared` (with and without), and
-  report the covered fraction; `uv run ksmech-physics gbdt --score-only` scores the stored
-  ranker of `--split` without a refit (`gbdt_lgbm_ranks_<split>_geomfree.json`); `uv run ksmech-eval embedding --run NAME
+  report the covered fraction; `uv run ksmech-physics gbdt --score-only [--model PATH
+  --allow-stale]` scores the stored ranker of `--split` (or a reference copy) without a refit
+  (`gbdt_lgbm_ranks_<split>_geomfree[_<model>].json`); P0a: `uv run python scripts/p0a_changes.py
+  --source S` (every step the P0a build changed, removed, returned or flagged, by rule,
+  `p0a_changes.json`, against the v17 copy in `data/processed_v17/`), `uv run python
+  scripts/probes/dative_audit.py` (the 20-case oxidation-state audit of the dative law,
+  read-only); `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
   under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts
