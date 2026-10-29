@@ -12,7 +12,10 @@ compared with.
 `decode` runs the beam decoder (`model.decode`) on the stored samples of one part and scores the
 full reaction matrix: a hit at k when one of the k best completions is a variant of the label
 class (`eval.decode`). It writes `decode_report_<split>_<part>[_n<limit>].json` next to the
-checkpoint.
+checkpoint. `--caps legacy` (the default: at most 8 bond and 2 atom changes, 48 candidates)
+or `--caps labels` (the label maxima of the training part of --source, never val or test),
+then `--max-bonds`, `--max-atoms`, `--max-candidates`; the header records the caps, and caps
+other than the legacy ones add `_caps<bonds>-<atoms>-<candidates>` to the file names.
 
 `embedding` traces one sample through a trained model (`eval.embedding`) and writes one
 self-contained HTML page (`eval.embedding_page`): the tokens on the Lewis structure, the parts
@@ -83,6 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _decode_parser(sub) -> None:
+    from ksmech.eval.decode import CAP_FIELDS, CAPS
+
     d = sub.add_parser("decode", help="the beam decoder on stored samples: full-R top-k")
     d.add_argument("--run", required=True, help="training run under <models-dir>/<run-source>/")
     d.add_argument("--checkpoint", default="best", choices=["best", "last"])
@@ -96,6 +101,10 @@ def _decode_parser(sub) -> None:
     d.add_argument("--beam", type=int, default=5, help="anchors completed and products kept each")
     d.add_argument("--scope", default="all", choices=["all", "inter"], help="inter: anchors "
                    "between two molecules only")  # fmt: skip
+    d.add_argument("--caps", default="legacy", choices=CAPS, help="legacy: 8 bond, 2 atom "
+                   "changes; labels: the label maxima of --source's training part")  # fmt: skip
+    for name in CAP_FIELDS:
+        d.add_argument(f"--{name.replace('_', '-')}", type=int, help="overrides --caps")
     d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     _cohort_args(d)
@@ -130,18 +139,31 @@ def _sample_versions(path: Path, payload: dict, console: Console) -> dict:
     return {"checkpoint_sample_version": trained, "view_sample_version": view}
 
 
+def _decode_caps(args) -> tuple[dict[str, int], dict[str, str]]:
+    """The caps of a decode (`eval.decode.decode_caps`: --caps, then the overrides) and, with
+    --caps labels, the training view of --source they are read from, an input of the report."""
+    from ksmech.arrows.steps import SAMPLE_VERSION
+    from ksmech.eval.decode import CAP_FIELDS, decode_caps
+
+    train = samples_path(args.source, f"{args.split}_train", args.processed_dir)
+    overrides = {name: getattr(args, name) for name in CAP_FIELDS}
+    caps = decode_caps(args.caps, train, SAMPLE_VERSION, overrides)
+    return caps, prov.file_input(train) if args.caps == "labels" else {}
+
+
 def cmd_decode(args, console: Console) -> int:
     from ksmech.eval.decode import decode_report, sample_decoder
     from ksmech.model.decode import DecodeConfig
     from ksmech.train.loop import load_model
 
+    caps, caps_input = _decode_caps(args)
     run_source = args.run_source or args.source
     ckpt = args.models_dir / run_source / args.run / f"{args.checkpoint}.pt"
     model, payload = load_model(ckpt, "cpu")
     path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
     ids = _cohort_ids(args, path)
     ids = ids[: args.limit] if args.limit is not None else ids
-    cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam)
+    cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam, **caps)
     samples = load_samples(path, ids=ids)
     report = decode_report(samples, sample_decoder(model, cfg, args.scope))
     hits = report.pop("per_sample")
@@ -149,12 +171,14 @@ def cmd_decode(args, console: Console) -> int:
     keys = ("source", "split", "part", "limit", "beam", "scope", "cohort", "slice")
     config = {k: getattr(args, k) for k in keys}
     config |= {"run_source": run_source, "checkpoint": _checkpoint_text(args.checkpoint, payload)}
-    config |= _sample_versions(path, payload, console)
-    inputs = prov.file_input(path) | prov.file_input(ckpt)
+    config |= _sample_versions(path, payload, console) | {"caps": args.caps, **caps}
+    inputs = prov.file_input(path) | prov.file_input(ckpt) | caps_input
     header = prov.stamp("decode", DECODE_VERSION, inputs, config)
     suffix = f"_{args.source}" if args.source != run_source else ""
     suffix += f"_{args.cohort}" if args.cohort != "all" else ""
     suffix += f"_n{args.limit}" if args.limit is not None else ""
+    if caps != {k: getattr(DecodeConfig(), k) for k in caps}:  # the legacy files stay as they are
+        suffix += "_caps{max_bonds}-{max_atoms}-{max_candidates}".format(**caps)
     out = ckpt.parent / f"decode_report_{args.split}_{args.part}{suffix}.json"
     prov.write_json(out, report, header)
     hits_out = ckpt.parent / f"decode_hits_{args.split}_{args.part}{suffix}.json"

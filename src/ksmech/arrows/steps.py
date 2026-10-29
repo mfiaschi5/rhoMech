@@ -59,6 +59,7 @@ from ksmech.arrows.delta_be import (
     StepEdit,
     class_shape,
     edit_label,
+    label_counts,
     step_edit,
     to_global,
 )
@@ -661,7 +662,9 @@ def frozen_excluded(frozen: dict[str, list[str]] | None, steps: list[ElementaryS
 
 def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> dict:
     """The counts of one split: steps, samples, skip reasons, edit-label class sizes and
-    anchor kinds, resonance drawings, orbital readings, ArrowLabels and filtered ArrowLabels."""
+    anchor kinds, the labels KEKULE_CLOSEST re-made or RESONANCE_CAP cut and the label maxima
+    (`delta_be.label_counts`), resonance drawings, orbital readings, ArrowLabels and filtered
+    ArrowLabels."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
     return {
@@ -670,6 +673,7 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
         **class_shape([s.edit_label for s in kept if s.edit_label]),
+        **label_counts([s.edit_label for s in kept if s.edit_label]),
         "symmetry": symmetry_report(kept),
         "drawings": drawing_report(kept),
         "orbital_reading": dict(Counter(s.orbital_reading for s in kept).most_common()),
@@ -744,6 +748,9 @@ def build_all_samples(
             for k in (
                 "class_size",
                 "anchor_kind",
+                "kekule_closest",
+                "resonance_truncated",
+                "label_maxima",
                 "symmetry",
                 "drawings",
                 "orbital_reading",

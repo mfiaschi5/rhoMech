@@ -79,7 +79,8 @@ def _structure(mol: Chem.Mol) -> tuple:
 
 def kekule_closest(drawn: Chem.Mol, form: Chem.Mol) -> Chem.Mol:
     """`form` (a resonance form of `drawn` on its atom indices) with its Kekule cycles relative
-    to `drawn` undone (`delta_be.without_kekule_cycles`): its charges and lone pairs, the drawn
+    to `drawn` undone (`delta_be.without_kekule_cycles`, the helper the product of a step
+    without arrows shares: `delta_be.mapped_closest`): its charges and lone pairs, the drawn
     bond orders wherever the form does not need others."""
     r = without_kekule_cycles(matrix_between(drawn, form), drawn)
     rw = Chem.RWMol(drawn)

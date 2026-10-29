@@ -1,12 +1,24 @@
-"""Steps without arrows (ReactMech): R from the two mapped sides, the moving hydrogens as atoms."""
+"""Steps without arrows (ReactMech): R from the two mapped sides, the moving hydrogens as atoms,
+the product in the Kekule structure closest to the reactant (rule KEKULE_CLOSEST)."""
 
 from dataclasses import replace
 
-from ksmech.arrows.delta_be import EditLabel, EditSkip, edit_label, reproduces
+import pytest
+from rdkit import Chem
+
+from ksmech.arrows.delta_be import (
+    EditLabel,
+    EditSkip,
+    dataset_matrix,
+    edit_label,
+    mapped_matrix,
+    reproduces,
+)
 from ksmech.arrows.hydrogens import explicit_moving_hydrogens, hydrogen_moves
 from ksmech.arrows.steps import READING_NO_ARROWS, MechanismSample, sample_for_step
 from ksmech.data import chem
 from ksmech.data.schema import ElementaryStep
+from tests.fixtures.molecules import MOLECULES
 from tests.test_arrows_delta_be import _by_map, _conserves_charge
 
 
@@ -110,3 +122,67 @@ def test_a_step_without_arrows_is_a_sample_anchored_on_the_moving_hydrogen(token
     assert maps == {(5, 6, "form")}
     (h,) = (g for g in range(s.n_atoms) if s.atom_map[g] == 6)
     assert s.atom_categorical[h, 0] == 1
+
+
+# the ring (maps 2-7) written in one Kekule structure on the reactant side, the other on the
+# product side, as RDKit's independent kekulization of each side may write it
+TOLUENE = _step(  # toluene deprotonated by amide; the moving H becomes atom 9
+    "[CH3:1][C:2]1=[CH:3][CH:4]=[CH:5][CH:6]=[CH:7]1.[NH2-:8]",
+    "[CH2-:1][C:2]1[CH:3]=[CH:4][CH:5]=[CH:6][CH:7]=1.[NH3:8]",
+)
+BENZYL = _step(  # hydroxide on benzyl chloride
+    "[OH-:9].[Cl:8][CH2:1][C:2]1=[CH:3][CH:4]=[CH:5][CH:6]=[CH:7]1",
+    "[OH:9][CH2:1][C:2]1[CH:3]=[CH:4][CH:5]=[CH:6][CH:7]=1.[Cl-:8]",
+)
+
+
+@pytest.mark.parametrize(
+    ("step", "want"),
+    [
+        (TOLUENE, ({(1, 9, -1), (8, 9, 1)}, {(1, 2), (8, -2)})),
+        (BENZYL, ({(1, 9, 1), (1, 8, -1)}, {(9, -2), (8, 2)})),
+    ],
+)
+def test_a_ring_kekulized_the_other_way_round_never_enters_r(step, want):
+    """The plain difference of the sides swaps all six ring bonds; R_data takes the product's
+    Kekule structure closest to the reactant (KEKULE_CLOSEST), so R has no entry on the ring
+    and the label is the step itself. Before the rule, toluene's label even put the charge in
+    the ring (the ortho carbanion was the cheapest member of a class built on the swap)."""
+    step = explicit_moving_hydrogens(step)
+    mol = chem.parse_mapped(step.reactants_smiles)
+    plain = mapped_matrix(mol, chem.parse_mapped(step.products_smiles))
+    ring = set(range(2, 8))
+    assert sum({i, j} <= ring for i, j, _ in _by_map(step, plain)[0]) == 6
+    *_, r_data, removed = dataset_matrix(step)
+    assert removed == 6 and r_data.size == plain.size - 6
+    label = edit_label(step)
+    assert isinstance(label, EditLabel) and label.kekule_closest == 6 and label.data_parsimonious
+    (r,) = label.variants
+    assert _by_map(step, r) == want
+    assert not {m for i, j, _ in _by_map(step, r)[0] for m in (i, j)} & ring
+    assert reproduces(step, mol, r) and _conserves_charge(r)
+
+
+def test_a_conjugate_addition_to_acrolein_keeps_its_r(monkeypatch):
+    """Cyanide adding 1,4 to acrolein (fixed set): its pi changes run along a chain, not round a
+    cycle, so R_data is the plain difference and the label is the one without the rule."""
+    import ksmech.arrows.delta_be as delta_be
+
+    step = _step("[CH2:1]=[CH:2][CH:3]=[O:4].[C-:5]#[N:6]", "[N:6]#[C:5][CH2:1][CH:2]=[CH:3][O-:4]")
+    acrolein = Chem.MolFromSmiles(step.reactants_smiles.split(".")[0])
+    for atom in acrolein.GetAtoms():
+        atom.SetAtomMapNum(0)
+    assert Chem.MolToSmiles(acrolein) == Chem.CanonSmiles(MOLECULES["acrolein"])
+    mol, _, r_data, removed = dataset_matrix(step)
+    assert removed == 0 and r_data == mapped_matrix(mol, chem.parse_mapped(step.products_smiles))
+    assert _by_map(step, r_data) == (
+        {(1, 5, 1), (1, 2, -1), (2, 3, 1), (3, 4, -1)},
+        {(5, -2), (4, 2)},
+    )
+    label = edit_label(step)
+    assert isinstance(label, EditLabel) and label.kekule_closest == 0
+    for r in label.variants:
+        assert reproduces(step, mol, r) and _conserves_charge(r)
+    plain = lambda reac, prod: (delta_be.mapped_matrix(reac, prod), 0)  # noqa: E731
+    monkeypatch.setattr(delta_be, "mapped_closest", plain)
+    assert edit_label(step) == label

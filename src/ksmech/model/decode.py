@@ -52,6 +52,9 @@ ZERO = 1  # the class index of 0 in both
 
 @dataclass(frozen=True)
 class DecodeConfig:
+    """The defaults of the three caps are the legacy ones (spec v9.1); `ksmech-eval decode
+    --caps labels` sets max_bonds and max_atoms per source (`eval.decode.decode_caps`)."""
+
     anchors: int = 5  # B
     per_anchor: int = 5  # products kept per anchor
     max_bonds: int = 8  # bond changes of one R, the anchor included (C_max)

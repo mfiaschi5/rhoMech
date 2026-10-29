@@ -10,13 +10,21 @@ valence electrons, H and He over 2), FORMAL_CHARGE_RANGE (a non-metal it touches
 RESONANCE_ONLY_STEP (no atom changes its sigma bonds or H: the sigma keys with the atom maps
 agree). The product key is the map-free sigma key of the pool (`data.resonance.sigma_key`), so
 completions that draw the same products differently merge, as serve's pool key merges them.
+
+The caps of the search (`decode_caps`): `legacy` keeps DecodeConfig's fixed 8 bond and 2 atom
+changes; `labels` takes the label maxima of the training part of the source decoded (the
+largest bond and atom counts of a label's smallest variant, `delta_be.label_counts`, written
+by the sample builder into each part's report), never of val or test. max_candidates stays 48
+unless overridden (spec v9.1, "fixed decoder caps" against caps per source).
 """
 
 from __future__ import annotations
 
+import json
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 
 import numpy as np
 from rdkit import Chem, rdBase
@@ -24,10 +32,49 @@ from rdkit import Chem, rdBase
 from ksmech.arrows.delta_be import EditLabel
 from ksmech.arrows.lewis import MAX_ORDER
 from ksmech.arrows.symmetry import lewis_mol
+from ksmech.data import provenance as prov
 from ksmech.data.resonance import sigma_key
 from ksmech.model.decode import NONMETALS, Apply, Completion, DecodeConfig, decode_pool
 
 Decode = Callable[[object, Counter], list[Completion]]
+CAPS = ("legacy", "labels")
+CAP_FIELDS = ("max_bonds", "max_atoms", "max_candidates")
+
+
+def caps_from_report(report: Mapping, where: str = "the report") -> dict[str, int]:
+    """max_bonds and max_atoms from a part's report (`arrows.steps.split_report`): its label
+    maxima. ValueError for a report written before them (a v17 store) or with no label."""
+    maxima = report.get("label_maxima")
+    if not maxima:
+        raise ValueError(f"{where} has no label maxima: rebuild the samples (ksmech-arrows)")
+    caps = {"max_bonds": int(maxima["bonds"]), "max_atoms": int(maxima["atoms"])}
+    if caps["max_bonds"] < 1:
+        raise ValueError(f"{where}: no labelled sample (label maxima {dict(maxima)})")
+    return caps
+
+
+def training_caps(view: Path, sample_version: int) -> dict[str, int]:
+    """The label maxima of a training view (`samples_<split>_train.json`), verified as every
+    view is read: kind, sample version, inputs and a clean build."""
+    prov.verify_clean(view, "samples", sample_version)
+    return caps_from_report(json.loads(Path(view).read_text())["report"], str(view))
+
+
+def decode_caps(
+    mode: str, train_view: Path, sample_version: int, overrides: Mapping[str, int | None]
+) -> dict[str, int]:
+    """max_bonds, max_atoms and max_candidates of a decode: DecodeConfig's defaults (legacy)
+    or the training part's label maxima (labels), then every override that is given."""
+    if mode not in CAPS:
+        raise ValueError(f"caps {mode!r}: one of {CAPS}")
+    legacy = DecodeConfig()
+    caps = {name: getattr(legacy, name) for name in CAP_FIELDS}
+    if mode == "labels":
+        caps |= training_caps(train_view, sample_version)
+    caps |= {k: int(v) for k, v in overrides.items() if k in CAP_FIELDS and v is not None}
+    if min(caps.values()) < 0 or caps["max_bonds"] < 1:
+        raise ValueError(f"caps {caps}: at least the anchor, no negative count")
+    return caps
 
 
 def _valence_limit(z: int) -> int | None:
