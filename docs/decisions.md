@@ -6375,6 +6375,61 @@ the GBDT reproduce; which default the GENERAL configuration takes is an ablation
   whose class also rewrites a spectator quinolinium-olate zwitterion into its neutral form,
   because the class is chosen by fewest formal charges over the whole product pool; so it was
   in v17 too (19 bonds, 3 atoms). An open label-cost question, not changed here.
+- **Unified domain laws (item 6), replacing R2 and the element- and parity-gated R3 / U5
+  repairs (`data.domain`).** (a) Dative law: an onium donor (a positively charged non-metal
+  other than C) bonded to an acceptor (a metal, or B); per acceptor u = its onium donors minus
+  the negative charge it carries (never below 0); in each fragment the acceptors' charges are
+  lowered by the largest j <= sum(u) that leaves the fragment's electron count even (Z + H -
+  charge, drawn radicals not corrected), the side's net charge >= 0 and both sides' totals
+  equal; the step then re-validates, else stays as drawn. Rule 'D dative onium->M' in
+  `charge_repair` and `charge_repairs.csv`. The literal form ('metal -1 per onium donor', only
+  the pool gate) was rejected on measurement: it would re-charge 101 PMechDB kept steps whose
+  drawn charge is right (Li, Na, K, Mg, Ca, Sc, Cu, Zn and B onium adducts such as [Li][O+]=C)
+  and 58 more ReactMech ones (51 [OH2+][Mg], 7 [OH2+]B), and leave odd two-onium Pd fragments
+  odd. (b) Placeholder law, any parity, checked first: a non-s-block metal with exactly one
+  neighbour (H counted) and charge <= 0, unless that neighbour is an onium donor it compensates
+  (ML1, [Pd-][P+]R3). A free atom or ion and MX+ with the charge on the metal ([Cl][Zn+]) are
+  defined species. (c) METAL_SUSPECT: an even fragment of a kept step with a first-row
+  transition metal (Sc to Cu) that the oxidation-state bookkeeping leaves d1-d9, flagged and
+  never excluded: 3d ligand-field splittings are comparable to the pairing energy, so the
+  closed-shell singlet the QM computes is an assumption (P2's scan measures them). (d)
+  `domain_class` (nullable STEP_SCHEMA column: REPAIRED_DATIVE, METAL_SUSPECT, joined by '+'
+  when both); `training_steps` takes a per-source admit set (`domain.ADMIT`, every class in
+  P0a), recorded in each view's provenance; `stats.json` counts every exclusion and class.
+  - **Oxidation-state bookkeeping (`domain.oxidation_state`, moved from the survey).** An
+    onium bond counts like any bond to a non-metal (its +1 cancels the metal's compensating
+    -1: [Pd-][P+]R3 reads Pd(0), NiCl2(PMe3)2 drawn [Ni-2] reads Ni(II)); metal-metal bonds
+    count both ways by Pauling electronegativity (the Gilman [Li][Cu](C)C reads Cu(I) d10,
+    not Cu(II)); RDKit dative bonds count 0. The survey's oracle counts are unchanged; its
+    per-row oxidation states now read the drawing as drawn (one test expectation changed:
+    Br[Pd-](Br)(C)[P+]Me3 reads Pd(III)).
+  - **Measured by a real ingest compared step by step with the v17 stores.** PMechDB: the
+    dative law changes 0 steps (the one repair is still R1); the placeholder law removes 24
+    kept steps (21 molecule-split train, 1 val, 2 resonance pairs; exactly the survey's
+    PLACEHOLDER_EVEN), keeps the 3 [Cl][Zn+] steps, moves the 8 Sn steps from RADICAL_DRAWN to
+    METAL_PLACEHOLDER and keeps the 24 old METAL_PLACEHOLDER; METAL_SUSPECT 0. Kept steps
+    12,935 -> 12,911, training steps 12,464 -> 12,442. ReactMech pilot: 49 kept steps
+    re-charged (25 Ni, 24 Pd; 20 train, 29 val), 205 excluded steps returned (109
+    METAL_PLACEHOLDER L1Pd(0), 96 OPEN_SHELL_METAL), 2 stay OPEN_SHELL_METAL, the 4 returned
+    steps with a spectator [Ag+] kept, METAL_SUSPECT 35 (Cr(IV) 10 test, Ni(II) 25: 9 train,
+    16 val); the other 9,736 steps are field-identical. No repair was dropped at
+    re-validation, and no fragment had two acceptors competing for the lowering.
+  - **The 20-case oxidation-state audit (`scripts/probes/dative_audit.py`, seed 0; EVEN 6,
+    ODD 7, L1PD 7), read by hand: all 20 correct.** EVEN: Ni(dppp)ArX Suzuki and
+    transmetalation drawings Ni(IV) d6 as drawn -> Ni(II) d8, and Ni(0)L2 + BnCl -> Ni(II).
+    ODD: Pd(III) d7 as drawn -> Pd(II) d8 in Buchwald-Hartwig amine complexes, the cationic
+    [PdAr(HNR2)(PR3)]+ keeping its halide counterion. L1PD: Pd(0)L <-> Pd(II)ArXL oxidative
+    additions and reductive eliminations. Each side's pool goes to 0. The census of all 254
+    repaired steps lands every fragment at Pd(0), Pd(II), Ni(0) or Ni(II), except six Pd(IV)
+    d6 C-H arylation intermediates (a palladacycle adding ArI: genuine) and one step,
+    `reactmech-4ad9ef86c572981f`, whose pool stays +1 (two cationic Pd(II)-PyOx fragments
+    drawn with one PF6-: a counterion the drawing omits, not electrons).
+  - **Spec wording.** Spec v9.1's bullet says "a non-alkali metal with at most one neighbour
+    ... except [Pd]-P+R3" and omits the charge clause; the code follows the plan's law
+    (non-s-block, exactly one neighbour, charge <= 0, ML1 compensated, free ions and MX+
+    defined), which is what was measured. The spec text is to be aligned (with the caps
+    parenthetical "8 and 2 on PMechDB", which are the legacy caps; the PMechDB label maxima
+    are 6 and 2).
 - **Gate support.** A token build compares every token file it replaces field by field
   (`tokens.legacy_differences`, NaN-aware and exact, the schema number and the fields only the
   new file has left out) and counts the files whose stored fields changed
