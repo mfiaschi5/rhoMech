@@ -210,7 +210,7 @@ Rejected records go to `data/processed/<source>/rejections.csv`, with columns `s
 ## Processed: `data/processed/<source>/samples/` and `samples_<split>.json`
 
 Written by `ksmech-arrows samples` (`ksmech.arrows.steps`, `ksmech.arrows.store`; schema
-`SAMPLE_VERSION` 15). The store holds every training step's sample once:
+`SAMPLE_VERSION` 18). The store holds every training step's sample once:
 
 - `samples/shard_00000.npz` ...: 256 samples each, members `<i>/<field>` and a JSON `meta`
   member, with a provenance header whose inputs are the steps parquet and every token file its
@@ -222,9 +222,10 @@ A split is a view, `samples_<strategy>_<part>.json` next to the store (its ids a
 the index and the split file as inputs); strategy `molecule` (default), `scaffold`,
 `loco-<class>` or, only when named, `random_leaky`; part `train`, `val`, `test`. Loaders refuse
 another schema version and stale or dirty artifacts (STALE_ARTIFACT). On disk the pair arrays
-keep the valid cells only (`pair_valid`): `pair_z` and `atom_coulomb` as float16, the 0/1
-features (`inter`, `bonded`) and `pair_defined` bit-packed, `atom_coulomb` as its upper
-triangle; in memory every array is dense float32 again.
+keep every (occupied, virtual) cell, flattened cell by cell (since v18; v17 kept the
+`pair_valid` cells only, about 89%): `pair_z` as float16 byte planes, the 0/1 features
+(`inter`, `bonded` and the three exclusion flags) and `pair_defined` bit-packed, `pair_valid`
+as the legacy mask; in memory every array is dense float32 again.
 
 One sample (`MechanismSample`), `A` atoms and `O` orbitals over all reactant fragments; global
 token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
@@ -234,21 +235,22 @@ token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
 | `step_id`, `source` | str | |
 | `fragment_keys` | list[str] | token-cache key (map-free canonical SMILES) of each fragment, in fragment order |
 | `atom_categorical` | int64, (A, 2) | atomic number, formal charge (record values) |
-| `atom_features`, `atom_missing` | float32 / bool, (A, F_a) | `atom_feature_names()`; missing values are 0 and flagged |
+| `atom_features`, `atom_missing` | float32 / bool, (A, F_a) | columns `atom_columns`; missing values are 0 and flagged |
+| `atom_columns` | tuple[str] | `orbitals.tokens.STORED_ATOM_FEATURES` (v18): the v17 inputs `atom_feature_names()`, then the extras `ATOM_EXTRA_FEATURES`: `f_plus`, `f_minus` (finite-difference, NaN -> missing when FUKUI_SCF_FAIL), `f_plus_fmo_exact`, `f_minus_fmo_exact`, `fmo_exact_<level>` (frontier blocks within 1e-4 eV). A model selects its columns by name (`model.inputs.token_columns`) |
 | `atom_fragment`, `orbital_fragment` | int64, (A,) / (O,) | fragment index |
 | `atom_map` | int64, (A,) | atom-map number of the drawn atom, 0 when unmapped or an implicit H |
 | `atom_positions`, `orbital_centroids` | float32, (A, 3) / (O, 3) | Angstrom, record geometries; for distances only |
-| `orbital_features` | float32, (O, F_o) | `feature_names()` |
+| `orbital_features` | float32, (O, F_o) | columns `orbital_columns` |
+| `orbital_columns` | tuple[str] | `orbitals.tokens.STORED_ORBITAL_FEATURES` (v18): `feature_names()`, then `retained_fraction` (the spectral weight kept before renormalization) and `energy_ev` (E_r) |
 | `orbital_spectra` | float32, (O, 8, 2) | (E eV, p) spectral set |
 | `orbital_occupied`, `donor_mask`, `acceptor_mask` | bool, (O,) | candidate masks (`CandidateConfig`); the donor-partner exclusion is in `pair_valid` |
 | `incidence` | float32, (E, 3) | rows (orbital index, atom index, weight) for every centre of every orbital |
-| `pair_z` | float32, (O_occ, O_virt, 11) | geometry-free pair features of every (occupied, virtual) pair, rows and columns in orbital order within each block, computed at K = 1 (`physics.params.REDUCED`; `physics.params.to_params` scales `cross_coupling` to another K). Columns, `pair_features` (`physics.stage_a.STAGE_A_FEATURES`) in order: `g` (the spectral gap factor G, eV^-1), `log_abs_g` (log \|G\|, floored at 1e-12), `inter` (1 between fragments), `bonded`, `bond_order`, `graph_distance` (between the two centre sets on the record's Lewis structure: bonded when some centre of r is bonded to some centre of s, the largest such order, the shortest graph distance, 0 when they share an atom, capped at 6; across fragments 0, 0, 6), `wbi` (the largest Wiberg index over the Lewis bonds joining the centre sets, 0 when not bonded), `centroid_distance` (Angstrom), `cross_coupling` (\|l_r^T B l_s\| over the AO blocks between the centres), `align_cos` (\|cos\| between the p vectors of r and s on their main centres), `dihedral_cos` (site-partner-partner-site dihedral when the two sit on adjacent bonds) |
-| `pair_defined` | bool, (O_occ, O_virt, 11) | where the entry exists: `centroid_distance`, `cross_coupling`, `align_cos` and `dihedral_cos` only within a fragment, `align_cos` only with p character on both main centres, `dihedral_cos` only on adjacent bonds; undefined entries are stored as 0 |
+| `pair_z` | float32, (O_occ, O_virt, 14) | geometry-free pair features of every (occupied, virtual) pair, rows and columns in orbital order within each block, computed at K = 1 (`physics.params.REDUCED`; `physics.params.to_params` scales `cross_coupling` to another K). Columns, `pair_features` (`physics.stage_a.STAGE_A_FEATURES`) in order: `g` (the spectral gap factor G, eV^-1), `log_abs_g` (log \|G\|, floored at 1e-12), `inter` (1 between fragments), `bonded`, `bond_order`, `graph_distance` (between the two centre sets on the record's Lewis structure: bonded when some centre of r is bonded to some centre of s, the largest such order, the shortest graph distance, 0 when they share an atom, capped at 6; across fragments 0, 0, 6), `wbi` (the largest Wiberg index over the Lewis bonds joining the centre sets, 0 when not bonded), `centroid_distance` (Angstrom), `cross_coupling` (\|l_r^T B l_s\| over the AO blocks between the centres), `align_cos` (\|cos\| between the p vectors of r and s on their main centres), `dihedral_cos` (site-partner-partner-site dihedral when the two sit on adjacent bonds); then (v18, `physics.stage_a.STORED_PAIR_FEATURES`) the 0/1 exclusion flags of `physics.pairs.pair_flags`: `d_acceptor` (the virtual token is a d polarization function), `own_antibond` (the donor's own antibond), `site_self` (every site pair is a bond interacting with itself), defined on every cell |
+| `pair_defined` | bool, (O_occ, O_virt, 14) | where the entry exists: `centroid_distance`, `cross_coupling`, `align_cos` and `dihedral_cos` only within a fragment, `align_cos` only with p character on both main centres, `dihedral_cos` only on adjacent bonds; undefined entries are stored as 0 |
 | `pair_gap_sign` | int8, (O_occ, O_virt) | sign of G (-1 for the normal order E_r < E_s); bookkeeping, not a feature |
-| `pair_valid` | bool, (O_occ, O_virt) | arrow candidates: donor and acceptor masks, minus, within a fragment, the donor's own antibond and every pair whose site pairs (donor centre a, acceptor centre b) all have a and b identical or bonded with the acceptor's weight on a or the donor's on b at least 0.20 (`orbitals.tokens.site_excluded_matrix`, `CandidateConfig.site_weight`) |
-| `pair_contact_sites` | int64, (O_occ, O_virt, 2) | always -1. A field of the removed contact model, kept only so that the schema-15 store stays readable; not a model input, and it leaves at the next sample schema bump |
-| `atom_coulomb` | float32, (A, A) | symmetric q q / R between atoms at eps = 1 (geometric distance within a fragment, van der Waals contact across; 0 diagonal). Kept only so that the schema-15 store stays readable; not a model input, and it leaves at the next sample schema bump |
-| `labels` | list[ArrowLabel] | the orbital reading of the arrows (`donor_ids`, `acceptor_ids`, sites, flags, ...); empty unless `orbital_reading` is `aligned` |
+| `pair_valid` | bool, (O_occ, O_virt) | the legacy mask (`ModelConfig.pair_cells = 'valid'`), = donor x empty non-d acceptor x no exclusion flag: donor and acceptor masks, minus, within a fragment, the donor's own antibond and every pair whose site pairs (donor centre a, acceptor centre b) all have a and b identical or bonded with the acceptor's weight on a or the donor's on b at least 0.20 (`orbitals.tokens.site_excluded_matrix`, `CandidateConfig.site_weight`) |
+| `labels` | list[ArrowLabel] | the orbital reading of the arrows (`donor_ids`, `acceptor_ids`, sites, flags, ...) restricted to `pair_valid`; empty unless `orbital_reading` is `aligned` |
+| `labels_all` | list[ArrowLabel] | (v18) the same labels on every cell, the teacher pair chosen among all of them; empty when an arrow does not align. Read by `--cells all` |
 | `product_key` | str | sigma key of the products (`data.resonance.sigma_key`) |
 | `edit_label` | EditLabel | the target: the parsimonious reaction-matrix class and its anchors on the global atoms (`arrows.delta_be`) |
 | `bonds`, `lone_pairs`, `wiberg` | int16 (E, 3) / int8 (A,) / float16 (E,) | the reactant's Lewis structure as drawn (Kekulé, implicit H included): (i, j, order) with i < j, lone pairs per atom, the Wiberg index of each bond (`arrows.lewis`) |
@@ -258,11 +260,13 @@ token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
 | `inputs` | dict[str, str] | provenance: every token file the sample was built from (`file:<path>` -> sha256) |
 | `pair_features` | tuple[str] | the column names of `pair_z` / `pair_defined` |
 
-**`pair_feature_stats_<strategy>.json`** (same directory, one per split strategy, written by
-`ksmech-arrows samples`): a provenance header (kind `pair_stats`, schema `SAMPLE_VERSION`;
-inputs the training view `samples_<strategy>_train.json` and the store index; config the
-feature names, `cells: valid` and the physical constants) and `features`:
-`{feature: {mean, std, count}}` over the defined entries of the valid cells (`pair_valid`) of
+**`pair_feature_stats_<strategy>.json`** and **`pair_feature_stats_<strategy>_allcells.json`**
+(same directory, one pair per split strategy, written by `ksmech-arrows samples`): a provenance
+header (kind `pair_stats`, schema `SAMPLE_VERSION`; inputs the training view
+`samples_<strategy>_train.json` and the store index; config the feature names, `cells` and the
+physical constants) and `features`: `{feature: {mean, std, count}}`. `valid`: the v17 features
+over the defined entries of the `pair_valid` cells; `all`: every stored feature and
+`pair_valid` as a 0/1 feature over every cell (`physics.stage_a.cell_features`). Both over
 the strategy's training part, with the values rounded to float16 as the store keeps them, at
 the physical K (`arrows.steps.pair_stats`, `physics.pairs.PairStats`). A refit on the loaded
 samples gives the same numbers. Read it with `arrows.steps.load_pair_stats`, which refuses a
@@ -276,17 +280,18 @@ lays tokens out as atoms `[0, A_max)` then orbitals `[A_max, A_max + O_max)`, an
 one-hot), `donor_sets` / `acceptor_sets` (B, K, N multi-hot), `donor_site` / `acceptor_site`
 (B, K; -1 padding) and `label_mask`, plus the padded input arrays. The pair inputs keep each
 sample's (occupied, virtual) layout, padded to the batch's largest counts (R, C): `pair_z`
-(B, R, C, F; at K = eps = 1, unstandardized), `pair_defined` (B, R, C, F), `pair_valid` and
+(B, R, C, F; at K = eps = 1, unstandardized; the model selects its features by name), `pair_defined` (B, R, C, F), `pair_valid` and
 `pair_gap_sign` (B, R, C), `pair_row_pos` (B, R) and `pair_col_pos` (B, C), the batch token
 position of each row's occupied and each column's virtual token (-1 padding), for scattering
-into the N x N pair track, and `pair_features` (the column names); `atom_coulomb` and
-`pair_contact_sites` are not collated. The reactant's Lewis structure and the reaction-matrix
+into the N x N pair track, and `pair_features` (the column names), with `atom_columns` and
+`orbital_columns` for the token inputs. The reactant's Lewis structure and the reaction-matrix
 targets are the `_reactant_tensors` and `_edit_tensors` keys.
 
 **`anchor_floor_report_<strategy>.json`** (same directory, `ksmech-eval floor`): a provenance
 header (kind `anchor_floor`; inputs the val and test views; config the split) and, per part,
 `top1`, `top3`, `top5`, `median_rank`, `n` and `unreachable`: the physics floor, anchors
-ranked by |G^atom| over the valid pairs (`eval.floor`).
+ranked by |G^atom| over the valid pairs (`eval.floor`); with `--cells all`,
+`anchor_floor_report_<strategy>_allcells.json`, pooled over every pair.
 
 ## Training runs: `data/models/<source>/<run>/` (`ksmech-train fit`)
 
@@ -307,6 +312,24 @@ ranked by |G^atom| over the valid pairs (`eval.floor`).
   - `optimizer`, `scheduler`, `scaler`, `epoch`, `step`, `best`, `metrics`.
 
   Read it with `train.loop.load_model`, which refuses a run trained from a dirty tree.
+
+## Token files: `data/cache/tokens/<sha256>.npz` (`ksmech-orbitals build`)
+
+One file per molecule and conformer (`orbitals.tokens.save_tokens`, no pickle), with a
+provenance header (kind `tokens`, schema `orbitals.tokens.SCHEMA_VERSION` 10, config
+`token_config()`: the descriptor thresholds and the localization settings; input the QM
+record). Members: the metadata (`smiles`, `method`, `conformer_id`, PM sweeps, `fermi_smeared`,
+...), one `atom_<field>` array per atom field (`AtomToken`: model inputs and diagnostics), the
+orbital diagnostics `orb_*`, one `desc_<field>` array per orbital descriptor (ragged ones padded
+with their lengths), `C_loc`, `S`, `F`, `ao_atom`, `ao_l`. Schema 10 (2026-10-29) adds
+`atom_f_plus_fmo_exact`, `atom_f_minus_fmo_exact` and `atom_fmo_weights_exact` (4 levels): the
+frozen-orbital f+ / f- and frontier weights with blocks within 1e-4 eV
+(`orbitals.frontier.EXACT_EV`) beside the 0.05 eV ones, whose content is unchanged; every other
+member is schema 9's. A build that replaces a file compares it field by field
+(`tokens.legacy_differences`); the build summary (`summary.json` beside the files, and per
+source `data/processed/<source>/tokens_summary.json`) counts under `replaced` the files whose
+stored fields changed, and under `frontier_blocks` the closed-shell molecules whose blocks at
+0.01, 0.05 and 0.1 eV differ from the exact ones.
 
 ## QM cache: `data/cache/qm/<sha256>.npz`
 
