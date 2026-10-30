@@ -6950,3 +6950,61 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
       - val 1,238, test 1,182.
     - flex_first's val decode hits per sample are identical: top-1/3/5 62.9 / 82.6 / 85.4.
     - No step_id changes, and the ReactMech pilot keeps its 10,000 ids.
+
+## 2026-10-30: Open-shell P2 amendment: every multiplicity derived twice and combined by one rule
+
+- **What (user request, 2026-10-30).** The user asked: "fai le due cose in parallelo fai il calcolo
+  spGFN2 (dove non le fai già) poi con le regole chimiche come Ligand field theory, representation
+  theory etc..". So P2 derives every multiplicity two independent ways and compares them.
+  `docs/open_shell_plan.md` P2 (steps 2-4; old steps 3-5 are now 5-7), P4 step 1 and P8 step 3
+  are amended.
+  - **(A) spGFN2 at every allowed multiplicity.** It is computed where it is not computed
+    already. Each species is optimized in ALPB water at every multiplicity its electron count
+    allows, and the adiabatic energies are recorded:
+    - Fe(III) d5 at S = 5/2, 3/2 and 1/2;
+    - mononuclear Cu(II) d9 at its one state, as a control;
+    - polynuclear species, every total spin enumerated;
+    - the METAL_SUSPECT rows (Cr(IV) d2, Ni(II) d8) at S = 1 and 0, as diagnostics;
+    - FlowER species with u >= 3, every state u, u - 2, ...
+
+    A is conclusive when its lowest state lies below every other by more than the method's
+    error bar. For organic species that is AC12's 0.30 eV. AC12 is organic only, so a published
+    spGFN2 error bar for 3d spin-state energetics must be found and cited here; until then A
+    alone decides no metal species.
+  - **(B) Theory rules, coded as principles.** They go in a separate, versioned, tracked table,
+    spin_theory_v1 (`src/ksmech/data/spin_tables/theory_v1.json`, written by
+    `src/ksmech/data/spin_theory.py`). Each entry gives the point group, d^n, the geometry class,
+    the predicted S and the rule chain, or 'undetermined'. The rules:
+    - d^n from `domain.oxidation_state` / `d_count`;
+    - the ligand field: from the coordination number and geometry, and Delta against the
+      pairing energy on a cited spectrochemical series. In Oh, d1-d3, d8, d9 and d10 have a
+      single outcome; d4-d7 depend on the field, and a mid-series ligand gives 'undetermined'.
+      Td is high spin, and Jahn-Teller is annotated;
+    - the point group at a tolerance and the frontier irreps from the GFN2 MOs;
+    - Hund's rule and the ground term for a degenerate open shell;
+    - Gleiter-Hoffmann for carbenes, with its cited thresholds.
+
+    No rule names a species, and data.spin never reads the table directly.
+  - **(C) The combination rule, chosen by the user.**
+    - Where A and B agree, the multiplicity is assigned.
+    - Where B is 'undetermined', A decides within its error bar.
+    - Every disagreement is MULTIPLICITY_AMBIGUOUS, reported here per species.
+    - The Fe(III) high-spin row of metal_v1 stays only if A and B confirm it.
+
+    The result is spin_table_v1, which records A, B and the case of C that decided.
+- **Why.** No multiplicity should rest on one derivation alone:
+  - GFN2's spin-state energetics for 3d metals have limited reliability (Moradi 2024);
+  - a theory rule is only as good as its reading of the geometry.
+
+  Requiring the two to agree keeps both under the governing principle (a law or a QM-derived
+  input, never a hand clause). Theory enters the model path only through C, so a wrong rule
+  makes a species ambiguous, not wrong.
+- **Reading of 'agree'.** A and B agree when they give the same lowest state. A lowest state of A
+  that differs from B's is a disagreement even when it lies inside A's error bar, so it is
+  MULTIPLICITY_AMBIGUOUS. This is the literal reading of the rule; the user can change it before
+  P2 runs.
+- **Consequence for P4.** If the Fe(III) row is not confirmed, its species are
+  MULTIPLICITY_AMBIGUOUS and leave the open_shell_metal cohort. Whether Cu then enters without
+  Fe (U9 joins them) goes back to the user.
+- **Schedule.** P2's compute grows to about 1 h at 8 workers (estimate). It runs after P1 is
+  closed (7247bcc), never beside a build, within the host's 15 heavy processes.
