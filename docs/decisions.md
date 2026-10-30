@@ -6885,3 +6885,68 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
     (the P0a law), and the Al, nitrone and four-bonded P steps stay RADICAL_DRAWN.
 - **Spec.** v9.1's "Domain coverage" already lists V1, A1 and the named repair, so the text is
   unchanged.
+- **Rebuild (P1 step 6).** It ran from the clean commit f3d05e9, 02:07 to 04:56, one heavy step
+  at a time. The P0b artifacts the checks compare against were copied first to
+  `data/processed/<source>/p0b_reference/` and `data/models/pmechdb/flex_first/p0b_reference/`.
+  - Times:
+
+    | Step | Time |
+    |---|---|
+    | ingest PMechDB | 1 min |
+    | ingest ReactMech | 22 min |
+    | QM top-up (37 molecules, all already cached, 0 failures) | seconds |
+    | bond-index | 5 min |
+    | tokens | 2 min |
+    | samples PMechDB | 21 min |
+    | samples ReactMech | 40 min |
+    | the two GBDT refits | 15 min each |
+    | the two floors | 1 min each |
+    | flex_first val decode | 45 min |
+
+  - Every artifact is stamped with code f3d05e9, clean, and SAMPLE_VERSION is 18.
+  - **PMechDB samples.** 12,412 samples from 12,455 training steps (P0b: 12,399 from 12,442).
+    The 43 MISSING_TOKENS are the same as before.
+    - The molecule split is 9,991 / 1,238 / 1,183 (P0b: 9,979 / 1,238 / 1,182). The frozen-split
+      hash path put 12 returned steps in train and one in test, the methyl step
+      `pmechdb-9346d5b585fc8087`.
+    - No frozen step changes part. The 22 frozen ids missing from the views are P0a's
+      METAL_PLACEHOLDER steps, as in P0b.
+  - **The 'added' cohort.** `cohort_added.json` holds the 13 returned training steps: 8 V1, 4 A1
+    and 1 BL; 12 in train, 1 in test. The resonance pair `pmechdb-51827a932b07eaa9` is left out.
+    closed_base does not change.
+  - **ReactMech samples.** 9,031 samples from 9,450 training steps (P0b: 9,003 from 9,388).
+    - Against the plan, 28 of the 62 CDI steps already have samples, because all their species
+      were in the token cache. The other 34 are skipped as MISSING_TOKENS (class REPAIRED_V1)
+      until P5.
+    - In the molecule split all 62 are SPLIT_CONFLICT: they are new steps that join molecule
+      groups frozen in two parts. SPLIT_CONFLICT goes from 204 to 266. The same holds for four
+      of the five loco_all splits.
+    - So they are in no molecule view. They will not enter one unless the frozen snapshot is
+      replaced by hand, which P5 decides. The scaffold split places them 50 / 4 / 8, and
+      locoall-anhydride puts 61 in train; the 62nd shares a molecule (acetate) with the
+      held-out class and is excluded as leaky, by design.
+    - No frozen ReactMech step changes part in any strategy.
+  - **GBDT refit, the new reference** (molecule split). Training queries go from 9,432 to 9,443:
+    one returned step has no orbital label.
+
+    | Cells | val top-5, P0b → P1 | test top-1/3/5, P0b → P1 | trees |
+    |---|---|---|---|
+    | valid | 70.7 → 69.8 | 48.1/67.8/75.4 → 47.1/67.2/74.6 | 553 → 307 |
+    | all | 70.8 → 70.8 | 50.4/66.6/74.9 → 47.8/64.9/73.9 | 621 → 568 |
+
+    - The fit is deterministic: negatives are seeded per step, and LightGBM is deterministic at
+      one thread count. The untrained gap kernel's val numbers are unchanged.
+    - So the shift is how much one refit moves with 11 more queries (0.1%): early stopping ends
+      at another round.
+    - P0b's GBDT weights were overwritten in place and are not on Hugging Face. Their reports
+      and ranks are kept in `p0b_reference/`.
+  - **Exit checks, all passed.**
+    - The per-rule counts equal the P0 survey.
+    - On closed_base the per-column digests of all 12,399 samples are identical to the
+      baseline: no column differs, is missing or is added. The 13 'added' samples are the only
+      ones outside it.
+    - The floor ranks per sample are identical:
+      - for valid cells and for every cell;
+      - val 1,238, test 1,182.
+    - flex_first's val decode hits per sample are identical: top-1/3/5 62.9 / 82.6 / 85.4.
+    - No step_id changes, and the ReactMech pilot keeps its 10,000 ids.
