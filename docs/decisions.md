@@ -6728,3 +6728,107 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
     A spectator costs too, but less; the counts are small. Within ReactMech, the K steps fall
     from 95 to 21.
   - Not done: k-fold or leave-one-class-out retraining, which needs new runs.
+
+## 2026-10-30: P0b decision: GENERAL against LEGACY
+
+- **Runs.** The legacy preset, three seeds on PMechDB and then on the ReactMech pilot, ran on the
+  same pod on 2026-10-29: started 20:45 UTC, while the cross-source decodes ran on the CPU (the
+  user asked for that). PMechDB took 76 min a run and ReactMech 100 min, three at a time on the
+  RTX 5090. The checkpoints and decode files were copied back, and their sha256 match the pod's.
+
+  | best.pt | PMechDB epoch (val anchor top-1) | ReactMech epoch (val anchor top-1) |
+  |---|---|---|
+  | legacy s0 | 21 (66.8) | 21 (94.7) |
+  | legacy s1 | 24 (67.4) | 23 (95.0) |
+  | legacy s2 | 17 (64.6) | 22 (94.8) |
+
+- **Decision (P0b step 4).** The metric is closed_base val full-R top-1 with caps legacy.
+  - GENERAL: 67.7, 64.1 and 65.1 (mean 65.6). LEGACY: 65.2, 65.9 and 62.4 (mean 64.5).
+  - Difference +1.1 points; pooled SD 1.87, so the tolerance is 3.75.
+  - GENERAL passes. It would fail only if it were below LEGACY by more than the tolerance.
+  - McNemar on majority-of-seeds hits: GENERAL misses 65 samples that LEGACY gets, and gets
+    70 that LEGACY misses; p 0.70. No seed pair is significant at top-1.
+
+  So keeping every cell (the d-type acceptors, the donor's own antibond and the site
+  self-pairs, as flag channels) and adding E_r and the retained spectral fraction cost nothing
+  measurable. The old deleting rules are dropped: GENERAL is the reference configuration, and
+  no leave-one-flag-out runs are needed.
+- **Every arm**, full-R top-1 / top-3, means of three seeds; the cross arms are the
+  evaluation of the previous section:
+
+  | model -> val | GENERAL | LEGACY | top-1 diff (tolerance) | McNemar top-1 / top-3 |
+  |---|---|---|---|---|
+  | PMechDB -> PMechDB (1,238) | 65.6 / 83.6 | 64.5 / 82.8 | +1.1 (3.75) | 0.70 / 0.98 |
+  | ReactMech -> ReactMech (911) | 94.0 / 95.6 | 93.5 / 94.8 | +0.5 (1.45) | 0.70 / 1.0 |
+  | PMechDB -> ReactMech (911) | 52.3 / 70.7 | 50.6 / 70.4 | +1.7 (7.31) | 0.93 / 0.93 |
+  | ReactMech -> PMechDB (1,238) | 27.7 / 42.7 | 29.1 / 43.6 | -1.4 (3.37) | 0.38 / 0.021 |
+
+  GENERAL passes on all four arms, at top-1 and at top-3.
+- **The one significant McNemar result inside the tolerance** (the plan asks for it to be
+  explained): ReactMech models on PMechDB val, top-3.
+  - The difference is -0.9 points, inside the 4.9-point tolerance. On majority-of-seeds hits,
+    GENERAL misses 96 samples that LEGACY gets and gets 69 that LEGACY misses, p 0.021.
+  - The three seed pairs that contain GENERAL s1 are significant (p <= 0.009), and none of
+    the other six is.
+  - GENERAL s1 is the weak seed of that arm: 25.4 top-1 and 39.0 top-3 on PMechDB, against
+    28-29 and 44 for the other GENERAL seeds; on its own val it is also the weakest seed,
+    92.9.
+  - With three seeds, the majority vote follows the weak seed on every sample where the
+    other two disagree.
+  - Read as seed variance in an out-of-distribution arm, not as a cost of the preset. The
+    same arm's top-1 is not significant (p 0.38).
+  - Single seed pairs are significant in three more comparisons. Each time it is a weak
+    GENERAL seed against a strong LEGACY one (the test is one-sided, GENERAL worse):
+    - top-3 on PMechDB: GENERAL s1 and s2 (82.3 and 82.2) against LEGACY s1 (84.6);
+    - PMechDB models on ReactMech: GENERAL s1 against LEGACY s0 and s1 at top-1, and
+      against LEGACY s1 at top-3.
+
+    The majority test of each of these comparisons is far from significant (p >= 0.93). This
+    is the seed spread that the pooled-SD tolerance is there to absorb.
+- **Subsets** (the split of the previous section), top-1, GENERAL against LEGACY. The
+  differences sit where the counts are small:
+  - unseen K on ReactMech val, a spectator in all 16 steps: 20.8 against 2.1;
+  - PMechDB models on ReactMech steps that share a molecule with PMechDB train (45): 54.1
+    against 45.9;
+  - with Cr, Ni or Pd (30): 5.6 against 0.0;
+  - novel steps: within 1.5 points everywhere.
+- **Label caps on the legacy runs.** The result is the same as for GENERAL:
+  - PMechDB: the label caps (6-2-48) give identical ranks on every val sample, in all three
+    seeds.
+  - ReactMech: the label caps (8-3-48) cost 1, 1 and 3 top-1 hits per seed and gain none.
+
+  The caps stay legacy for both presets.
+- **Old checkpoints beside the new means** (closed_base val full-R top-1), so drift is
+  visible:
+  - flex_first (v15): 62.9;
+  - the joint pmechdb+reactmech sparse_resonance (v17): 61.6.
+
+  Both are below both v18 arms. On ReactMech val, sparse_resonance_stop0 scores 91.1 and the
+  joint run 91.9, against 94.0 (GENERAL) and 93.5 (LEGACY).
+- **Test, read once for the selected configuration** (GENERAL, PMechDB, closed_base test,
+  1,182 samples, caps legacy).
+  - Full-R top-1 is 67.6, 65.2 and 66.0, a mean of 66.3; top-3 is 84.0 and top-5 86.5.
+  - The cohort covers 1,182 of 1,185 test steps; 3 are MISSING_TOKENS.
+  - On the same test, the old checkpoints score 62.7 (flex_first) and 64.1 (the joint run).
+  - The test was decoded after the decision and selected nothing. LEGACY's test is not read.
+  - Test top-1 (66.3) is close to val (65.6), so selecting best.pt on val did not overfit
+    val.
+- **Flag defaults.**
+  - The `ModelConfig` defaults stay the legacy ones (`pair_cells 'valid'`, `orbital_extra ()`).
+    This keeps every older checkpoint and the P0a reproduction gate reading as before.
+  - GENERAL is selected with `--preset general`. It is the configuration the later phases
+    train with: Release A in P4 step 7, against these three GENERAL seeds.
+  - `frontier_blocks` and the finite-difference f+/f- columns stay unselected until their P9
+    ablations.
+- **Where the runs are (user request).** Everything is in the private dataset
+  `mfiaschi5/rhoMech-data`, revision 728a967227051b5891c1c00b727a68eb295c9f83 (444 files), at
+  its checkout paths:
+  - the twelve run directories: checkpoints, logs and every decode file;
+  - `data/models/pod_runs/p0b_2026-10-29/`:
+    - the pod's logs and scripts;
+    - the analysis scripts and the paired comparisons;
+    - the staging script of the v18 upload.
+  - `SHA256SUMS.models`, which lists all 233 of these files.
+
+  Every uploaded file was checked against the local copy, by sha256 or by git blob hash. The
+  local copies match the pod's.
