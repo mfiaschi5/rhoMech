@@ -10,7 +10,7 @@ import numpy as np
 from rdkit import Chem
 
 from ksmech.data import chem
-from ksmech.data.domain import PRECEDENCE, admitted
+from ksmech.data.domain import PRECEDENCE, admitted, repair_rule_counts
 from ksmech.data.resonance import not_admitted
 from ksmech.data.schema import ElementaryStep
 
@@ -101,6 +101,7 @@ def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
             not s.resonance_step and s.domain_exclusion is None and admitted(s) for s in steps
         ),
         "domain": domain_counts(steps),
+        "charge_repairs_by_rule": dict(sorted(repair_rule_counts(steps).items())),
         "domain_class": class_counts(steps),
         **pathway_stats(steps),
         "steps_per_class": dict(classes.most_common()),
@@ -172,6 +173,9 @@ DEFINITIONS = {
     "domain": "steps removed from the target at ingest, by reason: every distinct "
     "domain_exclusion value (the PRECEDENCE codes listed even at 0); QM-level reasons (failed "
     "records, Fermi smearing) are in docs/decisions.md, 'Domain exclusions'",
+    "charge_repairs_by_rule": "repaired steps per repair rule of data.domain (V1, A1, "
+    "the named repairs, R1, the dative law), kept or excluded; a step with several rules counts "
+    "under each",
     "domain_class.all": "steps per distinct domain_class value, kept or excluded: the repairs "
     "and flags of the domain laws (data.domain.DomainClass), several joined by '+'",
     "domain_class.not_admitted": "training candidates (neither resonance nor excluded) left out "

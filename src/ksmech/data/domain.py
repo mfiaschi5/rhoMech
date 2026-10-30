@@ -8,7 +8,20 @@ that hold for every element and every parity, in this order:
 
 1. **Repairs** (`CHARGE_REPAIRED`, logged in `charge_repair` and `charge_repairs.csv`), kept only
    if the repaired step still validates (charge balance, maps, arrow replay where arrows exist;
-   `validation.screened`), otherwise the step is screened as drawn:
+   `validation.screened`), otherwise the step is screened as drawn. First the drawing repairs of
+   open-shell plan P1, each only on an atom drawn the same way on both sides (the same map
+   number, or unmapped atoms of the same shape equally many on both sides), so an atom that
+   reacts or a radical drawn on one side only is never touched:
+   - V1, H completion of two signatures no radical reading fits: a C with 3 radical electrons
+     and one neighbour (a methyl drawn `[C]`) gets 3 H, and the imidazol-2-yl C of CDI (a C in
+     a 5-ring with two N neighbours, degree 2, 1 radical electron; RDKit does not flag it
+     aromatic) gets 1 H. A C with 1 radical electron elsewhere (a ketyl, the Birch [CH]) is never
+     completed;
+   - A1: a bare neutral alkali atom (no neighbour, no H) gets charge +1;
+   - the named per-step repairs of `repairs_v1.json` (the beta-lactam N, rule BL_NAMED), each
+     its own decision in docs/decisions.md.
+
+   Then, on the completed sides:
    - R1: a -1 on a four-bonded group-14 atom (C, Si, Ge, Sn, Pb) of an odd fragment is removed;
    - D, the dative law: an onium donor (a positively charged non-metal other than C) bonded to
      an acceptor (a metal, or B) gives it a dative pair. Each acceptor's u is its onium donors
@@ -48,9 +61,13 @@ in the source's admit set (`ADMIT`).
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Iterable, Mapping
+import logging
+from collections import Counter
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import cache
+from pathlib import Path
 
 from rdkit import Chem, rdBase
 
@@ -70,6 +87,9 @@ class DomainClass(StrEnum):
     after."""
 
     REPAIRED_DATIVE = "REPAIRED_DATIVE"  # the dative law re-charged an acceptor
+    REPAIRED_V1 = "REPAIRED_V1"  # V1 completed a methyl or an imidazol-2-yl C with its H
+    REPAIRED_A1 = "REPAIRED_A1"  # A1 gave a bare alkali atom its +1
+    REPAIRED_BL = "REPAIRED_BL"  # the named beta-lactam N repair (repairs_v1.json)
     METAL_SUSPECT = "METAL_SUSPECT"  # an open-d-shell first-row metal computed as a singlet
 
 
@@ -82,11 +102,26 @@ PRECEDENCE = (
 CHARGE_REPAIRED = "CHARGE_REPAIRED"
 R1_RULE = "R1 group-14 -1 removed"
 DATIVE_RULE = "D dative onium->M"
+V1_METHYL = "V1 methyl [C] +3H"
+V1_IMIDAZOLYL = "V1 imidazol-2-yl C +H"
+A1_RULE = "A1 bare alkali +1"
+BL_RULE = "BL_NAMED"
+# the class each repair rule gives a step (R1 gives none: a charge typo, not a drawing choice)
+RULE_CLASS = {
+    DATIVE_RULE: DomainClass.REPAIRED_DATIVE,
+    V1_METHYL: DomainClass.REPAIRED_V1,
+    V1_IMIDAZOLYL: DomainClass.REPAIRED_V1,
+    A1_RULE: DomainClass.REPAIRED_A1,
+    BL_RULE: DomainClass.REPAIRED_BL,
+}
+REPAIRS_V1 = Path(__file__).with_name("repairs_v1.json")
 CLASS_SEP = "+"
+log = logging.getLogger(__name__)
 # the classes each source admits into the training target (P0a: every class, both are flags)
 ADMIT: dict[str, frozenset[str]] = {str(s): frozenset(map(str, DomainClass)) for s in Source}
 
 _S_BLOCK = frozenset([3, 4, 11, 12, 19, 20, 37, 38, 55, 56, 87, 88])
+ALKALI = frozenset([3, 11, 19, 37, 55, 87])  # group 1 without H
 METALS = _S_BLOCK | frozenset([13, 31, 49, 50, 81, 82, 83, *range(21, 31), *range(39, 49)])
 METALS = METALS | frozenset(range(57, 81)) | frozenset(range(89, 104))
 D0_D10 = frozenset(["Ti", "Zr", "Hf", "Sc", "Al", "B", "Zn", "Cd"])
@@ -356,6 +391,150 @@ def dative_step(
     return sides["reactants"], sides["products"], repairs
 
 
+# ---- the P1 drawing repairs: V1, A1 and the named per-step repairs
+
+# an atom edit: (rule, H added, formal charge added)
+Edit = tuple[str, int, int]
+
+
+def v1_edit(atom: Chem.Atom) -> Edit | None:
+    """V1 on one atom: a neutral C with 3 radical electrons and one neighbour (a methyl drawn
+    without its H) gets 3 H; a neutral C in a 5-ring with two N neighbours, degree 2 and 1
+    radical electron (the imidazol-2-yl C of CDI) gets 1 H. Any other C is left alone."""
+    if atom.GetAtomicNum() != 6 or atom.GetFormalCharge() != 0:
+        return None
+    radicals, degree = atom.GetNumRadicalElectrons(), atom.GetDegree()
+    if radicals == 3 and degree == 1:
+        return V1_METHYL, 3, 0
+    nitrogens = all(n.GetAtomicNum() == 7 for n in atom.GetNeighbors())
+    if radicals == 1 and degree == 2 and nitrogens and atom.IsInRingSize(5):
+        return V1_IMIDAZOLYL, 1, 0
+    return None
+
+
+def a1_edit(atom: Chem.Atom) -> Edit | None:
+    """A1 on one atom: a bare neutral alkali atom (no neighbour, no H) gets charge +1."""
+    bare = atom.GetDegree() == 0 and atom.GetTotalNumHs() == 0
+    if atom.GetAtomicNum() in ALKALI and atom.GetFormalCharge() == 0 and bare:
+        return A1_RULE, 0, 1
+    return None
+
+
+def matched(
+    reactants: Chem.Mol, products: Chem.Mol, rule: Callable[[Chem.Atom], Edit | None]
+) -> tuple[dict[int, Edit], dict[int, Edit]]:
+    """The edits `rule` makes on each side (atom index -> edit), kept only where the atom is
+    drawn the same way on both sides: a mapped atom whose map number gets the same edit on the
+    other side, and unmapped atoms when both sides hold equally many of the same element with
+    the same edit."""
+    sides = (reactants, products)
+    edits = [{a.GetIdx(): e for a in m.GetAtoms() if (e := rule(a)) is not None} for m in sides]
+    by_map, unmapped = [], []
+    for mol, side in zip(sides, edits, strict=True):
+        atoms = {i: mol.GetAtomWithIdx(i) for i in side}
+        by_map.append({a.GetAtomMapNum(): side[i] for i, a in atoms.items() if a.GetAtomMapNum()})
+        unmapped.append(
+            Counter((a.GetSymbol(), side[i]) for i, a in atoms.items() if not a.GetAtomMapNum())
+        )
+    out = []
+    for k, (mol, side) in enumerate(zip(sides, edits, strict=True)):
+        keep = {}
+        for i, edit in side.items():
+            atom = mol.GetAtomWithIdx(i)
+            if n := atom.GetAtomMapNum():
+                same = by_map[1 - k].get(n) == edit
+            else:
+                key = (atom.GetSymbol(), edit)
+                same = unmapped[0][key] == unmapped[1][key]
+            if same:
+                keep[i] = edit
+        out.append(keep)
+    return out[0], out[1]
+
+
+@cache
+def named_repairs() -> dict[str, list[dict]]:
+    """The named per-step repairs of `repairs_v1.json`, by step id."""
+    rows = json.loads(REPAIRS_V1.read_text())["repairs"]
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        if row["rule"] not in RULE_CLASS:
+            raise ValueError(f"repairs_v1.json: unknown rule {row['rule']!r}")
+        out.setdefault(row["step_id"], []).append(row)
+    return out
+
+
+def named_edits(
+    reactants: Chem.Mol, products: Chem.Mol, step_id: str | None
+) -> tuple[dict[int, Edit], dict[int, Edit]]:
+    """The named repairs of one step as edits on each side; a row whose map number is not on
+    both sides is not applied (logged)."""
+    out: tuple[dict[int, Edit], dict[int, Edit]] = ({}, {})
+    for row in named_repairs().get(step_id or "", []):
+        where = [chem.map_to_index(m).get(row["map"]) for m in (reactants, products)]
+        if None in where:
+            log.warning("named repair %s of %s: map %s not on both sides", row["rule"], step_id,
+                        row["map"])  # fmt: skip
+            continue
+        edit = (row["rule"], int(row["change"].get("h", 0)), int(row["change"].get("charge", 0)))
+        for side, idx in zip(out, where, strict=True):
+            side[idx] = edit
+    return out
+
+
+def _edited(mol: Chem.Mol, edits: Mapping[int, Edit]) -> Chem.Mol:
+    """`mol` with the edits applied: H added as an explicit count (NoImplicit, so the count
+    stays as written), the charge shifted, the atom's radical electrons removed."""
+    out = Chem.RWMol(mol)
+    for idx, (_, h, q) in edits.items():
+        atom = out.GetAtomWithIdx(idx)
+        atom.SetNumExplicitHs(atom.GetTotalNumHs() + h)
+        atom.SetNoImplicit(True)
+        atom.SetFormalCharge(atom.GetFormalCharge() + q)
+        atom.SetNumRadicalElectrons(0)
+    with rdBase.BlockLogs():
+        out.UpdatePropertyCache(strict=False)
+    return out.GetMol()
+
+
+def _edited_side(
+    mol: Chem.Mol, side: str, edits: Mapping[int, Edit]
+) -> tuple[Chem.Mol, list[tuple[str, str, str, str]]]:
+    """One side with its edits, and a repair row per fragment and rule."""
+    repairs = []
+    for atoms, frag in _fragments(mol):
+        local = {atoms.index(i): e for i, e in edits.items() if i in atoms}
+        for rule in sorted({e[0] for e in local.values()}):
+            repairs.append((side, rule, *_before_after(frag, _edited(frag, local))))
+    return (_edited(mol, edits) if edits else mol), repairs
+
+
+def completed_step(
+    reactants: Chem.Mol, products: Chem.Mol, step_id: str | None = None
+) -> tuple[Chem.Mol, Chem.Mol, list[tuple[str, str, str, str]]]:
+    """Both sides with V1, A1 and the step's named repairs applied, and the repairs."""
+    edits: tuple[dict[int, Edit], dict[int, Edit]] = ({}, {})
+    for found in (
+        matched(reactants, products, v1_edit),
+        matched(reactants, products, a1_edit),
+        named_edits(reactants, products, step_id),
+    ):
+        for side, new in zip(edits, found, strict=True):
+            side.update(new)
+    r, r_rep = _edited_side(reactants, "reactants", edits[0])
+    p, p_rep = _edited_side(products, "products", edits[1])
+    return r, p, r_rep + p_rep
+
+
+def repair_rule_counts(steps: Iterable[ElementaryStep]) -> Counter[str]:
+    """Steps per repair rule (a step repaired on both sides counts once)."""
+    out: Counter[str] = Counter()
+    for s in steps:
+        if s.charge_repair:
+            out.update({r["rule"] for r in json.loads(s.charge_repair)["repairs"]})
+    return out
+
+
 def side_codes(mol: Chem.Mol) -> tuple[list[DomainCode], bool]:
     """(codes of the fragments of one side, whether an even fragment is METAL_SUSPECT)."""
     codes, suspect = [], False
@@ -372,26 +551,34 @@ def side_codes(mol: Chem.Mol) -> tuple[list[DomainCode], bool]:
     return codes, suspect
 
 
-def screen_step(reactants: Chem.Mol, products: Chem.Mol, repair: bool = True) -> Screen:
-    """Repair (R1, then the dative law), then code both sides: the step's code is the first of
-    `PRECEDENCE` that any fragment has. Repaired sides are re-parsed from their canonical mapped
-    SMILES (sanitized as at ingest; `chem.SanitizeError` propagates) before they are coded."""
+def _reparsed(mol: Chem.Mol, side: str, repairs: Sequence[tuple[str, ...]]) -> Chem.Mol:
+    """A repaired side re-parsed from its canonical mapped SMILES (sanitized as at ingest;
+    `chem.SanitizeError` propagates), so its radical electrons and rings are recomputed."""
+    if any(s == side for s, *_ in repairs):
+        return chem.parse_mapped(chem.canonical_mapped_smiles(mol))
+    return mol
+
+
+def screen_step(
+    reactants: Chem.Mol, products: Chem.Mol, repair: bool = True, step_id: str | None = None
+) -> Screen:
+    """Repair (V1, A1 and the named repairs, then R1, then the dative law), then code both
+    sides: the step's code is the first of `PRECEDENCE` that any fragment has. Repaired sides
+    are re-parsed after the drawing repairs and again before they are coded."""
     r, p, repairs = reactants, products, []
     if repair:
+        r, p, v_rep = completed_step(r, p, step_id)
+        r, p = _reparsed(r, "reactants", v_rep), _reparsed(p, "products", v_rep)
         r, r_rep = _r1_side(r, "reactants")
         p, p_rep = _r1_side(p, "products")
         r, p, d_rep = dative_step(r, p)
-        repairs = r_rep + p_rep + d_rep
-    if any(s == "reactants" for s, *_ in repairs):
-        r = chem.parse_mapped(chem.canonical_mapped_smiles(r))
-    if any(s == "products" for s, *_ in repairs):
-        p = chem.parse_mapped(chem.canonical_mapped_smiles(p))
+        later = r_rep + p_rep + d_rep
+        r, p = _reparsed(r, "reactants", later), _reparsed(p, "products", later)
+        repairs = v_rep + later
     (r_codes, r_sus), (p_codes, p_sus) = side_codes(r), side_codes(p)
     codes = set(r_codes + p_codes)
     code = next((c for c in PRECEDENCE if c in codes), None)
-    classes = set()
-    if any(rule == DATIVE_RULE for _, rule, _, _ in repairs):
-        classes.add(str(DomainClass.REPAIRED_DATIVE))
+    classes = {str(RULE_CLASS[rule]) for _, rule, _, _ in repairs if rule in RULE_CLASS}
     if code is None and (r_sus or p_sus):  # a flag on the training target only
         classes.add(str(DomainClass.METAL_SUSPECT))
     return Screen(r, p, code, repairs, classes)

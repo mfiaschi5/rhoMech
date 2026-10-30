@@ -1,0 +1,12 @@
+{
+  "description": "Named per-step drawing repairs (open-shell plan P1 step 2). Each row is its own decision in docs/decisions.md; a rule repairs only the atom with this map number, on both sides, and the step must still validate with its arrows replayed (data.validation.screened).",
+  "repairs": [
+    {
+      "step_id": "pmechdb-65a6c92b04e820b5",
+      "map": 21,
+      "change": {"h": 1},
+      "rule": "BL_NAMED",
+      "reason": "the beta-lactam N is drawn without its H on both sides (an N-acyliminium [N+]=C and the beta-lactam amide N, each left with one radical electron); docs/decisions.md 2026-10-30"
+    }
+  ]
+}

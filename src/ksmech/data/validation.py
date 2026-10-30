@@ -168,7 +168,7 @@ def build_step(
     r_smi, p_smi = split_reaction(rxn_smiles)
     reactants, products = parse_side(r_smi, "reactants"), parse_side(p_smi, "products")
     validate(reactants, products, arrows, require_arrows)
-    screen = screened(reactants, products, arrows, require_arrows)
+    screen = screened(reactants, products, arrows, require_arrows, step_id)
     note = screen.repair_note(
         chem.canonical_mapped_smiles(reactants), chem.canonical_mapped_smiles(products)
     )
@@ -192,13 +192,17 @@ def build_step(
 
 
 def screened(
-    reactants: Chem.Mol, products: Chem.Mol, arrows: list[Arrow], require_arrows: bool
+    reactants: Chem.Mol,
+    products: Chem.Mol,
+    arrows: list[Arrow],
+    require_arrows: bool,
+    step_id: str | None = None,
 ) -> Screen:
-    """`domain.screen_step`, keeping its repairs (R1, the dative law) only if the repaired
-    sides parse and the repaired step validates (charge balance, maps, arrow replay); otherwise
-    the step is screened as drawn, without repairs."""
+    """`domain.screen_step`, keeping its repairs (V1, A1, the named repairs of `step_id`, R1,
+    the dative law) only if the repaired sides parse and the repaired step validates (charge
+    balance, maps, arrow replay); otherwise the step is screened as drawn, without repairs."""
     try:
-        screen = screen_step(reactants, products)
+        screen = screen_step(reactants, products, step_id=step_id)
         if screen.repairs:
             validate(screen.reactants, screen.products, arrows, require_arrows)
     except StepRejected as exc:

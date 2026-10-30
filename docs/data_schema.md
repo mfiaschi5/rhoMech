@@ -198,14 +198,17 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 | `conditions` | string, nullable | null for PMechDB (not in the release) |
 | `resonance_step` | bool | reactants and products are resonance structures; dropped from the training target |
 | `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). Null otherwise |
-| `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an explicit ingest rule changed a formal charge (`CHARGE_REPAIRED`; the step stays); the SMILES columns hold the repaired sides |
+| `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an ingest repair of `ksmech.data.domain` changed the drawing (`CHARGE_REPAIRED`; the step stays): a formal charge (R1, the dative law `D dative onium->M`, A1 `A1 bare alkali +1`) or missing H (V1 `V1 methyl [C] +3H` and `V1 imidazol-2-yl C +H`, the named repairs of `src/ksmech/data/repairs_v1.json`, rule `BL_NAMED`); one row per side, fragment and rule; the SMILES columns hold the repaired sides |
+| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none). A training candidate is kept only when its source's admit set (`domain.ADMIT`, every class by default) holds all of its classes. Null otherwise |
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`. Charge repairs are also listed one per row in
 `data/processed/<source>/charge_repairs.csv` (`step_id`, `side`, `rule`, `before`, `after`,
 `domain_exclusion`; fragments as map-free canonical SMILES). `ingest_report.json` counts
-`domain_exclusions` by code and `n_charge_repaired`; `stats.json` has the same counts under
-`domain`, with `RESONANCE_STEP`, and `n_training_steps` excludes both.
+`domain_exclusions` by code, `n_charge_repaired`, `charge_repairs_by_rule` (steps per rule) and
+`domain_class` (steps per value); `stats.json` has the same counts under `domain` (with
+`RESONANCE_STEP`), `charge_repairs_by_rule` and `domain_class`, and `n_training_steps`
+excludes the resonance steps, the excluded ones and those the admit set leaves out.
 
 ## Processed: `data/processed/<source>/samples/` and `samples_<split>.json`
 

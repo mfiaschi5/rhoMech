@@ -1,6 +1,7 @@
 """The closed-shell domain laws at ingest (`ksmech.data.domain`): the R1 repair, the dative law,
-the placeholder law and the METAL_SUSPECT flag, on two PMechDB steps the repairs once touched and
-on hand-written fixtures (open-shell plan P0a step 6), never other dataset SMILES."""
+the placeholder law and the METAL_SUSPECT flag (open-shell plan P0a step 6), and the drawing
+repairs V1, A1 and the named beta-lactam repair (P1), on two PMechDB steps the repairs once
+touched and on hand-written fixtures, never other dataset SMILES."""
 
 import json
 from dataclasses import replace
@@ -10,7 +11,11 @@ from rdkit import Chem
 
 from ksmech.data import chem
 from ksmech.data.domain import (
+    A1_RULE,
+    BL_RULE,
     DATIVE_RULE,
+    V1_IMIDAZOLYL,
+    V1_METHYL,
     DomainClass,
     DomainCode,
     admit_config,
@@ -22,6 +27,7 @@ from ksmech.data.domain import (
     is_odd,
     is_placeholder,
     join_classes,
+    named_repairs,
     oxidation_state,
     repair_candidate,
     screen_step,
@@ -31,7 +37,7 @@ from ksmech.data.domain import (
 from ksmech.data.ingest import IngestResult
 from ksmech.data.resonance import training_steps
 from ksmech.data.schema import Arrow, ElementaryStep, SinkKind, Source, SourceKind
-from ksmech.data.stats import class_counts, domain_counts
+from ksmech.data.stats import class_counts, compute_stats, domain_counts
 from ksmech.data.validation import build_step
 from tests.fixtures.molecules import MOLECULES, OPEN_SHELL
 
@@ -305,6 +311,121 @@ def test_oxidation_state_shows_a_fragment_mis_charged_by_two():
     assert oxidation_state(fixed.GetAtomWithIdx(idx)) == 2
 
 
+# ---- the P1 drawing repairs: V1, A1 and the named beta-lactam repair
+
+METHYL_TRANSFER = (  # BBr3 demethylation: the methyl drawn [C:20] on both sides
+    "c1ccccc1[O+:21](B(Br)Br)[C:20].[Br-:10]>>c1ccccc1[O:21]B(Br)Br.[Br:10][C:20]",
+    [
+        Arrow(SourceKind.LONE_PAIR, (10,), SinkKind.ATOM, (20,)),
+        Arrow(SourceKind.BOND, (20, 21), SinkKind.ATOM, (21,)),
+    ],
+)
+POTASSIUM_SPECTATOR = (  # an alkoxide's counter-ion drawn as a neutral atom on both sides
+    "CC(C)(C)[O-:10].C[O:21][H:20].[K]>>CC(C)(C)[O:10][H:20].C[O-:21].[K]",
+    [
+        Arrow(SourceKind.LONE_PAIR, (10,), SinkKind.ATOM, (20,)),
+        Arrow(SourceKind.BOND, (20, 21), SinkKind.ATOM, (21,)),
+    ],
+)
+BETA_LACTAM_STEP = "pmechdb-65a6c92b04e820b5"
+BETA_LACTAM = (  # an N-acyliminium adds an alkyne; the ring N drawn without its H on both sides
+    "CC1C(=O)[N+:21]=[CH:20]1.C[C:11]#[CH:10]>>CC1C(=O)[N:21][CH:20]1[CH:10]=[C+:11]C",
+    [
+        Arrow(SourceKind.BOND, (10, 11), SinkKind.BOND, (10, 20)),
+        Arrow(SourceKind.BOND, (20, 21), SinkKind.ATOM, (21,)),
+    ],
+)
+CDI = "O=C(n1[c]ncc1)n1[c]ncc1"
+
+
+def pmechdb_step(rxn_arrows, step_id: str = "x") -> ElementaryStep:
+    rxn, arrows = rxn_arrows
+    return build_step(step_id=step_id, source=Source.PMECHDB, rxn_smiles=rxn, arrows=arrows)
+
+
+def no_radicals(smiles: str) -> bool:
+    return not any(a.GetNumRadicalElectrons() for a in frag(smiles).GetAtoms())
+
+
+def test_v1_completes_a_methyl_drawn_without_its_hydrogens():
+    step = pmechdb_step(METHYL_TRANSFER)  # validated with the arrows replayed
+    assert step.domain_exclusion is None and step.domain_class == DomainClass.REPAIRED_V1
+    assert "[CH3:20]" in step.reactants_smiles and "[CH3:20]" in step.products_smiles
+    rows = json.loads(step.charge_repair)["repairs"]
+    assert [(r["side"], r["rule"]) for r in rows] == [
+        ("reactants", V1_METHYL),
+        ("products", V1_METHYL),
+    ]
+    assert step.step_id == "x"  # a repair never changes the step id
+    assert no_radicals(step.reactants_smiles) and no_radicals(step.products_smiles)
+
+
+def test_v1_completes_the_imidazolyl_carbons_of_cdi():
+    screen = same_on_both_sides(CDI)
+    assert screen.code is None and screen.classes == {DomainClass.REPAIRED_V1}
+    assert {r[1] for r in screen.repairs} == {V1_IMIDAZOLYL}
+    ring_c = [a for a in screen.reactants.GetAtoms() if a.GetSymbol() == "C" and a.IsInRing()]
+    assert sorted(a.GetTotalNumHs() for a in ring_c) == [1, 1, 1, 1, 1, 1]
+    assert no_radicals(chem.canonical_mapped_smiles(screen.reactants))
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        "CC(O[O])O",  # a peroxyl
+        "C[C](C)[O][Na]",  # a ketyl, possibly sodium acetone ketyl: structure cannot tell
+        "Cl[C]Cl",  # a carbene
+        "[CH]1C=CC=C[CH]1[Na]",  # the Birch radical
+        "C[CH2]",  # a C with one radical electron and one neighbour
+        "c1cc[c]cc1",  # a phenyl radical: a 6-ring C
+    ],
+)
+def test_v1_and_a1_leave_genuine_radicals_alone(smiles):
+    screen = same_on_both_sides(smiles)
+    assert not screen.repairs and screen.code == DomainCode.RADICAL_DRAWN
+
+
+def test_the_birch_step_is_not_repaired():
+    rxn = "[CH]1C=CC=C[CH:11]1[Na:10]>>[CH]1C=CC=C[CH-:11]1.[Na+:10]"
+    step = unmapped_step(rxn)
+    assert step.charge_repair is None and step.domain_exclusion == DomainCode.RADICAL_DRAWN
+
+
+@pytest.mark.parametrize(
+    ("reactants", "products"),
+    [
+        ("C[O+:21](C)[C:20].[Br-:10]", "C[O:21]C.[Br:10][CH3:20]"),  # mapped, one side only
+        ("C[O+](C)[C].[Br-]", "COC.[Br]C"),  # unmapped, one side only
+        ("[Na:10].[Cl:11]C", "[Na:10][Cl:11].[CH3]"),  # an alkali atom that reacts
+    ],
+)
+def test_an_atom_drawn_differently_on_the_two_sides_is_not_repaired(reactants, products):
+    screen = screen_step(frag(reactants), frag(products))
+    assert not [r for r in screen.repairs if r[1] in (V1_METHYL, A1_RULE)]
+    assert screen.code == DomainCode.RADICAL_DRAWN
+
+
+def test_a1_charges_a_bare_alkali_spectator():
+    step = pmechdb_step(POTASSIUM_SPECTATOR)
+    assert step.domain_exclusion is None and step.domain_class == DomainClass.REPAIRED_A1
+    assert "[K+]" in step.reactants_smiles and "[K+]" in step.products_smiles
+    for side in (step.reactants_smiles, step.products_smiles):
+        assert chem.formal_charge(frag(side)) == 0
+    na = same_on_both_sides("CC[O-].[Na]")
+    assert {r[1] for r in na.repairs} == {A1_RULE} and na.code is None
+    assert not same_on_both_sides("CC[O-].[Na+]").repairs  # drawn right: nothing to do
+
+
+def test_the_named_beta_lactam_repair_applies_to_its_step_only():
+    assert [r["map"] for r in named_repairs()[BETA_LACTAM_STEP]] == [21]
+    step = pmechdb_step(BETA_LACTAM, step_id=BETA_LACTAM_STEP)  # arrows replayed
+    assert step.domain_exclusion is None and step.domain_class == DomainClass.REPAIRED_BL
+    assert "[NH+:21]" in step.reactants_smiles and "[NH:21]" in step.products_smiles
+    assert {r["rule"] for r in json.loads(step.charge_repair)["repairs"]} == {BL_RULE}
+    other = pmechdb_step(BETA_LACTAM)
+    assert other.charge_repair is None and other.domain_exclusion == DomainCode.RADICAL_DRAWN
+
+
 # ---- the fixed molecules, the open-shell fixtures
 
 
@@ -330,7 +451,9 @@ def test_domain_class_values_join_and_split():
     assert join_classes(["METAL_SUSPECT", "REPAIRED_DATIVE"]) == "REPAIRED_DATIVE+METAL_SUSPECT"
     assert join_classes(["Z_LATER", "METAL_SUSPECT"]) == "METAL_SUSPECT+Z_LATER"
     assert domain_classes(None) == frozenset()
-    assert admit_config("reactmech") == ["METAL_SUSPECT", "REPAIRED_DATIVE"]
+    assert admit_config("reactmech") == [
+        "METAL_SUSPECT", "REPAIRED_A1", "REPAIRED_BL", "REPAIRED_DATIVE", "REPAIRED_V1"
+    ]  # fmt: skip
 
 
 def test_training_steps_drop_excluded_and_unadmitted_steps_and_keep_the_gap():
@@ -363,15 +486,20 @@ def test_domain_counts_list_every_distinct_code():
 
 def test_ingest_report_counts_repairs_per_rule_and_domain_classes():
     result = IngestResult(Source.REACTMECH)
-    for k, rxn in enumerate((L1PD_OXIDATIVE_ADDITION, NI_OXIDATIVE_ADDITION, LIGANDLESS_TI)):
+    cdi_hydrolysis = "[OH2:1].O=C(n1[c]ncc1)n1[c]ncc1>>[OH2:1].O=C(n1[c]ncc1)n1[c]ncc1"
+    rxns = (L1PD_OXIDATIVE_ADDITION, NI_OXIDATIVE_ADDITION, LIGANDLESS_TI, cdi_hydrolysis)
+    for k, rxn in enumerate(rxns):
         result.add(f"s{k}", rxn, lambda r=rxn: unmapped_step(r))
     report = result.report()
-    assert report["charge_repairs_by_rule"] == {DATIVE_RULE: 2}
+    assert report["charge_repairs_by_rule"] == {DATIVE_RULE: 2, V1_IMIDAZOLYL: 1}
     assert report["domain_class"] == {
         "REPAIRED_DATIVE": 1,
         "REPAIRED_DATIVE+METAL_SUSPECT": 1,
+        "REPAIRED_V1": 1,
     }
     assert report["domain_exclusions"] == {"METAL_PLACEHOLDER": 1}
+    stats = compute_stats([result.steps[k] for k in (0, 3)])
+    assert stats["charge_repairs_by_rule"] == {DATIVE_RULE: 1, V1_IMIDAZOLYL: 1}
 
 
 # ---- real data: the laws on every stored step, from its sides as drawn
@@ -394,35 +522,63 @@ def _rescreened(step: ElementaryStep) -> ElementaryStep:
     )
 
 
-# open-shell plan P0a step 6: (codes, repairs per rule, domain classes) over every stored step
-P0A_COUNTS = {
+# open-shell plans P0a step 6 and P1: (codes, repairs per rule, domain classes) over every stored
+# step. P1's rules equal the P0 survey: C3_METHYL 9, BARE_ALKALI 4, BETA_LACTAM_N 1 and, in the
+# ReactMech pilot, CDI_IMIDAZOLYL 62.
+P1_COUNTS = {
     "pmechdb": (
-        {None: 12911, "OPEN_SHELL_METAL": 78, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 44,
+        {None: 12925, "OPEN_SHELL_METAL": 78, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 30,
          "CHARGE_UNREPAIRED": 1},
-        {"R1 group-14 -1 removed": 1},
-        {},
+        {"R1 group-14 -1 removed": 1, V1_METHYL: 9, A1_RULE: 4, BL_RULE: 1},
+        {"REPAIRED_V1": 9, "REPAIRED_A1": 4, "REPAIRED_BL": 1},
     ),
     "reactmech": (  # the pilot
-        {None: 9936, "RADICAL_DRAWN": 62, "OPEN_SHELL_METAL": 2},
-        {DATIVE_RULE: 254},  # 49 kept steps re-charged (25 Ni, 24 Pd), 205 returned
-        {"REPAIRED_DATIVE": 229, "REPAIRED_DATIVE+METAL_SUSPECT": 25, "METAL_SUSPECT": 10},
+        {None: 9998, "OPEN_SHELL_METAL": 2},
+        {DATIVE_RULE: 254, V1_IMIDAZOLYL: 62},  # dative: 49 kept steps re-charged, 205 returned
+        {"REPAIRED_DATIVE": 229, "REPAIRED_DATIVE+METAL_SUSPECT": 25, "METAL_SUSPECT": 10,
+         "REPAIRED_V1": 62},
     ),
 }  # fmt: skip
+# P1 step 4: the steps that stay as P0a left them (the Sn ones by the placeholder law)
+SN_PLACEHOLDERS = 8
+STILL_RADICAL_DRAWN = (
+    "pmechdb-29a4a03883007779",  # Al of degree 3 and 2
+    "pmechdb-ef20cdaad5325eca",  # the nitrone
+    "pmechdb-e57aaee9d354b63c",  # a four-bonded P
+)
 
 
-@pytest.mark.realdata
-@pytest.mark.parametrize("source", sorted(P0A_COUNTS))
-def test_the_domain_laws_give_the_p0a_counts(source):
-    from collections import Counter
-
+def _rescreened_store(source: str) -> list[ElementaryStep]:
     from rdkit import RDLogger
 
-    from ksmech.data.ingest import repair_rule_counts
     from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
 
     RDLogger.DisableLog("rdApp.*")
-    steps = [_rescreened(s) for s in read_steps(steps_path(source, DEFAULT_PROCESSED_DIR))]
-    codes, rules, classes = P0A_COUNTS[source]
+    return [_rescreened(s) for s in read_steps(steps_path(source, DEFAULT_PROCESSED_DIR))]
+
+
+@pytest.mark.realdata
+@pytest.mark.parametrize("source", sorted(P1_COUNTS))
+def test_the_domain_laws_give_the_p1_counts(source):
+    from collections import Counter
+
+    from ksmech.data.ingest import repair_rule_counts
+
+    steps = _rescreened_store(source)
+    codes, rules, classes = P1_COUNTS[source]
     assert dict(Counter(s.domain_exclusion for s in steps)) == codes
     assert dict(repair_rule_counts(steps)) == rules
     assert dict(Counter(s.domain_class for s in steps if s.domain_class)) == classes
+
+
+@pytest.mark.realdata
+def test_p1_leaves_the_tin_placeholders_and_the_other_drawings_as_they_were():
+    steps = {s.step_id: s for s in _rescreened_store("pmechdb")}
+    sn = [
+        s for s in steps.values()
+        if s.domain_exclusion == DomainCode.METAL_PLACEHOLDER
+        and any(a.GetSymbol() == "Sn" for a in frag(s.reactants_smiles).GetAtoms())
+    ]  # fmt: skip
+    assert len(sn) == SN_PLACEHOLDERS
+    for step_id in STILL_RADICAL_DRAWN:
+        assert steps[step_id].domain_exclusion == DomainCode.RADICAL_DRAWN

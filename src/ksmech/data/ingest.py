@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ksmech.data.domain import repair_rule_counts
 from ksmech.data.io import source_dir, write_resonance_pairs, write_steps
 from ksmech.data.schema import ElementaryStep, Source
 from ksmech.data.validation import Rejection, RejectReason, StepRejected
@@ -101,15 +102,6 @@ class IngestResult:
             "notes": dict(self.notes.most_common()),
             "sample": self.sample,
         }
-
-
-def repair_rule_counts(steps: list[ElementaryStep]) -> Counter[str]:
-    """Steps per repair rule (`data.domain`; a step repaired on both sides counts once)."""
-    out: Counter[str] = Counter()
-    for s in steps:
-        if s.charge_repair:
-            out.update({r["rule"] for r in json.loads(s.charge_repair)["repairs"]})
-    return out
 
 
 def write_outputs(result: IngestResult, processed_dir: Path) -> dict[str, Path]:

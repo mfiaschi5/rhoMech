@@ -6832,3 +6832,56 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
 
   Every uploaded file was checked against the local copy, by sha256 or by git blob hash. The
   local copies match the pod's.
+
+## 2026-10-30: Open-shell P1: the drawing repairs V1, A1 and the named beta-lactam repair
+
+- **What (open-shell plan P1, U4).** Three drawing repairs return closed-shell polar steps that
+  were excluded as RADICAL_DRAWN only because a species was drawn with a missing H or charge.
+  They run first among the ingest repairs (`data.domain.completed_step`, before R1 and the
+  dative law). Each is kept only if the repaired step still validates (charge balance, maps,
+  arrow replay where arrows exist). Each touches only an atom drawn the same way on both
+  sides: the same map number with the same shape, or, for unmapped atoms, equally many of the
+  same element and shape on both sides. An atom that reacts, or a radical drawn on one side
+  only, is never touched.
+  - **V1, H completion.** It applies to two signatures that no radical reading fits:
+    - a neutral C with 3 radical electrons and one neighbour (a methyl drawn `[C]`) gets 3 H;
+    - the imidazol-2-yl C of CDI gets 1 H. It is recognized by topology: a neutral C in a
+      5-ring, degree 2, two N neighbours, 1 radical electron. RDKit does not flag it
+      aromatic, so an aromaticity test would match none.
+
+    A C with one radical electron anywhere else is never completed: the three ambiguous
+    ketyls (possibly sodium acetone ketyls), the Birch [CH], a phenyl. Structure cannot tell
+    them from genuine radicals; they stay excluded and go to P3's candidate list.
+  - **A1.** A bare neutral alkali atom (group 1 without H, no neighbour, charge 0) gets +1. The
+    Birch Na, bonded on one side, is not bare.
+  - **The named beta-lactam repair (`BL_NAMED`).** Step `pmechdb-65a6c92b04e820b5` draws the
+    ring N (map 21) without its H on both sides: the N-acyliminium [N+]=C and the
+    beta-lactam amide N each keep one radical electron. One row of the tracked table
+    `src/ksmech/data/repairs_v1.json` (step id, map, change, rule, reason) adds the H on both
+    sides; the step replays its arrows. This is a named per-step repair, not a rule. Any
+    later one needs its own decision here, so the table does not grow into a list.
+- **Not implemented: an explicit H atom with a fresh map number.** The plan also allows adding
+  the H as an explicit atom where a source draws H explicitly. No ingested source draws a
+  spectator's H as atoms: PMechDB draws only moving H as `[H:n]`, and ReactMech writes H counts.
+  So V1 writes the count (NoImplicit). If P8 meets the shape on rmechdb, it adds the variant.
+- **Classes and counts.**
+  - Each repair gives the step a domain class: `REPAIRED_V1`, `REPAIRED_A1` or `REPAIRED_BL`.
+    They are admitted by default, like the P0a classes.
+  - The rules are logged in `charge_repair` and `charge_repairs.csv` as `V1 methyl [C] +3H`,
+    `V1 imidazol-2-yl C +H`, `A1 bare alkali +1` and `BL_NAMED`.
+  - They are counted per rule in `ingest_report.json` and, new, in `stats.json`
+    (`charge_repairs_by_rule`, also printed by `ksmech-data stats`).
+- **Measured.** Every stored step was screened again from the sides the source drew. The per-rule
+  counts equal the P0 survey:
+  - PMechDB:
+    - 9 methyls (8 training steps and the allyl-cation shift, a resonance pair);
+    - 4 bare K/Na;
+    - 1 beta-lactam N.
+
+    RADICAL_DRAWN goes from 44 to 30, and kept steps from 12,911 to 12,925.
+  - The ReactMech pilot: the 62 CDI steps. Kept steps go from 9,936 to 9,998, and only the 2
+    OPEN_SHELL_METAL steps stay excluded.
+  - No other step changes: no code, class or SMILES. The 8 Sn steps stay METAL_PLACEHOLDER
+    (the P0a law), and the Al, nitrone and four-bonded P steps stay RADICAL_DRAWN.
+- **Spec.** v9.1's "Domain coverage" already lists V1, A1 and the named repair, so the text is
+  unchanged.
