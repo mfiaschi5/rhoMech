@@ -5,8 +5,9 @@ FD columns unselected, legacy decoder caps, floor and GBDT on the valid cells) t
 reproduces the P0 references on every sample P0a did not change (`p0a_changes.json`,
 `changed_steps`): the floor ranks, the stored v17 GBDT model's ranks and three runs' decode hits
 per sample. Every rebuilt token file kept its schema-9 fields (`tokens_summary.json`,
-`replaced`). The references are the v17 copies (`data/processed_v17/`, `<run>/p0_reference/`);
-the new files come from the CLI runs of the rebuild:
+`replaced`), and a later build changes no closed-shell file. The references are the v17 copies
+(`data/processed_v17/`, `<run>/p0_reference/`); the new files come from the CLI runs of the
+rebuild:
 
     ksmech-eval floor --source pmechdb
     ksmech-physics gbdt --source pmechdb --score-only --allow-stale \\
@@ -61,10 +62,15 @@ def _compare(old_rows: list[dict], new_rows: list[dict], changed: set[str]) -> d
 
 
 @pytest.mark.parametrize("source", ["pmechdb", "reactmech"])
-def test_every_rebuilt_token_file_keeps_its_schema_9_fields(source):
+def test_a_token_rebuild_changes_no_closed_shell_file(source):
+    """P0a's schema-10 rebuild replaced every token file and changed no schema-9 field (gate
+    passed 2026-10-29). A later build replaces only stale files: since P2b the open shells of the
+    plateau rule, so every replaced file that differs is an open shell (the list is complete)."""
+    from ksmech.orbitals.tokens import drawn_unpaired
+
     replaced = _read(DEFAULT_PROCESSED_DIR / source / "tokens_summary.json")["replaced"]
-    assert replaced["n_replaced"] > 0, "no token file was replaced: was the build forced?"
-    assert replaced["n_differing"] == 0, replaced
+    assert len(replaced["smiles"]) == replaced["n_differing"], replaced
+    assert all(drawn_unpaired(s) > 0 for s in replaced["smiles"]), replaced
 
 
 @pytest.mark.parametrize("part", ["val", "test"])

@@ -102,11 +102,14 @@ def test_a_kept_step_without_a_suspicious_metal_has_no_row():
 
 
 @pytest.mark.realdata
-def test_the_survey_matches_the_p0a_oracle():
-    """The v18 ingest (P0a's domain laws). P0 read, on the v17 ingest: PMechDB RADICAL_DRAWN 52
+def test_the_survey_matches_the_p1_oracle():
+    """The v18 ingest after P1's repairs. P0 read, on the v17 ingest: PMechDB RADICAL_DRAWN 52
     (the 8 Sn steps, now METAL_PLACEHOLDER, among them), KEPT PLACEHOLDER_EVEN 24 (now
     excluded); ReactMech OPEN_SHELL_METAL PD_DATIVE 96, METAL_PLACEHOLDER L1PD 109 (both
-    returned by the dative law and its ML1 exemption), KEPT ONIUM_PD_NI_EVEN 49 (re-charged)."""
+    returned by the dative law and its ML1 exemption), KEPT ONIUM_PD_NI_EVEN 49 (re-charged).
+    P0a's oracle had PMechDB RADICAL_DRAWN 44 and ReactMech CDI_IMIDAZOLYL 62; P1's repairs
+    returned the 9 C3_METHYL (V1), 4 BARE_ALKALI (A1), 1 BETA_LACTAM_N (BL_NAMED) and the 62 CDI
+    steps (V1), and no other subclass moved."""
     import pandas as pd
 
     from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
@@ -119,19 +122,15 @@ def test_the_survey_matches_the_p0a_oracle():
     pm = counts("pmechdb")
     radical = pm["counts"]["RADICAL_DRAWN"]
     genuine = radical["RADICAL_SPECTATOR"] + radical["RADICAL_REACTIVE"]
-    assert (sum(radical.values()), genuine, radical["CARBENE"], radical["C3_METHYL"]) == (
-        44,
-        12,
-        10,
-        9,
-    )
+    assert (sum(radical.values()), genuine, radical["CARBENE"]) == (30, 12, 10)
+    assert not {"C3_METHYL", "BARE_ALKALI", "BETA_LACTAM_N"} & set(radical)
     osm = pm["counts"]["OPEN_SHELL_METAL"]
     assert osm["OSM_FE3"] == 43 and osm["OSM_CU2"] + osm["CUH2_LIGAND"] + osm["CU_SUSPECT"] == 35
     assert pm["counts"]["METAL_PLACEHOLDER"] == {"PLACEHOLDER": 56}
     assert pm["counts"]["KEPT"] == {"ZNCL_ION": 3}
     assert pm["spin_parity_molecules"] == {"Cu": 41, "placeholder": 34, "Fe": 20, "Ti": 4, "P": 1}
     rm = counts("reactmech")
-    assert rm["counts"]["RADICAL_DRAWN"] == {"CDI_IMIDAZOLYL": 62}
+    assert "RADICAL_DRAWN" not in rm["counts"]
     assert rm["counts"]["OPEN_SHELL_METAL"] == {"PD_ALREADY_NEG": 2}
     assert "METAL_PLACEHOLDER" not in rm["counts"]
     # 49 re-charged + 205 returned, each named by its first suspicious fragment, reactants first

@@ -7289,3 +7289,103 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
     Cu) are degenerate or smeared under restricted GFN2.
   - **U16 (degenerate shells in P2b).** Three fixture plateaus are split across the 0.5 block
     threshold, the case P2b's plateau rule removes.
+
+## 2026-10-31: Open-shell P2b: the plateau reference, the radical frontier, atom_fukui and the stale key
+
+- **What ran.** P2b steps 1-5 of `docs/open_shell_plan.md` on branch `claude/open-shell-p2b`
+  (from p2). Code 83c35e1, spec v9.2 fc7e041 (approved by the user before the build, U3), then
+  `ksmech-orbitals build --source pmechdb` and `--source reactmech` from the clean tree.
+- **Step 1, localization blocks for u > 0.** `localize.reference_occupations`: the MOs in energy
+  order, neighbours with GFN2 occupations equal to `PLATEAU_TOL = 1e-6` e form a plateau, and
+  each MO's reference is the aufbau occupation averaged over its plateau. An MO with reference
+  > 0 is occupied; the sub-blocks are the reference values; an MO further than SMEAR_TOL (0.05)
+  from its reference is its own block, unrotated. `occupation_reference` dispatches on
+  `rec.unpaired`, so `is_fermi_smeared` reads the plateau reference for u > 0 and aufbau
+  otherwise. Closed shells keep OCC_THRESHOLD 0.5, DOUBLE_THRESHOLD 1.5 and one virtual block.
+  - **Tolerance evidence.** On the 44 PMechDB u > 0 records the reference is the same for every
+    tolerance from 1e-13 to 1e-2 e (realdata test, 1e-13..1e-3). Degenerate open levels agree
+    to 4.4e-14 e. Plateaus of doubly occupied levels with Fermi tails spread up to 5.8e-7 e,
+    but a tolerance that splits them changes no reference, since their aufbau values are equal.
+  - **Fixtures.** Restricted gas-phase GFN2 at idealized geometries (`tests/fixtures/
+    open_shell.py`). There the NO and C6H6.- pairs differ by up to 9e-9 e, so the fixture sweep
+    runs 1e-7..1e-4 instead of the plan's 1e-12..1e-4: at an idealized geometry with
+    restricted GFN2 the degenerate pair is split by more than on the production records, and a
+    tolerance below the split is not a numerical equality any more.
+- **Step 2, the radical frontier (U16).** `frontier.record_frontier_blocks`: for u > 0, HOMO =
+  LUMO = the open group (0 < reference < 2), HOMO-1 the 0.05 eV block of the highest MO with
+  reference 2, LUMO+1 that of the lowest with reference 0. Frozen f+ = f- = the open group's
+  population per MO. [CH3]: f+ was a sigma*(C-H) (C 0.436); now the SOMO, f+ = f-. The FD dual
+  and the record fields are unchanged.
+- **Step 3, `ModelConfig.atom_fukui`** = frozen (default) | fd | both. fd puts `f_plus` /
+  `f_minus` in the place of `f_plus_fmo` / `f_minus_fmo`, both appends them. 'frozen' gives a
+  byte-identical atom tensor. P9 ablates it with 3 seeds.
+- **Step 4, stale detection.** Deviation from the plan: there is no `load_tokens_for` helper.
+  `load_tokens` itself adds `open_shell_rule = "occ-plateau-v1"` to whatever config the caller
+  passes, from the file's own `smiles` (`drawn_unpaired`, RDKit's radical count), and
+  `save_tokens` stamps it. So every reader is covered without being changed, and the grep
+  test checks instead that no module other than tokens.py verifies a token header itself
+  (serve's header check goes through `token_config_for`). An unparsable SMILES raises; serve
+  reports it as "unreadable molecule". P4's records tagged with a table multiplicity must
+  revisit `drawn_unpaired` (a metal centre's u is not RDKit's radical count).
+- **Build summary.** `tokens_summary.json` gains `open_shell`: SOMO and open-group counts, the
+  window references at 0.01 / 0.05 / 0.1 eV against the plateau reference, and max|n - aufbau|
+  and max|n - reference| as median / p90 / max. Summaries are written atomically (tmp + replace):
+  this checkout's `data/cache/tokens/summary.json` was a hard link shared with the reactmech-full
+  worktree's, and an in-place write changed both.
+- **Rebuild.** Both builds ran at 2 workers from the clean commit fc7e041, beside the ReactMech
+  full QM batch (12 workers in its own worktree), so the host stayed within 15 heavy processes.
+  - **PMechDB.** 14,362 molecules: 14,215 with tokens (44 built, 14,171 loaded), 147 without a QM
+    record, 0 failed. The 44 built are exactly the u > 0 molecules (u = 1: 24, u = 2: 14,
+    u = 3: 6). They hold 73 open MOs in 58 plateaus, none smeared. The window references
+    differ from the plateau one in 0 / 0 / 0 records (0.01 / 0.05 / 0.1 eV).
+    max|n - aufbau| median / p90 / max 0 / 0.018 / 0.5, max|n - reference| 0 / 0.013 / 0.028.
+  - **What changed in the 44 files.** All 44 have new frontier columns (`f_plus_fmo`,
+    `fmo_weights` and their exact twins; `f_minus_fmo` in 16). The three species the rule makes
+    integral also have new orbital descriptors and fermi_smeared flags.
+  - **Smeared molecules** go 42 -> 39; the three removed are [C]=O, [CuH2] and [O][O-], and none
+    is added. Training steps touching a smeared molecule go 70 -> 59 (62 -> 57 of the fully
+    tokenized ones).
+  - **ReactMech pilot.** 20,183 molecules: 19,515 loaded, 0 built, 668 without a QM record, 0
+    failed, no open shell. Its previous `tokens_summary.json` was written before P1's re-ingest
+    (it still listed the CDI radicals), so the 18 smeared species it loses are the CDI radicals
+    P1 repaired away, not an effect of P2b.
+  - **Hard links.** The 44 rebuilt files were replaced, not written in place: each now has one
+    link, and the other worktrees, which share the token files by hard link, keep their old
+    copies. When a worktree with P2b's code reads them, `load_tokens` refuses them as stale.
+- **Counts against the plan.** PMechDB has 44 u > 0 molecules in accepted steps (plan 61) and
+  the ReactMech pilot 0 (plan 33): P1's repairs removed the rest, the CDI radicals included.
+  So the smeared u > 0 count goes 3 -> 0 ([C]=O, [CuH2], [O][O-]), not 9 -> 6. The window
+  reference differs from the plateau reference in 0 / 0 / 0 records (plan 0/1/1 and 0/2/13).
+  50 older u > 0 token files of molecules no manifest lists stay on disk under the old rule;
+  `load_tokens` refuses them as stale, so nothing reads them.
+- **Exit checks.** All pass.
+  - **Provenance.** No artifact under `data/processed/pmechdb` (10,294 token inputs) or
+    `data/processed/reactmech` (10,898) reads a u > 0 token file. Every sample store, current
+    view, pair-statistics file, split, cohort and the closed_base baseline verifies. The 77 and
+    6 stale artifacts were stale before P2b: built on 2026-10-25 or 10-29, with inputs P1 changed
+    on 10-30. They are the floor and GBDT ranks on the whole molecule split, the
+    `p0b_reference` copies, the archived contact shards, `open_shell_survey.json`,
+    `p0a_changes.json` and `threshold_reach.json`.
+  - **closed_base digests.** 30 samples rebuilt from their tokens through `load_tokens` give the
+    pinned per-column digests (realdata).
+  - **Floor.** Ranks per sample are identical on closed_base for valid cells and for every cell
+    (val 1,238, test 1,182).
+  - **flex_first decode.** Val hits per sample on closed_base are identical: top-1/3/5
+    62.9 / 82.6 / 85.4.
+  - **Closed-shell payloads.** 500 random closed-shell PMechDB molecules rebuilt in memory keep
+    their content hash.
+- **Realdata oracles left behind by P1.** P1's rebuild did not run the realdata suite, so three
+  tests still read pre-P1 states. Corrected here:
+  - `test_data_survey`: the oracle is now P1's. PMechDB RADICAL_DRAWN 44 -> 30 (C3_METHYL 9,
+    BARE_ALKALI 4 and BETA_LACTAM_N 1 returned) and ReactMech CDI_IMIDAZOLYL 62 -> 0. A survey
+    of the P0b copy of steps.parquet shows no other subclass moved.
+  - `test_eval_pin` (closed_base): the molecule views are closed_base plus the 13 'added'
+    samples.
+  - `test_legacy_reproduction` (token files): it read the live `tokens_summary.json` as P0a's
+    rebuild summary. That breaks on any later build (P1's had replaced nothing; ReactMech's
+    P0a summary was overwritten here). It now checks that every replaced file that differs is
+    an open shell. The P0a gate itself passed on 2026-10-29 (above).
+- **Unscheduled.** The rule is written for every molecule; extending it to closed shells is
+  left unscheduled (U16 keeps it to u > 0). Measured read-only when the plan was written, it
+  changes the reference of 0 PMechDB and 1 ReactMech closed-shell record (O=[C-]Cl) and the
+  blocks only of MOs already flagged smeared (7 and 24 records).
