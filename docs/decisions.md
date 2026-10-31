@@ -7385,6 +7385,9 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
     rebuild summary. That breaks on any later build (P1's had replaced nothing; ReactMech's
     P0a summary was overwritten here). It now checks that every replaced file that differs is
     an open shell. The P0a gate itself passed on 2026-10-29 (above).
+- **Tests** (from d8a3ff8, clean tree, beside the 12-worker ReactMech QM batch):
+  `pytest -n 2 -m "not realdata"` 1938 passed, 12 skipped, 2 xfailed;
+  `KSMECH_TEST_WORKERS=1 pytest -m realdata` 45 passed.
 - **Unscheduled.** The rule is written for every molecule; extending it to closed shells is
   left unscheduled (U16 keeps it to u > 0). Measured read-only when the plan was written, it
   changes the reference of 0 PMechDB and 1 ReactMech closed-shell record (O=[C-]Cl) and the
