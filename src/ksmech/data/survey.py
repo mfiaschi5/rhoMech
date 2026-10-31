@@ -19,6 +19,11 @@ oracle. Radical drawings, first match wins, drawing errors before genuine radica
 - CO_DRAWN: [C]=O; CARBENE: any other C with two radical electrons;
 - RADICAL_REACTIVE / RADICAL_SPECTATOR: the rest, by whether an arrow touches a radical atom.
 
+A radical drawing gets its subclass whatever P3's open-shell laws made of it: a step coded
+RADICAL_DRAWN or with one of the laws' codes (`domain.OPEN_SHELL_CODES`), and an admitted one
+(code KEPT, class RADICAL_SPECTATOR or RADICAL_REACTIVE), so the subclasses do not move when
+the admission does.
+
 Metals: OSM_FE3, OSM_CU2, CUH2_LIGAND, CU_SUSPECT (Cu=C, CuI2), PD_DATIVE (an odd Pd fragment
 with an uncompensated onium), PD_ALREADY_NEG (a step holding an odd Pd already at -1), L1PD
 ([Pd] bonded only to an onium P, on a METAL_PLACEHOLDER step), PLACEHOLDER; on kept steps
@@ -40,8 +45,11 @@ from rdkit import Chem, rdBase
 from ksmech.data import chem
 from ksmech.data.domain import (
     _S_BLOCK,
+    ADMITTED_OPEN_SHELL,
     METALS,
+    OPEN_SHELL_CODES,
     d_count,
+    domain_classes,
     is_odd,
     is_onium_donor,
     is_placeholder,
@@ -208,7 +216,8 @@ def survey_row(step) -> dict | None:
     code = step.domain_exclusion
     arrow_maps = {m for arrow in step.arrows for m in arrow.atoms}
     touched: list[int] = []
-    if code == "RADICAL_DRAWN":
+    admitted = domain_classes(step.domain_class) & {str(c) for c in ADMITTED_OPEN_SHELL}
+    if code == "RADICAL_DRAWN" or code in OPEN_SHELL_CODES or (code is None and admitted):
         sub, touched = classify_radical(sides, arrow_maps)
     elif code in ("OPEN_SHELL_METAL", "METAL_PLACEHOLDER"):
         sub = classify_metal(sides, code)

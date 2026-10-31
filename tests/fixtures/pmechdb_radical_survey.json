@@ -1,0 +1,53 @@
+{
+  "note": "The hand reading of PMechDB's genuine radical steps (open-shell plan P0, read 2026-10-28; docs/decisions.md): a test oracle only, never read by the pipeline. Step ids and the chemistry read, no SMILES.",
+  "genuine": [
+    {
+      "step_id": "pmechdb-4bda5440edfee13c",
+      "reading": "birch_radical_anion"
+    },
+    {
+      "step_id": "pmechdb-d801a8b229dcb84b",
+      "reading": "peroxyl_deprotonation"
+    },
+    {
+      "step_id": "pmechdb-c03e91edf1b60435",
+      "reading": "peroxyl_deprotonation"
+    },
+    {
+      "step_id": "pmechdb-0aee682f91716351",
+      "reading": "peroxyl_deprotonation"
+    },
+    {
+      "step_id": "pmechdb-da5ee706b4caccaa",
+      "reading": "peroxyl_superoxide_elimination"
+    },
+    {
+      "step_id": "pmechdb-1082008030665ea3",
+      "reading": "peroxyl_superoxide_elimination"
+    },
+    {
+      "step_id": "pmechdb-d3d89278e192317d",
+      "reading": "peroxyl_superoxide_elimination"
+    },
+    {
+      "step_id": "pmechdb-8035142e477f1333",
+      "reading": "peroxyl_superoxide_elimination"
+    },
+    {
+      "step_id": "pmechdb-ff22599cd73c0f6a",
+      "reading": "superoxide_protonation"
+    },
+    {
+      "step_id": "pmechdb-5d007b38296827b6",
+      "reading": "et3b_o2"
+    },
+    {
+      "step_id": "pmechdb-db877060093d34fc",
+      "reading": "resonance_spectator_ethyl"
+    },
+    {
+      "step_id": "pmechdb-dcf0a54a98432a8c",
+      "reading": "resonance_spectator_ethyl"
+    }
+  ]
+}

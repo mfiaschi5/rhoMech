@@ -48,6 +48,7 @@ from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
+from rdkit import Chem
 from rich.console import Console
 
 from ksmech.arrows import store
@@ -90,6 +91,7 @@ from ksmech.orbitals.tokens import (
     STORED_ORBITAL_FEATURES,
     MoleculeTokens,
     atom_feature_names,
+    drawn_unpaired,
     feature_names,
 )
 from ksmech.physics.pairs import (
@@ -139,6 +141,7 @@ class SkipReason(StrEnum):
     RADICAL_ARROW = "RADICAL_ARROW"
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
+    SOMO_NOT_INTEGRAL = "SOMO_NOT_INTEGRAL"  # an open-shell reactant is Fermi-smeared (law S, P3)
 
 
 READING_ALIGNED = "aligned"  # every arrow has its ArrowLabel
@@ -452,6 +455,42 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
         sample.labels, sample.orbital_reading = labels, READING_ALIGNED
 
 
+def smeared_open_shells(rt: ReactantTokens) -> list[str]:
+    """Law (S) of the open-shell admission (`data.domain`, open-shell plan P3): the open-shell
+    reactant fragments (drawn u > 0) whose tokens are Fermi-smeared, i.e. whose record has an
+    MO further than SMEAR_TOL from P2b's plateau reference; their SOMO is not integral."""
+    return [f.key for f in rt.fragments if f.tokens.fermi_smeared and drawn_unpaired(f.key)]
+
+
+def stretched_bonds(
+    sample: MechanismSample, factor: float | None = None
+) -> list[tuple[int, int, float]]:
+    """(i, j, d / r_cov sum) of the reactant bonds that R changes, that touch Li, Na, Mg or K
+    (the bonds the QM connectivity check skips, `qm.geometry.SKIP_BOND_ELEMENTS`) and that the
+    record holds further apart than `factor` (`QMConfig.conn_cov_factor`) x the covalent-radius
+    sum: R changes a bond the QM input does not have (SKIPPED_BOND_STRETCHED, open-shell plan
+    P3; the Birch step's Na...benzene complex). A counted flag, never a model input."""
+    from ksmech.qm.geometry import SKIP_BOND_ELEMENTS
+    from ksmech.qm.xtb_calc import QMConfig
+
+    factor = QMConfig().conn_cov_factor if factor is None else factor
+    if sample.edit_label is None:
+        return []
+    z = sample.atom_categorical[:, 0]
+    lewis = {(int(i), int(j)) for i, j, _ in sample.bonds}
+    pairs = {(i, j) for v in sample.edit_label.variants for i, j, _ in v.bonds} & lewis
+    table = Chem.GetPeriodicTable()
+    out = []
+    for i, j in sorted(pairs):
+        if not {int(z[i]), int(z[j])} & SKIP_BOND_ELEMENTS:
+            continue
+        d = float(np.linalg.norm(sample.atom_positions[i] - sample.atom_positions[j]))
+        ratio = d / (table.GetRcovalent(int(z[i])) + table.GetRcovalent(int(z[j])))
+        if ratio > factor:
+            out.append((i, j, round(ratio, 3)))
+    return out
+
+
 def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
     """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
     the edit label, the other resonance drawings of the pool, and the ArrowLabels when every
@@ -468,6 +507,9 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
             return SkipReason(exc.reason)
         except CorrespondenceError:
             return SkipReason.CORRESPONDENCE
+        if smeared := smeared_open_shells(rt):
+            log.info("%s: open-shell reactant not integral: %s", step.step_id, smeared)
+            return SkipReason.SOMO_NOT_INTEGRAL
         target = edit_target(step, rt)
         if isinstance(target, SkipReason):
             return target
@@ -755,6 +797,7 @@ def build_all_samples(
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
         "skipped_by_domain_class": skipped_by_domain_class(steps, skipped),
+        "SKIPPED_BOND_STRETCHED": sorted(i for i, s in samples.items() if stretched_bonds(s)),
         **{
             k: every[k]
             for k in (

@@ -4,7 +4,8 @@ A cohort is a frozen set of step ids, `cohort_<name>.json` beside the source's s
 `cohort`, COHORT_SCHEMA, no file inputs, a content hash: re-ingests and store bumps never make
 it stale). `ksmech-eval floor|decode --cohort <name>` scores only its steps, so new data is
 measured in its own cohort and never pooled into a headline number. A slice reports the same
-numbers on the samples with and without one attribute (`--slice fermi_smeared`). The covered
+numbers on the samples with and without one attribute (`--slice fermi_smeared`, or
+`bond_stretched`: an R entry on a Li/Na/Mg/K bond the record does not hold). The covered
 fraction says which share of a part's steps became samples, with the reason codes of the rest.
 """
 
@@ -18,7 +19,18 @@ from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir
 
 COHORT_SCHEMA = 1
-SLICES: dict[str, Callable] = {"fermi_smeared": lambda s: bool(s.fermi_smeared)}
+
+
+def _bond_stretched(sample) -> bool:
+    from ksmech.arrows.steps import stretched_bonds
+
+    return bool(stretched_bonds(sample))
+
+
+SLICES: dict[str, Callable] = {
+    "fermi_smeared": lambda s: bool(s.fermi_smeared),
+    "bond_stretched": _bond_stretched,  # SKIPPED_BOND_STRETCHED (open-shell plan P3)
+}
 
 
 def cohort_path(source: str, name: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
@@ -40,6 +52,16 @@ def write_cohort(
     content = prov.sha256_text(json.dumps(ids))
     header = prov.stamp("cohort", COHORT_SCHEMA, {}, {"name": name}, content, note or {})
     return prov.write_json(out, {"ids": ids}, header)
+
+
+def class_cohort_ids(steps: Iterable, classes: Iterable[str]) -> list[str]:
+    """The ids of the steps whose `domain_class` holds one of `classes` (pass the training
+    target, `io.read_training_steps`): the cohorts of admitted new data, e.g. open_shell from
+    RADICAL_SPECTATOR and RADICAL_REACTIVE (open-shell plan P3)."""
+    from ksmech.data.domain import domain_classes
+
+    want = set(classes)
+    return sorted(s.step_id for s in steps if domain_classes(s.domain_class) & want)
 
 
 def load_cohort(

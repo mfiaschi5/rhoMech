@@ -5,15 +5,16 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from rdkit import Chem
 
 from ksmech.arrows.apply import apply_arrows
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
-from ksmech.data import chem
-from ksmech.data.domain import Screen, screen_step
+from ksmech.arrows.delta_be import EditSkip, dataset_matrix
+from ksmech.data import chem, domain
+from ksmech.data.domain import DomainCode, OpenShellPolicy, Screen, screen_step
 from ksmech.data.resonance import is_resonance_step
 from ksmech.data.schema import Arrow, ElementaryStep, Source, SourceKind
 
@@ -174,7 +175,7 @@ def build_step(
     )
     reactants, products = screen.reactants, screen.products
     resonance = is_resonance_step(reactants, products)
-    return ElementaryStep(
+    step = ElementaryStep(
         step_id=step_id,
         source=source,
         pathway_id=pathway_id,
@@ -189,6 +190,35 @@ def build_step(
         charge_repair=note,
         domain_class=screen.domain_class,
     )
+    return admit_open_shell(step)
+
+
+def admit_open_shell(step: ElementaryStep) -> ElementaryStep:
+    """A RADICAL_DRAWN step of a source that admits open shells by rule (`domain.POLICY`),
+    re-read by the laws (u) and (R) of `data.domain` (its docstring, 4; open-shell plan P3):
+    a failed law replaces RADICAL_DRAWN by its code; a step that passes is admitted as
+    RADICAL_SPECTATOR or RADICAL_REACTIVE, or, when the source's curation file names it, keeps
+    RADICAL_DRAWN with the curated reason as its class. R is the dataset arrows' edit
+    (`delta_be.dataset_matrix`); a step whose edit fails is NOT_ELEMENTARY. Law (S) needs the
+    tokens and is the sample builder's (SOMO_NOT_INTEGRAL)."""
+    policy = domain.POLICY.get(str(step.source), domain.DomainPolicy())
+    if step.domain_exclusion != DomainCode.RADICAL_DRAWN:
+        return step
+    if policy.open_shell is not OpenShellPolicy.ADMIT_BY_RULE:
+        return step
+    products = chem.parse_mapped(step.products_smiles)
+    code = domain.spin_law(chem.parse_mapped(step.reactants_smiles), products)
+    edit = dataset_matrix(step) if code is None else None
+    if code is None and (isinstance(edit, EditSkip) or not domain.parity_law(edit[2].lone)):
+        code = DomainCode.NOT_ELEMENTARY
+    if code is not None:
+        return replace(step, domain_exclusion=str(code))
+    mol, _, r, _ = edit
+    curated = domain.open_shell_curation(str(step.source)).get(step.step_id)
+    cls = curated or domain.radical_class(mol, products, r.bonds, r.lone)
+    classes = domain.join_classes(domain.domain_classes(step.domain_class) | {cls})
+    exclusion = step.domain_exclusion if curated else None
+    return replace(step, domain_exclusion=exclusion, domain_class=classes)
 
 
 def screened(

@@ -282,8 +282,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
   `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
   it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
-  `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared` (with and without), and
-  report the covered fraction; `uv run ksmech-eval pin --source pmechdb --name closed_base [--workers N]`
+  `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared|bond_stretched` (with and
+  without), and report the covered fraction; `uv run ksmech-eval cohort --source pmechdb --name
+  open_shell --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE` (the training steps of some
+  domain_class values pinned once as a cohort); `uv run ksmech-eval pin --source pmechdb --name closed_base [--workers N]`
   (open-shell plan P0b: the molecule split's samples as a cohort, its GBDT subsets `<name>_gbdt_valid|all`
   and `baseline_<name>.json`, per-sample digests of every named column, `eval.pin`; each written once),
   `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--out FILE]` (two arms of decode runs

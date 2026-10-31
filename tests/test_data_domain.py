@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 from rdkit import Chem
 
-from ksmech.data import chem
+from ksmech.data import chem, domain
 from ksmech.data.domain import (
     A1_RULE,
     BL_RULE,
@@ -29,9 +29,12 @@ from ksmech.data.domain import (
     join_classes,
     named_repairs,
     oxidation_state,
+    parity_law,
+    radical_class,
     repair_candidate,
     screen_step,
     side_codes,
+    spin_law,
     uncompensated,
 )
 from ksmech.data.ingest import IngestResult
@@ -423,7 +426,9 @@ def test_the_named_beta_lactam_repair_applies_to_its_step_only():
     assert "[NH+:21]" in step.reactants_smiles and "[NH:21]" in step.products_smiles
     assert {r["rule"] for r in json.loads(step.charge_repair)["repairs"]} == {BL_RULE}
     other = pmechdb_step(BETA_LACTAM)
-    assert other.charge_repair is None and other.domain_exclusion == DomainCode.RADICAL_DRAWN
+    assert other.charge_repair is None and other.domain_exclusion is None
+    # as drawn, P3's laws read a conserved N radical the arrows touch: the repair is named
+    assert other.domain_class == DomainClass.RADICAL_REACTIVE
 
 
 # ---- the fixed molecules, the open-shell fixtures
@@ -441,6 +446,105 @@ def test_open_shell_fixtures_are_excluded_never_repaired_or_flagged(name):
     screen = same_on_both_sides(OPEN_SHELL[name][0])
     assert screen.code in (DomainCode.RADICAL_DRAWN, DomainCode.OPEN_SHELL_METAL)
     assert not screen.repairs and not screen.classes
+
+
+# ---- P3: open shells admitted by counted laws (PMechDB's admit_by_rule)
+
+SPECTATOR_RADICAL = (  # an alcohol deprotonated beside its own C radical, drawn alike on both sides
+    "C[CH:5]C[O:21][H:20].[OH-:10]>>C[CH:5]C[O-:21].[OH:10][H:20]",
+    [
+        Arrow(SourceKind.LONE_PAIR, (10,), SinkKind.ATOM, (20,)),
+        Arrow(SourceKind.BOND, (20, 21), SinkKind.ATOM, (21,)),
+    ],
+)
+
+
+def test_a_doublet_spectator_drawn_alike_on_both_sides_is_admitted():
+    step = pmechdb_step(SPECTATOR_RADICAL)
+    assert step.domain_exclusion is None
+    assert step.domain_class == DomainClass.RADICAL_SPECTATOR
+    assert training_steps([step]) == [step]
+
+
+def test_a_source_that_excludes_open_shells_keeps_radical_drawn():
+    rxn, arrows = SPECTATOR_RADICAL
+    step = build_step(step_id="x", source=Source.REACTMECH, rxn_smiles=rxn, arrows=arrows)
+    assert step.domain_exclusion == DomainCode.RADICAL_DRAWN and step.domain_class is None
+
+
+@pytest.mark.parametrize(
+    ("reactants", "products", "code"),
+    [
+        ("[CH3:1][Cl:2]", "[CH3:1].[Cl:2]", DomainCode.SPIN_NOT_CONSERVED),  # homolysis
+        ("[CH2:1]=[O:2].[H-:3]", "[CH2:1]([H:3])[O:2]", DomainCode.SPIN_NOT_CONSERVED),
+        ("[C]=O.C[O:1][H:2]", "[C]=O.C[O-:1].[H+:2]", DomainCode.SPIN_RULE_PENDING),
+        ("Cl[C]Cl.C[O:1][H:2]", "Cl[C]Cl.C[O-:1].[H+:2]", DomainCode.MULTIPLICITY_AMBIGUOUS),
+        ("[CH2]CCC[CH2].[OH-]", "[CH2]CCC[CH2].[OH-]", DomainCode.MULTIPLICITY_UNTABULATED),
+        ("[O][O-].[H+]", "[O]O", None),
+        ("[O][O].C", "[O][O].C", None),  # a triplet spectator: the table's 2 is RDKit's 2
+    ],
+)
+def test_the_spin_law(reactants, products, code):
+    assert spin_law(frag(reactants), frag(products)) == code
+
+
+def test_the_parity_law_refuses_an_odd_atom_entry():
+    assert parity_law([(0, 2), (3, -2)]) and not parity_law([(0, 2), (3, -1)])
+
+
+def test_an_odd_atom_entry_of_the_arrows_edit_is_not_elementary(monkeypatch):
+    from ksmech.arrows.delta_be import ReactionMatrix
+    from ksmech.data import validation
+
+    real = validation.dataset_matrix
+
+    def odd(step):
+        mol, prod, r, removed = real(step)
+        return mol, prod, ReactionMatrix(r.bonds, ((0, 1),)), removed
+
+    monkeypatch.setattr(validation, "dataset_matrix", odd)
+    assert pmechdb_step(SPECTATOR_RADICAL).domain_exclusion == DomainCode.NOT_ELEMENTARY
+
+
+def test_an_r_entry_on_a_radical_atom_makes_the_step_reactive():
+    reactants, products = frag("C[CH:5]C[O:21][H:20]"), frag("C[CH:5]C[O-:21].[H+:20]")
+    index = chem.map_to_index(reactants)
+    on_o = [(index[20], index[21], -1)]
+    on_radical = [(min(index[5], index[21]), max(index[5], index[21]), 1)]
+    assert radical_class(reactants, products, on_o, []) == DomainClass.RADICAL_SPECTATOR
+    assert radical_class(reactants, products, on_radical, []) == DomainClass.RADICAL_REACTIVE
+    assert radical_class(reactants, products, [], [(index[5], 2)]) == DomainClass.RADICAL_REACTIVE
+
+
+def test_a_curated_step_keeps_radical_drawn_with_its_reason(monkeypatch):
+    monkeypatch.setattr(
+        domain, "open_shell_curation", lambda source: {"cur": str(DomainClass.RADICAL_AMBIGUOUS)}
+    )
+    step = pmechdb_step(SPECTATOR_RADICAL, step_id="cur")
+    assert step.domain_exclusion == DomainCode.RADICAL_DRAWN
+    assert step.domain_class == DomainClass.RADICAL_AMBIGUOUS
+
+
+def test_the_curation_files_hold_step_ids_and_reasons_only():
+    rows = json.loads((domain.CURATION_DIR / "pmechdb_open_shell.json").read_text())["entries"]
+    assert {r["reason"] for r in rows} <= {str(c) for c in domain.CURATED_CLASSES}
+    assert all(set(r) == {"step_id", "reason", "decided", "why"} for r in rows)
+    assert all(r["step_id"].startswith("pmechdb-") for r in rows)
+    assert domain.open_shell_curation("pmechdb") == {r["step_id"]: r["reason"] for r in rows}
+    assert domain.open_shell_curation("reactmech") == {}
+    assert ("pmechdb", "pmechdb-5d007b38296827b6") in domain.multi_radical_exemptions()
+
+
+def test_the_ingest_report_counts_admitted_open_shells():
+    result = IngestResult(Source.PMECHDB)
+    result.add("s0", SPECTATOR_RADICAL[0], lambda: pmechdb_step(SPECTATOR_RADICAL, "s0"))
+    report = result.report()
+    assert report["open_shell"] == {
+        "admitted": {"RADICAL_SPECTATOR": 1},
+        "admitted_with_u_ge_2": [],
+        "curated_out": {},
+    }
+    assert report["spin"]["spin_table"] == "spin_table_v1"
 
 
 # ---- domain_class, the admit set, the counts
@@ -522,15 +626,18 @@ def _rescreened(step: ElementaryStep) -> ElementaryStep:
     )
 
 
-# open-shell plans P0a step 6 and P1: (codes, repairs per rule, domain classes) over every stored
-# step. P1's rules equal the P0 survey: C3_METHYL 9, BARE_ALKALI 4, BETA_LACTAM_N 1 and, in the
-# ReactMech pilot, CDI_IMIDAZOLYL 62.
-P1_COUNTS = {
+# open-shell plans P0a step 6, P1 and P3: (codes, repairs per rule, domain classes) over every
+# stored step. P1's rules equal the P0 survey: C3_METHYL 9, BARE_ALKALI 4, BETA_LACTAM_N 1 and,
+# in the ReactMech pilot, CDI_IMIDAZOLYL 62. P3's laws split PMechDB's 30 RADICAL_DRAWN steps:
+# 11 admitted, 8 + 4 + 2 by a law, 5 curated (they keep RADICAL_DRAWN).
+P3_COUNTS = {
     "pmechdb": (
-        {None: 12925, "OPEN_SHELL_METAL": 78, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 30,
-         "CHARGE_UNREPAIRED": 1},
+        {None: 12936, "OPEN_SHELL_METAL": 78, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 5,
+         "CHARGE_UNREPAIRED": 1, "MULTIPLICITY_AMBIGUOUS": 8, "SPIN_RULE_PENDING": 4,
+         "SPIN_NOT_CONSERVED": 2},
         {"R1 group-14 -1 removed": 1, V1_METHYL: 9, A1_RULE: 4, BL_RULE: 1},
-        {"REPAIRED_V1": 9, "REPAIRED_A1": 4, "REPAIRED_BL": 1},
+        {"REPAIRED_V1": 9, "REPAIRED_A1": 4, "REPAIRED_BL": 1, "RADICAL_SPECTATOR": 11,
+         "RADICAL_AMBIGUOUS": 3, "DRAWING_ERROR_UNREPAIRED": 2},
     ),
     "reactmech": (  # the pilot
         {None: 9998, "OPEN_SHELL_METAL": 2},
@@ -539,13 +646,14 @@ P1_COUNTS = {
          "REPAIRED_V1": 62},
     ),
 }  # fmt: skip
-# P1 step 4: the steps that stay as P0a left them (the Sn ones by the placeholder law)
+# P1 step 4: the steps that stay as P0a left them (the Sn ones by the placeholder law); P3's
+# laws pass the Al and nitrone drawings, which the curation file keeps out, and hold back the P
 SN_PLACEHOLDERS = 8
-STILL_RADICAL_DRAWN = (
-    "pmechdb-29a4a03883007779",  # Al of degree 3 and 2
-    "pmechdb-ef20cdaad5325eca",  # the nitrone
-    "pmechdb-e57aaee9d354b63c",  # a four-bonded P
-)
+LEFT_AS_DRAWN = {
+    "pmechdb-29a4a03883007779": DomainCode.RADICAL_DRAWN,  # Al of degree 3 and 2
+    "pmechdb-ef20cdaad5325eca": DomainCode.RADICAL_DRAWN,  # the nitrone
+    "pmechdb-e57aaee9d354b63c": DomainCode.SPIN_NOT_CONSERVED,  # a four-bonded P, u 1 -> 0
+}
 
 
 def _rescreened_store(source: str) -> list[ElementaryStep]:
@@ -558,14 +666,14 @@ def _rescreened_store(source: str) -> list[ElementaryStep]:
 
 
 @pytest.mark.realdata
-@pytest.mark.parametrize("source", sorted(P1_COUNTS))
-def test_the_domain_laws_give_the_p1_counts(source):
+@pytest.mark.parametrize("source", sorted(P3_COUNTS))
+def test_the_domain_laws_give_the_p3_counts(source):
     from collections import Counter
 
     from ksmech.data.ingest import repair_rule_counts
 
     steps = _rescreened_store(source)
-    codes, rules, classes = P1_COUNTS[source]
+    codes, rules, classes = P3_COUNTS[source]
     assert dict(Counter(s.domain_exclusion for s in steps)) == codes
     assert dict(repair_rule_counts(steps)) == rules
     assert dict(Counter(s.domain_class for s in steps if s.domain_class)) == classes
@@ -580,5 +688,5 @@ def test_p1_leaves_the_tin_placeholders_and_the_other_drawings_as_they_were():
         and any(a.GetSymbol() == "Sn" for a in frag(s.reactants_smiles).GetAtoms())
     ]  # fmt: skip
     assert len(sn) == SN_PLACEHOLDERS
-    for step_id in STILL_RADICAL_DRAWN:
-        assert steps[step_id].domain_exclusion == DomainCode.RADICAL_DRAWN
+    for step_id, code in LEFT_AS_DRAWN.items():
+        assert steps[step_id].domain_exclusion == code

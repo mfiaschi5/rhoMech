@@ -24,6 +24,8 @@ from ksmech.arrows.steps import (
     sample_for_step,
     samples_path,
     skipped_by_domain_class,
+    smeared_open_shells,
+    stretched_bonds,
     write_split_file,
 )
 from ksmech.data import chem
@@ -592,3 +594,42 @@ def test_samples_store_the_extra_token_columns_after_the_v17_ones(mini_steps, to
     )
     expect = [[o.descriptors.retained_fraction, o.descriptors.energy_ev] for o in orbitals]
     assert np.array_equal(s.orbital_features[:, m:], np.array(expect, dtype=np.float32))
+
+
+# ---- P3: law (S) and the stretched-bond flag
+
+
+def _fragment(key: str, smeared: bool):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(key=key, tokens=SimpleNamespace(fermi_smeared=smeared))
+
+
+def test_a_smeared_open_shell_reactant_has_no_integral_somo():
+    from types import SimpleNamespace
+
+    rt = SimpleNamespace(
+        fragments=[_fragment("[O][O-]", True), _fragment("CC=O", True), _fragment("[CH3]", False)]
+    )
+    assert smeared_open_shells(rt) == ["[O][O-]"]  # a smeared closed shell stays a slice (U10)
+
+
+def _na_sample(distance: float, r_bonds):
+    from types import SimpleNamespace
+
+    from ksmech.arrows.delta_be import ReactionMatrix
+
+    label = SimpleNamespace(variants=(ReactionMatrix(tuple(r_bonds), ()),))
+    return SimpleNamespace(
+        edit_label=label,
+        atom_categorical=np.array([[11, 0], [6, 0], [6, 0]]),  # Na, C, C
+        bonds=np.array([[0, 1, 1], [1, 2, 1]]),
+        atom_positions=np.array([[0.0, 0, 0], [distance, 0, 0], [distance + 1.5, 0, 0]]),
+    )
+
+
+def test_an_r_entry_on_a_stretched_alkali_bond_is_flagged():
+    flagged = stretched_bonds(_na_sample(3.3, [(0, 1, -1)]))
+    assert [(i, j) for i, j, _ in flagged] == [(0, 1)] and flagged[0][2] > 1.3
+    assert stretched_bonds(_na_sample(2.3, [(0, 1, -1)])) == []  # a bond the record holds
+    assert stretched_bonds(_na_sample(3.3, [(1, 2, -1)])) == []  # R elsewhere

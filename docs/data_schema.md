@@ -197,9 +197,9 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 | `mechanism_class` | string, nullable | null for PMechDB (not in the release) |
 | `conditions` | string, nullable | null for PMechDB (not in the release) |
 | `resonance_step` | bool | reactants and products are resonance structures; dropped from the training target |
-| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). Null otherwise |
+| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). On a source that admits open shells by rule (PMechDB, open-shell plan P3) a RADICAL_DRAWN step is re-read by the open-shell laws, and a failed law puts its own code in place: `MULTIPLICITY_UNTABULATED`, `MULTIPLICITY_AMBIGUOUS` (a u >= 2 species spin_table_v1 lacks or does not assign), `SPIN_NOT_CONSERVED`, `SPIN_RULE_PENDING` (the table re-assigns a species; P4's tagged records) or `NOT_ELEMENTARY` (an odd atom entry of the arrows' R); a curated step keeps `RADICAL_DRAWN`. Null otherwise |
 | `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an ingest repair of `ksmech.data.domain` changed the drawing (`CHARGE_REPAIRED`; the step stays): a formal charge (R1, the dative law `D dative onium->M`, A1 `A1 bare alkali +1`) or missing H (V1 `V1 methyl [C] +3H` and `V1 imidazol-2-yl C +H`, the named repairs of `src/ksmech/data/repairs_v1.json`, rule `BL_NAMED`); one row per side, fragment and rule; the SMILES columns hold the repaired sides |
-| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none). A training candidate is kept only when its source's admit set (`domain.ADMIT`, every class by default) holds all of its classes. Null otherwise |
+| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none); an admitted open shell `RADICAL_SPECTATOR` or `RADICAL_REACTIVE` (an R entry on an atom drawn with radical electrons); a curated open-shell exclusion `RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED` (with `RADICAL_DRAWN`). A training candidate is kept only when its source's admit set (`domain.ADMIT`: the five P0a/P1 classes for every source, plus the two admitted open-shell classes where the source admits open shells by rule) holds all of its classes. Null otherwise |
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`. Charge repairs are also listed one per row in
@@ -209,8 +209,25 @@ Rejected records go to `data/processed/<source>/rejections.csv`, with columns `s
 `domain_class` (steps per value); `stats.json` has the same counts under `domain` (with
 `RESONANCE_STEP`), `charge_repairs_by_rule` and `domain_class`, and `n_training_steps`
 excludes the resonance steps, the excluded ones and those the admit set leaves out.
+`ingest_report.json` also holds `open_shell` (admitted steps by class, the admitted ones that
+hold a species with u >= 2, the curated exclusions by reason) and `spin` (`data.spin`'s rule
+version, the species table and its content hash).
+
+Two tracked curation files (open-shell plan P3), step ids and reasons, no SMILES:
+
+- `src/ksmech/data/curation/pmechdb_open_shell.json`: `entries` of `step_id`, `reason`
+  (`RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED`), `decided` (date), `why`: steps the
+  open-shell laws admit and the hand reading rejects. Each must pass the laws.
+- `src/ksmech/data/curation/multi_radical_exemptions.json`: `entries` of `source`, `step_id`,
+  `species` (map-free SMILES of its u >= 2 species), `reason`: the counted exemptions of P8's
+  MULTI_RADICAL_SPECIES policy. Every admitted step with a u >= 2 species must be listed.
 
 ## Processed: `data/processed/<source>/samples/` and `samples_<split>.json`
+
+`samples_report.json` lists, under `SKIPPED_BOND_STRETCHED`, the samples whose label changes a
+reactant bond to Li, Na, Mg or K that the QM record holds further apart than 1.3 x the
+covalent-radius sum (`steps.stretched_bonds`; a counted flag and the eval slice
+`bond_stretched`, never a model input).
 
 Written by `ksmech-arrows samples` (`ksmech.arrows.steps`, `ksmech.arrows.store`; schema
 `SAMPLE_VERSION` 18). The store holds every training step's sample once:
@@ -258,7 +275,7 @@ token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
 | `edit_label` | EditLabel | the target: the parsimonious reaction-matrix class and its anchors on the global atoms (`arrows.delta_be`) |
 | `bonds`, `lone_pairs`, `wiberg` | int16 (E, 3) / int8 (A,) / float16 (E,) | the reactant's Lewis structure as drawn (Kekulé, implicit H included): (i, j, order) with i < j, lone pairs per atom, the Wiberg index of each bond (`arrows.lewis`) |
 | `orbital_reading` | str | `aligned`, `LABEL_FILTERED`, the first unaligned reason (e.g. `HETEROLYSIS_ONLY`), or `NO_ARROWS` for a source without arrows (ReactMech) |
-| `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` |
+| `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` (a closed shell: kept and sliced; an open-shell fragment, drawn u > 0, skips the step as `SOMO_NOT_INTEGRAL`, law (S) of open-shell plan P3) |
 | `label_filter` | dict[str, int] | labeled (donor, acceptor) cells that `pair_valid` rejects, by group |
 | `inputs` | dict[str, str] | provenance: every token file the sample was built from (`file:<path>` -> sha256) |
 | `pair_features` | tuple[str] | the column names of `pair_z` / `pair_defined` |

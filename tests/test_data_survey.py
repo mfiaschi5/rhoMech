@@ -109,9 +109,13 @@ def test_the_survey_matches_the_p1_oracle():
     returned by the dative law and its ML1 exemption), KEPT ONIUM_PD_NI_EVEN 49 (re-charged).
     P0a's oracle had PMechDB RADICAL_DRAWN 44 and ReactMech CDI_IMIDAZOLYL 62; P1's repairs
     returned the 9 C3_METHYL (V1), 4 BARE_ALKALI (A1), 1 BETA_LACTAM_N (BL_NAMED) and the 62 CDI
-    steps (V1), and no other subclass moved."""
+    steps (V1), and no other subclass moved. P3's admission spreads the radical drawings over
+    its law codes and KEPT; their subclasses are summed over every code, so they do not move."""
+    from collections import Counter
+
     import pandas as pd
 
+    from ksmech.data.domain import OPEN_SHELL_CODES
     from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
 
     def counts(source):
@@ -120,14 +124,19 @@ def test_the_survey_matches_the_p1_oracle():
         return sv.survey(steps, manifest)
 
     pm = counts("pmechdb")
-    radical = pm["counts"]["RADICAL_DRAWN"]
+    genuine_names = ("RADICAL_SPECTATOR", "RADICAL_REACTIVE")
+    radical, kept = Counter(), Counter(pm["counts"].get("KEPT", {}))
+    for code, subclasses in pm["counts"].items():
+        if code == "RADICAL_DRAWN" or code in OPEN_SHELL_CODES:
+            radical.update(subclasses)
+    radical.update({k: kept.pop(k) for k in genuine_names if k in kept})
     genuine = radical["RADICAL_SPECTATOR"] + radical["RADICAL_REACTIVE"]
     assert (sum(radical.values()), genuine, radical["CARBENE"]) == (30, 12, 10)
     assert not {"C3_METHYL", "BARE_ALKALI", "BETA_LACTAM_N"} & set(radical)
     osm = pm["counts"]["OPEN_SHELL_METAL"]
     assert osm["OSM_FE3"] == 43 and osm["OSM_CU2"] + osm["CUH2_LIGAND"] + osm["CU_SUSPECT"] == 35
     assert pm["counts"]["METAL_PLACEHOLDER"] == {"PLACEHOLDER": 56}
-    assert pm["counts"]["KEPT"] == {"ZNCL_ION": 3}
+    assert dict(kept) == {"ZNCL_ION": 3}
     assert pm["spin_parity_molecules"] == {"Cu": 41, "placeholder": 34, "Fe": 20, "Ti": 4, "P": 1}
     rm = counts("reactmech")
     assert "RADICAL_DRAWN" not in rm["counts"]

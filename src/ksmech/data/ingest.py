@@ -12,9 +12,16 @@ from pathlib import Path
 
 import numpy as np
 
-from ksmech.data.domain import repair_rule_counts
+from ksmech.data.domain import (
+    CURATED_CLASSES,
+    DomainClass,
+    domain_classes,
+    max_species_unpaired,
+    repair_rule_counts,
+)
 from ksmech.data.io import source_dir, write_resonance_pairs, write_steps
 from ksmech.data.schema import ElementaryStep, Source
+from ksmech.data.spin import spin_config
 from ksmech.data.validation import Rejection, RejectReason, StepRejected
 
 log = logging.getLogger(__name__)
@@ -96,12 +103,37 @@ class IngestResult:
             "domain_class": dict(
                 Counter(s.domain_class for s in self.steps if s.domain_class).most_common()
             ),
+            "open_shell": open_shell_report(self.steps),
+            "spin": spin_config(),
             "n_rejected": len(self.rejections),
             "rejected_fraction": self.rejected_fraction,
             "rejections_by_reason": dict(self.reason_counts().most_common()),
             "notes": dict(self.notes.most_common()),
             "sample": self.sample,
         }
+
+
+def open_shell_report(steps: list[ElementaryStep]) -> dict:
+    """The open-shell admission of the steps (open-shell plan P3): admitted steps by class, the
+    admitted ones that hold a species with u >= 2 (each must be a counted exemption of
+    `curation/multi_radical_exemptions.json`) and the curated exclusions by reason."""
+    admitted_classes = {str(DomainClass.RADICAL_SPECTATOR), str(DomainClass.RADICAL_REACTIVE)}
+    curated = {str(c) for c in CURATED_CLASSES}
+    admitted, held = Counter(), Counter()
+    multi = []
+    for s in steps:
+        classes = domain_classes(s.domain_class)
+        if s.domain_exclusion is None and classes & admitted_classes:
+            admitted.update(classes & admitted_classes)
+            if max_species_unpaired(s) >= 2:
+                multi.append(s.step_id)
+        elif s.domain_exclusion is not None:
+            held.update(classes & curated)
+    return {
+        "admitted": dict(sorted(admitted.items())),
+        "admitted_with_u_ge_2": sorted(multi),
+        "curated_out": dict(sorted(held.items())),
+    }
 
 
 def write_outputs(result: IngestResult, processed_dir: Path) -> dict[str, Path]:

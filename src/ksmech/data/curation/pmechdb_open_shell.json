@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "note": "Open-shell plan P3 (U4, U6; decided 2026-10-28): PMechDB RADICAL_DRAWN steps that the open-shell laws admit and the hand reading rejects. Step ids only, no SMILES. Every entry must pass the laws (tests/test_data_domain.py); a step the laws already exclude does not belong here.",
+  "entries": [
+    {
+      "step_id": "pmechdb-9532a9a31ecfcb97",
+      "reason": "RADICAL_AMBIGUOUS",
+      "decided": "2026-10-28",
+      "why": "an isopropoxide drawn with a C radical on the O-Na carbon: a sodium ketyl or a missing H"
+    },
+    {
+      "step_id": "pmechdb-20a9346c157804b6",
+      "reason": "RADICAL_AMBIGUOUS",
+      "decided": "2026-10-28",
+      "why": "an isopropoxide drawn with a C radical on the O-Na carbon: a sodium ketyl or a missing H"
+    },
+    {
+      "step_id": "pmechdb-19a76e67eb5680ab",
+      "reason": "RADICAL_AMBIGUOUS",
+      "decided": "2026-10-28",
+      "why": "an isopropoxide drawn with a C radical on the O-Na carbon: a sodium ketyl or a missing H"
+    },
+    {
+      "step_id": "pmechdb-29a4a03883007779",
+      "reason": "DRAWING_ERROR_UNREPAIRED",
+      "decided": "2026-10-28",
+      "why": "a dialkylaluminium missing its H"
+    },
+    {
+      "step_id": "pmechdb-ef20cdaad5325eca",
+      "reason": "DRAWING_ERROR_UNREPAIRED",
+      "decided": "2026-10-28",
+      "why": "a nitrone drawn with OH+ for O-"
+    }
+  ]
+}

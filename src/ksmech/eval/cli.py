@@ -5,6 +5,8 @@
     ksmech-eval embedding --run flex_first --smiles 'CC(=O)C.[OH-]'
     ksmech-eval decode --run flex_first --part val --limit 200
     ksmech-eval pin --source pmechdb --name closed_base --workers 4
+    ksmech-eval cohort --source pmechdb --name open_shell \
+        --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE
     ksmech-eval compare --a <GENERAL hit files> --b <LEGACY hit files> --out FILE
 
 `floor` ranks each step's anchor by |G^atom| (no learned parameter) on the validation and test
@@ -22,6 +24,9 @@ other than the legacy ones add `_caps<bonds>-<atoms>-<candidates>` to the file n
 `pin` pins every sample of a split's three parts as a cohort, its two GBDT subsets (the
 samples with ArrowLabels on the valid cells and on every cell) and `baseline_<name>.json`, the
 per-sample digests of every named column (`eval.pin`); each file is written once.
+
+`cohort` pins the training steps whose `domain_class` holds one of the given classes as a
+cohort (`eval.cohorts.class_cohort_ids`), written once; an empty cohort is refused.
 
 `compare` pairs two arms of decode runs sample by sample (`eval.paired`): arm A fails when its
 mean top-k is lower than B's by more than max(2 x pooled SD, 1 point); beside it, the exact
@@ -87,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
     pin.add_argument("--split", default="molecule", help="split strategy of the sample files")
     pin.add_argument("--workers", type=int, default=1, help="spawned processes reading shards")
     pin.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    k = sub.add_parser("cohort", help="pin the training steps of some domain_class values")
+    k.add_argument("--source", required=True, choices=[str(x) for x in Source])
+    k.add_argument("--name", required=True, help="cohort name, e.g. open_shell")
+    k.add_argument("--domain-class", nargs="+", required=True, help="classes, any of which")
+    k.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     e = sub.add_parser("embedding", help="one sample through a trained model, as an HTML page")
     e.add_argument("--run", required=True, help="training run under <models-dir>/<source>/")
     e.add_argument("--checkpoint", default="best", choices=["best", "last"])
@@ -262,6 +272,21 @@ def cmd_pin(args, console: Console) -> int:
     return 0
 
 
+def cmd_cohort(args, console: Console) -> int:
+    from ksmech.data.io import read_training_steps
+    from ksmech.eval.cohorts import class_cohort_ids, write_cohort
+
+    steps = read_training_steps(steps_path(args.source, args.processed_dir))
+    ids = class_cohort_ids(steps, args.domain_class)
+    if not ids:
+        console.print(f"no training step has a domain_class in {args.domain_class}")
+        return 1
+    note = {"domain_class": sorted(args.domain_class), "n_training_steps": len(steps)}
+    path = write_cohort(args.source, args.name, ids, note, args.processed_dir)
+    console.print(f"wrote {path}: {len(ids)} steps")
+    return 0
+
+
 def cmd_floor(args, console: Console) -> int:
     results, inputs = {}, {}
     ranks = {}
@@ -412,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         "decode": cmd_decode,
         "embedding": cmd_embedding,
         "pin": cmd_pin,
+        "cohort": cmd_cohort,
         "compare": cmd_compare,
     }
     return commands[args.command](args, Console())
