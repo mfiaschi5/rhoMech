@@ -7008,3 +7008,284 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   Fe (U9 joins them) goes back to the user.
 - **Schedule.** P2's compute grows to about 1 h at 8 workers (estimate). It runs after P1 is
   closed (7247bcc), never beside a build, within the host's 15 heavy processes.
+
+## 2026-10-31: Open-shell P2: the probe, the spin-state scan, spin_theory_v1 and spin_table_v1
+
+- **What ran.** P2 steps 1-6 of `docs/open_shell_plan.md` ran on branch `claude/open-shell-p2`.
+  - Steps 1 and 5: `scripts/probes/open_shell_probe.py`.
+  - Steps 2-4: `scripts/probes/spin_scan.py`. It covers 156 species: organic 64, Cu/Fe 61,
+    METAL_SUSPECT 31. That is 267 states and 534 optimizations (two starts each, below).
+  - Step 6: `scripts/probes/flower_species_census.py`.
+
+  The scan ran at 2 workers beside the ReactMech full build (12 workers in its own worktree),
+  so the host stayed within 15 heavy processes. The user chose this when the first run was
+  started at 8. The two-start rerun took about 2 h. No build ran from this checkout.
+- **Scratch cache root (the plan's exception).**
+  - Every probe and scan record lives under `data/cache/probe_open_shell/`. That directory is
+    ignored by git and keyed by canonical SMILES and method string, like the production caches.
+  - Its sub-roots: production and theory records, `sp_single`, `scan`, `b_displaced`, `checks`
+    and the IP/EA levels.
+  - No pipeline command reads it. The reports `probe_report.json` and `scan_report.json` stay
+    local.
+- **Step 1, the probe's diagnostics.** Restricted is compared with spGFN2 at the production
+  geometry and the table multiplicity.
+
+  | group | n (failed) | integral / degenerate / smeared | max\|n - aufbau\| median / p90 / max | open MOs occupied / virtual block | split plateaus | max\|dq\| median / p90 / max | arrow non-metal \|dq\| max |
+  |---|---|---|---|---|---|---|---|
+  | fixtures (OPEN_SHELL + ethane) | 20 (0) | 13 / 6 / 1 | 0.000 / 0.500 / 0.667 | 34 / 3 | 3 | 0.003 / 0.027 / 0.286 | 0.071 (n = 1) |
+  | PMechDB Cu(II) / Fe(III) | 61 (7 SCF, 1 OPT) | 46 / 1 / 6 | 0.000 / 0.058 / 0.722 | 127 / 0 | 0 | 0.013 / 0.351 / 0.363 | 0.096 (n = 17, median 0.024) |
+  | METAL_SUSPECT | 31 (2 SCF, 3 OPT) | 26 / 0 / 0 | 0.000 / 0.000 / 0.000 | - | 0 | 0.000 / 0.0001 / 0.0002 | - |
+
+  - **Fixtures.** The six degenerate ones are [Br], [OH], [N]=O, [O][O-], [C]=O and [N]=[N]; the
+    smeared one is [Cl][Cu][Cl]. Three degenerate plateaus are split across the 0.5 block
+    threshold (U16).
+  - **Metals.** Every Fe species is integral (17 of 17). The seven non-integral metal species
+    are all Cu: [Br][Cu][Br] is degenerate; [Cl][Cu][Cl], [I][Cu][I], CC#[N+][Cu-]Br2,
+    C[N+](C)(C)[CuH2-], C[NH2+][Cu-]Br2 and [NH3+][Cu-]I2 are smeared. The p90 max|dq| of 0.35
+    is the Fe species.
+  - **eps_SOMO minus the alpha-HOMO/beta-LUMO midpoint.** Fixtures: median 0.006 eV, p90 0.70,
+    max 0.82. Metals: median 0.069, p90 0.49, max 0.82.
+  - **Time per metal run (first, uncached run).** Median 2.8 s, p90 23 s, max 698 s.
+  - **spGFN2's lowest vertical state against the table.** It is the table's multiplicity for
+    every metal species that ran: Cu u = 1 for 36 of 36 (one state), Fe u = 5 for 17 of 17 (of
+    5, 3 and 1).
+  - **Checks.** These are now tests in `tests/test_open_shell_probe.py`.
+    - [CH3] at the engine's embedding: restricted SOMO -8.9115 eV, spGFN2 alpha HOMO -9.6867 eV
+      and beta LUMO -8.1502 eV. The plan quotes -8.911 / -9.687 / -8.150.
+    - Ethane: spGFN2 minus restricted is 4.8e-14 eV.
+- **Step 6, the FlowER census** (`tests/test_flower_species_census.py`, realdata).
+  - Lines: RS 3,569 and RC 1,519.
+  - Species: 4,284 unique. By u: 0 has 1,841, 1 has 2,387, 2 has 53, 3 has 3.
+  - The 56 species with u >= 2 occur in RC 143 / RS 1,265 lines. This reproduces U19 ("about
+    56").
+  - Named species, lines RC / RS:
+
+    | species | RC | RS |
+    |---|---|---|
+    | [C]=O | 5 | 28 |
+    | [N]=[N] | 5 | 0 |
+    | [O][O] | 89 | 1,210 |
+    | [O]O[O] | 10 | 10 |
+    | [O][O+][O-] | 1 | 2 |
+
+  - Atoms or linear open shells: 18 species, 7 of them atoms with a degenerate fractional
+    subshell. They occur in RC 753 / RS 2,015 lines.
+- **Step 2 (A).** It runs as planned, with two laws the scan made necessary.
+  - **The symmetric saddle, and the two-start law.**
+    - The engine's embedding draws Cl[C]Cl and Br[C]Br exactly linear (180.0°). A gradient
+      optimizer cannot leave a symmetry element, so in the first scan both states ended at the
+      linear saddle. There the triplet is lower (0.69 / 0.64 eV), and B read 3Sigma_g-.
+    - From the production geometry displaced by a fixed Gaussian kick (sigma = 0.02 Angstrom
+      per coordinate, `np.random.default_rng(0)`), the molecules bend. CCl2 goes to 112.9°
+      (u = 0) and 128.7° (u = 2); CBr2 to 113.9° and 129.8°. The singlet then lies lower, by
+      1.01 and 0.76 eV.
+    - So every state is optimized from both starts, and its energy is the lowest converged
+      one. A state fails only when every start fails; the reasons are joined.
+    - Why 0.02: a trial at sigma = 0.05 Angstrom failed one restricted SCF.
+    - The displaced start changed A for 5 species:
+      - CCl2 and CBr2: triplet to singlet.
+      - [F][Cu][F]: its u = 1 SCF failure from production converges from the displaced start.
+      - [Br][Fe-]([Br])([Br])[BrH+]: the gap goes from 0.79 to 0.75 eV, same verdict.
+      - C[C](O[O])C1CC(CC=O)C1(C)C: its production start forms a bond (next point).
+  - **BOND_FORMED.**
+    - `check_connectivity` flags only input bonds that break; it ignores new contacts. The
+      singlet optimization of 17 organic biradical drawings closed a bond the drawing lacks, so
+      A was comparing the drawing's triplet with the singlet of another molecule. Examples:
+      - [O]C1[CH]C2OC2C=CC1 forms an epoxide.
+      - O[C](CC[CH]CBr)c1ccccc1, a Norrish II 1,4-biradical, closes to a cyclobutane.
+      - COC(=O)[C]C(=O)OC: the carbene centre closes on a carbonyl O.
+      - [C]=C(c1ccccc1)c1ccccc1: a phenyl migrates to the carbene carbon, the
+        Fritsch-Buttenberg-Wiechell shift to diphenylacetylene.
+      - [O][N+]([O])=O forms an O-O bond.
+    - The law: a start fails with BOND_FORMED when, at its optimum, two non-metal atoms not
+      bonded in the drawing (graph distance >= 2) lie within `QMConfig.wall_factor` (1.2 x their
+      covalent-radius sum, where the bond walls start). The state then takes the lowest start
+      that kept the drawing (`open_shell_probe.formed_bonds`, `spin_scan.drawing_kept`).
+    - Left out: metal-ligand pairs, and Li, Na, Mg and K as in `bond_stretch_ratios`. The
+      coordination sphere of a ligand-truncated fragment moves freely (kappa-2 triflates,
+      eta-2 aryls).
+    - Distribution over every optimum, non-metal pairs:
+      - the formed bonds lie at 0.92-1.12;
+      - two O-H contacts lie at 1.19-1.20 (flagged; C[C]1C(OO[O])CC2CC1C2(C)C, an H 1.16
+        Angstrom from O);
+      - one lies at 1.22 (not flagged; three nitroxide drawings
+        COC(=O)C(C1C=C[CH]C1)N([O])CCC#N and its two variants, with an H 1.18 Angstrom from the
+        nitroxide O, so their singlets carry a nearly transferred H);
+      - every other contact is at >= 1.29: geminal pairs, such as Br-Br in bent CBr2 (1.29) and
+        1,3 C-C in rings (>= 1.38).
+    - So the margin is clean except for O-H. The factor is the engine's existing constant, not
+      tuned.
+    - Effect:
+      - 16 organic species become A_FAILED and so MULTIPLICITY_AMBIGUOUS.
+      - C[C](O[O])C1CC(CC=O)C1(C)C keeps a singlet from its displaced start, with no new bond: the
+        carbonyl-oxide reading, singlet by 2.36 eV.
+      - 10 METAL_SUSPECT Ni species fail in both states: the two Ni-bound carbons couple, a
+        reductive elimination.
+  - **Error bars.**
+    - **Organic.** 7 kcal/mol = 0.304 eV, spGFN2-xTB on AC12 (Moradi et al. 2024).
+    - **Transition metal.** 17.9 kcal/mol = 0.776 eV: spGFN2-xTB's MAD for spin-state
+      splittings on the 3d subset of TM90S against TPSSh-D4/def2-QZVPP (Neugebauer, Baedorf,
+      Ehlert, Hansen, Grimme, J. Comput. Chem. 44, 2120 (2023), doi 10.1002/jcc.27185).
+    - **Caveats on the metal bar.** Only the abstract was read; the reference is a hybrid DFT,
+      not experiment; and TM90S's complexes are not our ligand-truncated fragments.
+    - **Effect on the amendment.** With a published bar, rule C lets A decide a metal when B is
+      undetermined and the gap exceeds 0.776 eV. This replaces the amendment's "until then A
+      alone decides no metal species". In v1, no metal species is decided that way: the three
+      undetermined Fe species have gaps inside the bar.
+    - A species with one allowed state (Cu(II) d9) is conclusive by count.
+- **Step 3 (B), spin_theory_v1** (`theory_v1.json`, digest `39a0f802dbb1...`). How the rules
+  were implemented:
+  - **Point group.** The detector moved from `serve/workbench/symmetry.py` to
+    `ksmech.qm.point_group`; serve re-imports it, and its symmetry tests are unchanged. The
+    point group is read at 0.1 Angstrom.
+  - **Degeneracy** is read by MO energy within 1e-4 eV (frontier `EXACT_EV`).
+  - **Tolerances.** The AO operators are checked on the overlap matrix to OPERATOR_TOL 1e-3, and
+    characters to CHARACTER_TOL 1e-2.
+  - **Gleiter-Hoffmann** is read on the restricted GFN2 HOMO-LUMO gap when both MOs sit mostly on
+    the carbene centre. It stands in for their extended-Hueckel sigma-p_pi separation.
+  - **Spectrochemical bands, by donor element.** The halides are below water, so high spin in
+    Oh. C and P donors are low spin, and 4d/5d metals are low spin. O, N and S donors, or a
+    mixed set, are undetermined.
+  - **Textbook laws beyond the plan's list:**
+    - d0 and d10 are closed in any geometry; d1 and d9 have one unpaired electron by count;
+    - square-planar d8 is low spin;
+    - a single atom follows Hund's rules (term symbol).
+  - **Limits.** These give undetermined:
+    - a polyhedron with no rule, such as trigonal FeX3;
+    - two open-shell metal centres;
+    - drawn radicals beside a metal.
+- **Step 4 (C), spin_table_v1** (`species_v1.json`, content hash `deb0df542235...`).
+  - **Totals, 156 species.** Agree 59, B undetermined and A conclusive 37, B undetermined and A
+    inconclusive 15, disagree 5, A failed 40.
+  - **Organic, 64.**
+    - Assigned: singlet 34; doublet 3 (CC(CO)(O[O])[C]([O])CO and the two
+      [C]C=C(C)... quartet-or-doublet drawings, A conclusive); triplet 2 ([O] and [O][O], both
+      agree).
+    - MULTIPLICITY_AMBIGUOUS 25: A failed 16 (all BOND_FORMED), A inconclusive 7, disagree 2.
+    - The inconclusive seven, whose gaps lie inside 0.304 eV (A's lower state, then the gap):
+      - CC(C)([O])OOC(C)(C)OOC(C)(C)[O]: triplet, 0.15 eV;
+      - C[C+]=C[Si-](C)(C)(C)[O+](C)[Sn-]: triplet, 0.30 eV;
+      - CC(C)C1([O])CCC(C)([O])C(O)C1O: singlet, 0.13 eV;
+      - CCCCC#CCCc1[c]c(OC)c(OC)c(OC)c1[O]: singlet, 0.15 eV;
+      - the two COc1[c]c(...)c([O])c(OC)c1OC aryl-phenoxyl drawings: singlet, 0.15 eV;
+      - COc1c([O])c2c(c(OC)c1OC)C(=[C]c1ccccc1)CC2: singlet, 0.20 eV.
+  - **Cu/Fe, 61.**
+    - Assigned: u = 1 for 36 (all Cu, all agree); u = 5 for 13 (all Fe, all agree, A's sextet
+      lowest by 0.44-1.18 eV).
+    - MULTIPLICITY_AMBIGUOUS 12, listed below under the metal_v1 rows.
+  - **METAL_SUSPECT, 31** (diagnostics). Singlet 8; MULTIPLICITY_AMBIGUOUS 23:
+    - A failed 15 (10 BOND_FORMED, 5 without a production record);
+    - A inconclusive 5 (four Ni species with gaps of 0.33-0.74 eV, and [O]=[Cr]([OH])[OH] at
+      0.31);
+    - disagree 3.
+  - **Every A-B disagreement:**
+    - **Cl[C]Cl.** A: singlet by 1.01 eV (bent, from the displaced start). B: triplet (3Sigma_g-
+      at the linear production geometry). At A's bent optimum B is undetermined (GH gap 1.83 eV),
+      and C would assign the singlet.
+    - **Br[C]Br.** A: singlet by 0.76 eV. B: triplet at the linear geometry. At the bent optimum
+      B still gives the triplet (GH gap 1.40 eV < 1.5).
+    - **Three Ni(II) d8 aryl diphosphine complexes:**
+      - CN(C)c1ccc[c]([Ni-2]2([Cl])...)c1, A singlet by 0.73 eV;
+      - Cc1cn2...[Ni-2]([c]1ccccc1)([c]1ccccn1)..., 1.44 eV;
+      - [Br][Ni-2]1([c]2ccccc2)..., 0.63 eV.
+
+      In all three, B reads the production polyhedron as tetrahedral (d8 high spin, u = 2) and A
+      puts the singlet lower. These are METAL_SUSPECT rows, so diagnostics only.
+    - **The first run's two other disagreements** are now A_FAILED: COC(=O)[C]C(=O)OC (B triplet
+      by GH 0.10 eV) and [C]=C(c1ccccc1)c1ccccc1 (GH 1.31 eV). Their singlets formed a bond.
+  - **The plan's species.** Cl[C]Cl, Br[C]Br and diphenylvinylidene are MULTIPLICITY_AMBIGUOUS.
+    [C]=CC, [C]=C(C)C and [C]=O are singlets (agree). [O][O] is the triplet (agree).
+    `tests/test_spin_table.py` checks this.
+  - **The metal_v1 rows.**
+    - **Fe(III) high spin (u = 5)** is confirmed by C for 13 of the 20 Fe species and
+      contradicted by none. The 7 ambiguous Fe species:
+      - [Cl][Fe]([Cl])[Cl] and [Br][Fe]([Br])[Br]: trigonal, so B is undetermined; A's gaps,
+        0.48 and 0.64 eV, are inside 0.776.
+      - C[N+](C)(c1cc(Br)ccc1Br)[Fe-]([Br])([Br])[Br]: B is undetermined at its production
+        polyhedron; A's gap is 0.52 eV.
+      - Br[Br+][Fe-]([Br])([Br])[Br]: u = 1 fails the SCF from both starts; u = 3 lies 0.28 eV
+        up.
+      - Three with no production record: the two Fe triflates (SCF) and the [Fe-]Cl3
+        sulfonamide with a [Si-] (OPT).
+    - **The Cu(II) control:** 36 of 41 at u = 1 (agree). Five have no production record (SCF):
+      [NH3+][CuH2-], [NH3+][Cu-]([Br])[Br], [NH3+][Cu-]([F])[F], COC=[NH+][CuH2-] and
+      NC=[NH+][CuH2-].
+    - So the Fe row stands wherever C decides. The 12 ambiguous metal species stay out of the
+      open_shell_metal cohort when P4 builds it. U9 (Cu and Fe together) needs no change from
+      this.
+- **Step 5, IP/EA against the literature.**
+  - **Method.** Vertical gas-phase delta-SCF at each radical's gas-phase production geometry:
+    IE = E(N-1) - E(N) and EA = E(N) - E(N+1). It is compared with adiabatic experiment, so part
+    of the offset is relaxation.
+  - **Sources.** NIST Chemistry WebBook (SRD 69, ion energetics), except as marked. The values
+    and their citations are in `open_shell_probe.IPEA_LITERATURE`.
+
+  | radical | IE lit. | EA lit. | restricted IE / EA | spGFN2 IE / EA |
+  |---|---|---|---|---|
+  | CH3 | 9.843 | 0.080 | 14.85 / 3.47 | 15.23 / 3.09 |
+  | OH | 13.017 | 1.8277 | 20.15 / 6.89 | 19.03 / 6.48 |
+  | HO2 | 11.35 | 1.078 | 16.83 / 6.32 | 17.05 / 6.11 |
+  | NO | 9.2642 | 0.026 (a) | 15.23 / 4.06 | 15.43 / 4.61 |
+  | NO2 | 9.586 | 2.273 | 15.11 / 5.39 | 15.25 / 5.26 |
+  | NO3 | 12.57 | 3.937 | 18.71 / 9.97 | 18.85 / 9.83 |
+  | CH3O | 10.72 (b) | 1.5689 (c) | 15.42 / 6.67 | 15.06 / 6.45 |
+  | Br | 11.8138 | 3.3636 | 18.53 / 7.73 | 18.02 / 7.54 |
+  | Cl | 12.9676 | 3.6127 | 18.37 / 8.23 | 17.77 / 8.02 |
+  | O2 | 12.0697 | 0.448 | 17.40 / 6.60 | 17.97 / 6.03 |
+  | allyl | 8.13 (d) | 0.481 | 12.90 / 4.87 | 13.11 / 4.67 |
+  | phenoxyl | 8.56 | 2.2538 | 13.58 / 7.12 | 13.67 / 7.02 |
+
+  - **Notes on the sources.**
+    - (a) Travers, Cowles and Ellison 1989 (NO- photoelectron spectrum), as quoted by the
+      Wikipedia article on nitric oxide.
+    - (b) NIST also lists a photoelectron value of 7.37 eV.
+    - (c) Weichman et al. 2017 (cryo-SEVI of CH3O-).
+    - (d) NIST also lists a ZEKE value of 8.153 eV.
+
+    The plan names Rienstra-Kiracofe et al. 2002 for the EAs; NIST's EA entries were used
+    instead.
+  - **Errors (eV).**
+
+    | level | mean signed IE / EA | SD IE / EA | MAD after the mean shift IE / EA | Spearman IE / EA |
+    |---|---|---|---|---|
+    | restricted | +5.60 / +4.70 | 0.76 / 0.92 | 0.59 / 0.71 | 0.94 / 0.86 |
+    | spGFN2 | +5.55 / +4.51 | 0.62 / 0.87 | 0.52 / 0.63 | 0.88 / 0.87 |
+
+  - **Reading.** GFN2 puts every cation about 5.6 eV and every anion about 4.6 eV off, in the
+    same direction for all twelve radicals. That is a systematic error of GFN2's charged
+    states, the one xtb's own vertical IP/EA (`--vipea`) corrects with an empirical shift. Once
+    the mean shift is removed, the scatter is 0.5-0.7 eV and the ranking holds (rho
+    0.86-0.94). spGFN2 is no better than restricted on the ranking. Nothing downstream reads
+    these numbers.
+- **Deviations from the plan.**
+  - `combine`, `scan_verdict` and `ERROR_BARS` live in `src/ksmech/data/spin_table.py`, beside
+    the table's `validate` / `load` / `lookup`, not in the scan script. That way the tests
+    import rule C as a pure function.
+  - The two-start law and BOND_FORMED refine "each state optimized" (above).
+  - B reads the production geometry, as the plan says. B at A's displaced optimum is a
+    diagnostic only: it changes B or C for 3 species, and 29 species have no displaced optimum
+    of their lowest state.
+  - The step tests the plan lists as checks (the [CH3] values, ethane dE and the census counts)
+    are pytest tests.
+- **Open for P4 and the user (spin_table_v2 if taken).**
+  - **The carbene saddle.** P4's production geometry for a two-coordinate carbene is the
+    embedding's linear saddle. Featurized there, CCl2 and CBr2 would read degenerate pi
+    orbitals and fractional occupations. The fix belongs to P4's production geometry (the same
+    displaced start, or an embedding that breaks the symmetry); B on the fixed geometry then
+    gives spin_table_v2.
+  - **New bonds in production.** P4's production optimizer ignores new bonds, as the scan did.
+    A biradical drawing featurized at u = 0 would collapse. The table keeps those species
+    ambiguous, but P4 needs the same check.
+  - **A collapsing singlet.** When a drawing's singlet collapses to another molecule, its other
+    state is the drawing's only minimum (Norrish II 1,4-biradicals are triplets in the textbook
+    picture). Should such a species take that state instead of MULTIPLICITY_AMBIGUOUS? That
+    changes A's law, so it is the user's decision.
+- **Evidence for decisions already taken.**
+  - **U7 (restricted with the spin rule).** spGFN2's lowest vertical state at the restricted
+    production geometry is the table's multiplicity for every metal that ran. For closed shells
+    the two energies are equal (ethane 5e-14 eV). On the non-metal atoms the arrows touch, the
+    restricted-versus-spGFN2 |dq| is at most 0.096 e.
+  - **U10 (fermi_smeared kept and sliced).** 7 of 20 fixtures and 7 of 53 metal species (all
+    Cu) are degenerate or smeared under restricted GFN2.
+  - **U16 (degenerate shells in P2b).** Three fixture plateaus are split across the 0.5 block
+    threshold, the case P2b's plateau rule removes.
