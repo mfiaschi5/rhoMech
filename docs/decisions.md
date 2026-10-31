@@ -7501,6 +7501,9 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
     / 85.4.
   - **GBDT.** Refit recorded above; P1's stored model reproduces its own test numbers on the
     P3 store.
+- **Tests** (from a2a9c64, clean tree, beside the 12-worker ReactMech QM batch):
+  `pytest -n 2 -m "not realdata"` 1993 passed, 12 skipped, 5 xfailed;
+  `KSMECH_TEST_WORKERS=1 pytest -m realdata` 51 passed.
 - **Against the plan's data effect.** The plan expected 10 samples and 2 resonance pairs and
   RADICAL_DRAWN 30 -> 18 (12 pending). Measured: 9 samples (5d007b38 held back), 2 resonance
   pairs, RADICAL_DRAWN 30 -> 5 (the curated ones); the 25 others carry the law codes.
