@@ -334,6 +334,20 @@ source `data/processed/<source>/tokens_summary.json`) counts under `replaced` th
 stored fields changed, and under `frontier_blocks` the closed-shell molecules whose blocks at
 0.01, 0.05 and 0.1 eV differ from the exact ones.
 
+Open shells (open-shell plan P2b, 2026-10-31). The file of a molecule with u > 0 (RDKit's radical
+count of its `smiles`, `tokens.drawn_unpaired`, the u its QM record was run at) carries one more
+config key, `open_shell_rule` = `occ-plateau-v1`: its blocks come from the plateau reference
+occupations (`localize.reference_occupations`) and its frontier columns from the radical
+convention (`frontier.record_frontier_blocks`: HOMO = LUMO = the open group, frozen f+ = f-).
+Closed-shell headers do not carry the key and their payloads are unchanged; the schema stays 10.
+`load_tokens` adds the key to whatever config its caller passes when the file's own molecule is
+an open shell, so a u > 0 file built before the rule is STALE_ARTIFACT under every reader, and
+`save_tokens` stamps it. The build summary's `open_shell` block counts the u > 0 molecules (by u),
+their open MOs (0 < reference < 2) and open plateaus, the molecules whose energy-window reference
+(0.01 / 0.05 / 0.1 eV, `build.window_reference`) differs from the plateau one, the smeared ones,
+and the distributions (median, p90, max) of max|n - aufbau| and max|n - reference|; the
+`frontier_blocks` comparison covers closed shells only.
+
 ## QM cache: `data/cache/qm/<sha256>.npz`
 
 Written by `ksmech.qm` (one file per molecule and conformer). Fields were listed from a real

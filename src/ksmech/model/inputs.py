@@ -8,8 +8,8 @@ the fixed K and standardized with the training statistics (`pair_feature_stats_<
 The token features are standardized with `FeatureStats`, fitted on the training samples. Like
 the pair features they are selected by name from the sample's stored columns (`token_columns`:
 the v17 inputs by default, the retained spectral weight and E_r with `orbital_extra`, the
-exact-degeneracy frontier set with `frontier_blocks='exact'`); statistics without names are a
-v15-v17 checkpoint's and read the v17 columns.
+exact-degeneracy frontier set with `frontier_blocks='exact'`, the finite-difference f+ / f- with
+`atom_fukui`); statistics without names are a v15-v17 checkpoint's and read the v17 columns.
 Which (occupied, virtual) cells the model reads is `ModelConfig.pair_cells` (spec v9.1): with
 'valid' (the default, v17) every pair feature is undefined outside `pair_valid` and G^atom and
 the pooled means run over the valid pairs only, so the donor's own antibond is not among them
@@ -80,18 +80,31 @@ class FeatureStats:
         return cls(**{k: (float(v) if v.ndim == 0 else v) for k, v in arrays.items()}, **names)
 
 
+ATOM_FUKUI = ("frozen", "fd", "both")
+FD_COLUMNS = {"f_plus_fmo": "f_plus", "f_minus_fmo": "f_minus"}  # frozen -> finite difference
+
+
 def token_columns(cfg) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """(atom, orbital) input columns of a `ModelConfig`: the v17 atom inputs, with the
     exact-degeneracy frontier set in place of the 0.05 eV one when `frontier_blocks` is
-    'exact'; the v17 orbital inputs and `orbital_extra`."""
+    'exact', and the finite-difference f+ / f- in place of the frozen-orbital ones
+    (`atom_fukui` 'fd') or after every other column ('both'); the v17 orbital inputs and
+    `orbital_extra`."""
     if cfg.frontier_blocks not in ("window", "exact"):
         raise ValueError(f"frontier_blocks {cfg.frontier_blocks!r}, expected window or exact")
+    fukui = getattr(cfg, "atom_fukui", "frozen")
+    if fukui not in ATOM_FUKUI:
+        raise ValueError(f"atom_fukui {fukui!r}, expected one of {ATOM_FUKUI}")
     unknown = set(cfg.orbital_extra) - set(ORBITAL_EXTRA_FEATURES)
     if unknown:
         raise ValueError(f"orbital_extra {sorted(unknown)}, not in {ORBITAL_EXTRA_FEATURES}")
     atoms = tuple(atom_feature_names())
+    if fukui == "fd":
+        atoms = tuple(FD_COLUMNS.get(n, n) for n in atoms)
     if cfg.frontier_blocks == "exact":
         atoms = tuple(EXACT_COLUMNS.get(n, n) for n in atoms)
+    if fukui == "both":
+        atoms = (*atoms, *FD_COLUMNS.values())
     return atoms, (*feature_names(), *cfg.orbital_extra)
 
 

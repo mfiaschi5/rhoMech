@@ -189,3 +189,29 @@ def test_a_rebuild_compares_the_replaced_files_field_by_field(dataset):
     again = run(processed, forced)["replaced"]
     assert again["n_replaced"] == 3 and again["n_differing"] == 1
     assert again["fields"] == {"atom_mulliken_charge": 1} and again["smiles"] == ["O"]
+
+
+def test_open_shell_molecules_get_their_diagnostics_in_the_summary(tmp_path):
+    """A u > 0 molecule's row carries its open MOs and plateaus, the energy-window references
+    beside the plateau one and both deviations, built or loaded; a closed shell carries none
+    and only closed shells enter the frontier-window comparison (open-shell plan P2b)."""
+    from ksmech.orbitals.build import OPEN_WINDOWS, process_molecule, summarize
+    from ksmech.qm.records import cache_path, save_record
+    from tests.fixtures.open_shell import open_shell_record
+
+    config = BuildConfig(qm_cache_dir=tmp_path / "qm", out_dir=tmp_path / "tokens")
+    for name in ("nitric_oxide", "bromine_atom"):
+        rec = open_shell_record(name)
+        save_record(rec, cache_path(config.qm_cache_dir, rec.smiles, 0, config.method))
+    rows = [process_molecule(s, config) for s in ("[N]=O", "[Br]")]
+    rows += [process_molecule(s, config) for s in ("[N]=O", "[Br]")]
+    assert [r.status for r in rows] == ["built", "built", "loaded", "loaded"]
+    no = rows[0].open_shell
+    assert (no["unpaired"], no["n_open"], no["n_open_groups"]) == (1, 2, 1)
+    assert abs(no["max_dev_aufbau"] - 0.5) < 1e-9 and no["max_dev_reference"] < 1e-6
+    assert rows[1].open_shell["n_open"] == 3 and rows[2].open_shell == no
+    assert not any(r.frontier_merged for r in rows) and not any(r.fermi_smeared for r in rows)
+    s = summarize(rows[:2], config)["open_shell"]
+    assert s["n_molecules"] == 2 and s["by_unpaired"] == {"1": 2} and s["n_open_groups"] == 2
+    assert s["window_differs"] == {f"{t:g}": 0 for t in OPEN_WINDOWS} and s["n_fermi_smeared"] == 0
+    assert s["max_dev_aufbau"]["max"] == round(5 / 3 - 1, 4)  # Br: the aufbau SOMO at 1

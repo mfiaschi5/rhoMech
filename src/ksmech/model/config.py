@@ -23,6 +23,8 @@ class ModelConfig:
     #   the exclusion flags and the legacy mask as channels; open-shell plan P0a, item 1)
     orbital_extra: tuple[str, ...] = ()  # orbital inputs beyond v17: retained_fraction, energy_ev
     frontier_blocks: str = "window"  # window (0.05 eV, v17) | exact (1e-4 eV) frontier columns
+    atom_fukui: str = "frozen"  # frozen (v17: frozen-orbital f+ / f-) | fd (the finite-difference
+    #   f+ / f- in their place) | both (FD appended); open-shell plan P2b, ablated in P9
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)

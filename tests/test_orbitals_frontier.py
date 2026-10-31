@@ -1,8 +1,9 @@
 """Per-atom frontier-orbital weights: degenerate blocks and the f+/f- generalization."""
 
 import numpy as np
+import pytest
 
-from ksmech.orbitals.frontier import LEVELS, frontier_blocks, frontier_weights
+from ksmech.orbitals.frontier import DEGENERACY_EV, LEVELS, frontier_blocks, frontier_weights
 from ksmech.orbitals.tokens import build_molecule_tokens
 
 
@@ -117,3 +118,55 @@ def test_atom_tokens_store_both_frontier_sets(sp_record, smiles):
         np.testing.assert_array_equal(extra[:, 3], exact_minus)
         np.testing.assert_array_equal(extra[:, 0], [a.f_plus for a in t.atoms])
         np.testing.assert_array_equal(extra[:, 1], [a.f_minus for a in t.atoms])
+
+
+# ---- the radical frontier convention (U16, open-shell plan P2b)
+
+
+def test_methyl_f_plus_and_f_minus_are_both_the_somo():
+    """Today's f+ of [CH3] was a sigma*(C-H) (C 0.436, each H 0.188): the 0.5 rule made the
+    SOMO the HOMO. Both are the SOMO now; the FD dual is the record's, not 0."""
+    from ksmech.orbitals.frontier import frozen_orbital_fukui_blocks
+    from tests.fixtures.open_shell import open_shell_record
+
+    rec = open_shell_record("methyl")
+    f_plus, f_minus = frozen_orbital_fukui_blocks(rec)
+    assert np.array_equal(f_plus, f_minus) and 0.89 <= f_plus[0] <= 1.0 + 1e-9  # planar: pure p
+    t = build_molecule_tokens(rec)
+    assert t.atoms[0].f_plus_fmo == t.atoms[0].f_minus_fmo == f_plus[0]
+    assert np.array_equal([a.dual for a in t.atoms], rec.fukui_dual, equal_nan=True)
+
+
+@pytest.mark.parametrize("name", ["nitric_oxide", "triplet_o2", "superoxide"])
+def test_homo_and_lumo_are_the_open_pair(name):
+    from ksmech.orbitals.frontier import (
+        EXACT_EV,
+        frozen_orbital_fukui_blocks,
+        record_frontier_blocks,
+    )
+    from ksmech.orbitals.localize import reference_occupations
+    from tests.fixtures.open_shell import open_shell_record
+
+    rec = open_shell_record(name)
+    ref = reference_occupations(rec)
+    pair = np.flatnonzero((ref > 0) & (ref < 2))
+    for tol in (DEGENERACY_EV, EXACT_EV):
+        blocks = record_frontier_blocks(rec, tol)
+        assert blocks["homo"].tolist() == blocks["lumo"].tolist() == pair.tolist()
+        assert (ref[blocks["homo_minus_1"]] == 2).all() and (ref[blocks["lumo_plus_1"]] == 0).all()
+        f_plus, f_minus = frozen_orbital_fukui_blocks(rec, tol)
+        assert np.array_equal(f_plus, f_minus) and abs(f_plus.sum() - 1.0) < 1e-6
+
+
+def test_closed_shell_frontier_blocks_are_unchanged(sp_record, smiles):
+    """The record-level blocks of the ten fixtures (and benzene, acetone) are today's."""
+    from ksmech.orbitals.frontier import EXACT_EV, record_frontier_blocks
+
+    for smi in [*smiles.values(), "c1ccccc1", "CC(C)=O"]:
+        rec = sp_record(smi)
+        for tol in (DEGENERACY_EV, EXACT_EV):
+            old = frontier_blocks(rec.orbital_energies_ev, rec.occupations, tol)
+            new = record_frontier_blocks(rec, tol)
+            assert {k: v.tolist() for k, v in old.items()} == {
+                k: v.tolist() for k, v in new.items()
+            }

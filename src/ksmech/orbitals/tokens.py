@@ -752,6 +752,45 @@ def token_config(
     }
 
 
+OPEN_SHELL_RULE = "occ-plateau-v1"  # u > 0: plateau blocks and the radical frontier (P2b)
+
+
+def drawn_unpaired(smiles: str) -> int:
+    """RDKit's unpaired count of a token file's molecule: the u its QM record was run at
+    (`qm.xtb_calc.resolve_charge_spin` on the same SMILES)."""
+    from rdkit import rdBase
+
+    with rdBase.BlockLogs():
+        mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"RDKit cannot parse the token file molecule {smiles!r}")
+    return sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
+
+
+def with_open_shell_rule(config: dict, smiles: str) -> dict:
+    """`config` plus, for an open shell (u > 0), the key `open_shell_rule`, which only those
+    files carry: a u > 0 file built before the rule lacks it and is stale under every reader,
+    whatever config the reader passes (`load_tokens`, `save_tokens`; open-shell plan P2b)."""
+    if drawn_unpaired(smiles) > 0:
+        return {**config, "open_shell_rule": OPEN_SHELL_RULE}
+    return dict(config)
+
+
+def token_config_for(
+    smiles: str,
+    pm_config: PMConfig | None = None,
+    descriptor_config: DescriptorConfig | None = None,
+) -> dict:
+    """The configuration the token file of `smiles` is stamped with and checked against."""
+    return with_open_shell_rule(token_config(pm_config, descriptor_config), smiles)
+
+
+def stored_smiles(path: Path) -> str:
+    """The molecule a token file holds (its payload's `smiles`)."""
+    with np.load(Path(path), allow_pickle=False) as z:
+        return str(z["smiles"].item())
+
+
 def token_digest(tokens: MoleculeTokens) -> str:
     """The content hash of the tokens (the one their file header carries); computed once."""
     if not tokens.digest:
@@ -766,12 +805,12 @@ def save_tokens(
     config: dict | None = None,
 ) -> Path:
     """Write as .npz (no pickle) with its provenance header, atomically. `inputs`: the QM
-    record it was built from (`prov.file_input(qm_path)`); `config`: `token_config(...)`."""
+    record it was built from (`prov.file_input(qm_path)`); `config`: `token_config(...)`,
+    with the open-shell rule added for a u > 0 molecule (`with_open_shell_rule`)."""
     arrays = _payload(tokens)
     tokens.digest = prov.array_digest(arrays)
-    header = prov.stamp(
-        "tokens", SCHEMA_VERSION, inputs or {}, config or token_config(), tokens.digest
-    )
+    config = with_open_shell_rule(config or token_config(), tokens.smiles)
+    header = prov.stamp("tokens", SCHEMA_VERSION, inputs or {}, config, tokens.digest)
     out = prov.save_npz(path, arrays, header)
     tokens.source_path = str(out)
     return out
@@ -859,15 +898,22 @@ TokenSchemaError = prov.StaleArtifact  # the old name: a stale token file; rebui
 
 def load_tokens(path: Path, config: dict | None = None, verify: bool = True) -> MoleculeTokens:
     """Read a token file. Its header is verified against the current schema, `config`
-    (default `token_config()`) and the QM record it was built from; raises StaleArtifact.
+    (default `token_config()`) with the open-shell rule of the file's own molecule
+    (`with_open_shell_rule`), and the QM record it was built from; raises StaleArtifact.
+    Every token reader goes through here, so none can take an old u > 0 file for current.
     `verify=False` is for diagnostics only."""
+    with np.load(Path(path), allow_pickle=False) as npz:
+        z = {k: npz[k] for k in npz.files if k != prov.HEADER_KEY}
     header = (
-        prov.verify(path, "tokens", SCHEMA_VERSION, config or token_config())
+        prov.verify(
+            path,
+            "tokens",
+            SCHEMA_VERSION,
+            with_open_shell_rule(config or token_config(), str(z["smiles"].item())),
+        )
         if verify
         else prov.read_header(path)
     )
-    with np.load(Path(path), allow_pickle=False) as npz:
-        z = {k: npz[k] for k in npz.files if k != prov.HEADER_KEY}
     atoms = _load_atoms(z)
     meta = {k: z[k].item() for k in _META}
     for k in ("conformer_id", "pm_sweeps_occ", "pm_sweeps_virt", "schema_version", "fg_vocab_size"):

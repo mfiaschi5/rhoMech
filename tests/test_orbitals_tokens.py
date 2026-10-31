@@ -417,3 +417,81 @@ def test_candidate_matrices_give_their_pairwise_rules(sp_record, name):
         assert matrix.tolist() == every, (name, w)
     default = site_excluded_matrix(t, occ, virt, CandidateConfig().site_weight)
     assert default.any() and not default.all(), name  # a bond with itself, and real arrows
+
+
+# ---- stale detection of open-shell token files (open-shell plan P2b, step 4)
+
+
+@pytest.fixture
+def old_methyl_file(tmp_path, monkeypatch):
+    """[CH3]'s tokens written the way a build before the open-shell rule wrote them: no
+    `open_shell_rule` key in the header config."""
+    from ksmech.orbitals import tokens as T
+    from tests.fixtures.open_shell import open_shell_record
+
+    rec = open_shell_record("methyl")
+    with monkeypatch.context() as m:
+        m.setattr(T, "with_open_shell_rule", lambda config, smiles: dict(config))
+        path = T.save_tokens(T.build_molecule_tokens(rec), tmp_path / "old.npz")
+    return rec, path
+
+
+def test_only_open_shell_files_carry_the_rule(sp_record, tmp_path):
+    from ksmech.data import provenance as prov
+    from ksmech.orbitals.tokens import OPEN_SHELL_RULE, token_config, token_config_for
+    from tests.fixtures.open_shell import open_shell_record
+
+    closed = save_tokens(build_molecule_tokens(sp_record("CC(=O)C")), tmp_path / "c.npz")
+    radical = save_tokens(build_molecule_tokens(open_shell_record("methyl")), tmp_path / "r.npz")
+    assert "open_shell_rule" not in prov.read_header(closed).config
+    assert prov.read_header(radical).config["open_shell_rule"] == OPEN_SHELL_RULE
+    assert token_config_for("CC(C)=O") == token_config()
+    assert load_tokens(closed, token_config()).smiles == "CC(C)=O"
+    assert load_tokens(radical).smiles == "[CH3]"
+
+
+def test_every_reader_refuses_an_old_open_shell_file(old_methyl_file, tmp_path):
+    from ksmech.arrows.reactants import STALE_ARTIFACT, TokenCache
+    from ksmech.data.provenance import StaleArtifact
+    from ksmech.orbitals.build import BuildConfig, process_molecule, tokens_path
+    from ksmech.orbitals.localize import PMConfig
+    from ksmech.orbitals.tokens import token_config
+    from ksmech.qm.records import cache_path, save_record
+    from ksmech.serve.chem.loader import token_header_problems
+
+    rec, path = old_methyl_file
+    for config in (None, token_config(), token_config(PMConfig())):
+        with pytest.raises(StaleArtifact, match="open_shell_rule"):
+            load_tokens(path, config)
+    assert any("open_shell_rule" in p for p in token_header_problems(path))
+    cfg = BuildConfig(qm_cache_dir=tmp_path / "qm", out_dir=tmp_path / "tokens")
+    save_record(rec, cache_path(cfg.qm_cache_dir, rec.smiles, 0, cfg.method))
+    out = tokens_path(cfg.out_dir, rec.smiles, 0, cfg.method)
+    out.parent.mkdir(parents=True)
+    out.write_bytes(path.read_bytes())
+    cache = TokenCache(cfg.out_dir, method=cfg.method, bond_index_dir=tmp_path / "wbi")
+    assert cache(rec.smiles) is None and cache.missing_reason(rec.smiles) == STALE_ARTIFACT
+    assert process_molecule(rec.smiles, cfg).status == "built"  # rebuilt, not loaded
+    assert process_molecule(rec.smiles, cfg).status == "loaded"
+    assert not token_header_problems(out)
+
+
+def test_no_module_checks_a_token_header_on_its_own():
+    """Token headers are verified in `orbitals.tokens.load_tokens` only; serve's header check
+    (it reads files unverified after it) goes through `token_config_for`."""
+    import re
+    from pathlib import Path
+
+    import ksmech
+
+    root = Path(ksmech.__file__).parent
+    own = re.compile(r"verify\([^)]*[\"']tokens[\"']", re.S)
+    found = [
+        str(p.relative_to(root))
+        for p in root.rglob("*.py")
+        if p.name != "tokens.py" and own.search(p.read_text())
+    ]
+    assert found == []
+    loader = (root / "serve" / "chem" / "loader.py").read_text()
+    assert "token_config_for(stored_smiles(path))" in loader
+    assert "token_config()" not in loader

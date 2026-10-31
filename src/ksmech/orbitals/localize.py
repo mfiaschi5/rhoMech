@@ -18,6 +18,10 @@ maximized per pair on a grid that contains 0, then Newton-refined).
 Occupied and virtual orbitals are localized as separate blocks. Within the occupied block the
 doubly and the singly occupied MOs are localized separately, because a rotation that mixes MOs
 of different occupation changes the density sum_i n_i |phi_i|^2: a SOMO stays occupation 1.
+For an open shell (u > 0) the blocks come from the reference occupations instead
+(`reference_occupations`, open-shell plan P2b): the aufbau occupations averaged over each
+plateau of equal GFN2 occupations, so a degenerate open group (NO's pi* pair at 1/2, Br's 4p at
+5/3) is one block that the SCF itself formed, with no energy window.
 
 Foster-Boys is not available as a fallback: tblite's Python interface exposes overlap and
 Hamiltonian integrals only (`save-integrals`), no dipole integrals.
@@ -39,6 +43,7 @@ from ksmech.qm.records import QMRecord
 P_AXIS_ORDER = (1, 2, 0)
 DOUBLE_THRESHOLD = 1.5  # an occupied MO at or above this is doubly occupied, below it a SOMO
 SMEAR_TOL = 0.05  # an MO further than this from its aufbau occupation is Fermi-smeared
+PLATEAU_TOL = 1e-6  # occupations equal to this are one plateau: numerical equality, not chemistry
 _N_VALENCE_AOS = frozenset({1, 4, 9})
 _MIN_GAIN = 1e-14
 
@@ -134,12 +139,40 @@ def aufbau_occupations(rec: QMRecord) -> np.ndarray:
     return ref
 
 
+def reference_occupations(rec: QMRecord, tol: float = PLATEAU_TOL) -> np.ndarray:
+    """The aufbau occupations averaged over each plateau: MOs that are neighbours in energy
+    order and whose GFN2 occupations are equal to `tol` (numerical equality). Fermi smearing
+    gives exactly degenerate levels equal occupations, so a plateau is a degenerate group the
+    SCF formed: Br 3 x 5/3, .OH 2 x 3/2, NO 2 x 1/2, triplet O2 2 x 1. An accidental
+    near-degeneracy keeps distinct occupations and stays off its reference."""
+    auf = aufbau_occupations(rec)
+    ref = np.empty(len(auf))
+    for members in occupation_plateaus(rec, tol):
+        ref[members] = auf[members].mean()
+    return ref
+
+
+def occupation_plateaus(rec: QMRecord, tol: float = PLATEAU_TOL) -> list[np.ndarray]:
+    """MO indices of each plateau, in energy order: runs of neighbouring MOs whose GFN2
+    occupations differ by at most `tol`."""
+    order = np.argsort(rec.orbital_energies_ev, kind="stable")
+    cuts = np.flatnonzero(np.abs(np.diff(rec.occupations[order])) > tol) + 1
+    return np.split(order, cuts)
+
+
+def occupation_reference(rec: QMRecord) -> np.ndarray:
+    """The occupations a record is judged against: aufbau for a closed shell (today's path),
+    the plateau reference for an open shell (u > 0)."""
+    return reference_occupations(rec) if rec.unpaired > 0 else aufbau_occupations(rec)
+
+
 def is_fermi_smeared(rec: QMRecord, tol: float = SMEAR_TOL) -> bool:
-    """Some MO's occupation lies more than `tol` from its aufbau value: the GFN2 gap is small
-    enough for the electronic temperature to spread electrons over several levels. For a
-    closed shell this is exactly "some MO has 0.05 < n < 1.95"; a radical's SOMO at n = 1 is
-    its spin state, not smearing."""
-    return bool(np.any(np.abs(rec.occupations - aufbau_occupations(rec)) > tol))
+    """Some MO's occupation lies more than `tol` from its reference (`occupation_reference`):
+    the GFN2 gap is small enough for the electronic temperature to spread electrons over
+    several levels. For a closed shell this is exactly "some MO has 0.05 < n < 1.95"; a
+    radical's SOMO at n = 1, or a degenerate open group at its plateau value, is its spin
+    state, not smearing."""
+    return bool(np.any(np.abs(rec.occupations - occupation_reference(rec)) > tol))
 
 
 def _schedule(n: int) -> list[tuple[np.ndarray, np.ndarray]]:
@@ -402,32 +435,48 @@ def _merge_stats(a: PMStats, b: PMStats) -> PMStats:
     )
 
 
-def _localize_occupied(rec: QMRecord, occ_idx: np.ndarray, config: PMConfig | None):
-    """Localization of the doubly and the singly occupied MOs of `occ_idx` separately.
+def _localize_groups(rec: QMRecord, idx: np.ndarray, keys: np.ndarray, config: PMConfig | None):
+    """Localization of the MOs of `idx` within each group of equal `keys` separately.
 
-    U is block-diagonal in the order of `occ_idx`, so the spectral weights of every LMO still
-    run over the whole occupied block, and the stats cover both sub-blocks (sweeps: the max).
+    U is block-diagonal in the order of `idx`, so the spectral weights of every LMO still run
+    over the whole block, and the stats cover every group (sweeps: the max).
     """
-    n = len(occ_idx)
+    n = len(idx)
     U = np.zeros((n, n))
     stats = PMStats(0, 0, True, 0.0, 0.0)
-    double = rec.occupations[occ_idx] >= DOUBLE_THRESHOLD
-    for sel in (np.flatnonzero(double), np.flatnonzero(~double)):
-        if len(sel):
-            _, U_sub, st = localize_block(rec.C[:, occ_idx[sel]], rec.S, rec.ao_atom, config)
-            U[np.ix_(sel, sel)] = U_sub
-            stats = _merge_stats(stats, st)
-    return rec.C[:, occ_idx] @ U, U, stats
+    for key in np.unique(keys)[::-1]:
+        sel = np.flatnonzero(keys == key)
+        _, U_sub, st = localize_block(rec.C[:, idx[sel]], rec.S, rec.ao_atom, config)
+        U[np.ix_(sel, sel)] = U_sub
+        stats = _merge_stats(stats, st)
+    return rec.C[:, idx] @ U, U, stats
+
+
+def _open_shell_keys(rec: QMRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(occupied MOs, virtual MOs, group key per MO) of an open shell: an MO with reference
+    occupation > 0 is occupied; MOs rotate only among equal reference occupations, and an MO
+    further than SMEAR_TOL from its reference is a group of its own (unrotated)."""
+    ref = reference_occupations(rec)
+    off = np.abs(rec.occupations - ref) > SMEAR_TOL
+    keys = np.where(off, -1.0 - np.arange(len(ref)), ref)
+    return np.flatnonzero(ref > 0), np.flatnonzero(ref == 0), keys
 
 
 def localize_record(rec: QMRecord, config: PMConfig | None = None) -> LocalizedOrbitals:
     """Localize (IBO by default, `config.method`) the occupied (occupation >= 0.5) and virtual
-    blocks of a QM record; the SOMOs of an open-shell record are localized among themselves."""
+    blocks of a QM record; the SOMOs are localized among themselves. An open shell (u > 0)
+    takes its blocks from the reference occupations (`_open_shell_keys`)."""
     assert_valence_only(rec)
-    occ_idx = np.flatnonzero(rec.occupations >= OCC_THRESHOLD)
-    virt_idx = np.flatnonzero(rec.occupations < OCC_THRESHOLD)
-    C_occ, U_occ, st_occ = _localize_occupied(rec, occ_idx, config)
-    C_virt, U_virt, st_virt = localize_block(rec.C[:, virt_idx], rec.S, rec.ao_atom, config)
+    if rec.unpaired > 0:
+        occ_idx, virt_idx, keys = _open_shell_keys(rec)
+        C_occ, U_occ, st_occ = _localize_groups(rec, occ_idx, keys[occ_idx], config)
+        C_virt, U_virt, st_virt = _localize_groups(rec, virt_idx, keys[virt_idx], config)
+    else:
+        occ_idx = np.flatnonzero(rec.occupations >= OCC_THRESHOLD)
+        virt_idx = np.flatnonzero(rec.occupations < OCC_THRESHOLD)
+        double = rec.occupations[occ_idx] >= DOUBLE_THRESHOLD
+        C_occ, U_occ, st_occ = _localize_groups(rec, occ_idx, double, config)
+        C_virt, U_virt, st_virt = localize_block(rec.C[:, virt_idx], rec.S, rec.ao_atom, config)
     return LocalizedOrbitals(occ_idx, virt_idx, C_occ, C_virt, U_occ, U_virt, st_occ, st_virt)
 
 

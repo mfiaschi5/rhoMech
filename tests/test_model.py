@@ -218,6 +218,32 @@ def test_extra_token_columns_are_selected_by_name(samples):
         token_columns(replace(TINY, frontier_blocks="wide"))
 
 
+def test_atom_fukui_selects_the_finite_difference_columns(samples):
+    """'frozen' is today's columns; 'fd' puts the FD f+ / f- in the frozen ones' place, 'both'
+    appends them; a store without them refuses both by name (open-shell plan P2b)."""
+    base = token_columns(TINY)
+    assert token_columns(replace(TINY, atom_fukui="frozen")) == base
+    assert base[0] == tuple(atom_feature_names()) and "f_plus" not in base[0]
+    fd, both = (token_columns(replace(TINY, atom_fukui=k))[0] for k in ("fd", "both"))
+    i, j = base[0].index("f_plus_fmo"), base[0].index("f_minus_fmo")
+    assert (fd[i], fd[j]) == ("f_plus", "f_minus") and len(fd) == len(base[0])
+    assert both == (*base[0], "f_plus", "f_minus")
+    exact_fd = token_columns(replace(TINY, atom_fukui="fd", frontier_blocks="exact"))[0]
+    assert (
+        "f_plus" in exact_fd and "fmo_exact_homo" in exact_fd and "f_plus_fmo_exact" not in exact_fd
+    )
+    stats = fit_feature_stats(samples, both, base[1])
+    inp = token_inputs(collate_samples(samples), stats)
+    assert inp["atom_x"].shape[-1] == 2 * len(both)
+    stripped = [_legacy_columns(s) for s in samples]
+    with pytest.raises(ValueError, match="f_plus"):
+        fit_feature_stats(stripped, fd, base[1])
+    with pytest.raises(ValueError, match="atom_fukui"):
+        token_columns(replace(TINY, atom_fukui="relaxed"))
+    old = {k: v for k, v in TINY.to_dict().items() if k != "atom_fukui"}
+    assert ModelConfig.from_dict(old).atom_fukui == "frozen"
+
+
 def test_all_cells_feed_the_flags_and_pool_every_cell(samples):
     """pair_cells 'all': the statistics name every stored feature and the legacy mask, every
     real cell is defined for the flags, G^atom pools every (occupied, virtual) pair."""
