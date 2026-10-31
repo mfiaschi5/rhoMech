@@ -113,9 +113,9 @@ def test_the_pin_command(mini_store):
 @pytest.mark.realdata
 def test_closed_base_reloads_and_its_digests_reproduce_on_a_rebuild():
     """closed_base (no file inputs) loads after any re-ingest and holds the molecule split's
-    samples but the 'added' cohort (the steps P1's repairs returned); 30 of its samples rebuilt
-    from their tokens, through the store's packing, give the pinned digests on every shared
-    column."""
+    samples but the cohorts of steps returned later ('added', 'open_shell'); 30 of its samples
+    rebuilt from their tokens, through the store's packing, give the pinned digests on every
+    shared column."""
     from ksmech.arrows.reactants import TokenCache
     from ksmech.arrows.steps import sample_for_step, sample_ids
     from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, steps_path
@@ -124,10 +124,11 @@ def test_closed_base_reloads_and_its_digests_reproduce_on_a_rebuild():
         pytest.skip("closed_base is not pinned (ksmech-eval pin --source pmechdb ...)")
     ids = co.load_cohort("pmechdb", "closed_base")
     views = [samples_path("pmechdb", f"molecule_{p}") for p in ("train", "val", "test")]
-    added = (
-        co.load_cohort("pmechdb", "added") if co.cohort_path("pmechdb", "added").exists() else set()
-    )
-    assert ids == {i for v in views for i in sample_ids(v)} - added and not ids & added
+    later = set()  # the steps P1's repairs returned ('added') and P3 admitted ('open_shell')
+    for name in ("added", "open_shell"):
+        if co.cohort_path("pmechdb", name).exists():
+            later |= co.load_cohort("pmechdb", name)
+    assert ids == {i for v in views for i in sample_ids(v)} - later and not ids & later
     base = pin.load_baseline("pmechdb", "closed_base")
     assert set(base) == ids
     picked = sorted(ids)[:: max(1, len(ids) // 30)][:30]

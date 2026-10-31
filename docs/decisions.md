@@ -7392,3 +7392,115 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   left unscheduled (U16 keeps it to u > 0). Measured read-only when the plan was written, it
   changes the reference of 0 PMechDB and 1 ReactMech closed-shell record (O=[C-]Cl) and the
   blocks only of MOs already flagged smeared (7 and 24 records).
+
+## 2026-10-31: Open-shell P3: open shells in polar PMechDB steps, admitted by three counted laws
+
+- **What ran.** P3 of `docs/open_shell_plan.md` on branch `claude/open-shell-p3` (from p2b):
+  code cbd0338, spec v9.2 (Scope, Domain coverage) d37414f, approved by the user before the
+  build (U3). Then, from the clean tree, the PMechDB re-ingest, `ksmech-arrows samples`, the
+  GBDT refits and textbook, the open_shell cohort and the exit checks, at 2 workers beside the
+  ReactMech full QM batch (12 workers in its own worktree).
+- **Step 1, `data/spin.py`.** `species_u`: RDKit's count when it is 0 or 1; spin_table_v1 when
+  RDKit counts 2 or more, keyed by `chem.unmapped_canonical` (the scan's key), else
+  MULTIPLICITY_UNTABULATED; an ambiguous entry stays MULTIPLICITY_AMBIGUOUS. `spin_config`
+  (SPIN_RULE_VERSION `spin-rule-v1`, the table version and content hash) is stamped in
+  `ingest_report.json` under `spin`: steps.parquet has no header of its own, and every artifact
+  built from the steps records the parquet's hash.
+  - **The singlet oracle fails on spin_table_v1 for three species.** Cl[C]Cl and Br[C]Br are
+    MULTIPLICITY_AMBIGUOUS (case disagree: B read the linear saddle the embedding draws), and
+    Ph2C=C: too (case a_failed). The test marks the three xfail strict: the plan resolves a
+    disagreement in the table, not in code, and that is spin_table_v2, the open P2 question
+    on P4's production geometry for two-coordinate carbenes. [C]=CC, [C]=C(C)C and [C]=O read
+    0.
+- **Step 2, the laws** (`domain.spin_law`, `domain.parity_law`, `validation.admit_open_shell`).
+  `domain.POLICY` holds one `DomainPolicy(open_shell = exclude | admit_by_rule)` per source;
+  PMechDB admits by rule, every other source excludes. On a RADICAL_DRAWN step of such a
+  source, in this order:
+  1. a species without a count: MULTIPLICITY_UNTABULATED, MULTIPLICITY_AMBIGUOUS;
+  2. the total under data.spin not conserved: SPIN_NOT_CONSERVED (a code the plan does not
+     name; the conservation failure is final, so it is read before the pending one);
+  3. a count that differs from RDKit's: SPIN_RULE_PENDING (P4's tagged records);
+  4. an odd atom entry of R_data, the arrows' edit (`delta_be.dataset_matrix`), or no R_data:
+     NOT_ELEMENTARY.
+  A step that passes is RADICAL_SPECTATOR, or RADICAL_REACTIVE when an R entry touches an atom
+  drawn with radical electrons on either side; the curation file
+  (`curation/pmechdb_open_shell.json`, 5 steps: the 3 isopropoxides RADICAL_AMBIGUOUS, the Al
+  and nitrone drawings DRAWING_ERROR_UNREPAIRED) keeps a step RADICAL_DRAWN with its reason as
+  the class.
+  - **Admit sets.** `ADMIT` is now the five P0a/P1 classes for every source, plus the two
+    admitted open-shell classes for a source that admits by rule. It was "every DomainClass";
+    keeping it so would have changed ReactMech's recorded admit config and staled its views.
+  - **The survey** gives a radical drawing its subclass under every outcome (RADICAL_DRAWN, a
+    law code, or KEPT with an admitted class), so it stays the oracle: PMechDB's radical
+    subclasses still total 30, 12 genuine, 10 carbenes.
+  - **Permissiveness, as the plan's risks say.** Drawn as is, without its named repair, the
+    beta-lactam step passes the laws (a conserved N radical the arrows touch); the unit test
+    now says so. A new polar source needs its own curation review before admit_by_rule.
+- **Step 3.** Law (S) in the sample builder: an open-shell reactant fragment (drawn u > 0)
+  whose tokens are Fermi-smeared skips the step as SOMO_NOT_INTEGRAL. `steps.stretched_bonds`:
+  an R entry on a Lewis bond to Li, Na, Mg or K that the record holds beyond 1.3 x the
+  covalent-radius sum; listed in `samples_report.json` under SKIPPED_BOND_STRETCHED and the
+  eval slice `bond_stretched`, never a model input. `curation/multi_radical_exemptions.json`
+  holds 5d007b38 for P8, though the step is not admitted (below).
+- **Step 4.** The two radical resonance steps enter resonance_pairs. `ksmech-eval cohort`
+  pins the training steps of some domain_class values; cohort `open_shell` (RADICAL_SPECTATOR,
+  RADICAL_REACTIVE). The spectator/reactive split has no reactive step, so one cohort.
+- **Against the hand reading (the oracle).** The laws admit 11 of its 12 steps: 9 samples
+  (Birch 1, peroxyl deprotonations 3, peroxyl -> superoxide eliminations 4, superoxide
+  protonation 1) and the 2 resonance pairs. The 12th, 5d007b38 (Et3B + O2), is
+  SPIN_NOT_CONSERVED: spin_table_v1 gives the adduct CC[B-](CC)(CC)[O+][O] u = 0 (A: the
+  singlet 0.48 eV lower, B undetermined), so the step turns triplet O2 into a singlet. The plan
+  admits it only if the table gives u = 2, so the law decides and the difference was reported
+  to the user (2026-10-31). The other 19: MULTIPLICITY_AMBIGUOUS 8 (Cl[C]Cl 6, Br[C]Br 1,
+  Ph2C=C: 1), SPIN_RULE_PENDING 4 ([C]=O 2, the vinylidenes 2), SPIN_NOT_CONSERVED 1
+  (e57aaee9, u 1 -> 0), curated 5. The plan expected 12 carbene/CO steps pending; the table
+  makes 8 of them ambiguous.
+- **Rebuild.** From d37414f, clean tree.
+  - **Re-ingest.** 13,090 accepted steps as before; only the 30 RADICAL_DRAWN steps change, and
+    only in `domain_exclusion` and `domain_class`. Training steps 12,455 -> 12,464, resonance
+    pairs 470 -> 472 (db877060, dcf0a54a). `ingest_report.json`: `open_shell` admitted
+    RADICAL_SPECTATOR 11, none with a u >= 2 species, curated out 3 + 2.
+  - **Samples** (2 workers, about 55 min): 12,412 -> 12,421 samples, MISSING_TOKENS 43 as
+    before, no SOMO_NOT_INTEGRAL. The molecule views gain 6 train and 3 val ids and lose none;
+    test is unchanged. SKIPPED_BOND_STRETCHED lists 2 samples: the Birch step 4bda5440 (Na-C
+    1.349 x the radii sum) and dc6b7866, a closed-shell closed_base step whose R breaks an
+    N+-Li- dative bond drawn as a Lewis bond (the ionic case the plan expected, a slice).
+  - **Cohort** `open_shell`: the 9 samples (6 train, 3 val, 0 test). Floor on its val: ranks
+    78, 120, 60 (0 of 3 in the top 5); reported as counts.
+  - **GBDT refit, the new reference** (molecule split, `--workers 2 --n-jobs 3`; P1 fitted with
+    more threads):
+
+    | Cells | val top-5, P1 -> P3 | test top-1/3/5, P1 -> P3 | trees |
+    |---|---|---|---|
+    | valid | 69.8 -> 68.4 | 47.1/67.2/74.6 -> 47.1/66.5/72.1 | 307 -> 216 |
+    | all | 70.8 -> 69.9 | 47.8/64.9/73.9 -> 45.9/65.6/73.9 | 568 -> 269 |
+
+    Training queries go 9,443 -> 9,449 (valid) and 9,444 -> 9,450 (all). The data do not cause
+    the shift: P1's stored valid model scored on the P3 store gives P1's test numbers exactly
+    (47.1 / 67.2 / 74.6 on 1,121) and val 43.1 / 60.3 / 69.9 on 1,204 (P1: 1,202). So the
+    shift is the refit itself (six more queries and another thread count end early stopping
+    elsewhere), as P1 measured for its own refit. The untrained gap kernel's test numbers are
+    unchanged.
+  - **A file overwritten and restored.** `--score-only --model` names its output after the
+    model file, and P1's model shares the v17 model's file name, so the score of P1's model
+    replaced `gbdt_lgbm_ranks_molecule_geomfree_gbdt_lgbm_molecule_geomfree.json`, which the
+    legacy gate reads as the v17 model's ranks. It was regenerated with the v17 model, the
+    gate's command; the P1-model ranks were kept in the scratchpad only.
+  - **Textbook** (the refit rankers): gap kernel 3/5 held-out expected pairs in the top 3,
+    ranker 2/2 held out (2/3 of the cases seen in training), textbook-held-out ranker 4/5.
+- **Exit checks.** All pass.
+  - **The admitted set** is the hand reading's 12 but 5d007b38 (above): 9 samples and 2
+    resonance pairs. Every other radical drawing carries a counted reason; every curated step
+    passes the laws; no admitted step holds a u >= 2 species; no admitted pool is smeared.
+  - **closed_base.** Its per-column digests reproduce on rebuilt samples (realdata), and every
+    closed_base id is still in the molecule views (the views are closed_base, the 'added'
+    cohort and the 9 open-shell samples; `test_eval_pin` now subtracts both cohorts).
+  - **Floor.** Ranks per sample identical on closed_base, valid cells and every cell (val 1,238,
+    test 1,182).
+  - **flex_first decode.** Val hits per sample on closed_base identical: top-1/3/5 62.9 / 82.6
+    / 85.4.
+  - **GBDT.** Refit recorded above; P1's stored model reproduces its own test numbers on the
+    P3 store.
+- **Against the plan's data effect.** The plan expected 10 samples and 2 resonance pairs and
+  RADICAL_DRAWN 30 -> 18 (12 pending). Measured: 9 samples (5d007b38 held back), 2 resonance
+  pairs, RADICAL_DRAWN 30 -> 5 (the curated ones); the 25 others carry the law codes.
