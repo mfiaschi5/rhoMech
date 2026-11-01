@@ -7507,3 +7507,82 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
 - **Against the plan's data effect.** The plan expected 10 samples and 2 resonance pairs and
   RADICAL_DRAWN 30 -> 18 (12 pending). Measured: 9 samples (5d007b38 held back), 2 resonance
   pairs, RADICAL_DRAWN 30 -> 5 (the curated ones); the 25 others carry the law codes.
+
+## 2026-11-01: spin_table_v2: the dihalocarbenes and diphenylvinylidene decided in the table
+
+- **What and why.** After P3 the user asked to resolve the three failures of the singlet
+  oracle (`tests/test_data_spin.py`): spin_table_v1 left Cl[C]Cl, Br[C]Br and Ph2C=C:
+  MULTIPLICITY_AMBIGUOUS, where the textbook reads singlets. The plan resolves such a failure in
+  the table, not in code, so this is spin_theory_v2 and spin_table_v2, on branch
+  `claude/open-shell-spin-v2` (from p3), commit 65490c9. The user chose the four changes over a
+  DFT arbiter (asked 2026-11-01); a DFT arbiter for the species C leaves unassigned stays a
+  possible later step (PySCF is not installed).
+- **Diagnosis** (read-only, the scan's scratch caches):
+  - Cl[C]Cl: A is a conclusive singlet (1.01 eV). B read the production geometry, the linear
+    D-inf-h saddle the ETKDG embedding draws, saw a degenerate Pi_u pair and applied Hund
+    (triplet). At the bent singlet optimum (113 degrees) B is undetermined (GFN2 gap 1.83 eV).
+  - Br[C]Br: A is a conclusive singlet (0.76 eV). At the bent singlet optimum (114 degrees)
+    B's Gleiter-Hoffmann proxy still reads a triplet (GFN2 HOMO-LUMO gap 1.40 eV < 1.5): the
+    proxy, with extended-Hueckel thresholds on GFN2 gaps, is wrong for the dihalocarbenes.
+  - Ph2C=C:: the singlet has no minimum at spGFN2. From the production start the terminal C
+    bonds to an ipso carbon (the Fritsch-Buttenberg-Wiechell shift to diphenylacetylene),
+    BOND_FORMED; the displaced start's SCF did not converge. B: Gleiter-Hoffmann 1.31 eV,
+    triplet.
+- **B, spin_theory_v2.**
+  - Geometry: the scan re-optimizes the production geometry (restricted GFN2 at the production
+    multiplicity) from the displaced start, and B reads that optimum when it ends more than
+    1e-5 Ha lower without forming a bond (`SADDLE_TOL_HA`, a numerical equality of two
+    optima). 34 species move: CCl2 and CBr2 by 0.027 and 0.023 Ha (the saddles), NO3 by 0.004
+    Ha, the other 31 by 1e-5 to 2e-4 Ha (median 3e-5, a slightly lower point of the same
+    minimum). B's verdict changes only for the three species.
+  - Rule 4a: a carbene centre whose one neighbour is a carbon doubly bonded to it (R2C=C:, a
+    vinylidene) is a singlet (Stang, Chem. Rev. 78, 383 (1978)).
+  - Rule 4b: a carbene centre with two pi-donor neighbours holding a lone pair (a halogen, or
+    N, O, P, S) is a singlet (Bourissou et al., Chem. Rev. 100, 39 (2000), already cited).
+    One donor stays with Gleiter-Hoffmann. Both rules read the drawing only, as rule 4 did.
+- **A.** A state of a carbene (one centre holding the drawing's two radical electrons) whose
+  every start formed a bond takes its spGFN2 single-point energy at the production geometry:
+  the geometry has the drawing's bonding, so the energy bounds the state's lowest energy there
+  from above. `spin_table.scan_verdict` lets a bounded state decide only as the lowest state.
+  - **Two versions tried and dropped.** Repulsive walls at 1.3 x the radii sum let the singlet
+    sit half-bonded on the wall (C-C 1.96 A, C-O 1.83 A) and gain 1.3-2.3 eV from the forming
+    bond; walls at the start distances still let it stretch other bonds to 1.2 x (C-Br, O-H,
+    C-H: Norrish-type cleavage and H shifts). Both turned 16 organic biradicals (Norrish II
+    1,4-biradicals, peroxyl-alkoxyl biradicals, all FlowER) from AMBIGUOUS into singlets.
+  - **Why carbenes only.** Even the vertical single point at the drawn geometry puts those
+    biradicals' spGFN2 singlet 0.4-0.8 eV below the triplet, which is not chemistry for two
+    distant centres. A's 0.30 eV bar is spGFN2's error on AC12, a set of 12 aryl carbenes
+    (Ghafarian Shirazi, Neese and Pantazis, JCTC 14, 4733 (2018)), so the bound is kept to the
+    species kind the bar was measured on. Other species keep such a state failed, as in v1;
+    the user's P2 question (a collapsing singlet: the other state or AMBIGUOUS) stays open for
+    them.
+- **v1 against v2** (156 species, same species set). Cases: agree 59 -> 63, A decides 37 -> 37,
+  A inconclusive 15 -> 15, disagree 5 -> 3, A failed 40 -> 38. Four verdicts change:
+  Cl[C]Cl, Br[C]Br and Ph2C=C: AMBIGUOUS -> 0 (agree); COC(=O)[C]C(=O)OC AMBIGUOUS -> 2 (agree:
+  its vertical singlet lies 0.54 eV above the triplet, so A alone is inconclusive, and rule C
+  assigns when A's lowest state and B agree, as in v1). No metal or biradical verdict changes.
+- **Files.** `spin_tables/species_v2.json`, `theory_v2.json`; v1's stay as the record of what
+  P3 read. `spin_table.load` reads v2, `data.spin` with it (`spin_config` stamps the new digest
+  in the ingest report). The singlet oracle passes without xfail.
+- **Rebuild.** From 65490c9, clean tree, 2-3 workers beside the ReactMech full QM batch.
+  - **Scan.** The 534 starts of v1 came from the cache; new are the vertical bounds (2 carbene
+    states) and B's displaced re-optimizations (156 species). The dropped wall versions'
+    runs stay in the scratch cache under their own method tags, unused.
+  - **PMechDB re-ingest.** Only the 8 dihalocarbene and diphenylvinylidene steps change, and
+    only in `domain_exclusion`: MULTIPLICITY_AMBIGUOUS -> SPIN_RULE_PENDING (the table assigns
+    0, RDKit counts 2: P4's tagged records). SPIN_RULE_PENDING is now 12, the plan's original
+    expectation for the carbene and CO steps. Admission is unchanged (11; 5d007b38 still
+    SPIN_NOT_CONSERVED, its adduct is 0 in v2 too). `ingest_report.json` stamps spin_table_v2.
+  - **Samples** (steps.parquet is an input of the store, so it is rebuilt): 12,421 samples,
+    MISSING_TOKENS 43, SKIPPED_BOND_STRETCHED the same 2, the molecule views' ids identical.
+  - **GBDT refit** (molecule split, valid and every cell, `--n-jobs 3` as in P3): results and
+    trees identical to P3's refit (216/453 and 269/370), the fit being deterministic at one
+    thread count. The textbook cases are therefore unchanged and were not rerun.
+- **Exit checks.** All pass.
+  - closed_base: floor ranks per sample identical (valid cells and every cell; val 1,238, test
+    1,182); flex_first's val hits per sample identical (62.9 / 82.6 / 85.4); its per-column
+    digests reproduce (realdata).
+  - The singlet oracle reads 0 for all six textbook singlets in `data.spin` and in the table.
+- **Tests** (from 65490c9, clean tree): `pytest -n 2 -m "not realdata"` 2008 passed, 12 skipped,
+  2 xfailed (the singlet oracle's three xfails are gone); `KSMECH_TEST_WORKERS=1 pytest -m
+  realdata` 51 passed.
