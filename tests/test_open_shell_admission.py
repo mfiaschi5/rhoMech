@@ -21,8 +21,9 @@ pytestmark = pytest.mark.realdata
 
 PM = DEFAULT_PROCESSED_DIR / "pmechdb"
 ORACLE = Path("tests/fixtures/pmechdb_radical_survey.json")
-# spin_table_v1 gives the Et3B-O2 adduct u = 0 (A: the singlet 0.48 eV lower, B undetermined),
-# so its step turns triplet O2 into a singlet: law (u) holds it back (plan P3, step 3 (b))
+# the species table (v1 and v2) gives the Et3B-O2 adduct u = 0 (A: the singlet 0.48 eV lower,
+# B undetermined), so its step turns triplet O2 into a singlet: law (u) holds it back (plan P3,
+# step 3 (b))
 KNOWN_DIFFERENCES = {"pmechdb-5d007b38296827b6": DomainCode.SPIN_NOT_CONSERVED}
 RESONANCE_PAIRS_GAINED = {"pmechdb-db877060093d34fc", "pmechdb-dcf0a54a98432a8c"}
 BIRCH = "pmechdb-4bda5440edfee13c"

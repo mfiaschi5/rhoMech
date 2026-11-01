@@ -1,5 +1,5 @@
-"""The spin-state scan (open-shell plan P2 steps 2 to 4): A, B and their combination into
-spin_theory_v1 and spin_table_v1.
+"""The spin-state scan (open-shell plan P2 steps 2 to 4): A, B and their combination into the
+theory and species tables (v2 since 2026-10-31; v1 is P2's).
 
     uv run python scripts/probes/spin_scan.py [--workers 8] [--write]
 
@@ -10,12 +10,18 @@ the METAL_SUSPECT fragments of open_shell_probe.py. (A): each species at every u
 its electron count and d shells allow (u, u - 2, ... ; Fe(III) d5 5, 3, 1; Cu(II) d9 1; Ni(II)
 d8 and Cr(IV) d2 2, 0) is optimized with spGFN2 in ALPB water from its production geometry and
 from it displaced by a fixed kick (bond walls when a bond breaks); a start whose optimum formed a
-bond the drawing lacks is a state of another molecule and fails (BOND_FORMED). The lower energies
-at the optima are compared against the method's error bar (`data.spin_table.ERROR_BARS`). (B):
-`data.spin_theory` on the restricted lowest-spin record at the production geometry; the report
-adds B at A's displaced optimum as a diagnostic. (C): `data.spin_table.combine`. With --write the
-two tables go to src/ksmech/data/spin_tables/ (commit them with no build running); the report,
-with every A-B disagreement, goes to data/cache/probe_open_shell/scan_report.json.
+bond the drawing lacks is a state of another molecule and fails (BOND_FORMED). v2: a carbene
+state whose every start failed so takes its single-point energy at the production geometry,
+an upper bound in the drawing's bonding (`spin_table.scan_verdict`'s bounded states); the
+bound is kept to carbenes, the species kind the error bar was measured on (AC12).
+The lower energies at the optima are compared against the method's error bar
+(`data.spin_table.ERROR_BARS`). (B): `data.spin_theory` on the restricted lowest-spin record at
+the production geometry, re-optimized from the displaced start when that ends lower (v2: the
+embedding can sit on a symmetric saddle, linear Cl[C]Cl); the report adds B at A's displaced
+optimum as a diagnostic. (C): `data.spin_table.combine`. With
+--write the two v2 tables go to src/ksmech/data/spin_tables/ (commit them with no build
+running); the report, with every A-B disagreement, goes to
+data/cache/probe_open_shell/scan_report_v2.json.
 """
 
 from __future__ import annotations
@@ -74,6 +80,7 @@ KICK_ANG = 0.02
 KICK_SEED = 0
 STARTS = ("production", "displaced")
 NO_DISPLACED = "no displaced optimum"
+SADDLE_TOL_HA = 1e-5  # two optima of one state are the same below this (numerical equality)
 
 
 def kick(shape: tuple[int, ...]) -> np.ndarray:
@@ -113,6 +120,41 @@ def scan_start(task: tuple[probe.Species, int, str]) -> dict:
     return probe.cached(probe.PROBE_ROOT / "scan", sp.smiles, method, compute) | tag
 
 
+def is_carbene(smiles: str) -> bool:
+    """One carbene centre (`spin_theory.carbene_centres`) holding the drawing's only two
+    radical electrons: the species kind spGFN2's error bar was measured on (AC12, aryl
+    carbenes)."""
+    from ksmech.data.spin_theory import carbene_centres
+
+    mol = prepare_mol(smiles)
+    centres = carbene_centres(mol)
+    radicals = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
+    return (
+        len(centres) == 1
+        and radicals == 2 == mol.GetAtomWithIdx(centres[0]).GetNumRadicalElectrons()
+    )
+
+
+def vertical_bound(task: tuple[probe.Species, int]) -> dict:
+    """One state of a carbene at its production geometry, a single point with no optimization:
+    the geometry is in the drawing's bonding, so its energy bounds from above the state's
+    lowest energy with that bonding. Never raises."""
+    sp, u = task
+    tag = {"u": u, "smiles": sp.smiles, "start": "production"}
+    try:
+        rec = probe.production(sp)
+    except Exception as exc:  # noqa: BLE001 - counted per state
+        return {"status": "failed", "reason": "NO_PRODUCTION", "detail": str(exc)} | tag
+    method = f"GFN2-xTB/{probe.medium(probe.SOLVENT)}/sp/u{u}/vertical-at-prod-u{rec.unpaired}"
+
+    def compute() -> dict:
+        x = rec.coords_ang / BOHR_ANG
+        point = probe.single_point(rec.atomic_numbers, x, rec.charge, u, probe.SOLVENT, True)
+        return {"u": u, "energy_ha": point["energy_ha"], "bounded": True}
+
+    return probe.cached(probe.PROBE_ROOT / "scan", sp.smiles, method, compute) | tag
+
+
 def drawing_kept(run: dict) -> dict:
     """A run whose optimum formed a bond the drawing lacks (`probe.formed_bonds`) is a state of
     another molecule, not of the drawing: it fails with BOND_FORMED, the pairs in `detail`."""
@@ -122,13 +164,16 @@ def drawing_kept(run: dict) -> dict:
     return run | {"status": "failed", "reason": "BOND_FORMED", "detail": bonds} if bonds else run
 
 
-def scan_state(runs: list[dict]) -> dict:
+def scan_state(runs: list[dict], bounded: list[dict] = ()) -> dict:
     """One state from its starts: the lowest energy among the converged starts that kept the
-    drawing, with every start kept."""
+    drawing, else the carbene's vertical bound (`vertical_bound`), with every start kept."""
     runs = [drawing_kept(r) for r in runs]
     keep = ("status", "energy_ha", "restrained", "reason", "detail")
     starts = {r["start"]: {k: r.get(k) for k in keep} for r in runs}
+    for r in bounded:
+        starts["vertical"] = {k: r.get(k) for k in keep} | {"bounded": True}
     ok = [r for r in runs if r["status"] == "ok"]
+    ok = ok or [r for r in bounded if r["status"] == "ok"]
     if not ok:
         reason = "/".join(sorted({str(r.get("reason")) for r in runs}))
         head = {"u": runs[0]["u"], "smiles": runs[0]["smiles"], "status": "failed"}
@@ -146,7 +191,8 @@ def a_verdict(sp: probe.Species, states: list[dict]) -> dict:
     energies = {r["u"]: r.get("energy_ha") if r["status"] == "ok" else None for r in states}
     ev = {u: None if e is None else e * probe.HA_EV for u, e in energies.items()}
     bar = spin_table.ERROR_BARS[kind]["ev"]
-    verdict = spin_table.scan_verdict(ev, bar)
+    bounded = {r["u"] for r in states if r["status"] == "ok" and r.get("bounded")}
+    verdict = spin_table.scan_verdict(ev, bar, bounded)
     base = min((e for e in ev.values() if e is not None), default=None)
     return {
         "kind": kind,
@@ -159,6 +205,7 @@ def a_verdict(sp: probe.Species, states: list[dict]) -> dict:
                 "energy_ha": energies[r["u"]],
                 "relative_ev": None if ev[r["u"]] is None else ev[r["u"]] - base,
                 "restrained": r.get("restrained"),
+                "bounded": r["u"] in bounded,
                 "status": r["status"],
                 "reason": r.get("reason"),
                 "start": r.get("start") if r["status"] == "ok" else None,
@@ -169,15 +216,56 @@ def a_verdict(sp: probe.Species, states: list[dict]) -> dict:
     }
 
 
+def b_geometry(sp: probe.Species) -> dict:
+    """B's geometry (v2): the production geometry, unless the restricted optimization at the
+    production multiplicity from the displaced start ends lower by more than SADDLE_TOL_HA
+    and forms no bond: then the embedding sat on a symmetric saddle (linear Cl[C]Cl), and the
+    displaced optimum is used. Raises when the production record is missing."""
+    rec = probe.production(sp)
+    out = {"source": "production", "coords_ang": rec.coords_ang.tolist(), "drop_ha": None}
+    if rec.n_atoms == 1:
+        return out
+    method = f"GFN2-xTB/{probe.medium(probe.SOLVENT)}/u{rec.unpaired}/kick{KICK_ANG}-s{KICK_SEED}"
+    x0 = rec.coords_ang / BOHR_ANG
+
+    def compute() -> dict:
+        mol, z, q, u = prepare_mol(sp.smiles), rec.atomic_numbers, rec.charge, rec.unpaired
+        e0 = probe.single_point(z, x0, q, u, probe.SOLVENT, False)["energy_ha"]
+        xyz, walls = probe.optimize(mol, x0 + kick(x0.shape), q, u, probe.SOLVENT, False)
+        e1 = probe.single_point(z, xyz, q, u, probe.SOLVENT, False)["energy_ha"]
+        formed = probe.formed_bonds(mol, xyz * BOHR_ANG)
+        coords = (xyz * BOHR_ANG).tolist()
+        return {"e_production_ha": e0, "e_displaced_ha": e1, "formed": formed, "coords": coords}
+
+    run = probe.cached(probe.PROBE_ROOT / "b_geometry", sp.smiles, method, compute)
+    if run["status"] != "ok":
+        return out | {"displaced_failed": run.get("reason")}
+    drop = run["e_production_ha"] - run["e_displaced_ha"]
+    if drop > SADDLE_TOL_HA and not run["formed"]:
+        return {"source": "displaced", "coords_ang": run["coords"], "drop_ha": drop}
+    return out | {"drop_ha": drop}
+
+
 def b_verdict(sp: probe.Species) -> dict:
-    """B for one species on its restricted lowest-spin record at the production geometry."""
+    """B for one species on its restricted lowest-spin record at `b_geometry`, with the
+    geometry's source and the saddle drop."""
     from ksmech.data import spin_theory
 
     try:
-        rec = probe.theory_record(sp, probe.production(sp))
+        geo = b_geometry(sp)
+        u0 = min(sp.states)
+        root = probe.PROBE_ROOT / "b_v2"
+        rec = probe.record_for(
+            sp.smiles, u0, probe.SOLVENT, root, given=np.asarray(geo["coords_ang"])
+        )
     except Exception as exc:  # noqa: BLE001 - B is then undetermined, with the reason
-        return {"unpaired": None, "rule_chain": ["no restricted record"], "detail": str(exc)}
-    return spin_theory.theory_verdict(prepare_mol(sp.smiles), rec).as_dict()
+        return {"smiles": sp.smiles, "unpaired": None, "rule_chain": ["no restricted record"],
+                "detail": str(exc)}  # fmt: skip
+    verdict = spin_theory.theory_verdict(prepare_mol(sp.smiles), rec).as_dict()
+    geometry = {k: geo[k] for k in ("source", "drop_ha")} | {
+        "displaced_failed": geo.get("displaced_failed")
+    }
+    return verdict | {"smiles": sp.smiles, "geometry": geometry}
 
 
 def b_displaced(task: tuple[probe.Species, list | None]) -> dict:
@@ -216,20 +304,40 @@ def table_entry(sp: probe.Species, a: dict, b: dict) -> dict:
     }
 
 
+def _run(fn, tasks: list, workers: int, label: str) -> dict[tuple[str, int], list[dict]]:
+    runs: dict[tuple[str, int], list[dict]] = {}
+    for k, res in enumerate(in_processes(fn, tasks, workers), 1):
+        runs.setdefault((res["smiles"], res["u"]), []).append(res)
+        tag = f"{label} {res['status']} u={res['u']} {res['start']}"
+        print(f"step {k} / {len(tasks)} {tag} {res['smiles']}", flush=True)
+    return runs
+
+
+def bounded_tasks(species: list[probe.Species], runs: dict) -> list[tuple]:
+    """A vertical bound for every state of a carbene that every start left for another
+    molecule (BOND_FORMED) and none kept; any other species keeps such a state failed."""
+    by = {sp.smiles: sp for sp in species}
+    out = []
+    for (smiles, u), state_runs in runs.items():
+        kept = [drawing_kept(r) for r in state_runs]
+        if any(r["status"] == "ok" for r in kept) or not is_carbene(smiles):
+            continue
+        if any(r.get("reason") == "BOND_FORMED" for r in kept):
+            out.append((by[smiles], u))
+    return out
+
+
 def run_scan(species: list[probe.Species], workers: int) -> dict[str, list[dict]]:
-    """Every state of every species from both starts, combined per state and grouped by
-    SMILES: the species the table serves (organic, Cu/Fe) before the METAL_SUSPECT
-    diagnostics, each longest first."""
+    """Every state of every species from both starts, then the bounded runs, combined per
+    state and grouped by SMILES: the species the table serves (organic, Cu/Fe) before the
+    METAL_SUSPECT diagnostics, each longest first."""
     tasks = [(sp, u, s) for sp in species for u in sp.states for s in STARTS]
     tasks.sort(key=lambda t: (t[0].groups == ("suspect",), -prepare_mol(t[0].smiles).GetNumAtoms()))
-    runs: dict[tuple[str, int], list[dict]] = {}
-    for k, res in enumerate(in_processes(scan_start, tasks, workers), 1):
-        runs.setdefault((res["smiles"], res["u"]), []).append(res)
-        tag = f"{res['status']} u={res['u']} {res['start']}"
-        print(f"step {k} / {len(tasks)} {tag} {res['smiles']}", flush=True)
+    runs = _run(scan_start, tasks, workers, "scan")
+    held = _run(vertical_bound, bounded_tasks(species, runs), workers, "vertical")
     out: dict[str, list[dict]] = {sp.smiles: [] for sp in species}
-    for (smiles, _), state_runs in runs.items():
-        out[smiles].append(scan_state(state_runs))
+    for key, state_runs in runs.items():
+        out[key[0]].append(scan_state(state_runs, held.get(key, [])))
     return out
 
 
@@ -251,7 +359,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--write", action="store_true", help="write the two tracked tables")
-    parser.add_argument("--report", type=Path, default=probe.PROBE_ROOT / "scan_report.json")
+    parser.add_argument("--report", type=Path, default=probe.PROBE_ROOT / "scan_report_v2.json")
     args = parser.parse_args(argv)
     RDLogger.DisableLog("rdApp.*")
     species, counts = gather()
@@ -261,10 +369,10 @@ def main(argv: list[str] | None = None) -> None:
     scans = run_scan(ready, args.workers)
     shifted = [(sp, displaced_coords(sp, scans[sp.smiles])) for sp in ready]
     b_alt = {r["smiles"]: r for r in in_processes(b_displaced, shifted, args.workers)}
-    entries, theory = {}, {}
+    entries = {}
+    theory = {r["smiles"]: r for r in in_processes(b_verdict, species, args.workers)}
     for sp in species:
-        b = b_verdict(sp)
-        theory[sp.smiles] = b
+        b = theory[sp.smiles]
         none = [{"u": u, "status": "failed", "reason": "NO_PRODUCTION"} for u in sp.states]
         a = a_verdict(sp, scans.get(sp.smiles) or none)
         entries[sp.smiles] = table_entry(sp, a, b)
@@ -341,7 +449,12 @@ def write_outputs(entries, theory, rows, counts, args) -> None:
             "multiplicity, the engine's embedding) and from it displaced by a fixed Gaussian "
             f"kick ({KICK_ANG} Angstrom, seed {KICK_SEED}); the lower energy among the "
             "converged starts that formed no bond the drawing lacks (non-metal pairs within "
-            "the wall factor, 1.2 x the covalent-radius sum; else the state fails, BOND_FORMED)",
+            "the wall factor, 1.2 x the covalent-radius sum; else BOND_FORMED). v2: a state of "
+            "a carbene (one centre holding the two radical electrons, AC12's kind) whose every "
+            "start formed one takes its single-point energy at the production geometry, an "
+            "upper bound (bounded); B "
+            "reads the production geometry re-optimized from the displaced start when that "
+            f"ends more than {SADDLE_TOL_HA} Ha lower without a new bond",
             "solvent": f"ALPB {probe.SOLVENT}",
             "theory_digest": theory_table["digest"],
             "error_bars": spin_table.ERROR_BARS,
@@ -356,8 +469,8 @@ def write_outputs(entries, theory, rows, counts, args) -> None:
     probe._write_json(args.report, report | {"table": table, "theory": theory_table})
     if args.write:
         spin_table.TABLE_DIR.mkdir(exist_ok=True)
-        spin_theory.write_theory_table(theory, spin_table.THEORY_V1)
-        spin_table.SPECIES_V1.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n")
+        spin_theory.write_theory_table(theory, spin_table.THEORY_V2)
+        spin_table.SPECIES_V2.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n")
     effects = counts["start_and_geometry"]
     short = {k: v for k, v in counts.items() if k not in ("start_and_geometry", "bond_formed")}
     short |= {k: len(v) for k, v in effects.items()} | {"bond_formed": len(counts["bond_formed"])}

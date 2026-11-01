@@ -92,6 +92,7 @@ def _tmm() -> tuple:
 SPECIES = {
     "o2": lambda: ("[O][O]", [[0, 0, -0.605], [0, 0, 0.605]]),
     "dichlorocarbene": lambda: ("Cl[C]Cl", _bent(1.72, 109.0, centre_first=False)),
+    "dibromocarbene": lambda: ("Br[C]Br", _bent(1.87, 112.0, centre_first=False)),
     "methylene_134": lambda: ("[CH2]", _bent(1.08, 134.0, centre_first=True)),
     "co_drawn": lambda: ("[C]=O", [[0, 0, 0], [0, 0, 1.128]]),
     "vinylidene": _vinylidene,
@@ -202,19 +203,44 @@ def test_atoms_follow_hunds_rules(name, term):
     assert v.term == term and v.unpaired == int(term[0]) - 1
 
 
-def test_dichlorocarbene_is_never_a_triplet():
-    v = verdict("dichlorocarbene")
-    assert v.unpaired in (0, None)
-    assert v.carbene is not None and v.carbene["centre"] == 1
-    assert any("Gleiter-Hoffmann" in r for r in v.rule_chain)
+@pytest.mark.parametrize("name", ["dichlorocarbene", "dibromocarbene"])
+def test_dihalocarbenes_are_singlets_by_their_pi_donors(name):
+    """Rule 4b (v2): the GFN2 gap is only a proxy, and dibromocarbene's reads a triplet."""
+    v = verdict(name)
+    assert v.unpaired == 0 and v.carbene is not None and v.carbene["centre"] == 1
+    assert v.rule_chain == ["two pi-donor neighbours with lone pairs: singlet"]
+
+
+def test_a_vinylidene_is_an_unsaturated_carbene():
+    v = verdict("vinylidene")
+    assert v.unpaired == 0 and "stang" in v.citations
+    assert v.rule_chain[0].startswith("unsaturated carbene")
 
 
 def test_gleiter_hoffmann_reaches_both_ends():
-    """Methylene at its triplet angle has a small sigma-p_pi gap; vinylidene and CO a large
-    one."""
+    """Methylene at its triplet angle has a small sigma-p_pi gap, CO a large one."""
     assert verdict("methylene_134").unpaired == 2
-    assert verdict("vinylidene").unpaired == 0
     assert verdict("co_drawn").unpaired == 0
+    assert any("Gleiter-Hoffmann" in r for r in verdict("co_drawn").rule_chain)
+
+
+@pytest.mark.parametrize(
+    ("smiles", "line"),
+    [
+        ("Cl[C]Cl", "two pi-donor"),
+        ("CN(C)[C]N(C)C", "two pi-donor"),  # a diaminocarbene
+        ("[C]=C(C)C", "unsaturated"),
+        ("[CH]Cl", None),  # one donor: Gleiter-Hoffmann decides
+        ("C[N+](C)(C)[C][N+](C)(C)C", None),  # oniums hold no lone pair
+        ("[C]=O", None),  # the neighbour is not a carbon
+        ("C[C]C", None),
+    ],
+)
+def test_the_structural_carbene_rules(smiles, line):
+    mol = prepare_mol(chem.unmapped_canonical(Chem.MolFromSmiles(smiles)))
+    centre = st.carbene_centres(mol)[0]
+    got = st.structural_carbene(mol.GetAtomWithIdx(centre))
+    assert (got is None) if line is None else got.startswith(line)
 
 
 def test_every_verdict_has_a_rule_chain_and_its_citations():

@@ -1,4 +1,4 @@
-"""spin_table_v1: the species multiplicity table of the open-shell plan (P2 step 4).
+"""spin_table_v2: the species multiplicity table of the open-shell plan (P2 step 4; v2 after P3).
 
 Every multiplicity is derived twice, independently, and combined by one rule (the user's choice,
 2026-10-30):
@@ -6,7 +6,16 @@ Every multiplicity is derived twice, independently, and combined by one rule (th
 - (A) spGFN2-xTB at every allowed multiplicity, each state optimized (scripts/probes/spin_scan.py).
   A is conclusive when its lowest state lies below every other by more than the method's
   published error bar (`ERROR_BARS`); a species with one allowed state is conclusive by count.
-- (B) the theory rules of `data.spin_theory` (spin_theory_v1): a predicted unpaired count or
+  Since v2, a state of a carbene (one centre holding the drawing's two radical electrons, the
+  species kind of AC12, the aryl-carbene set the bar was measured on) whose every start formed
+  a bond the drawing lacks takes its single-point energy at the production geometry: an upper
+  bound of the state's energy in the drawing's bonding. A bounded state can make A conclusive
+  as the lowest state (its true gap is at least the measured one), never as another state (its
+  true energy may be lower), so A is inconclusive when a state other than the lowest is
+  bounded. Other species keep such a state failed: for biradicals with distant centres
+  spGFN2's singlet reads 0.4-0.8 eV below the triplet even at the drawn geometry, outside the
+  bar's domain (docs/decisions.md, 2026-11-01).
+- (B) the theory rules of `data.spin_theory` (spin_theory_v2): a predicted unpaired count or
   undetermined (None).
 - (C) `combine`: A and B give the same lowest state -> assigned; B undetermined -> A decides
   when conclusive, else MULTIPLICITY_AMBIGUOUS; every disagreement -> MULTIPLICITY_AMBIGUOUS,
@@ -16,20 +25,27 @@ Every multiplicity is derived twice, independently, and combined by one rule (th
 The table maps a canonical map-free SMILES to its unpaired count (multiplicity u + 1) or
 MULTIPLICITY_AMBIGUOUS, with every state's energy, both verdicts and the case of C. It is
 tracked and versioned: `content_hash` covers every field but itself, and `theory_digest` must
-equal spin_theory_v1's digest. Any change is spin_table_v2 and a rebuild.
+equal the theory table's digest. Any change is a new version and a rebuild; v1 (P2) stays in
+`spin_tables/` as the record of what P3 read.
+
+v2 (2026-10-31, docs/decisions.md): A's bounded states (above) and spin_theory_v2's B (its
+geometry off symmetric saddles, the unsaturated-carbene and pi-donor rules).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
 TABLE_DIR = Path(__file__).parent / "spin_tables"
 SPECIES_V1 = TABLE_DIR / "species_v1.json"
 THEORY_V1 = TABLE_DIR / "theory_v1.json"
-VERSION = "spin_table_v1"
+SPECIES_V2 = TABLE_DIR / "species_v2.json"
+THEORY_V2 = TABLE_DIR / "theory_v2.json"
+VERSION = "spin_table_v2"
 SCHEMA = 1
 AMBIGUOUS = "MULTIPLICITY_AMBIGUOUS"
 
@@ -70,15 +86,19 @@ class ScanVerdict:
     conclusive: bool
 
 
-def scan_verdict(energies_ev: dict[int, float | None], bar_ev: float) -> ScanVerdict:
-    """A from the energy of every allowed state (None for a failed state)."""
+def scan_verdict(
+    energies_ev: dict[int, float | None], bar_ev: float, bounded: Collection[int] = ()
+) -> ScanVerdict:
+    """A from the energy of every allowed state (None for a failed state); `bounded` holds the
+    states whose energy is an upper bound (module docstring), which keep A from being
+    conclusive unless the lowest state is the only one among them."""
     if not energies_ev or any(e is None for e in energies_ev.values()):
         return ScanVerdict(None, None, False)
     order = sorted(energies_ev, key=energies_ev.get)
     if len(order) == 1:
         return ScanVerdict(order[0], None, True)
     gap = energies_ev[order[1]] - energies_ev[order[0]]
-    return ScanVerdict(order[0], gap, gap > bar_ev)
+    return ScanVerdict(order[0], gap, gap > bar_ev and not set(order[1:]) & set(bounded))
 
 
 def combine(a: ScanVerdict, b_unpaired: int | None) -> tuple[int | str, str]:
@@ -112,16 +132,16 @@ REQUIRED = ("version", "schema", "method", "theory_digest", "error_bars", "entri
 ENTRY_KEYS = ("unpaired", "case", "states", "a", "b")
 
 
-def validate(table: dict, theory: dict | None = None) -> None:
+def validate(table: dict, theory: dict | None = None, version: str = VERSION) -> None:
     """Raise SpinTableError unless the table has its fields, its content hash and, when the
-    theory table is given, spin_theory_v1's digest."""
+    theory table is given, that table's digest."""
     missing = [k for k in REQUIRED if k not in table]
-    if missing or table.get("version") != VERSION or table.get("schema") != SCHEMA:
-        raise SpinTableError(f"not a {VERSION} schema {SCHEMA} table (missing {missing})")
+    if missing or table.get("version") != version or table.get("schema") != SCHEMA:
+        raise SpinTableError(f"not a {version} schema {SCHEMA} table (missing {missing})")
     if with_hash(table)["content_hash"] != table.get("content_hash"):
         raise SpinTableError("content_hash does not match the table")
     if theory is not None and table["theory_digest"] != theory.get("digest"):
-        raise SpinTableError("theory_digest differs from spin_theory_v1's digest")
+        raise SpinTableError("theory_digest differs from the theory table's digest")
     for smiles, entry in table["entries"].items():
         bad = [k for k in ENTRY_KEYS if k not in entry]
         if bad or entry["case"] not in CASES:
@@ -130,8 +150,8 @@ def validate(table: dict, theory: dict | None = None) -> None:
             raise SpinTableError(f"{smiles}: case {entry['case']} with {entry['unpaired']!r}")
 
 
-def load(path: Path = SPECIES_V1, theory_path: Path = THEORY_V1) -> dict:
-    """The validated species table, checked against spin_theory_v1 (whose own digest is
+def load(path: Path = SPECIES_V2, theory_path: Path = THEORY_V2) -> dict:
+    """The validated species table, checked against its theory table (whose own digest is
     verified; the theory rules themselves are never run here)."""
     from ksmech.data.spin_theory import load_theory_table
 

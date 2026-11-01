@@ -1,4 +1,4 @@
-"""data.spin: RDKit's count for u <= 1, spin_table_v1 for u >= 2 (open-shell plan P3 step 1)."""
+"""data.spin: RDKit's count for u <= 1, the species table (v2) for u >= 2 (open-shell plan P3)."""
 
 import pytest
 from rdkit import Chem
@@ -32,21 +32,9 @@ def test_carbenes_vinylidenes_and_co_take_the_table_s_value(smiles):
     assert spin.species_u(mol(smiles)) == table_value(smiles)
 
 
-V1_DISAGREES = (  # spin_table_v1 assigns these no multiplicity (docs/decisions.md, P2)
-    "the scan's B reads the linear saddle the embedding draws (triplet) against A's bent singlet; "
-    "resolved by spin_table_v2 (P4's production geometry), not in code"
-)
-SINGLET_ORACLE = [  # the textbook singlet clauses: dihalocarbenes, vinylidenes, CO
-    pytest.param("Cl[C]Cl", marks=pytest.mark.xfail(strict=True, reason=V1_DISAGREES)),
-    pytest.param("Br[C]Br", marks=pytest.mark.xfail(strict=True, reason=V1_DISAGREES)),
-    "[C]=CC",
-    "[C]=C(C)C",
-    pytest.param(
-        "[C]=C(c1ccccc1)c1ccccc1",
-        marks=pytest.mark.xfail(strict=True, reason="spin_table_v1: A failed for a state"),
-    ),
-    "[C]=O",
-]
+# the textbook singlet clauses: dihalocarbenes, vinylidenes, CO. spin_table_v1 left Cl[C]Cl,
+# Br[C]Br and Ph2C=C: ambiguous; v2 decides them in the table (docs/decisions.md, 2026-11-01)
+SINGLET_ORACLE = ["Cl[C]Cl", "Br[C]Br", "[C]=CC", "[C]=C(C)C", "[C]=C(c1ccccc1)c1ccccc1", "[C]=O"]
 
 
 @pytest.mark.parametrize("smiles", SINGLET_ORACLE)
@@ -60,7 +48,11 @@ def test_an_untabulated_u2_species_is_counted_as_such():
 
 
 def test_an_ambiguous_entry_is_returned_as_such():
-    assert spin.species_u(mol("Cl[C]Cl")) == spin.AMBIGUOUS
+    ambiguous = [
+        s for s, e in spin.species_table()["entries"].items() if e["unpaired"] == spin.AMBIGUOUS
+    ]
+    smiles = next(s for s in ambiguous if spin.rdkit_unpaired(mol(s)) >= 2)
+    assert spin.species_u(mol(smiles)) == spin.AMBIGUOUS
 
 
 @pytest.mark.parametrize("name", sorted(MOLECULES))

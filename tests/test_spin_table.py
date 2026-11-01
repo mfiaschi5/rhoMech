@@ -1,5 +1,6 @@
-"""spin_table_v1 (open-shell plan P2 step 4): rule C as a pure function of A and B, the table's
-schema, content hash and theory digest, and the species the plan names."""
+"""The species table (open-shell plan P2 step 4; spin_table_v2 since 2026-10-31): rule C as a
+pure function of A and B, A's bounded states, the table's schema, content hash and theory
+digest, and the species the plan names."""
 
 import copy
 
@@ -40,6 +41,15 @@ def test_scan_verdict():
     assert st.scan_verdict({2: 0.0, 0: None}, bar).lowest is None
 
 
+def test_a_bounded_state_decides_only_as_the_lowest():
+    """A bounded energy is an upper bound: the lowest state may be bounded (its true gap is at
+    least the measured one), another state may not (its true energy may be lower)."""
+    bar = st.ERROR_BARS["organic"]["ev"]
+    assert st.scan_verdict({0: 0.0, 2: 1.27}, bar, bounded={0}) == st.ScanVerdict(0, 1.27, True)
+    assert st.scan_verdict({0: 0.0, 2: 1.27}, bar, bounded={2}).conclusive is False
+    assert st.scan_verdict({0: 0.0, 2: 1.27}, bar, bounded={0, 2}).conclusive is False
+
+
 def test_error_bars_are_the_published_values():
     assert st.ERROR_BARS["organic"]["ev"] == pytest.approx(0.304, abs=1e-3)
     assert st.ERROR_BARS["transition_metal"]["ev"] == pytest.approx(0.776, abs=1e-3)
@@ -73,7 +83,7 @@ def table() -> dict:
     return st.load()
 
 
-SINGLET_OR_AMBIGUOUS = (
+TEXTBOOK_SINGLETS = (  # the dihalocarbenes, the vinylidenes and CO (v1 left three ambiguous)
     "Cl[C]Cl",
     "Br[C]Br",
     "[C]=CC",
@@ -83,9 +93,18 @@ SINGLET_OR_AMBIGUOUS = (
 )
 
 
-@pytest.mark.parametrize("smiles", SINGLET_OR_AMBIGUOUS)
-def test_carbenes_and_co_are_singlets_or_ambiguous(table, smiles):
-    assert st.lookup(table, smiles) in (0, st.AMBIGUOUS)
+@pytest.mark.parametrize("smiles", TEXTBOOK_SINGLETS)
+def test_carbenes_vinylidenes_and_co_are_singlets(table, smiles):
+    assert st.lookup(table, smiles) == 0
+
+
+def test_the_table_is_v2_and_v1_stays_as_p3_read_it():
+    import json
+
+    assert st.load()["version"] == st.VERSION == "spin_table_v2"
+    v1 = json.loads(st.SPECIES_V1.read_text())
+    st.validate(v1, version="spin_table_v1")
+    assert st.lookup(v1, "Cl[C]Cl") == st.AMBIGUOUS
 
 
 def test_triplet_oxygen(table):

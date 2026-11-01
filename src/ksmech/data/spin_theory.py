@@ -1,10 +1,12 @@
 """The theory rules of open-shell plan P2 step 3 (B): a species' lowest spin state predicted
 from principles, independently of the spGFN2 scan (A), for the combination rule (C) that writes
-spin_table_v1. Read by that step and the tests, never by `data.spin`.
+the species table (spin_table_v2 from spin_theory_v2). Read by that step and the tests, never by
+`data.spin`.
 
 `theory_verdict(mol, rec)` reads the drawing (`mol`, H-explicit, `qm.embed.prepare_mol` atom
-order) and one restricted GFN2 record of it (`rec`: ALPB water, production geometry, the lowest
-spin the electron count allows, so a degenerate open shell holds its electrons as fractional
+order) and one restricted GFN2 record of it (`rec`: ALPB water, the production geometry off any
+symmetric saddle (the scan re-optimizes it from a displaced start, v2), the lowest spin the
+electron count allows, so a degenerate open shell holds its electrons as fractional
 occupations of degenerate MOs). It returns the predicted number of unpaired electrons (2S) or None
 ('undetermined'), the rule chain that gave it and the citations. No rule names a species: every
 rule reads an element, a count, a geometry or the MOs.
@@ -30,10 +32,18 @@ The rules, first applicable wins:
    electrons the group allows, and the ground term's spatial part is the exterior power of the
    irrep (O2's pi_g*^2 gives 3Sigma_g-). Finite groups are named by Mulliken letter with g/u
    and primes; the numeric subscripts are not assigned (the characters are recorded).
-4. A carbene centre (a neutral C with two bonds' worth of valence): Gleiter-Hoffmann on the
-   sigma-p_pi gap, read as the restricted GFN2 HOMO-LUMO gap (in place of their extended-Hueckel
-   separation) when both MOs sit mostly on the centre: a singlet above 2 eV, a triplet below
-   1.5 eV, undetermined between.
+4. A carbene centre (a neutral C with two bonds' worth of valence), first applicable wins
+   (v2 adds a and b):
+   a. an unsaturated carbene, the centre's one neighbour a carbon doubly bonded to it
+      (R2C=C:, a vinylidene): a singlet, the sigma pair in an sp orbital far below p_pi
+      (Stang);
+   b. two pi-donor neighbours (a halogen, or N, O, P, S with a lone pair): a singlet, their
+      lone pairs donate into the empty p_pi and raise it (Bourissou, the dihalocarbenes and
+      diaminocarbenes);
+   c. Gleiter-Hoffmann on the sigma-p_pi gap, read as the restricted GFN2 HOMO-LUMO gap (in
+      place of their extended-Hueckel separation) when both MOs sit mostly on the centre: a
+      singlet above 2 eV, a triplet below 1.5 eV, undetermined between. The GFN2 gap is a
+      proxy: at its own singlet geometry dibromocarbene reads 1.40 eV, which rule b decides.
 5. Otherwise undetermined.
 
 The AO operators: an operation maps atom i to perm[i] and rotates each shell by the real
@@ -60,8 +70,8 @@ from ksmech.orbitals.frontier import EXACT_EV
 from ksmech.qm import point_group as pg
 from ksmech.qm.records import QMRecord
 
-VERSION = "spin_theory_v1"
-THEORY_TABLE_PATH = Path(__file__).resolve().parent / "spin_tables" / "theory_v1.json"
+VERSION = "spin_theory_v2"
+THEORY_TABLE_PATH = Path(__file__).resolve().parent / "spin_tables" / "theory_v2.json"
 SYMMETRY_TOLERANCE_ANG = pg.DEFAULT_TOLERANCE  # the point group at 0.1 Angstrom
 DEGENERACY_EV = EXACT_EV  # equal MO energies (1e-4 eV), as the exact-degeneracy frontier columns
 # |T^T S T - S| above this: the structure is too far from its group (or an AO convention is
@@ -71,9 +81,11 @@ CHARACTER_TOL = 1e-2  # a character within this of its exact value (approximate 
 GH_SINGLET_EV = 2.0  # Gleiter-Hoffmann: a sigma-p_pi gap above this, a singlet
 GH_TRIPLET_EV = 1.5  # below this, a triplet
 LINEAR_PROBE_RAD = 1.0  # a C_phi rotation at an angle no finite axis has, for lambda
+PI_DONORS = frozenset([7, 8, 9, 15, 16, 17, 35, 53])  # N, O, F, P, S, Cl, Br, I (with a pair)
 
 CITATIONS = {
     "gleiter_hoffmann": "R. Gleiter and R. Hoffmann, J. Am. Chem. Soc. 90, 5457 (1968)",
+    "stang": "P. J. Stang, Chem. Rev. 78, 383 (1978) (unsaturated carbenes)",
     "bourissou": (
         "D. Bourissou, O. Guerret, F. P. Gabbai and G. Bertrand, Chem. Rev. 100, 39 (2000)"
     ),
@@ -459,6 +471,26 @@ def carbene_centres(mol: Chem.Mol) -> list[int]:
     ]
 
 
+def _lone_pairs(atom: Chem.Atom) -> int:
+    """Non-bonding electron pairs of an atom as drawn (valence - charge - bonds - H) // 2."""
+    outer = Chem.GetPeriodicTable().GetNOuterElecs(atom.GetAtomicNum())
+    bonds = sum(round(b.GetBondTypeAsDouble()) for b in atom.GetBonds())
+    return (outer - atom.GetFormalCharge() - bonds - atom.GetTotalNumHs()) // 2
+
+
+def structural_carbene(atom: Chem.Atom) -> str | None:
+    """Rules 4a and 4b on the centre's neighbours: the rule chain line of a singlet, or None."""
+    nbrs = atom.GetNeighbors()
+    if len(nbrs) == 1 and nbrs[0].GetAtomicNum() == 6:
+        bond = atom.GetOwningMol().GetBondBetweenAtoms(atom.GetIdx(), nbrs[0].GetIdx())
+        if bond.GetBondType() == Chem.BondType.DOUBLE:
+            return "unsaturated carbene (R2C=C:, a vinylidene): singlet"
+    donors = [n for n in nbrs if n.GetAtomicNum() in PI_DONORS and _lone_pairs(n) >= 1]
+    if len(nbrs) == 2 and len(donors) == 2:
+        return "two pi-donor neighbours with lone pairs: singlet"
+    return None
+
+
 def _carbene_rule(mol: Chem.Mol, rec: QMRecord, v: TheoryVerdict) -> bool:
     centres = carbene_centres(mol)
     if not centres:
@@ -472,6 +504,11 @@ def _carbene_rule(mol: Chem.Mol, rec: QMRecord, v: TheoryVerdict) -> bool:
     on_centre = all(int(np.argmax(mo_atom_populations(rec, k))) == c for k in (homo, homo + 1))
     gap = float(rec.orbital_energies_ev[homo + 1] - rec.orbital_energies_ev[homo])
     v.carbene = {"centre": c, "homo": homo, "gap_ev": round(gap, 4), "centre_share": share}
+    if (line := structural_carbene(mol.GetAtomWithIdx(c))) is not None:
+        v.unpaired = 0
+        v.citations += ["stang"] if line.startswith("unsaturated") else []
+        v.rule_chain.append(line)
+        return True
     if not on_centre:
         v.rule_chain.append("carbene: the HOMO and LUMO are not both mostly on the centre")
         return True
@@ -684,7 +721,8 @@ def theory_digest(table: dict) -> str:
 
 
 def theory_table(entries: dict[str, TheoryVerdict | dict]) -> dict:
-    """spin_theory_v1: the verdicts by canonical SMILES, the rule constants and citations."""
+    """The theory table (`VERSION`): the verdicts by canonical SMILES, the rule constants and
+    citations."""
     rows = {
         smi: e.as_dict() if isinstance(e, TheoryVerdict) else e
         for smi, e in sorted(entries.items())
@@ -694,6 +732,7 @@ def theory_table(entries: dict[str, TheoryVerdict | dict]) -> dict:
         "degeneracy_ev": DEGENERACY_EV,
         "operator_tol": OPERATOR_TOL,
         "gleiter_hoffmann_ev": [GH_TRIPLET_EV, GH_SINGLET_EV],
+        "pi_donors": sorted(PI_DONORS),
         "weak_donors": sorted(WEAK_DONORS),
         "strong_donors": sorted(STRONG_DONORS),
     }

@@ -4,11 +4,11 @@ routing).
 `species_u` is the number of unpaired electrons of one connected fragment:
 
 - RDKit's radical count when it is 0 or 1: a closed shell or a doublet has one multiplicity;
-- spin_table_v1 (`data.spin_table`, P2's QM-derived species table) when RDKit counts 2 or more
-  (carbenes, CO drawn [C]=O, O2, diradicals: the drawings whose pairing is ambiguous), keyed by
-  the map-free canonical SMILES. A species the table lacks is MULTIPLICITY_UNTABULATED and one
-  whose entry is ambiguous MULTIPLICITY_AMBIGUOUS; the remedy for either is a new table version,
-  never a rule here.
+- the species table (`data.spin_table`, spin_table_v2: P2's QM-derived table, v2 after P3) when
+  RDKit counts 2 or more (carbenes, CO drawn [C]=O, O2, diradicals: the drawings whose pairing
+  is ambiguous), keyed by the map-free canonical SMILES. A species the table lacks is
+  MULTIPLICITY_UNTABULATED and one whose entry is ambiguous MULTIPLICITY_AMBIGUOUS; the remedy
+  for either is a new table version, never a rule here.
 
 `spin_config` is what every artifact that reads this module stamps into its provenance config:
 the rule version and the table's version and content hash.
@@ -22,7 +22,7 @@ from rdkit import Chem
 
 from ksmech.data import chem, spin_table
 
-SPIN_RULE_VERSION = "spin-rule-v1"  # RDKit for u <= 1, spin_table_v1 for u >= 2
+SPIN_RULE_VERSION = "spin-rule-v1"  # RDKit for u <= 1, the species table for u >= 2
 UNTABULATED = "MULTIPLICITY_UNTABULATED"
 AMBIGUOUS = spin_table.AMBIGUOUS
 
@@ -34,7 +34,8 @@ def rdkit_unpaired(mol: Chem.Mol) -> int:
 
 @cache
 def species_table() -> dict:
-    """spin_table_v1, validated against spin_theory_v1 (loaded once per process)."""
+    """The species table (`spin_table.load`: v2), validated against its theory table (loaded
+    once per process)."""
     return spin_table.load()
 
 

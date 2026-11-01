@@ -478,7 +478,12 @@ def test_a_source_that_excludes_open_shells_keeps_radical_drawn():
         ("[CH3:1][Cl:2]", "[CH3:1].[Cl:2]", DomainCode.SPIN_NOT_CONSERVED),  # homolysis
         ("[CH2:1]=[O:2].[H-:3]", "[CH2:1]([H:3])[O:2]", DomainCode.SPIN_NOT_CONSERVED),
         ("[C]=O.C[O:1][H:2]", "[C]=O.C[O-:1].[H+:2]", DomainCode.SPIN_RULE_PENDING),
-        ("Cl[C]Cl.C[O:1][H:2]", "Cl[C]Cl.C[O-:1].[H+:2]", DomainCode.MULTIPLICITY_AMBIGUOUS),
+        ("Cl[C]Cl.C[O:1][H:2]", "Cl[C]Cl.C[O-:1].[H+:2]", DomainCode.SPIN_RULE_PENDING),  # v2: 0
+        (
+            "[O][N+]([O])=O.C[O:1][H:2]",
+            "[O][N+]([O])=O.C[O-:1].[H+:2]",
+            DomainCode.MULTIPLICITY_AMBIGUOUS,
+        ),  # fmt: skip
         ("[CH2]CCC[CH2].[OH-]", "[CH2]CCC[CH2].[OH-]", DomainCode.MULTIPLICITY_UNTABULATED),
         ("[O][O-].[H+]", "[O]O", None),
         ("[O][O].C", "[O][O].C", None),  # a triplet spectator: the table's 2 is RDKit's 2
@@ -544,7 +549,7 @@ def test_the_ingest_report_counts_admitted_open_shells():
         "admitted_with_u_ge_2": [],
         "curated_out": {},
     }
-    assert report["spin"]["spin_table"] == "spin_table_v1"
+    assert report["spin"]["spin_table"] == "spin_table_v2"
 
 
 # ---- domain_class, the admit set, the counts
@@ -629,12 +634,12 @@ def _rescreened(step: ElementaryStep) -> ElementaryStep:
 # open-shell plans P0a step 6, P1 and P3: (codes, repairs per rule, domain classes) over every
 # stored step. P1's rules equal the P0 survey: C3_METHYL 9, BARE_ALKALI 4, BETA_LACTAM_N 1 and,
 # in the ReactMech pilot, CDI_IMIDAZOLYL 62. P3's laws split PMechDB's 30 RADICAL_DRAWN steps:
-# 11 admitted, 8 + 4 + 2 by a law, 5 curated (they keep RADICAL_DRAWN).
+# 11 admitted, 12 + 2 by a law, 5 curated (they keep RADICAL_DRAWN). On spin_table_v1 the 8
+# dihalocarbene and diphenylvinylidene steps were MULTIPLICITY_AMBIGUOUS; v2 assigns them 0.
 P3_COUNTS = {
     "pmechdb": (
         {None: 12936, "OPEN_SHELL_METAL": 78, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 5,
-         "CHARGE_UNREPAIRED": 1, "MULTIPLICITY_AMBIGUOUS": 8, "SPIN_RULE_PENDING": 4,
-         "SPIN_NOT_CONSERVED": 2},
+         "CHARGE_UNREPAIRED": 1, "SPIN_RULE_PENDING": 12, "SPIN_NOT_CONSERVED": 2},
         {"R1 group-14 -1 removed": 1, V1_METHYL: 9, A1_RULE: 4, BL_RULE: 1},
         {"REPAIRED_V1": 9, "REPAIRED_A1": 4, "REPAIRED_BL": 1, "RADICAL_SPECTATOR": 11,
          "RADICAL_AMBIGUOUS": 3, "DRAWING_ERROR_UNREPAIRED": 2},

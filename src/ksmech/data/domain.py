@@ -50,7 +50,7 @@ that hold for every element and every parity, in this order:
    read literally they are open shells (user decision of 2026-10-24); the step is excluded.
    A source whose `DomainPolicy` admits open shells by rule (PMechDB, open-shell plan P3)
    re-reads such a step with three counted laws (`validation.admit_open_shell`):
-   - (u) every species' unpaired count under `data.spin` (RDKit for u <= 1, spin_table_v1 for
+   - (u) every species' unpaired count under `data.spin` (RDKit for u <= 1, the species table for
      u >= 2) is defined (else MULTIPLICITY_UNTABULATED / MULTIPLICITY_AMBIGUOUS), the total is
      conserved across the step (else SPIN_NOT_CONSERVED), and every species' count equals
      RDKit's (else SPIN_RULE_PENDING: the table re-assigns a species whose tagged record P4
