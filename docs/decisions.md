@@ -7719,3 +7719,6 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   out of closed_base), `test_data_survey` (metal subclasses summed over every code, SPIN_PARITY
   under each species' method), `test_open_shell_tokens` (the 3 smeared Cu species, open shells
   counted under each species' method), new `test_p4_spin_records`.
+- **Tests** (from c6176f7, clean tree, beside the 12-worker ReactMech QM batch):
+  `pytest -n 3 -m "not realdata"` 2066 passed, 12 skipped, 2 xfailed, 5 warnings;
+  `KSMECH_TEST_WORKERS=1 pytest -m realdata` 57 passed.
