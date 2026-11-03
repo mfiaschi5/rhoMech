@@ -1,0 +1,52 @@
+{
+ "citations": {
+  "greenwood": "N. N. Greenwood and A. Earnshaw, Chemistry of the Elements, 2nd ed. (Butterworth-Heinemann, 1997), ch. 28, Copper, Silver and Gold",
+  "ligand_field": "G. L. Miessler, P. J. Fischer and D. A. Tarr, Inorganic Chemistry, 5th ed. (Pearson, 2014), ch. 10, Coordination Chemistry II: Bonding",
+  "tsuchida": "R. Tsuchida, Bull. Chem. Soc. Jpn. 13, 388 (1938) (the spectrochemical series)"
+ },
+ "content_hash": "5b1fbccfeb18edde9b17cdfe63441d45071dff089ce0000ed24a777d48a8e29d",
+ "notes": "Odd-electron metal fragments (open-shell plan P4 step 1). A row is element and oxidation state (domain.oxidation_state: formal charge + H on M + bond orders to non-metals) with an optional donor condition, matched in order; it holds for a species only where spin_table's rule C has A and B agree on the row's count. donors_any: the row applies only when a donor (a neighbour, or H on the metal) is one of these; donors_none: it does not apply when one is.",
+ "rows": [
+  {
+   "basis": "Cu(II) oxidizes iodide and hydride: Cu2+ with I- gives CuI and I2 (CuI2 is not a stable compound), and a Cu(II) hydride reduces itself; the drawing has no species to compute",
+   "citations": [
+    "greenwood"
+   ],
+   "donors_any": [
+    "H",
+    "I"
+   ],
+   "element": "Cu",
+   "id": "CU2_REDOX",
+   "oxidation_state": 2,
+   "redox_incompatible": true
+  },
+  {
+   "basis": "Cu(II) is d9: one d hole, S = 1/2 in any geometry, by count",
+   "citations": [
+    "ligand_field"
+   ],
+   "element": "Cu",
+   "id": "CU2",
+   "oxidation_state": 2,
+   "unpaired": 1
+  },
+  {
+   "basis": "Fe(III) is d5; without a donor from the strong-field end of the spectrochemical series (C and P donors: CN-, CO, phosphines) it is high spin, S = 5/2 (FeX4-, FeX3, FeCl3.L); with one, low spin is possible and there is no row",
+   "citations": [
+    "ligand_field",
+    "tsuchida"
+   ],
+   "donors_none": [
+    "C",
+    "P"
+   ],
+   "element": "Fe",
+   "id": "FE3_HS",
+   "oxidation_state": 3,
+   "unpaired": 5
+  }
+ ],
+ "schema": 1,
+ "version": "metal_v1"
+}

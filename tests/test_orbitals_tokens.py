@@ -431,7 +431,7 @@ def old_methyl_file(tmp_path, monkeypatch):
 
     rec = open_shell_record("methyl")
     with monkeypatch.context() as m:
-        m.setattr(T, "with_open_shell_rule", lambda config, smiles: dict(config))
+        m.setattr(T, "with_open_shell_rule", lambda config, smiles, method=None: dict(config))
         path = T.save_tokens(T.build_molecule_tokens(rec), tmp_path / "old.npz")
     return rec, path
 

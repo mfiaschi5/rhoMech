@@ -197,9 +197,9 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 | `mechanism_class` | string, nullable | null for PMechDB (not in the release) |
 | `conditions` | string, nullable | null for PMechDB (not in the release) |
 | `resonance_step` | bool | reactants and products are resonance structures; dropped from the training target |
-| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). On a source that admits open shells by rule (PMechDB, open-shell plan P3) a RADICAL_DRAWN step is re-read by the open-shell laws, and a failed law puts its own code in place: `MULTIPLICITY_UNTABULATED`, `MULTIPLICITY_AMBIGUOUS` (a u >= 2 species the species table, `data.spin_table` v2, lacks or does not assign), `SPIN_NOT_CONSERVED`, `SPIN_RULE_PENDING` (the table re-assigns a species; P4's tagged records) or `NOT_ELEMENTARY` (an odd atom entry of the arrows' R); a curated step keeps `RADICAL_DRAWN`. Null otherwise |
+| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). On a source that admits open shells by rule (PMechDB, open-shell plan P3) a RADICAL_DRAWN step is re-read by the open-shell laws, and a failed law puts its own code in place: `MULTIPLICITY_UNTABULATED`, `MULTIPLICITY_AMBIGUOUS` (a u >= 2 species the species table, `data.spin_table` v2, lacks or does not assign), `SPIN_NOT_CONSERVED` or `NOT_ELEMENTARY` (an odd atom entry of the arrows' R); a curated step keeps `RADICAL_DRAWN`. `SPIN_RULE_PENDING` (the table re-assigned a species) is P3's code, which old artifacts carry; since P4 such a count stands. Since P4 the same laws re-read an `OPEN_SHELL_METAL` step of a source that admits open-shell metals by rule (PMechDB): a metal fragment the metal table (`spin_tables/metal_v1.json`) assigns no count is `MULTIPLICITY_AMBIGUOUS` (or `MULTIPLICITY_UNTABULATED` when the species table lacks it), and a fragment code the laws do not re-read (`CHARGE_UNREPAIRED`, `METAL_PLACEHOLDER`) keeps the step out under that code. Null otherwise |
 | `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an ingest repair of `ksmech.data.domain` changed the drawing (`CHARGE_REPAIRED`; the step stays): a formal charge (R1, the dative law `D dative onium->M`, A1 `A1 bare alkali +1`) or missing H (V1 `V1 methyl [C] +3H` and `V1 imidazol-2-yl C +H`, the named repairs of `src/ksmech/data/repairs_v1.json`, rule `BL_NAMED`); one row per side, fragment and rule; the SMILES columns hold the repaired sides |
-| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none); an admitted open shell `RADICAL_SPECTATOR` or `RADICAL_REACTIVE` (an R entry on an atom drawn with radical electrons); a curated open-shell exclusion `RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED` (with `RADICAL_DRAWN`). A training candidate is kept only when its source's admit set (`domain.ADMIT`: the five P0a/P1 classes for every source, plus the two admitted open-shell classes where the source admits open shells by rule) holds all of its classes. Null otherwise |
+| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none); an admitted open shell `RADICAL_SPECTATOR` or `RADICAL_REACTIVE` (an R entry on an atom drawn with radical electrons); a curated open-shell exclusion `RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED` (with `RADICAL_DRAWN`); since P4 `CARBENE_SINGLET` (the species table pairs a species drawn with radical electrons: a carbene, CO drawn `[C]=O`) and `OSM_CU2` / `OSM_FE3` (an admitted Cu(II) or high-spin Fe(III) fragment, the open_shell_metal cohort). A training candidate is kept only when its source's admit set (`domain.ADMIT`: the five P0a/P1 classes for every source, plus `RADICAL_SPECTATOR`, `RADICAL_REACTIVE` and `CARBENE_SINGLET` where the source admits open shells by rule and `OSM_CU2`, `OSM_FE3` where it admits open-shell metals by rule) holds all of its classes. Null otherwise |
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`. Charge repairs are also listed one per row in
@@ -210,8 +210,19 @@ Rejected records go to `data/processed/<source>/rejections.csv`, with columns `s
 `RESONANCE_STEP`), `charge_repairs_by_rule` and `domain_class`, and `n_training_steps`
 excludes the resonance steps, the excluded ones and those the admit set leaves out.
 `ingest_report.json` also holds `open_shell` (admitted steps by class, the admitted ones that
-hold a species with u >= 2, the curated exclusions by reason) and `spin` (`data.spin`'s rule
-version, the species table and its content hash).
+hold a species drawn with u >= 2, the curated exclusions by reason) and `spin` (`data.spin`'s
+rule version, the species table and the metal table with their content hashes).
+
+Two tracked spin tables (`src/ksmech/data/spin_tables/`), read by `data.spin.assign`:
+
+- `species_v2.json` (with `theory_v2.json`; v1 kept as P3's record): map-free canonical SMILES ->
+  unpaired count or `MULTIPLICITY_AMBIGUOUS`, each with its spGFN2 states, both verdicts (A, B)
+  and the case of rule C (`data.spin_table`).
+- `metal_v1.json` (open-shell plan P4): `rows` of `id`, `element`, `oxidation_state`,
+  `unpaired` (or `redox_incompatible`), optional `donors_any` / `donors_none` (donor element
+  symbols, `H` for a hydride), `basis` and `citations`; `citations`, `notes`, `version`,
+  `schema`, `content_hash` (over every other field). A row holds for a species only where the
+  species table's rule C has A and B agree on the row's count.
 
 Two tracked curation files (open-shell plan P3), step ids and reasons, no SMILES:
 
@@ -373,18 +384,27 @@ is a plain `.npz` (no pickle). `ksmech.qm.records.load_record` returns a `QMReco
 
 The key is `sha256(f"{smiles}|{conformer_id}|{method}")`, where `smiles` is the map-free canonical
 SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
-`GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key).
+`GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key). A
+species whose spin `data.spin` reassigns (a singlet carbene or CO drawn with two radical
+electrons, an odd Cu(II) or Fe(III) fragment RDKit counts 0; open-shell plan P4) has the tag
+`+spin-v1-u<u>` right after the optimizer part, before any later suffix:
+`GFN2-xTB/ALPB-water/tblite-lbfgs+spin-v1-u1`, serve's metal path
+`...tblite-lbfgs+spin-v1-u1+metal-geom-v1` (`qm.spin.method_for`). Every other key is unchanged.
+A tagged species is optimized from the embedding and from it kicked (0.02 Angstrom, seed 0), an
+optimum with a bond the drawing lacks is dropped (`BOND_FORMED` when every start is), and the
+lower energy is kept. The untagged records of those species (the old triplet `Cl[C]Cl`) stay in
+the cache, unused by the engine.
 
 | Field | dtype, shape | Notes |
 |---|---|---|
 | `smiles`, `atom_order_smiles` | str, () | the second one defines the atom order: `Chem.AddHs(Chem.MolFromSmiles(atom_order_smiles))` |
-| `conformer_id`, `charge`, `unpaired` | int, () | charge = sum of formal charges, unpaired = sum of radical electrons |
+| `conformer_id`, `charge`, `unpaired` | int, () | charge = sum of formal charges, unpaired = sum of radical electrons, or the count of the method's spin tag |
 | `method`, `schema_version` | str / int, () | |
 | `atomic_numbers` | int32, (n,) | |
 | `coords_ang` | float64, (n, 3) | optimized geometry, Angstrom |
 | `energy_ha` | float64, () | total energy, Hartree (includes the ALPB term) |
 | `orbital_energies_ev` | float64, (nmo,) | eV |
-| `occupations` | float64, (nmo,) | restricted; radicals have a fractional SOMO (1.0) |
+| `occupations` | float64, (nmo,) | restricted (one set of spatial orbitals, no spin polarization); a SOMO has occupation 1.0, a high-spin Fe(III) five of them |
 | `C` | float64, (nao, nmo) | AO x MO, S-orthonormal: `C.T @ S @ C = 1` |
 | `S`, `H_core`, `fock` | float64, (nao, nao) | Hartree for the last two. `H_core` is tblite's core Hamiltonian; `fock = S C diag(eps) C.T S` is rebuilt from the converged MOs |
 | `charges` | float64, (n,) | Mulliken, positive = electron-poor |
@@ -400,6 +420,9 @@ SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
 One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cache_path`,
 `status` (`ok` / `failed`), `reason` (a `ReasonCode`, empty when ok), `detail`, `warnings`,
 `seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`.
+`method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
+row whose method is its own species' method under the run's configuration
+(`qm.batch.row_method`).
 
 ## Serve workbench: `data/serve/workbench/`
 

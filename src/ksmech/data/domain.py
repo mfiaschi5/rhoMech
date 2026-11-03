@@ -42,27 +42,38 @@ that hold for every element and every parity, in this order:
    and MX+ drawn with the charge on the metal ([Cl][Zn+]) are defined species. The step is
    excluded.
 3. **OPEN_SHELL_METAL**: an odd fragment left after the repairs with a metal outside the d0 / d10
-   set (Cu(II), Fe(III) adducts), outside the closed-shell domain until the radical extension;
-   **CHARGE_UNREPAIRED**: one whose only metals are d0 / d10 (a charge error, not an open shell).
-   An odd fragment without any metal gets no code here; the QM layer reports it (SPIN_PARITY).
+   set (Cu(II), Fe(III) adducts); **CHARGE_UNREPAIRED**: one whose only metals are d0 / d10 (a
+   charge error, not an open shell). An odd fragment without any metal gets no code here; the
+   QM layer reports it (SPIN_PARITY). A source whose `DomainPolicy` admits open-shell metals
+   by rule (PMechDB, open-shell plan P4) re-reads an OPEN_SHELL_METAL step with the laws of 4:
+   `data.spin` gives each odd metal fragment its count from the metal table (Cu(II) 1,
+   Fe(III) high spin 5, each confirmed by the species table), or MULTIPLICITY_AMBIGUOUS /
+   MULTIPLICITY_UNTABULATED, which then replace OPEN_SHELL_METAL as the exclusion; a step that
+   passes is admitted as OSM_CU2 or OSM_FE3 (the open_shell_metal cohort). Its metal's d
+   open-shell tokens stay masked: the metal is a Lewis acid or a spectator of a polar step.
 4. **RADICAL_DRAWN**: an even fragment with an atom RDKit marks with unpaired electrons. In a
    polar dataset these are drawing errors (a methyl written `[C:20]`, K without its charge);
    read literally they are open shells (user decision of 2026-10-24); the step is excluded.
    A source whose `DomainPolicy` admits open shells by rule (PMechDB, open-shell plan P3)
    re-reads such a step with three counted laws (`validation.admit_open_shell`):
-   - (u) every species' unpaired count under `data.spin` (RDKit for u <= 1, the species table for
-     u >= 2) is defined (else MULTIPLICITY_UNTABULATED / MULTIPLICITY_AMBIGUOUS), the total is
-     conserved across the step (else SPIN_NOT_CONSERVED), and every species' count equals
-     RDKit's (else SPIN_RULE_PENDING: the table re-assigns a species whose tagged record P4
-     computes);
+   - (u) every species' unpaired count under `data.spin.assign` (RDKit for u <= 1, the species
+     table for u >= 2, the metal table for an odd metal fragment) is defined (else
+     MULTIPLICITY_UNTABULATED / MULTIPLICITY_AMBIGUOUS) and the total is conserved across the
+     step (else SPIN_NOT_CONSERVED). A count other than RDKit's stands since P4, whose QM
+     records are computed at it under a tagged method (`qm.spin`); P3 held such steps as
+     SPIN_RULE_PENDING, a code old artifacts still carry;
    - (R) every atom entry of R read from the dataset arrows is even (else NOT_ELEMENTARY): a
      polar step neither creates, destroys nor moves an unpaired electron;
    - (S) every open-shell reactant has an integral SOMO, checked by the sample builder on the
      tokens (SOMO_NOT_INTEGRAL).
-   A step that passes is admitted as RADICAL_SPECTATOR, or RADICAL_REACTIVE when an R entry
-   touches an atom drawn with radical electrons, unless the source's curation file
-   (`curation/<source>_open_shell.json`) excludes it: it then keeps RADICAL_DRAWN with the
-   curated reason as its class (RADICAL_AMBIGUOUS, DRAWING_ERROR_UNREPAIRED).
+   A step that passes is admitted with the classes of its species (`open_shell_classes`):
+   RADICAL_SPECTATOR, or RADICAL_REACTIVE when an R entry touches a radical atom (one drawn
+   with radical electrons in a species that stays an open shell under `data.spin`);
+   CARBENE_SINGLET when the species table pairs a species drawn with radical electrons
+   (Cl[C]Cl, the vinylidenes, CO drawn [C]=O read 0); OSM_CU2 / OSM_FE3 for a metal fragment.
+   The source's curation file (`curation/<source>_open_shell.json`) can still exclude it: it
+   then keeps RADICAL_DRAWN with the curated reason as its class (RADICAL_AMBIGUOUS,
+   DRAWING_ERROR_UNREPAIRED).
 5. **METAL_SUSPECT**, a flag, never an exclusion: a kept step with an even fragment holding a
    first-row transition metal (Sc to Cu) whose oxidation-state bookkeeping (`oxidation_state`)
    leaves an open d shell (d1-d9). 3d ligand-field splittings are comparable to the pairing
@@ -99,7 +110,7 @@ class DomainCode(StrEnum):
     MULTIPLICITY_UNTABULATED = "MULTIPLICITY_UNTABULATED"  # a u >= 2 species the table lacks
     MULTIPLICITY_AMBIGUOUS = "MULTIPLICITY_AMBIGUOUS"  # the table assigns it no multiplicity
     SPIN_NOT_CONSERVED = "SPIN_NOT_CONSERVED"  # the total unpaired count changes
-    SPIN_RULE_PENDING = "SPIN_RULE_PENDING"  # the table re-assigns a species (P4's records)
+    SPIN_RULE_PENDING = "SPIN_RULE_PENDING"  # P3: the table re-assigned a species (old artifacts)
     NOT_ELEMENTARY = "NOT_ELEMENTARY"  # an odd atom entry of R, or no R from the arrows
 
 
@@ -116,6 +127,9 @@ class DomainClass(StrEnum):
     RADICAL_REACTIVE = "RADICAL_REACTIVE"  # admitted open shell, an R entry on a radical atom
     RADICAL_AMBIGUOUS = "RADICAL_AMBIGUOUS"  # curated out: the drawing has two readings
     DRAWING_ERROR_UNREPAIRED = "DRAWING_ERROR_UNREPAIRED"  # curated out: no repair law fits
+    CARBENE_SINGLET = "CARBENE_SINGLET"  # the species table pairs a drawn carbene or CO (P4)
+    OSM_CU2 = "OSM_CU2"  # an admitted Cu(II) fragment, u = 1 (the open_shell_metal cohort, P4)
+    OSM_FE3 = "OSM_FE3"  # an admitted high-spin Fe(III) fragment, u = 5 (idem)
 
 
 PRECEDENCE = (
@@ -167,14 +181,18 @@ class OpenShellPolicy(StrEnum):
 
 @dataclass(frozen=True)
 class DomainPolicy:
-    """What a source's ingest does with a domain phenomenon. Only PMechDB admits open shells by
-    rule; every other polar source keeps EXCLUDE until it has its own curation review (P8)."""
+    """What a source's ingest does with a domain phenomenon: drawn radicals (P3) and open-shell
+    metals (P4). Only PMechDB admits either by rule; every other polar source keeps EXCLUDE
+    until its next re-ingest under `data.spin` (P8)."""
 
     open_shell: OpenShellPolicy = OpenShellPolicy.EXCLUDE
+    open_shell_metal: OpenShellPolicy = OpenShellPolicy.EXCLUDE
 
 
 POLICY: dict[str, DomainPolicy] = {str(s): DomainPolicy() for s in Source}
-POLICY[str(Source.PMECHDB)] = DomainPolicy(OpenShellPolicy.ADMIT_BY_RULE)
+POLICY[str(Source.PMECHDB)] = DomainPolicy(
+    OpenShellPolicy.ADMIT_BY_RULE, OpenShellPolicy.ADMIT_BY_RULE
+)
 CURATION_DIR = Path(__file__).with_name("curation")
 OPEN_SHELL_CODES = frozenset(  # what the open-shell laws put in place of RADICAL_DRAWN
     [
@@ -185,10 +203,15 @@ OPEN_SHELL_CODES = frozenset(  # what the open-shell laws put in place of RADICA
         DomainCode.NOT_ELEMENTARY,
     ]
 )
-ADMITTED_OPEN_SHELL = frozenset([DomainClass.RADICAL_SPECTATOR, DomainClass.RADICAL_REACTIVE])
+ADMITTED_OPEN_SHELL = frozenset(
+    [DomainClass.RADICAL_SPECTATOR, DomainClass.RADICAL_REACTIVE, DomainClass.CARBENE_SINGLET]
+)
+ADMITTED_METAL = frozenset([DomainClass.OSM_CU2, DomainClass.OSM_FE3])
 for _source, _policy in POLICY.items():  # a source that admits open shells admits their classes
     if _policy.open_shell is OpenShellPolicy.ADMIT_BY_RULE:
         ADMIT[_source] = ADMIT[_source] | frozenset(map(str, ADMITTED_OPEN_SHELL))
+    if _policy.open_shell_metal is OpenShellPolicy.ADMIT_BY_RULE:
+        ADMIT[_source] = ADMIT[_source] | frozenset(map(str, ADMITTED_METAL))
 CURATED_CLASSES = frozenset([DomainClass.RADICAL_AMBIGUOUS, DomainClass.DRAWING_ERROR_UNREPAIRED])
 
 _S_BLOCK = frozenset([3, 4, 11, 12, 19, 20, 37, 38, 55, 56, 87, 88])
@@ -653,17 +676,15 @@ def side_spins(mol: Chem.Mol) -> tuple[list[int | str], list[int]]:
 
 
 def spin_law(reactants: Chem.Mol, products: Chem.Mol) -> DomainCode | None:
-    """Law (u) of the open-shell admission, None when it holds: every species has a count, the
-    total is conserved across the step, and every count is RDKit's."""
-    (r, r_drawn), (p, p_drawn) = side_spins(reactants), side_spins(products)
+    """Law (u) of the open-shell admission, None when it holds: every species has a count and
+    the total is conserved across the step."""
+    (r, _), (p, _) = side_spins(reactants), side_spins(products)
     every = r + p
     for code in (DomainCode.MULTIPLICITY_UNTABULATED, DomainCode.MULTIPLICITY_AMBIGUOUS):
         if str(code) in every:
             return code
     if sum(r) != sum(p):
         return DomainCode.SPIN_NOT_CONSERVED
-    if every != r_drawn + p_drawn:
-        return DomainCode.SPIN_RULE_PENDING
     return None
 
 
@@ -672,26 +693,50 @@ def parity_law(lone: Iterable[tuple[int, int]]) -> bool:
     return all(d % 2 == 0 for _, d in lone)
 
 
-def radical_atoms(reactants: Chem.Mol, products: Chem.Mol) -> set[int]:
-    """Reactant atom indices drawn with radical electrons on either side (a product atom by its
-    map number)."""
-    out = {a.GetIdx() for a in reactants.GetAtoms() if a.GetNumRadicalElectrons()}
-    index = chem.map_to_index(reactants)
-    maps = {a.GetAtomMapNum() for a in products.GetAtoms() if a.GetNumRadicalElectrons()}
-    return out | {index[m] for m in maps if m in index}
+def _metal_class(row_id: str) -> str:
+    """The domain class of an admitted metal row (`spin_tables/metal_v1.json`): OSM_<EL><OS>."""
+    row = next(r for r in spin.metal_table()["rows"] if r["id"] == row_id)
+    return str(DomainClass(f"OSM_{row['element'].upper()}{row['oxidation_state']}"))
 
 
-def radical_class(
+def _side_spin(mol: Chem.Mol) -> tuple[set[int], set[str]]:
+    """(atom indices of `mol` that are radical atoms, the P4 classes) of one side: a radical atom
+    is drawn with radical electrons in a species `data.spin` leaves an open shell; a species
+    the species table pairs gives CARBENE_SINGLET, a metal row its OSM class."""
+    atoms, classes = set(), set()
+    for idx, frag in _fragments(mol):
+        a, drawn = spin.assign(frag), spin.rdkit_unpaired(frag)
+        if a.source == spin.METAL and a.assigned:
+            classes.add(_metal_class(a.row))
+        elif a.assigned and a.unpaired == 0 and drawn:
+            classes.add(str(DomainClass.CARBENE_SINGLET))
+        elif a.assigned and a.unpaired:
+            radical = [i for i, f in enumerate(frag.GetAtoms()) if f.GetNumRadicalElectrons()]
+            atoms |= {idx[i] for i in radical}
+    return atoms, classes
+
+
+def open_shell_classes(
     reactants: Chem.Mol,
     products: Chem.Mol,
     bonds: Iterable[tuple[int, int, int]],
     lone: Iterable[tuple[int, int]],
-) -> str:
-    """RADICAL_REACTIVE when an entry of R (reactant indices) touches a radical atom, else
-    RADICAL_SPECTATOR."""
-    atoms = radical_atoms(reactants, products)
-    touched = {i for i, j, _ in bonds} | {j for i, j, _ in bonds} | {i for i, _ in lone}
-    return str(DomainClass.RADICAL_REACTIVE if touched & atoms else DomainClass.RADICAL_SPECTATOR)
+) -> set[str]:
+    """The classes of a step that passed laws (u) and (R) (module docstring, 4): the P4 classes
+    of its species, and RADICAL_REACTIVE when an entry of R (reactant indices) touches a radical
+    atom, RADICAL_SPECTATOR when it has radical atoms R does not touch."""
+    r_atoms, r_classes = _side_spin(reactants)
+    p_atoms, p_classes = _side_spin(products)
+    index = chem.map_to_index(reactants)
+    maps = {products.GetAtomWithIdx(i).GetAtomMapNum() for i in p_atoms}
+    atoms = r_atoms | {index[m] for m in maps if m in index}
+    classes = r_classes | p_classes
+    if atoms:
+        touched = {i for i, j, _ in bonds} | {j for i, j, _ in bonds} | {i for i, _ in lone}
+        classes.add(
+            str(DomainClass.RADICAL_REACTIVE if touched & atoms else DomainClass.RADICAL_SPECTATOR)
+        )
+    return classes
 
 
 def max_species_unpaired(step: ElementaryStep) -> int:

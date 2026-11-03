@@ -91,8 +91,8 @@ from ksmech.orbitals.tokens import (
     STORED_ORBITAL_FEATURES,
     MoleculeTokens,
     atom_feature_names,
-    drawn_unpaired,
     feature_names,
+    record_unpaired,
 )
 from ksmech.physics.pairs import (
     PAIR_CELLS,
@@ -457,9 +457,14 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
 
 def smeared_open_shells(rt: ReactantTokens) -> list[str]:
     """Law (S) of the open-shell admission (`data.domain`, open-shell plan P3): the open-shell
-    reactant fragments (drawn u > 0) whose tokens are Fermi-smeared, i.e. whose record has an
+    reactant fragments (u > 0 as their record was run, `record_unpaired`: a Cu(II) or Fe(III)
+    fragment RDKit counts 0 included) whose tokens are Fermi-smeared, i.e. whose record has an
     MO further than SMEAR_TOL from P2b's plateau reference; their SOMO is not integral."""
-    return [f.key for f in rt.fragments if f.tokens.fermi_smeared and drawn_unpaired(f.key)]
+    return [
+        f.key
+        for f in rt.fragments
+        if f.tokens.fermi_smeared and record_unpaired(f.key, f.tokens.method)
+    ]
 
 
 def stretched_bonds(

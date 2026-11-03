@@ -5,15 +5,21 @@ GFN2-xTB optimization, e.g. QMugs): no optimization, only a check that every bon
 structure is still a bond there, then the same single point, N+-1 Fukui and sterics. Its method
 string ends in `given`, so those records never share a cache key with optimized ones.
 
-Charge and multiplicity come from RDKit: total charge = sum of formal charges, unpaired electrons
-= sum of radical electrons. tblite runs open-shell systems restricted with fractional occupations
-(no spin polarization), so the SOMO of a doublet has occupation 1.
+Charge and multiplicity come from `qm.spin.spin_for_qm`: total charge = sum of formal charges,
+unpaired electrons = RDKit's radical electrons, except for a species whose spin `data.spin`
+reassigns (a singlet carbene, a Cu(II) or Fe(III) fragment): its record is computed at the
+assigned count under the tagged method (`QMConfig.spin_tag`, '+spin-v1-u<u>'). A tagged species
+is optimized from the embedded start and from it displaced by a fixed kick (`geometry.kick`: a
+symmetric start, the linear Cl[C]Cl, can be a saddle), an optimum that formed a bond the drawing
+lacks is a state of another molecule (`geometry.formed_bonds`, BOND_FORMED), and the lower
+energy of the rest is kept. tblite runs open-shell systems restricted with fractional
+occupations (no spin polarization), so the SOMO of a doublet has occupation 1.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -22,12 +28,15 @@ from tblite.interface import TBLiteRuntimeError, TBLiteValueError
 
 from ksmech.data import chem
 from ksmech.qm import fukui
+from ksmech.qm import spin as qm_spin
 from ksmech.qm.ao import ao_layout
 from ksmech.qm.embed import NOTES_PROP, prepare_mol
 from ksmech.qm.geometry import (
     BOHR_ANG,
     bond_walls,
     check_connectivity,
+    formed_bonds,
+    kick,
     new_calculator,
     optimize_tblite,
     optimize_xtb,
@@ -53,6 +62,7 @@ class QMConfig:
     wall_k: float = 1.0  # Hartree / Bohr^2
     cache_dir: Path = DEFAULT_CACHE_DIR
     given_geometry: bool = False  # single points at the conformer's own geometry, no optimizer
+    spin_tag: str | None = None  # set per species by `qm.spin.config_for`, never by hand
 
     def __post_init__(self) -> None:
         if self.optimizer not in _OPTIMIZERS:
@@ -63,7 +73,8 @@ class QMConfig:
         """Part of the cache key: results from different backends must not collide."""
         medium = f"ALPB-{self.solvent}" if self.solvent else "gas"
         opt = "tblite-lbfgs" if self.optimizer == "tblite" else "xtb-opt"
-        return f"GFN2-xTB/{medium}/{'given' if self.given_geometry else opt}"
+        base = f"GFN2-xTB/{medium}/{'given' if self.given_geometry else opt}"
+        return qm_spin.tagged(base, self.spin_tag)
 
 
 @dataclass
@@ -168,23 +179,48 @@ class GFN2Calculator:
         check_connectivity(mol, xyz_bohr * BOHR_ANG, cfg.conn_cov_factor)
         return xyz_bohr, True
 
+    def _relax_tagged(self, mol, z, start, charge, unpaired) -> tuple[np.ndarray, bool]:
+        """A tagged species (module docstring): `_relax` from the start and from the kicked
+        start, an optimum with a formed bond dropped (BOND_FORMED), the lower energy kept.
+        Raises the first start's failure when neither is kept."""
+        kept, errors = [], []
+        for x0 in (start, start + kick(start.shape)):
+            try:
+                xyz, restrained = self._relax(mol, z, x0, charge, unpaired)
+                if bonds := formed_bonds(mol, xyz * BOHR_ANG):
+                    raise QMError(ReasonCode.BOND_FORMED, f"new bonds (i, j, d/r_cov) {bonds}")
+                res = _single_point(
+                    z, xyz, charge, unpaired, self.config.solvent, False, self.config.scf_maxiter
+                )
+            except QMError as exc:
+                errors.append(exc)
+                continue
+            kept.append((float(res.get("energy")), xyz, restrained))
+        if not kept:
+            detail = "; ".join(f"{e.reason}: {e.detail}" for e in errors)
+            raise QMError(errors[0].reason, f"every start failed ({detail})")
+        _, xyz, restrained = min(kept, key=lambda k: k[0])
+        return xyz, restrained
+
     def run(self, mol: Chem.Mol, conf_id: int = 0) -> QMRecord:
         """Full pipeline for one conformer. Raises QMError(reason) on failure."""
         smiles = chem.unmapped_canonical(mol)
         _check_atom_order(mol, smiles)
         z = np.array([a.GetAtomicNum() for a in mol.GetAtoms()], dtype=np.int32)
         start = mol.GetConformer(conf_id).GetPositions() / BOHR_ANG
-        charge, unpaired = resolve_charge_spin(mol)
-        if self.config.given_geometry:
-            check_connectivity(mol, start * BOHR_ANG, self.config.conn_cov_factor)
+        charge, unpaired, tag = qm_spin.spin_for_qm(mol, smiles)
+        config = replace(self.config, spin_tag=tag)
+        if config.given_geometry:
+            check_connectivity(mol, start * BOHR_ANG, config.conn_cov_factor)
             xyz_bohr, restrained = start, False
+        elif tag is not None:
+            xyz_bohr, restrained = self._relax_tagged(mol, z, start, charge, unpaired)
         else:
             xyz_bohr, restrained = self._relax(mol, z, start, charge, unpaired)
         xyz_ang = xyz_bohr * BOHR_ANG
-        res = _single_point(
-            z, xyz_bohr, charge, unpaired, self.config.solvent, True, self.config.scf_maxiter
-        )
+        res = _single_point(z, xyz_bohr, charge, unpaired, config.solvent, True, config.scf_maxiter)
         rec = self._assemble(res, z, xyz_ang, smiles, conf_id, charge, unpaired)
+        rec.method = config.method
         if restrained:
             rec.add_warning(ReasonCode.RESTRAINED_GEOM)
         for note in mol.GetProp(NOTES_PROP).split(",") if mol.HasProp(NOTES_PROP) else []:

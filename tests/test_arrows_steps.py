@@ -602,7 +602,11 @@ def test_samples_store_the_extra_token_columns_after_the_v17_ones(mini_steps, to
 def _fragment(key: str, smeared: bool):
     from types import SimpleNamespace
 
-    return SimpleNamespace(key=key, tokens=SimpleNamespace(fermi_smeared=smeared))
+    from ksmech.qm.spin import method_for
+    from ksmech.qm.xtb_calc import QMConfig
+
+    method = method_for(key, QMConfig().method)  # the token file's method, tagged where reassigned
+    return SimpleNamespace(key=key, tokens=SimpleNamespace(fermi_smeared=smeared, method=method))
 
 
 def test_a_smeared_open_shell_reactant_has_no_integral_somo():
@@ -612,6 +616,15 @@ def test_a_smeared_open_shell_reactant_has_no_integral_somo():
         fragments=[_fragment("[O][O-]", True), _fragment("CC=O", True), _fragment("[CH3]", False)]
     )
     assert smeared_open_shells(rt) == ["[O][O-]"]  # a smeared closed shell stays a slice (U10)
+
+
+def test_law_s_reads_the_count_the_record_was_run_at():
+    """A Cu(II) fragment RDKit counts 0 is an open shell (its tagged record: u = 1); a carbene
+    the species table pairs is not (u = 0)."""
+    from types import SimpleNamespace
+
+    rt = SimpleNamespace(fragments=[_fragment("[Cl][Cu][Cl]", True), _fragment("Cl[C]Cl", True)])
+    assert smeared_open_shells(rt) == ["[Cl][Cu][Cl]"]
 
 
 def _na_sample(distance: float, r_bonds):

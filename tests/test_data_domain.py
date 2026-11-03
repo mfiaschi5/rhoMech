@@ -28,9 +28,9 @@ from ksmech.data.domain import (
     is_placeholder,
     join_classes,
     named_repairs,
+    open_shell_classes,
     oxidation_state,
     parity_law,
-    radical_class,
     repair_candidate,
     screen_step,
     side_codes,
@@ -477,8 +477,15 @@ def test_a_source_that_excludes_open_shells_keeps_radical_drawn():
     [
         ("[CH3:1][Cl:2]", "[CH3:1].[Cl:2]", DomainCode.SPIN_NOT_CONSERVED),  # homolysis
         ("[CH2:1]=[O:2].[H-:3]", "[CH2:1]([H:3])[O:2]", DomainCode.SPIN_NOT_CONSERVED),
-        ("[C]=O.C[O:1][H:2]", "[C]=O.C[O-:1].[H+:2]", DomainCode.SPIN_RULE_PENDING),
-        ("Cl[C]Cl.C[O:1][H:2]", "Cl[C]Cl.C[O-:1].[H+:2]", DomainCode.SPIN_RULE_PENDING),  # v2: 0
+        ("[C]=O.C[O:1][H:2]", "[C]=O.C[O-:1].[H+:2]", None),  # 0 from the table (P4: stands)
+        ("Cl[C]Cl.C[O:1][H:2]", "Cl[C]Cl.C[O-:1].[H+:2]", None),
+        ("[Cl][Cu][Cl].C[O:1][H:2]", "[Cl][Cu][Cl].C[O-:1].[H+:2]", None),  # metal_v1: 1, 1
+        ("[I][Cu][I].C[O:1][H:2]", "[I][Cu][I].C[O-:1].[H+:2]", DomainCode.MULTIPLICITY_AMBIGUOUS),
+        (
+            "[Cl][Fe]([Cl])[Cl].C[O:1][H:2]",
+            "[Cl][Fe]([Cl])[Cl].C[O-:1].[H+:2]",
+            DomainCode.MULTIPLICITY_AMBIGUOUS,  # FeCl3: the species table does not confirm 5
+        ),  # fmt: skip
         (
             "[O][N+]([O])=O.C[O:1][H:2]",
             "[O][N+]([O])=O.C[O-:1].[H+:2]",
@@ -516,9 +523,49 @@ def test_an_r_entry_on_a_radical_atom_makes_the_step_reactive():
     index = chem.map_to_index(reactants)
     on_o = [(index[20], index[21], -1)]
     on_radical = [(min(index[5], index[21]), max(index[5], index[21]), 1)]
-    assert radical_class(reactants, products, on_o, []) == DomainClass.RADICAL_SPECTATOR
-    assert radical_class(reactants, products, on_radical, []) == DomainClass.RADICAL_REACTIVE
-    assert radical_class(reactants, products, [], [(index[5], 2)]) == DomainClass.RADICAL_REACTIVE
+    spectator, reactive = {DomainClass.RADICAL_SPECTATOR}, {DomainClass.RADICAL_REACTIVE}
+    assert open_shell_classes(reactants, products, on_o, []) == spectator
+    assert open_shell_classes(reactants, products, on_radical, []) == reactive
+    assert open_shell_classes(reactants, products, [], [(index[5], 2)]) == reactive
+
+
+def _beside(spectator: str) -> tuple[str, list[Arrow]]:
+    """An alcohol deprotonated by OH- beside an unmapped `spectator`, drawn alike on both
+    sides."""
+    rxn = f"{spectator}.C[O:21][H:20].[OH-:10]>>{spectator}.C[O-:21].[OH:10][H:20]"
+    return rxn, SPECTATOR_RADICAL[1]
+
+
+@pytest.mark.parametrize(
+    ("spectator", "exclusion", "classes"),
+    [
+        ("[Cl][Cu][Cl]", None, {DomainClass.OSM_CU2}),
+        ("[Br][Fe-]([Br])([Br])[Br]", None, {DomainClass.OSM_FE3}),
+        ("[I][Cu][I]", DomainCode.MULTIPLICITY_AMBIGUOUS, set()),  # REDOX_INCOMPATIBLE
+        ("C[NH+](C)[CuH2-]", DomainCode.MULTIPLICITY_AMBIGUOUS, set()),
+        ("[Cl][Fe]([Cl])[Cl]", DomainCode.MULTIPLICITY_AMBIGUOUS, set()),  # not confirmed
+        ("Cl[C]Cl", None, {DomainClass.CARBENE_SINGLET}),
+        ("[C]=O", None, {DomainClass.CARBENE_SINGLET}),
+        ("[O][O]", None, {DomainClass.RADICAL_SPECTATOR}),  # a triplet: stays an open shell
+    ],
+)
+def test_pmechdb_admits_metals_and_paired_carbenes_by_the_spin_laws(spectator, exclusion, classes):
+    step = pmechdb_step(_beside(spectator))
+    assert step.domain_exclusion == exclusion
+    assert domain_classes(step.domain_class) == {str(c) for c in classes}
+
+
+def test_a_source_that_excludes_open_shell_metals_keeps_open_shell_metal():
+    rxn, arrows = _beside("[Cl][Cu][Cl]")
+    step = build_step(step_id="x", source=Source.REACTMECH, rxn_smiles=rxn, arrows=arrows)
+    assert step.domain_exclusion == DomainCode.OPEN_SHELL_METAL and step.domain_class is None
+
+
+def test_a_fragment_code_the_laws_do_not_read_keeps_the_step_out():
+    """CuCl2 is re-read, but an odd fragment whose only metal is d10 (ZnCl3 drawn neutral,
+    CHARGE_UNREPAIRED) keeps the step out under its own code."""
+    step = pmechdb_step(_beside("[Cl][Cu][Cl].[Cl][Zn]([Cl])[Cl]"))
+    assert step.domain_exclusion == DomainCode.CHARGE_UNREPAIRED
 
 
 def test_a_curated_step_keeps_radical_drawn_with_its_reason(monkeypatch):

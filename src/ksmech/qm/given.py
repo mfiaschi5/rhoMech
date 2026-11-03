@@ -33,6 +33,7 @@ from ksmech.arrows.reactants import CorrespondenceError
 from ksmech.data import chem, qmugs
 from ksmech.qm.batch import _Timeout, execute, print_summary
 from ksmech.qm.records import QMError, ReasonCode, cache_path, is_valid_cache_file, save_record
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import GFN2Calculator, QMConfig
 
 log = logging.getLogger(__name__)
@@ -74,7 +75,9 @@ def _compute(task: GivenTask, row: dict) -> None:
     """Fill `row` for one conformer; raises QMError, ValueError or CorrespondenceError."""
     key, mol = qmugs.record_mol(task.molblock, task.conformer_id)
     row |= {"smiles": key, "n_atoms": mol.GetNumAtoms()}
-    path = cache_path(task.config.cache_dir, key, task.conformer_id, task.config.method)
+    method = method_for(key, task.config.method)
+    row["method"] = method
+    path = cache_path(task.config.cache_dir, key, task.conformer_id, method)
     if not is_valid_cache_file(path):
         out = GFN2Calculator(task.config).try_run(mol, task.conformer_id)
         if out.record is None:

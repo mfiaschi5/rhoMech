@@ -7586,3 +7586,63 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
 - **Tests** (from 65490c9, clean tree): `pytest -n 2 -m "not realdata"` 2008 passed, 12 skipped,
   2 xfailed (the singlet oracle's three xfails are gone); `KSMECH_TEST_WORKERS=1 pytest -m
   realdata` 51 passed.
+
+## 2026-11-03: P4 code: spin from `data.spin.assign`, tagged QM records, the metal table and the open-shell metal cohort
+
+- **What.** Open-shell plan P4 steps 1-5, 7 (the train option) and 8, on branch
+  `claude/open-shell-p4` (from `claude/open-shell-spin-v2`); the build (step 6) waits for the
+  approval of the spec v9.2 QM text (U3), the training (step 7) for the build.
+- **`data.spin.assign`** gives each fragment its count, its source ('rdkit', 'species',
+  'metal'), the count per atom where defined, and for a metal the row and, when it assigns
+  nothing, the reason. SPIN_RULE_VERSION spin-rule-v1 -> v2. Differences from the plan text:
+  - It reads spin_table_v2 (the plan was written against v1).
+  - The metal table `spin_tables/metal_v1.json` has three rows: CU2_REDOX (Cu(II) with an H or
+    I donor, REDOX_INCOMPATIBLE), CU2 (u 1) and FE3_HS (u 5 without a C or P donor; a
+    polypyridyl or porphyrin N cannot be told from an amine N by element, so the species
+    table's confirmation is the gate there). One law confirms every row: rule C has A and B
+    agree on the row's count. Cu(II) d9 is 1 by count either way; the plan's 'scan the control'
+    reads the same.
+  - A ligand-dropped metal (`domain.is_placeholder`, odd or even) is MULTIPLICITY_AMBIGUOUS:
+    it is no species. Without this the table's u = 0 for `C=[O+][Sn-]` would have tagged and
+    computed a placeholder. Domain is unchanged by it (METAL_PLACEHOLDER comes first).
+- **QM.** `qm.spin` tags a species whose assigned count differs from RDKit's with
+  `+spin-v1-u<u>`, inserted after the optimizer part (`...tblite-lbfgs+spin-v1-u1+metal-geom-v1`
+  for serve, the order fixed for S1). The plan's tag is `+spin-v1`; the count is added so that
+  a later table revision that changes one species re-keys that species only, and no reader can
+  take a record of another count. Tagged species are optimized from the embedding and from it
+  kicked (0.02 Angstrom, seed 0, P2's scan start), an optimum that formed a bond the drawing
+  lacks is dropped (`geometry.formed_bonds`, P2's law, factor 1.2; BOND_FORMED, remembered by
+  the failure memo when every start fails) and the lower energy is kept. These are P2's open
+  questions for P4 (the linear saddle of a 2-coordinate carbene, the BOND_FORMED check in
+  production), answered by the laws the table itself was built with; they apply to tagged
+  species only, so no untagged record's meaning changes. Ph2C=C: has no singlet minimum at
+  GFN2 (P2: the singlet shifts to diphenylacetylene from every start), so it is expected to
+  fail as BOND_FORMED and its step stays out, counted (MISSING_TOKENS at sample build).
+- **Keys.** Every engine site that builds a record, tombstone, token or sidecar path from a
+  configured method goes through `qm.spin.method_for` (grep test, tests/test_qm_spin.py); the
+  QM manifest's method is per row (`qm.batch.row_method`). Serve keeps RDKit spin until S1:
+  its pre-screens refuse radicals and SPIN_PARITY before any QM, and a closed-shell metal
+  complex keeps its method and key (tested). A token file's open-shell key reads the count its
+  record was run at from the method tag (`orbitals.tokens.record_unpaired`); law (S) reads the
+  same count, so a smeared Cu(II) fragment is SOMO_NOT_INTEGRAL like a smeared radical (one
+  law for every open shell, where the plan expected such Cu adducts as a flagged slice).
+- **Index.** INDEX_VERSION 1 -> 2: `unpaired`, `spin_source`, `spin_rule_version` for records
+  and tombstones, and `index stats` lists the tagged ones.
+- **Domain.** `DomainPolicy.open_shell_metal` (PMechDB ADMIT_BY_RULE, every other source
+  EXCLUDE until P8). The laws of P3 re-read an OPEN_SHELL_METAL step; a fragment code they do
+  not re-read keeps the step out under that code. Law (u) loses the SPIN_RULE_PENDING clause
+  (the code stays for old artifacts). Classes: CARBENE_SINGLET (the species table pairs a
+  species drawn with radical electrons), OSM_CU2, OSM_FE3, admitted for PMechDB.
+  RADICAL_SPECTATOR / REACTIVE now count only radical atoms of species that stay open shells.
+- **Dry-run re-ingest** (scratch directory, read-only on data/): 90 steps change class or
+  code, no side changes. OPEN_SHELL_METAL 78 -> OSM_CU2 23 (2 resonance pairs), OSM_FE3 19 (2
+  resonance pairs), MULTIPLICITY_AMBIGUOUS 36: 12 Cu (6 CuH2 and 4 CuI2 adducts,
+  REDOX_INCOMPATIBLE; 2 NH3-CuX2 whose scan failed) and 24 Fe, every one a species rule C does
+  not confirm (14 steps of Br2-FeBr4- `Br[Br+][Fe-]Br4`, A failed; FeCl3 3 and FeBr3 2, B has
+  no trigonal-planar rule; the Fe(OTf)2 oxocarbenium pairs 2; others 3). SPIN_RULE_PENDING 12
+  -> CARBENE_SINGLET 12 (10 steps, the 2 CO drawings resonance pairs), as the plan expected.
+  The plan's 62 metal steps (Fe 39) assumed every Fe species confirmed; 20 Fe steps are not.
+  QM: 48 tagged species (Cu 28, Fe 13, u = 0: the 6 carbene and CO species and the Et3B-O2
+  adduct of 5d007b38, which the table pairs).
+- **Train.** `--drop-domain-class` leaves the training samples of the named classes out of
+  training (never out of evaluation), each logged, counted as DROPPED_DOMAIN_CLASS.

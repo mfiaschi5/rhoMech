@@ -189,6 +189,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   token cache needs them, so re-run after the QM batch), `uv run ksmech-qm index stats [--root
   data/cache --root data/serve]` (the SQLite index `<root>/index.sqlite` of records, tombstones,
   tokens and Wiberg sidecars, read from the file headers and refreshed incrementally first;
+  the records of species `data.spin` reassigns, under the tagged method `+spin-v1-u<u>`
+  (`qm.spin`), listed by spin source;
   `index refresh [--rebuild]` only refreshes; the files stay the source of truth)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
@@ -253,7 +255,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
-  [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy]` (the spec-v9 model on one split;
+  [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy]
+  [--drop-domain-class C...]` (the spec-v9 model on one split;
   `--preset` sets the P0a flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
   orbital extras, legacy = the v17 inputs; an explicit option wins; `--source pmechdb+reactmech`
   pools several sources' training parts, validates each and the pool, pair statistics fitted on the pool; each epoch every training
@@ -265,6 +268,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `metrics.jsonl` per epoch, `last.pt` and `best.pt` by validation anchor top-1; batches by a
   padded-cell budget, samples over `--max-tokens` skipped as TOO_LARGE and counted; the override is
   for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); `--eval-test` also scores the test part each epoch (`test_*`, never for `best.pt`);
+  `--drop-domain-class OSM_CU2 OSM_FE3` leaves those classes' training samples out (P4's metal
+  ablation; evaluation keeps them; counted as DROPPED_DOMAIN_CLASS);
   every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
   run)

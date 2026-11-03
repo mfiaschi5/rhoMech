@@ -17,6 +17,7 @@ from ksmech.orbitals.fgroups import DEFAULT_VOCAB_PATH, build_vocab
 from ksmech.orbitals.tokens import build_molecule_tokens, token_table
 from ksmech.qm.batch import collect_molecules
 from ksmech.qm.records import DEFAULT_CACHE_DIR, cache_path, is_valid_cache_file, load_record
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import QMConfig
 
 
@@ -91,7 +92,8 @@ def cmd_show(args: argparse.Namespace, console: Console) -> int:
 
     smiles = chem.unmapped_canonical(Chem.MolFromSmiles(args.smiles))
     config = QMConfig(cache_dir=args.qm_cache_dir)
-    path = cache_path(config.cache_dir, smiles, 0, config.method)
+    method = method_for(smiles, config.method)
+    path = cache_path(config.cache_dir, smiles, 0, method)
     if not is_valid_cache_file(path):
         if not args.compute:
             console.print(f"[red]no QM record for {smiles} at {path}[/red]; add --compute")
@@ -101,7 +103,7 @@ def cmd_show(args: argparse.Namespace, console: Console) -> int:
         rec = compute_fixture_records({"x": smiles}, config)["x"]
     else:
         try:
-            rec = load_record(path, (smiles, 0, config.method))
+            rec = load_record(path, (smiles, 0, method))
         except StaleArtifact as exc:
             console.print(f"[red]{exc}[/red]")
             return 2

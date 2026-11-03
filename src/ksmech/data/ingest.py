@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 
 from ksmech.data.domain import (
+    ADMITTED_METAL,
+    ADMITTED_OPEN_SHELL,
     CURATED_CLASSES,
     DomainClass,
     domain_classes,
@@ -114,10 +116,12 @@ class IngestResult:
 
 
 def open_shell_report(steps: list[ElementaryStep]) -> dict:
-    """The open-shell admission of the steps (open-shell plan P3): admitted steps by class, the
-    admitted ones that hold a species with u >= 2 (each must be a counted exemption of
-    `curation/multi_radical_exemptions.json`) and the curated exclusions by reason."""
-    admitted_classes = {str(DomainClass.RADICAL_SPECTATOR), str(DomainClass.RADICAL_REACTIVE)}
+    """The open-shell admission of the steps (open-shell plan P3, P4): admitted steps by class,
+    the admitted radical steps that hold a species drawn with u >= 2 (each must be a counted
+    exemption of `curation/multi_radical_exemptions.json`) and the curated exclusions by
+    reason."""
+    admitted_classes = {str(c) for c in ADMITTED_OPEN_SHELL | ADMITTED_METAL}
+    radical = {str(DomainClass.RADICAL_SPECTATOR), str(DomainClass.RADICAL_REACTIVE)}
     curated = {str(c) for c in CURATED_CLASSES}
     admitted, held = Counter(), Counter()
     multi = []
@@ -125,7 +129,7 @@ def open_shell_report(steps: list[ElementaryStep]) -> dict:
         classes = domain_classes(s.domain_class)
         if s.domain_exclusion is None and classes & admitted_classes:
             admitted.update(classes & admitted_classes)
-            if max_species_unpaired(s) >= 2:
+            if classes & radical and max_species_unpaired(s) >= 2:
                 multi.append(s.step_id)
         elif s.domain_exclusion is not None:
             held.update(classes & curated)

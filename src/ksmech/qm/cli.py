@@ -140,6 +140,8 @@ def _print_stats(root: Path, s: dict, console: Console) -> None:
     console.print(table)
     for kind, method, n in s["methods"]:
         console.print(f"  {kind} {method}: {n}")
+    for kind, source, version, unpaired, n in s.get("spin", []):
+        console.print(f"  {kind} tagged {version}, spin_source {source}, u={unpaired}: {n}")
     if s["reasons"]:
         reasons = Table(title="remembered failures")
         for col in ("reason", "count", "example"):

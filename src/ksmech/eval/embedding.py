@@ -37,6 +37,7 @@ from ksmech.model.inputs import CHARGE_MAX, MAX_Z, pair_channels, to_device
 from ksmech.model.loss import anchor_log_probs, anchor_ranks, greedy_edit
 from ksmech.model.net import KSMech
 from ksmech.model.sparse import select_keys
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import QMConfig
 
 PARTS = (
@@ -274,10 +275,11 @@ def ensure_pool(keys: list[str], loader: TokenCache, qm: QMConfig | None = None)
     qm = qm or QMConfig()
     built = set(ensure_tokens(keys, loader.tokens_dir, qm))
     for key in keys:
-        if bond_index_path(loader.bond_index_dir, key, 0, qm.method).exists():
+        method = method_for(key, qm.method)
+        if bond_index_path(loader.bond_index_dir, key, 0, method).exists():
             continue
         record = compute_fixture_records({key: key}, qm)[key]
-        record_path = cache_path(qm.cache_dir, key, 0, qm.method)
+        record_path = cache_path(qm.cache_dir, key, 0, method)
         save_bond_indices(record, record_path, loader.bond_index_dir)
         built.add(key)
     return sorted(built)

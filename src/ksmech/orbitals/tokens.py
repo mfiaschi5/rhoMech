@@ -26,6 +26,7 @@ Hartree. `C_loc` holds the S-orthonormal AO coefficients of every orbital token 
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
@@ -767,11 +768,20 @@ def drawn_unpaired(smiles: str) -> int:
     return sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
 
 
-def with_open_shell_rule(config: dict, smiles: str) -> dict:
-    """`config` plus, for an open shell (u > 0), the key `open_shell_rule`, which only those
-    files carry: a u > 0 file built before the rule lacks it and is stale under every reader,
-    whatever config the reader passes (`load_tokens`, `save_tokens`; open-shell plan P2b)."""
-    if drawn_unpaired(smiles) > 0:
+def record_unpaired(smiles: str, method: str | None = None) -> int:
+    """The u the QM record of a token file was run at: the count of its method's spin tag for a
+    species `data.spin` reassigns ('+spin-v1-u<u>', `qm.spin`, open-shell plan P4), else
+    RDKit's (`drawn_unpaired`)."""
+    found = re.search(r"\+spin-v\d+-u(\d+)", method or "")
+    return int(found.group(1)) if found else drawn_unpaired(smiles)
+
+
+def with_open_shell_rule(config: dict, smiles: str, method: str | None = None) -> dict:
+    """`config` plus, for an open shell (u > 0, `record_unpaired`), the key `open_shell_rule`,
+    which only those files carry: a u > 0 file built before the rule lacks it and is stale under
+    every reader, whatever config the reader passes (`load_tokens`, `save_tokens`; open-shell
+    plan P2b)."""
+    if record_unpaired(smiles, method) > 0:
         return {**config, "open_shell_rule": OPEN_SHELL_RULE}
     return dict(config)
 
@@ -780,9 +790,11 @@ def token_config_for(
     smiles: str,
     pm_config: PMConfig | None = None,
     descriptor_config: DescriptorConfig | None = None,
+    method: str | None = None,
 ) -> dict:
-    """The configuration the token file of `smiles` is stamped with and checked against."""
-    return with_open_shell_rule(token_config(pm_config, descriptor_config), smiles)
+    """The configuration the token file of `smiles` (computed under `method`) is stamped with
+    and checked against."""
+    return with_open_shell_rule(token_config(pm_config, descriptor_config), smiles, method)
 
 
 def stored_smiles(path: Path) -> str:
@@ -809,7 +821,7 @@ def save_tokens(
     with the open-shell rule added for a u > 0 molecule (`with_open_shell_rule`)."""
     arrays = _payload(tokens)
     tokens.digest = prov.array_digest(arrays)
-    config = with_open_shell_rule(config or token_config(), tokens.smiles)
+    config = with_open_shell_rule(config or token_config(), tokens.smiles, tokens.method)
     header = prov.stamp("tokens", SCHEMA_VERSION, inputs or {}, config, tokens.digest)
     out = prov.save_npz(path, arrays, header)
     tokens.source_path = str(out)
@@ -909,7 +921,9 @@ def load_tokens(path: Path, config: dict | None = None, verify: bool = True) -> 
             path,
             "tokens",
             SCHEMA_VERSION,
-            with_open_shell_rule(config or token_config(), str(z["smiles"].item())),
+            with_open_shell_rule(
+                config or token_config(), str(z["smiles"].item()), str(z["method"].item())
+            ),
         )
         if verify
         else prov.read_header(path)

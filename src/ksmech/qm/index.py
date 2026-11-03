@@ -13,12 +13,18 @@ the web app's `data/serve`. Every root has the same schema; `stats` reads severa
 key of a row is the cache key (`records.cache_key`, the file stem), which joins a record with
 its tombstone, its tokens and its sidecar (the view `molecule`). Nothing on the hot path reads
 the index: the batch and the web app look files up by path, as before.
+
+Version 2 (open-shell plan P4) adds the spin of each record and tombstone: `unpaired` (the
+record's own; a tombstone's from its method's spin tag), `spin_source` ('rdkit' for an untagged
+method, else the source `data.spin` gives the species: 'species' or 'metal') and
+`spin_rule_version` (the tag's version, '+spin-v1-u<u>' -> 'spin-v1'; NULL untagged).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import zipfile
 from collections import Counter
@@ -31,11 +37,13 @@ from typing import Any
 import numpy as np
 
 from ksmech.data import provenance as prov
+from ksmech.data import spin
 from ksmech.qm import failures
 
 INDEX_NAME = "index.sqlite"
-INDEX_VERSION = 1  # PRAGMA user_version; another value drops and recreates the tables
+INDEX_VERSION = 2  # PRAGMA user_version; another value drops and recreates the tables
 BUSY_TIMEOUT_S = 30.0
+TAG = re.compile(r"\+(?P<version>spin-v\d+)-u(?P<u>\d+)")  # `qm.spin`'s tag in a method
 COMMIT_EVERY = 1000
 # (kind, directory under the root, file suffix)
 LAYOUT = (
@@ -47,7 +55,8 @@ LAYOUT = (
 COLUMNS = (
     "kind", "key", "path", "size", "mtime_ns", "problem", "schema_version", "content_sha256",
     "built_at", "code_git_hash", "code_dirty", "inputs", "config", "smiles", "conformer_id",
-    "method", "n_atoms", "warnings", "reason", "detail", "seconds", "params",
+    "method", "n_atoms", "warnings", "reason", "detail", "seconds", "params", "unpaired",
+    "spin_source", "spin_rule_version",
 )  # fmt: skip
 SCHEMA = """
 CREATE TABLE artifact (
@@ -73,6 +82,9 @@ CREATE TABLE artifact (
     detail TEXT,
     seconds REAL,
     params TEXT,
+    unpaired INTEGER,            -- records and tombstones: the unpaired count computed (P4)
+    spin_source TEXT,            -- rdkit | species | metal (`data.spin`; rdkit when untagged)
+    spin_rule_version TEXT,      -- the spin tag's version (spin-v1), NULL when untagged
     PRIMARY KEY (kind, key)
 );
 CREATE INDEX artifact_smiles ON artifact (smiles);
@@ -159,13 +171,32 @@ def _header_columns(header: prov.Provenance | None, kind: str) -> dict[str, Any]
     )
 
 
-def _record_identity(z: Any) -> dict[str, Any]:
+def spin_columns(smiles: str, method: str, unpaired: int | None = None) -> dict[str, Any]:
+    """The spin columns of a record or tombstone (module docstring)."""
+    found = TAG.search(method or "")
+    if found is None:
+        return dict(unpaired=unpaired, spin_source=spin.RDKIT, spin_rule_version=None)
+    try:
+        source = spin.assign_smiles(smiles).source
+    except ValueError:
+        source = None
+    tag_u = int(found.group("u"))
     return dict(
-        smiles=str(z["smiles"]),
+        unpaired=tag_u if unpaired is None else unpaired,
+        spin_source=source,
+        spin_rule_version=found.group("version"),
+    )
+
+
+def _record_identity(z: Any) -> dict[str, Any]:
+    smiles, method = str(z["smiles"]), str(z["method"])
+    return dict(
+        smiles=smiles,
         conformer_id=int(z["conformer_id"]),
-        method=str(z["method"]),
+        method=method,
         n_atoms=len(z["atomic_numbers"]),
         warnings=str(z["warnings"]),
+        **spin_columns(smiles, method, int(z["unpaired"])),
     )
 
 
@@ -194,6 +225,7 @@ def _read_tombstone(path: Path) -> dict[str, Any]:
         "detail": hit.detail,
         "seconds": hit.seconds,
         "params": json.dumps(hit.params, sort_keys=True),
+        **spin_columns(hit.smiles, hit.method),
     }
 
 
@@ -284,6 +316,13 @@ def stats(root: Path) -> dict[str, Any]:
                 con,
                 "SELECT kind, method, COUNT(*) FROM artifact WHERE kind IN"
                 " ('qm_record', 'qm_failure') GROUP BY kind, method ORDER BY kind, method",
+            ),
+            spin=_rows(
+                con,
+                "SELECT kind, spin_source, spin_rule_version, unpaired, COUNT(*) FROM artifact"
+                " WHERE kind IN ('qm_record', 'qm_failure') AND spin_rule_version IS NOT NULL"
+                " GROUP BY kind, spin_source, spin_rule_version, unpaired"
+                " ORDER BY kind, spin_source, unpaired",
             ),
             reasons=_rows(
                 con,

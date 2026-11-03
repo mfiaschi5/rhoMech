@@ -2,7 +2,9 @@
 
 Molecules are deduplicated on the map-free canonical SMILES. Each task embeds one molecule and
 runs the calculator on its conformers. The disk cache is the source of truth for resuming; the
-manifest parquet records the outcome of every (smiles, conformer) pair, failures included.
+manifest parquet records the outcome of every (smiles, conformer) pair, failures included. A
+species whose spin `data.spin` reassigns runs under its tagged method (`qm.spin.config_for`), so
+the manifest's method is per row and every view compares a row with its own species' method.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from ksmech.qm.records import (
     is_valid_cache_file,
     save_record,
 )
+from ksmech.qm.spin import config_for, method_for
 from ksmech.qm.xtb_calc import GFN2Calculator, QMConfig
 
 log = logging.getLogger(__name__)
@@ -117,7 +120,8 @@ def _compute(task: MolTask) -> list[dict]:
                 _row(task.smiles, cid, reason=str(out.reason), detail=out.detail, seconds=seconds)
             )
             continue
-        path = cache_path(task.config.cache_dir, task.smiles, cid, task.config.method)
+        method = method_for(task.smiles, task.config.method)
+        path = cache_path(task.config.cache_dir, task.smiles, cid, method)
         save_record(out.record, path)
         rows.append(
             _row(
@@ -210,14 +214,15 @@ def _is_done(
     """Every conformer is cached, or the molecule failed before and is not to be retried:
     with `retry_reasons`, a failure is retried only when its reason code is one of them."""
     rows = None
+    method = method_for(task.smiles, task.config.method)
     if prev is not None:
-        rows = prev[(prev["smiles"] == task.smiles) & (prev["method"] == task.config.method)]
+        rows = prev[(prev["smiles"] == task.smiles) & (prev["method"] == method)]
     n_expected = task.n_conformers
     if rows is not None and (rows["status"] == "ok").any():
         embedded = int(rows.loc[rows["status"] == "ok", "n_embedded"].max())
         n_expected = min(n_expected, embedded) if embedded else n_expected
     if all(
-        is_valid_cache_file(cache_path(task.config.cache_dir, task.smiles, c, task.config.method))
+        is_valid_cache_file(cache_path(task.config.cache_dir, task.smiles, c, method))
         for c in range(n_expected)
     ):
         return True
@@ -229,12 +234,27 @@ def _is_done(
     return not retry_failed
 
 
-def _failed_before(prev: pd.DataFrame | None, method: str) -> set[str]:
-    """The molecules this source's manifest records as failed under `method`: a run that
-    schedules one of them again was asked to retry it, so its task skips the failure memo."""
+def row_method(smiles: str, conformer_id: int, config: QMConfig) -> str:
+    """The method a manifest row of this species carries under `config`: its tagged method
+    (`qm.spin.method_for`), the base method for a canonicalization failure (conformer -1)."""
+    return config.method if conformer_id < 0 else method_for(smiles, config.method)
+
+
+def _row_matches(manifest: pd.DataFrame, config: QMConfig) -> pd.Series:
+    """Rows whose method is their own species' method under `config`."""
+    pairs = zip(manifest["smiles"], manifest["conformer_id"], strict=True)
+    want = [row_method(s, int(c), config) for s, c in pairs]
+    return manifest["method"] == pd.Series(want, index=manifest.index, dtype=object)
+
+
+def _failed_before(prev: pd.DataFrame | None, config: QMConfig) -> set[str]:
+    """The molecules this source's manifest records as failed under `config`'s method (each its
+    own tagged one): a run that schedules one of them again was asked to retry it, so its task
+    skips the failure memo."""
     if prev is None:
         return set()
-    return set(prev.loc[(prev["status"] == "failed") & (prev["method"] == method), "smiles"])
+    failed = prev[prev["status"] == "failed"]
+    return set(failed.loc[_row_matches(failed, config), "smiles"])
 
 
 def _crash_row(task: MolTask) -> dict:
@@ -306,24 +326,25 @@ def build_manifest(
         for r in prev.to_dict("records"):
             current[(r["smiles"], int(r["conformer_id"]), r["method"])] = r
     for r in rows:
-        r["method"] = config.method
-        current[(r["smiles"], int(r["conformer_id"]), config.method)] = r
+        r["method"] = row_method(r["smiles"], int(r["conformer_id"]), config)
+        current[(r["smiles"], int(r["conformer_id"]), r["method"])] = r
     for smiles in smiles_list:
+        method = method_for(smiles, config.method)
         for cid in range(n_conformers):
-            path = cache_path(config.cache_dir, smiles, cid, config.method)
-            key = (smiles, cid, config.method)
+            path = cache_path(config.cache_dir, smiles, cid, method)
+            key = (smiles, cid, method)
             if is_valid_cache_file(path) and (key not in current or current[key]["status"] != "ok"):
-                current[key] = _row(
-                    smiles, cid, cache_path=str(path), status="ok", method=config.method
-                )
+                current[key] = _row(smiles, cid, cache_path=str(path), status="ok", method=method)
     out = pd.DataFrame(list(current.values()), columns=MANIFEST_COLUMNS)
     return out.sort_values(["method", "smiles", "conformer_id"], ignore_index=True)
 
 
 def run_view(manifest: pd.DataFrame, smiles_list: list[str], config: QMConfig) -> pd.DataFrame:
-    """Rows of one run: this method, the molecules asked for, plus canonicalization failures."""
+    """Rows of one run: the molecules asked for, each under its own method (`row_method`), plus
+    canonicalization failures."""
     in_scope = manifest["smiles"].isin(set(smiles_list)) | (manifest["conformer_id"] == -1)
-    return manifest[in_scope & (manifest["method"] == config.method)].reset_index(drop=True)
+    view = manifest[in_scope]
+    return view[_row_matches(view, config)].reset_index(drop=True)
 
 
 def summarize(manifest: pd.DataFrame) -> dict:
@@ -412,8 +433,10 @@ def featurize_dataset(
     prev = load_manifest(path)
     if prev is not None and "method" not in prev.columns:
         prev = prev.assign(method="")  # manifests written before the method column existed
-    retried = _failed_before(prev, config.method)
-    tasks = [MolTask(s, n_conformers, config, memo=s not in retried) for s in smiles_list]
+    retried = _failed_before(prev, config)
+    tasks = [
+        MolTask(s, n_conformers, config_for(s, config), memo=s not in retried) for s in smiles_list
+    ]
     todo = [t for t in tasks if not _is_done(t, prev, retry_failed, retry_reasons)]
     console.print(
         f"{len(smiles_list)} unique molecules, {len(smiles_list) - len(todo)} done already, "

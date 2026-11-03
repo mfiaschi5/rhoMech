@@ -1,4 +1,5 @@
-"""Geometry optimization backends and the post-optimization connectivity check.
+"""Geometry optimization backends, the post-optimization connectivity check and the two laws of
+a tagged species' optimization (`kick`, `formed_bonds`; open-shell plan P4).
 
 tblite has no optimizer, so the default backend runs scipy L-BFGS-B on tblite energies and
 gradients (Cartesian, Bohr). The other backend shells out to the `xtb` binary (`--opt --gfn 2`).
@@ -6,6 +7,7 @@ gradients (Cartesian, Bohr). The other backend shells out to the `xtb` binary (`
 
 from __future__ import annotations
 
+import itertools
 import shutil
 import subprocess
 import tempfile
@@ -25,6 +27,10 @@ _XTB_TIMEOUT_S = 600
 # rest of the molecule are electrostatic, and covalent-radius ratios mean little for them.
 SKIP_BOND_ELEMENTS = frozenset({3, 11, 12, 19})  # Li, Na, Mg, K
 SCF_MAXITER = 250  # tblite's own default SCF cycle limit
+# the fixed symmetry-breaking displacement of P2's scan (scripts/probes/spin_scan.py)
+KICK_ANG = 0.02
+KICK_SEED = 0
+FORMED_FACTOR = 1.2  # a non-bonded pair closer than this x r_cov sum is a formed bond (the walls)
 
 
 def new_calculator(
@@ -190,3 +196,41 @@ def check_connectivity(mol: Chem.Mol, xyz_ang: np.ndarray, cov_factor: float) ->
         raise QMError(
             ReasonCode.CONNECTIVITY_CHANGED, f"{len(broken)} bond(s) beyond {cov_factor}x: {shown}"
         )
+
+
+def kick(shape: tuple[int, ...]) -> np.ndarray:
+    """The fixed symmetry-breaking displacement (Bohr): normal, sigma KICK_ANG, seed KICK_SEED,
+    the second start of P2's spin scan."""
+    return np.random.default_rng(KICK_SEED).normal(0.0, KICK_ANG / BOHR_ANG, shape)
+
+
+def _bond_tested(atom: Chem.Atom) -> bool:
+    """Neither a transition metal (the coordination sphere of a ligand-truncated fragment moves
+    freely) nor Li, Na, Mg or K (`SKIP_BOND_ELEMENTS`)."""
+    from ksmech.data import domain
+
+    d = domain.d_count(atom)
+    tm = d is not None and 0 <= d <= 10
+    return not tm and atom.GetAtomicNum() not in SKIP_BOND_ELEMENTS
+
+
+def formed_bonds(
+    mol: Chem.Mol, xyz_ang: np.ndarray, factor: float = FORMED_FACTOR
+) -> list[tuple[int, int, float]]:
+    """(i, j, d / r_cov sum) of the pairs not bonded in the drawing (graph distance 2 or more)
+    that end within `factor` x their covalent-radius sum, where the bond walls start: a bond the
+    optimization formed, which `check_connectivity` ignores (P2's BOND_FORMED law,
+    scripts/probes/open_shell_probe.py). Metal-ligand contacts and Li, Na, Mg and K are left
+    out (`_bond_tested`)."""
+    table, dist = Chem.GetPeriodicTable(), Chem.GetDistanceMatrix(mol)
+    keep = [a.GetIdx() for a in mol.GetAtoms() if _bond_tested(a)]
+    out = []
+    for i, j in itertools.combinations(keep, 2):
+        if dist[i, j] < 2:
+            continue
+        zi, zj = mol.GetAtomWithIdx(i).GetAtomicNum(), mol.GetAtomWithIdx(j).GetAtomicNum()
+        rcov = table.GetRcovalent(zi) + table.GetRcovalent(zj)
+        r = float(np.linalg.norm(xyz_ang[i] - xyz_ang[j])) / rcov
+        if r < factor:
+            out.append((i, j, round(r, 3)))
+    return out

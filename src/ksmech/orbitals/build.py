@@ -38,9 +38,9 @@ from ksmech.orbitals.tokens import (
     MoleculeTokens,
     atom_feature_names,
     build_molecule_tokens,
-    drawn_unpaired,
     legacy_differences,
     load_tokens,
+    record_unpaired,
     save_tokens,
     token_config,
 )
@@ -53,6 +53,7 @@ from ksmech.qm.records import (
     is_valid_cache_file,
     load_record,
 )
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import QMConfig
 
 log = logging.getLogger(__name__)
@@ -162,7 +163,7 @@ def frontier_merges(t: MoleculeTokens) -> dict[str, bool]:
     exact ones (1e-4 eV): the 0.05 eV window of the legacy columns merges distinct levels
     there. Empty for a Fermi-smeared molecule (outside the closed-shell domain) and for an open
     shell, whose blocks come from its occupations (`frontier.record_frontier_blocks`)."""
-    if t.fermi_smeared or drawn_unpaired(t.smiles) > 0:
+    if t.fermi_smeared or record_unpaired(t.smiles, t.method) > 0:
         return {}
     occ, virt = t.occupied(), t.virtual()
     e_occ = occ[0].descriptors.full_energies if occ else np.zeros(0)
@@ -246,8 +247,9 @@ def open_shell_diagnostics(rec) -> dict:
 def _with_open_shell(row: BuildRow, qm_path: Path, config: BuildConfig, rec=None) -> BuildRow:
     """`row` with `open_shell_diagnostics` when its molecule is an open shell (the QM record is
     read for a loaded token file)."""
-    if row.status in ("built", "loaded") and drawn_unpaired(row.smiles) > 0:
-        rec = rec or load_record(qm_path, (row.smiles, config.conformer_id, config.method))
+    method = method_for(row.smiles, config.method)
+    if row.status in ("built", "loaded") and record_unpaired(row.smiles, method) > 0:
+        rec = rec or load_record(qm_path, (row.smiles, config.conformer_id, method))
         row.open_shell = open_shell_diagnostics(rec)
     return row
 
@@ -262,10 +264,11 @@ def process_molecule(smiles: str, config: BuildConfig) -> BuildRow:
     """Build (or load) the tokens of one molecule. Never raises. A token file whose header no
     longer matches (schema, config, or the QM record it was built from) is rebuilt; a QM record
     whose header does not match this molecule and method is `stale_qm` (STALE_ARTIFACT)."""
-    qm_path = cache_path(config.qm_cache_dir, smiles, config.conformer_id, config.method)
+    method = method_for(smiles, config.method)
+    qm_path = cache_path(config.qm_cache_dir, smiles, config.conformer_id, method)
     if not is_valid_cache_file(qm_path):
         return BuildRow(smiles, "missing_qm", str(qm_path))
-    out = tokens_path(config.out_dir, smiles, config.conformer_id, config.method)
+    out = tokens_path(config.out_dir, smiles, config.conformer_id, method)
     tok_config = token_config(config.pm)
     try:
         if out.is_file() and not config.force:
@@ -275,7 +278,7 @@ def process_molecule(smiles: str, config: BuildConfig) -> BuildRow:
             except StaleArtifact as exc:
                 log.info("rebuilding %s", exc)
         try:
-            record = load_record(qm_path, (smiles, config.conformer_id, config.method))
+            record = load_record(qm_path, (smiles, config.conformer_id, method))
         except StaleArtifact as exc:
             return BuildRow(smiles, "stale_qm", str(exc))
         tokens = build_molecule_tokens(record, pm_config=config.pm, classify_config=config.classify)

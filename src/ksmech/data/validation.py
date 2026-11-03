@@ -193,21 +193,39 @@ def build_step(
     return admit_open_shell(step)
 
 
+def _readable(policy: domain.DomainPolicy) -> set[DomainCode]:
+    """The exclusion codes the open-shell laws re-read under a source's policy."""
+    out = set()
+    if policy.open_shell is OpenShellPolicy.ADMIT_BY_RULE:
+        out.add(DomainCode.RADICAL_DRAWN)
+    if policy.open_shell_metal is OpenShellPolicy.ADMIT_BY_RULE:
+        out.add(DomainCode.OPEN_SHELL_METAL)
+    return out
+
+
+def _blocking_code(reactants: Chem.Mol, products: Chem.Mol, readable: set) -> DomainCode | None:
+    """The first code (`PRECEDENCE`) of a fragment of either side that the laws do not re-read:
+    the step's exclusion stays that code."""
+    codes = set(domain.side_codes(reactants)[0] + domain.side_codes(products)[0])
+    return next((c for c in domain.PRECEDENCE if c in codes and c not in readable), None)
+
+
 def admit_open_shell(step: ElementaryStep) -> ElementaryStep:
-    """A RADICAL_DRAWN step of a source that admits open shells by rule (`domain.POLICY`),
-    re-read by the laws (u) and (R) of `data.domain` (its docstring, 4; open-shell plan P3):
-    a failed law replaces RADICAL_DRAWN by its code; a step that passes is admitted as
-    RADICAL_SPECTATOR or RADICAL_REACTIVE, or, when the source's curation file names it, keeps
-    RADICAL_DRAWN with the curated reason as its class. R is the dataset arrows' edit
+    """A RADICAL_DRAWN or OPEN_SHELL_METAL step of a source that admits it by rule
+    (`domain.POLICY`), re-read by the laws (u) and (R) of `data.domain` (its docstring, 3 and 4;
+    open-shell plan P3 and P4): a fragment code the policy does not re-read keeps the step out
+    under that code; a failed law replaces the exclusion by its code; a step that passes is
+    admitted with `domain.open_shell_classes`, or, when the source's curation file names it,
+    keeps its exclusion with the curated reason as its class. R is the dataset arrows' edit
     (`delta_be.dataset_matrix`); a step whose edit fails is NOT_ELEMENTARY. Law (S) needs the
     tokens and is the sample builder's (SOMO_NOT_INTEGRAL)."""
-    policy = domain.POLICY.get(str(step.source), domain.DomainPolicy())
-    if step.domain_exclusion != DomainCode.RADICAL_DRAWN:
+    readable = _readable(domain.POLICY.get(str(step.source), domain.DomainPolicy()))
+    if step.domain_exclusion not in {str(c) for c in readable}:
         return step
-    if policy.open_shell is not OpenShellPolicy.ADMIT_BY_RULE:
-        return step
+    reactants = chem.parse_mapped(step.reactants_smiles)
     products = chem.parse_mapped(step.products_smiles)
-    code = domain.spin_law(chem.parse_mapped(step.reactants_smiles), products)
+    code = _blocking_code(reactants, products, readable)
+    code = code or domain.spin_law(reactants, products)
     edit = dataset_matrix(step) if code is None else None
     if code is None and (isinstance(edit, EditSkip) or not domain.parity_law(edit[2].lone)):
         code = DomainCode.NOT_ELEMENTARY
@@ -215,8 +233,8 @@ def admit_open_shell(step: ElementaryStep) -> ElementaryStep:
         return replace(step, domain_exclusion=str(code))
     mol, _, r, _ = edit
     curated = domain.open_shell_curation(str(step.source)).get(step.step_id)
-    cls = curated or domain.radical_class(mol, products, r.bonds, r.lone)
-    classes = domain.join_classes(domain.domain_classes(step.domain_class) | {cls})
+    found = {curated} if curated else domain.open_shell_classes(mol, products, r.bonds, r.lone)
+    classes = domain.join_classes(domain.domain_classes(step.domain_class) | found)
     exclusion = step.domain_exclusion if curated else None
     return replace(step, domain_exclusion=exclusion, domain_class=classes)
 

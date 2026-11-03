@@ -37,6 +37,7 @@ from ksmech.orbitals.tokens import (
 )
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import cache_path
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import QMConfig
 
 
@@ -100,7 +101,8 @@ def ensure_tokens(keys: list[str], tokens_dir: Path, qm: QMConfig | None = None)
     qm = qm or QMConfig()
     built = []
     for key in keys:
-        path = tokens_path(tokens_dir, key, 0, qm.method)
+        method = method_for(key, qm.method)
+        path = tokens_path(tokens_dir, key, 0, method)
         if path.exists():
             try:
                 load_tokens(path)
@@ -108,7 +110,7 @@ def ensure_tokens(keys: list[str], tokens_dir: Path, qm: QMConfig | None = None)
             except StaleArtifact:
                 pass  # rebuilt below
         record = compute_fixture_records({key: key}, qm)[key]
-        qm_path = cache_path(qm.cache_dir, key, 0, qm.method)
+        qm_path = cache_path(qm.cache_dir, key, 0, method)
         save_tokens(build_molecule_tokens(record), path, prov.file_input(qm_path))
         built.append(key)
     return built

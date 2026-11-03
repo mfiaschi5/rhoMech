@@ -47,7 +47,7 @@ from ksmech.arrows.steps import (
     samples_path,
 )
 from ksmech.data import provenance as prov
-from ksmech.data.io import DEFAULT_PROCESSED_DIR
+from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
 from ksmech.model.config import ModelConfig
 from ksmech.model.inputs import FeatureStats, fit_feature_stats, to_device, token_columns
 from ksmech.model.loss import anchor_ranks, edit_matches, greedy_edit, step_loss
@@ -82,6 +82,7 @@ class TrainConfig:
     stop_weight: float = -1.0  # lambda_stop; < 0: the source's (0.5, 0 on PMechDB)
     resonance_draws: bool = True  # each epoch, every training sample in a random drawing
     eval_test: bool = False  # also score the split's test part each epoch (test_*), never for best
+    drop_domain_class: tuple[str, ...] = ()  # training samples of these classes left out (P4)
 
 
 STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0}  # PMechDB: isolated steps, no stop labels
@@ -182,23 +183,51 @@ def drop_undecodable_drawings(samples: list, part: str) -> int:
     return dropped
 
 
+DROPPED_DOMAIN_CLASS = "DROPPED_DOMAIN_CLASS"
+
+
+def drop_domain_classes(samples: list, source: str, classes, processed_dir: Path) -> list:
+    """The samples whose step's `domain_class` holds none of `classes` (the training part of an
+    ablation, open-shell plan P4: the open_shell_metal cohort left out); each dropped one is
+    logged."""
+    from ksmech.data.domain import domain_classes
+
+    want = set(classes)
+    held = {
+        s.step_id
+        for s in read_steps(steps_path(source, processed_dir))
+        if domain_classes(s.domain_class) & want
+    }
+    for s in samples:
+        if s.step_id in held:
+            log.info("train %s left out: %s (%s)", s.step_id, DROPPED_DOMAIN_CLASS, sorted(want))
+    return [s for s in samples if s.step_id not in held]
+
+
 def load_source_part(
     cfg: TrainConfig, source: str, part: str, processed_dir: Path
 ) -> tuple[list, dict]:
     """The samples of one source's part that fit the token cap, and the skip counts (samples
-    too large, drawings the decoder cannot write)."""
+    too large, drawings the decoder cannot write, and in the training part the samples of the
+    domain classes `cfg.drop_domain_class` names)."""
     path = samples_path(source, f"{cfg.split}_{part}", processed_dir)
     samples = load_samples(path)
     if cfg.limit:
         samples = samples[: cfg.limit]
+    skipped, total = {}, len(samples)
+    if part == "train" and cfg.drop_domain_class:
+        samples = drop_domain_classes(samples, source, cfg.drop_domain_class, processed_dir)
+        skipped[DROPPED_DOMAIN_CLASS] = total - len(samples)
+        log.info("%d training samples left out by --drop-domain-class", total - len(samples))
     keep = [s for s in samples if _size(s) + 1 <= cfg.max_tokens]
-    skipped = {TOO_LARGE: len(samples) - len(keep)} if len(keep) < len(samples) else {}
+    if len(keep) < len(samples):
+        skipped[TOO_LARGE] = len(samples) - len(keep)
     for s in samples:
         if _size(s) + 1 > cfg.max_tokens:
             log.warning("%s %s skipped: %s (%d tokens)", part, s.step_id, TOO_LARGE, _size(s))
     if n := drop_undecodable_drawings(keep, part):
         skipped["drawings NOT_ELEMENTARY"] = n
-    return keep, {"n": len(samples), "used": len(keep), "skipped": skipped, "path": str(path)}
+    return keep, {"n": total, "used": len(keep), "skipped": skipped, "path": str(path)}
 
 
 def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[dict[str, list], dict]:
