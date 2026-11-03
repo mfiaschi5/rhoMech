@@ -286,7 +286,7 @@ token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
 | `edit_label` | EditLabel | the target: the parsimonious reaction-matrix class and its anchors on the global atoms (`arrows.delta_be`) |
 | `bonds`, `lone_pairs`, `wiberg` | int16 (E, 3) / int8 (A,) / float16 (E,) | the reactant's Lewis structure as drawn (Kekulé, implicit H included): (i, j, order) with i < j, lone pairs per atom, the Wiberg index of each bond (`arrows.lewis`) |
 | `orbital_reading` | str | `aligned`, `LABEL_FILTERED`, the first unaligned reason (e.g. `HETEROLYSIS_ONLY`), or `NO_ARROWS` for a source without arrows (ReactMech) |
-| `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` (a closed shell: kept and sliced; an open-shell fragment, drawn u > 0, skips the step as `SOMO_NOT_INTEGRAL`, law (S) of open-shell plan P3) |
+| `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` (a closed shell, or an odd Cu(II) / Fe(III) fragment RDKit counts 0: kept and sliced; a fragment drawn u > 0 that stays an open shell under its record's count skips the step as `SOMO_NOT_INTEGRAL`, law (S) of open-shell plan P3) |
 | `label_filter` | dict[str, int] | labeled (donor, acceptor) cells that `pair_valid` rejects, by group |
 | `inputs` | dict[str, str] | provenance: every token file the sample was built from (`file:<path>` -> sha256) |
 | `pair_features` | tuple[str] | the column names of `pair_z` / `pair_defined` |

@@ -7603,8 +7603,9 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
     agree on the row's count. Cu(II) d9 is 1 by count either way; the plan's 'scan the control'
     reads the same.
   - A ligand-dropped metal (`domain.is_placeholder`, odd or even) is MULTIPLICITY_AMBIGUOUS:
-    it is no species. Without this the table's u = 0 for `C=[O+][Sn-]` would have tagged and
-    computed a placeholder. Domain is unchanged by it (METAL_PLACEHOLDER comes first).
+    it is no species. On PMechDB it changes no count and no tag (METAL_PLACEHOLDER comes first
+    in domain; `C=[O+][Sn-]` is ML1 by the placeholder law, an onium donor its Sn- compensates,
+    so the table's u = 0 tags it).
 - **QM.** `qm.spin` tags a species whose assigned count differs from RDKit's with
   `+spin-v1-u<u>`, inserted after the optimizer part (`...tblite-lbfgs+spin-v1-u1+metal-geom-v1`
   for serve, the order fixed for S1). The plan's tag is `+spin-v1`; the count is added so that
@@ -7615,17 +7616,18 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   the failure memo when every start fails) and the lower energy is kept. These are P2's open
   questions for P4 (the linear saddle of a 2-coordinate carbene, the BOND_FORMED check in
   production), answered by the laws the table itself was built with; they apply to tagged
-  species only, so no untagged record's meaning changes. Ph2C=C: has no singlet minimum at
-  GFN2 (P2: the singlet shifts to diphenylacetylene from every start), so it is expected to
-  fail as BOND_FORMED and its step stays out, counted (MISSING_TOKENS at sample build).
+  species only, so no untagged record's meaning changes.
 - **Keys.** Every engine site that builds a record, tombstone, token or sidecar path from a
   configured method goes through `qm.spin.method_for` (grep test, tests/test_qm_spin.py); the
   QM manifest's method is per row (`qm.batch.row_method`). Serve keeps RDKit spin until S1:
   its pre-screens refuse radicals and SPIN_PARITY before any QM, and a closed-shell metal
   complex keeps its method and key (tested). A token file's open-shell key reads the count its
   record was run at from the method tag (`orbitals.tokens.record_unpaired`); law (S) reads the
-  same count, so a smeared Cu(II) fragment is SOMO_NOT_INTEGRAL like a smeared radical (one
-  law for every open shell, where the plan expected such Cu adducts as a flagged slice).
+  count of fragments drawn with radical electrons only: a smeared Cu(II) fragment stays a
+  flagged sample of the fermi_smeared slice, as the plan says (its d tokens are masked either
+  way). The first version read every open shell, metals included, and would have held back
+  the 7 CuCl2 steps; the user chose the plan's reading on 2026-11-03, and the spec's metal
+  sentence says so.
 - **Index.** INDEX_VERSION 1 -> 2: `unpaired`, `spin_source`, `spin_rule_version` for records
   and tombstones, and `index stats` lists the tagged ones.
 - **Domain.** `DomainPolicy.open_shell_metal` (PMechDB ADMIT_BY_RULE, every other source
@@ -7642,7 +7644,7 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   no trigonal-planar rule; the Fe(OTf)2 oxocarbenium pairs 2; others 3). SPIN_RULE_PENDING 12
   -> CARBENE_SINGLET 12 (10 steps, the 2 CO drawings resonance pairs), as the plan expected.
   The plan's 62 metal steps (Fe 39) assumed every Fe species confirmed; 20 Fe steps are not.
-  QM: 48 tagged species (Cu 28, Fe 13, u = 0: the 6 carbene and CO species and the Et3B-O2
-  adduct of 5d007b38, which the table pairs).
+  QM: 49 tagged species (Cu 28, Fe 13, u = 0: the 6 carbene and CO species, the Et3B-O2
+  adduct of 5d007b38 and the ML1 adduct C=[O+][Sn-], which the table pairs).
 - **Train.** `--drop-domain-class` leaves the training samples of the named classes out of
   training (never out of evaluation), each logged, counted as DROPPED_DOMAIN_CLASS.

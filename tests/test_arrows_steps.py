@@ -618,13 +618,14 @@ def test_a_smeared_open_shell_reactant_has_no_integral_somo():
     assert smeared_open_shells(rt) == ["[O][O-]"]  # a smeared closed shell stays a slice (U10)
 
 
-def test_law_s_reads_the_count_the_record_was_run_at():
-    """A Cu(II) fragment RDKit counts 0 is an open shell (its tagged record: u = 1); a carbene
-    the species table pairs is not (u = 0)."""
+def test_law_s_reads_drawn_radicals_that_stay_open_shells():
+    """A smeared Cu(II) fragment RDKit counts 0 stays a flagged sample (its d tokens are
+    masked), and a carbene the species table pairs (u = 0) is no open shell; a smeared drawn
+    doublet is held back."""
     from types import SimpleNamespace
 
-    rt = SimpleNamespace(fragments=[_fragment("[Cl][Cu][Cl]", True), _fragment("Cl[C]Cl", True)])
-    assert smeared_open_shells(rt) == ["[Cl][Cu][Cl]"]
+    frags = [_fragment("[Cl][Cu][Cl]", True), _fragment("Cl[C]Cl", True), _fragment("[CH3]", True)]
+    assert smeared_open_shells(SimpleNamespace(fragments=frags)) == ["[CH3]"]
 
 
 def _na_sample(distance: float, r_bonds):

@@ -91,6 +91,7 @@ from ksmech.orbitals.tokens import (
     STORED_ORBITAL_FEATURES,
     MoleculeTokens,
     atom_feature_names,
+    drawn_unpaired,
     feature_names,
     record_unpaired,
 )
@@ -456,14 +457,19 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
 
 
 def smeared_open_shells(rt: ReactantTokens) -> list[str]:
-    """Law (S) of the open-shell admission (`data.domain`, open-shell plan P3): the open-shell
-    reactant fragments (u > 0 as their record was run, `record_unpaired`: a Cu(II) or Fe(III)
-    fragment RDKit counts 0 included) whose tokens are Fermi-smeared, i.e. whose record has an
-    MO further than SMEAR_TOL from P2b's plateau reference; their SOMO is not integral."""
+    """Law (S) of the open-shell admission (`data.domain`, open-shell plan P3): the reactant
+    fragments drawn with radical electrons that stay open shells as their record was run
+    (`record_unpaired`; a carbene the species table pairs does not) whose tokens are
+    Fermi-smeared, i.e. whose record has an MO further than SMEAR_TOL from P2b's plateau
+    reference; their SOMO is not integral. An odd metal fragment RDKit counts 0 (Cu(II),
+    Fe(III), P4) is not read: its d singly occupied tokens are neither donors nor acceptors,
+    and a smeared one stays a flagged sample (the fermi_smeared slice, U10; user, 2026-11-03)."""
     return [
         f.key
         for f in rt.fragments
-        if f.tokens.fermi_smeared and record_unpaired(f.key, f.tokens.method)
+        if f.tokens.fermi_smeared
+        and drawn_unpaired(f.key)
+        and record_unpaired(f.key, f.tokens.method)
     ]
 
 
