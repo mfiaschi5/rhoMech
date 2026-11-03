@@ -24,6 +24,9 @@ RADICAL_DRAWN or with one of the laws' codes (`domain.OPEN_SHELL_CODES`), and an
 (code KEPT, class RADICAL_SPECTATOR or RADICAL_REACTIVE), so the subclasses do not move when
 the admission does.
 
+A step with an odd metal fragment gets its metal subclass whatever P4's admission made of it:
+coded OPEN_SHELL_METAL, one of the laws' codes, or admitted (KEPT, class OSM_CU2 or OSM_FE3).
+
 Metals: OSM_FE3, OSM_CU2, CUH2_LIGAND, CU_SUSPECT (Cu=C, CuI2), PD_DATIVE (an odd Pd fragment
 with an uncompensated onium), PD_ALREADY_NEG (a step holding an odd Pd already at -1), L1PD
 ([Pd] bonded only to an onium P, on a METAL_PLACEHOLDER step), PLACEHOLDER; on kept steps
@@ -45,6 +48,7 @@ from rdkit import Chem, rdBase
 from ksmech.data import chem
 from ksmech.data.domain import (
     _S_BLOCK,
+    ADMITTED_METAL,
     ADMITTED_OPEN_SHELL,
     METALS,
     OPEN_SHELL_CODES,
@@ -137,6 +141,26 @@ def _odd_metal_class(frag: Chem.Mol) -> str | None:
 METAL_ORDER = ("PD_ALREADY_NEG", "CU_SUSPECT", "CUH2_LIGAND", "OSM_CU2", "OSM_FE3", "PD_DATIVE")
 
 
+def _odd_metal(sides: list[Chem.Mol]) -> bool:
+    """Some fragment of either side is odd and holds a metal `_odd_metal_class` names."""
+    frags = (f for m in sides for f in Chem.GetMolFrags(m, asMols=True, sanitizeFrags=False))
+    return any(is_odd(f) and _odd_metal_class(f) for f in frags)
+
+
+def _survey_code(step, sides: list[Chem.Mol]) -> str | None:
+    """'metal', 'radical' or 'kept': which classifier reads the step (module docstring)."""
+    code, classes = step.domain_exclusion, domain_classes(step.domain_class)
+    metal = classes & {str(c) for c in ADMITTED_METAL}
+    if code in ("OPEN_SHELL_METAL", "METAL_PLACEHOLDER") or (code is None and metal):
+        return "metal"
+    if code in OPEN_SHELL_CODES and _odd_metal(sides):
+        return "metal"
+    radical = classes & {str(c) for c in ADMITTED_OPEN_SHELL}
+    if code == "RADICAL_DRAWN" or code in OPEN_SHELL_CODES or (code is None and radical):
+        return "radical"
+    return "kept" if code is None else None
+
+
 def classify_metal(sides: list[Chem.Mol], code: str) -> str:
     """Subclass of an OPEN_SHELL_METAL or METAL_PLACEHOLDER step from the subclasses of all its
     odd fragments, on both sides: a step that holds a Pd already at -1 anywhere is
@@ -216,12 +240,12 @@ def survey_row(step) -> dict | None:
     code = step.domain_exclusion
     arrow_maps = {m for arrow in step.arrows for m in arrow.atoms}
     touched: list[int] = []
-    admitted = domain_classes(step.domain_class) & {str(c) for c in ADMITTED_OPEN_SHELL}
-    if code == "RADICAL_DRAWN" or code in OPEN_SHELL_CODES or (code is None and admitted):
+    reader = _survey_code(step, sides)
+    if reader == "radical":
         sub, touched = classify_radical(sides, arrow_maps)
-    elif code in ("OPEN_SHELL_METAL", "METAL_PLACEHOLDER"):
-        sub = classify_metal(sides, code)
-    elif code is None:
+    elif reader == "metal":
+        sub = classify_metal(sides, code or "KEPT")
+    elif reader == "kept":
         sub = classify_kept(sides)
         if sub is None:
             return None
@@ -235,8 +259,18 @@ def survey_row(step) -> dict | None:
     }
 
 
+def _own_method(smiles: str) -> str:
+    """The species' current QM method (`qm.spin.method_for`): a manifest row under another one
+    (the untagged SPIN_PARITY row of a Cu(II) species P4 computes tagged) is history."""
+    from ksmech.qm.spin import method_for
+    from ksmech.qm.xtb_calc import QMConfig
+
+    return method_for(smiles, QMConfig().method)
+
+
 def survey(steps, manifest=None) -> dict:
-    """Counts by code and subclass, the rows, and the SPIN_PARITY kinds of the QM manifest."""
+    """Counts by code and subclass, the rows, and the SPIN_PARITY kinds of the QM manifest
+    (each species under its current method)."""
     rows = [r for s in steps if (r := survey_row(s)) is not None]
     counts: dict[str, Counter] = defaultdict(Counter)
     for r in rows:
@@ -245,6 +279,8 @@ def survey(steps, manifest=None) -> dict:
     out["resonance_steps"] = dict(Counter(r["code"] for r in rows if r["resonance_step"]))
     if manifest is not None:
         failed = manifest[(manifest["status"] == "failed") & (manifest["reason"] == "SPIN_PARITY")]
+        rows = zip(failed["smiles"], failed["method"], strict=True)
+        failed = failed[[m == _own_method(smiles) for smiles, m in rows]]
         kinds = Counter(spin_parity_kind(s) for s in failed["smiles"].unique())
         out["spin_parity_molecules"] = dict(kinds.most_common())
     radicals = [r for r in rows if r["subclass"] in ("RADICAL_SPECTATOR", "RADICAL_REACTIVE")]

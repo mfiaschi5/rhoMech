@@ -678,18 +678,22 @@ def _rescreened(step: ElementaryStep) -> ElementaryStep:
     )
 
 
-# open-shell plans P0a step 6, P1 and P3: (codes, repairs per rule, domain classes) over every
-# stored step. P1's rules equal the P0 survey: C3_METHYL 9, BARE_ALKALI 4, BETA_LACTAM_N 1 and,
-# in the ReactMech pilot, CDI_IMIDAZOLYL 62. P3's laws split PMechDB's 30 RADICAL_DRAWN steps:
-# 11 admitted, 12 + 2 by a law, 5 curated (they keep RADICAL_DRAWN). On spin_table_v1 the 8
-# dihalocarbene and diphenylvinylidene steps were MULTIPLICITY_AMBIGUOUS; v2 assigns them 0.
-P3_COUNTS = {
+# open-shell plans P0a step 6, P1, P3 and P4: (codes, repairs per rule, domain classes) over
+# every stored step. P1's rules equal the P0 survey: C3_METHYL 9, BARE_ALKALI 4, BETA_LACTAM_N 1
+# and, in the ReactMech pilot, CDI_IMIDAZOLYL 62. P3's laws split PMechDB's 30 RADICAL_DRAWN
+# steps: 11 admitted, 12 + 2 by a law, 5 curated (they keep RADICAL_DRAWN). P4: the 12 held
+# SPIN_RULE_PENDING are CARBENE_SINGLET (2 of them the CO resonance pairs); the 78
+# OPEN_SHELL_METAL steps are OSM_CU2 23, OSM_FE3 19 (2 resonance pairs each) and 36
+# MULTIPLICITY_AMBIGUOUS (12 Cu, REDOX_INCOMPATIBLE or a failed scan; 24 Fe the species table
+# does not confirm). ReactMech keeps OPEN_SHELL_METAL until P8.
+P4_COUNTS = {
     "pmechdb": (
-        {None: 12936, "OPEN_SHELL_METAL": 78, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 5,
-         "CHARGE_UNREPAIRED": 1, "SPIN_RULE_PENDING": 12, "SPIN_NOT_CONSERVED": 2},
+        {None: 12990, "MULTIPLICITY_AMBIGUOUS": 36, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 5,
+         "CHARGE_UNREPAIRED": 1, "SPIN_NOT_CONSERVED": 2},
         {"R1 group-14 -1 removed": 1, V1_METHYL: 9, A1_RULE: 4, BL_RULE: 1},
         {"REPAIRED_V1": 9, "REPAIRED_A1": 4, "REPAIRED_BL": 1, "RADICAL_SPECTATOR": 11,
-         "RADICAL_AMBIGUOUS": 3, "DRAWING_ERROR_UNREPAIRED": 2},
+         "RADICAL_AMBIGUOUS": 3, "DRAWING_ERROR_UNREPAIRED": 2, "CARBENE_SINGLET": 12,
+         "OSM_CU2": 23, "OSM_FE3": 19},
     ),
     "reactmech": (  # the pilot
         {None: 9998, "OPEN_SHELL_METAL": 2},
@@ -718,14 +722,14 @@ def _rescreened_store(source: str) -> list[ElementaryStep]:
 
 
 @pytest.mark.realdata
-@pytest.mark.parametrize("source", sorted(P3_COUNTS))
-def test_the_domain_laws_give_the_p3_counts(source):
+@pytest.mark.parametrize("source", sorted(P4_COUNTS))
+def test_the_domain_laws_give_the_p4_counts(source):
     from collections import Counter
 
     from ksmech.data.ingest import repair_rule_counts
 
     steps = _rescreened_store(source)
-    codes, rules, classes = P3_COUNTS[source]
+    codes, rules, classes = P4_COUNTS[source]
     assert dict(Counter(s.domain_exclusion for s in steps)) == codes
     assert dict(repair_rule_counts(steps)) == rules
     assert dict(Counter(s.domain_class for s in steps if s.domain_class)) == classes

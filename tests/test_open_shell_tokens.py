@@ -4,8 +4,8 @@ Before the rebuild: a random 500 of the closed-shell token files are rebuilt in 
 today's identical content hash, and every open-shell record keeps its plateau reference for any
 tolerance from 1e-13 to 1e-3 e. After `ksmech-orbitals build --source pmechdb` (the copy of the
 summary taken before it is `p2b_reference/tokens_summary.json`): every open-shell token file is
-current, none is smeared, and the smeared list lost exactly the open shells the rule made
-integral.
+current, no drawn radical is smeared, and the smeared list lost exactly the open shells the rule
+made integral; since P4 it holds the three Cu(II) species GFN2 smears.
 """
 
 import json
@@ -23,6 +23,9 @@ TOKENS = Path("data/cache/tokens")
 SUMMARY = DEFAULT_PROCESSED_DIR / "pmechdb" / "tokens_summary.json"
 BEFORE = DEFAULT_PROCESSED_DIR / "pmechdb" / "p2b_reference" / "tokens_summary.json"
 MADE_INTEGRAL = {"[C]=O", "[CuH2]", "[O][O-]"}  # measured 2026-10-31 on the 44 open shells
+# P4 (2026-11-03): three tagged Cu(II) species GFN2 smears; law (S) does not read metals, so
+# their steps keep them as flagged samples
+P4_SMEARED = {"CC#[N+][Cu-]([Br])[Br]", "C[NH2+][Cu-]([Br])[Br]", "[Cl][Cu][Cl]"}
 
 
 def _molecules():
@@ -99,6 +102,22 @@ def test_the_rebuild_made_every_open_shell_file_current_and_integral():
         assert not t.fermi_smeared, smiles
         assert prov.read_header(path).config["open_shell_rule"] == OPEN_SHELL_RULE
     op = after["open_shell"]
-    assert op["n_molecules"] == len(radicals) and op["n_fermi_smeared"] == 0
+    assert op["n_molecules"] == len(_open_now()) and set(op["fermi_smeared"]) == P4_SMEARED
     old, new = set(before["fermi_smeared"]["smiles"]), set(after["fermi_smeared"]["smiles"])
-    assert new <= old and old - new == MADE_INTEGRAL
+    assert new - old == P4_SMEARED and old - new == MADE_INTEGRAL
+
+
+def _open_now() -> list[str]:
+    """The species whose record under its current method (`qm.spin.method_for`) is an open
+    shell: the drawn radicals the species table does not pair, and since P4 the Cu(II) and
+    Fe(III) fragments RDKit counts 0."""
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.orbitals.tokens import record_unpaired
+    from ksmech.qm.batch import collect_molecules
+    from ksmech.qm.spin import method_for
+    from ksmech.qm.xtb_calc import QMConfig
+
+    smiles, _ = collect_molecules("pmechdb", DEFAULT_PROCESSED_DIR)
+    methods = {s: method_for(s, QMConfig().method) for s in smiles}
+    have = [s for s in smiles if tokens_path(TOKENS, s, 0, methods[s]).is_file()]
+    return [s for s in have if record_unpaired(s, methods[s])]

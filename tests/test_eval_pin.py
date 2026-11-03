@@ -113,7 +113,8 @@ def test_the_pin_command(mini_store):
 @pytest.mark.realdata
 def test_closed_base_reloads_and_its_digests_reproduce_on_a_rebuild():
     """closed_base (no file inputs) loads after any re-ingest and holds the molecule split's
-    samples but the cohorts of steps returned later ('added', 'open_shell'); 30 of its samples
+    samples but the cohorts of steps returned later ('added', 'open_shell', and P4's
+    'carbene_singlet' and 'open_shell_metal'); 30 of its samples
     rebuilt from their tokens, through the store's packing, give the pinned digests on every
     shared column."""
     from ksmech.arrows.reactants import TokenCache
@@ -124,8 +125,8 @@ def test_closed_base_reloads_and_its_digests_reproduce_on_a_rebuild():
         pytest.skip("closed_base is not pinned (ksmech-eval pin --source pmechdb ...)")
     ids = co.load_cohort("pmechdb", "closed_base")
     views = [samples_path("pmechdb", f"molecule_{p}") for p in ("train", "val", "test")]
-    later = set()  # the steps P1's repairs returned ('added') and P3 admitted ('open_shell')
-    for name in ("added", "open_shell"):
+    later = set()  # the steps P1's repairs returned ('added'), P3 and P4 admitted
+    for name in ("added", "open_shell", "carbene_singlet", "open_shell_metal"):
         if co.cohort_path("pmechdb", name).exists():
             later |= co.load_cohort("pmechdb", name)
     assert ids == {i for v in views for i in sample_ids(v)} - later and not ids & later

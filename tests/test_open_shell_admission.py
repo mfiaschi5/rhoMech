@@ -26,6 +26,8 @@ ORACLE = Path("tests/fixtures/pmechdb_radical_survey.json")
 # step 3 (b))
 KNOWN_DIFFERENCES = {"pmechdb-5d007b38296827b6": DomainCode.SPIN_NOT_CONSERVED}
 RESONANCE_PAIRS_GAINED = {"pmechdb-db877060093d34fc", "pmechdb-dcf0a54a98432a8c"}
+# P4's: the two CO drawings (CARBENE_SINGLET) and two each of OSM_CU2 and OSM_FE3
+P4_RESONANCE_CLASSES = {"CARBENE_SINGLET": 2, "OSM_CU2": 2, "OSM_FE3": 2}
 BIRCH = "pmechdb-4bda5440edfee13c"
 
 
@@ -36,11 +38,13 @@ def steps():
     return {s.step_id: s for s in _rescreened_store("pmechdb")}
 
 
+RADICAL = {str(domain.DomainClass.RADICAL_SPECTATOR), str(domain.DomainClass.RADICAL_REACTIVE)}
+
+
 def _admitted(step) -> bool:
+    """Admitted as a radical (P3's classes; P4's paired carbenes and metals are not radicals)."""
     classes = domain.domain_classes(step.domain_class)
-    return step.domain_exclusion is None and bool(
-        classes & {str(c) for c in domain.ADMITTED_OPEN_SHELL}
-    )
+    return step.domain_exclusion is None and bool(classes & RADICAL)
 
 
 def test_the_admitted_set_is_the_hand_reading_but_the_known_differences(steps):
@@ -86,7 +90,22 @@ def test_the_reingest_gains_exactly_the_two_radical_resonance_pairs():
         pytest.skip("run the P3 re-ingest (resonance pairs copied to p3_reference/ first)")
     ids = lambda p: set(pq.read_table(p, columns=["step_id"]).column(0).to_pylist())  # noqa: E731
     old, new = ids(before), ids(PM / "resonance_pairs.parquet")
-    assert old <= new and new - old == RESONANCE_PAIRS_GAINED
+    p4 = PM / "p4_reference" / "resonance_pairs.parquet"
+    later = new - ids(p4) if p4.exists() else set()  # the pairs P4 gained, checked below
+    assert old <= new and new - old - later == RESONANCE_PAIRS_GAINED
+
+
+def test_the_p4_reingest_gains_the_carbene_and_metal_resonance_pairs(steps):
+    import pyarrow.parquet as pq
+
+    before = PM / "p4_reference" / "resonance_pairs.parquet"
+    if "metal_table" not in _report("ingest_report.json").get("spin", {}) or not before.exists():
+        pytest.skip("run the P4 re-ingest (resonance pairs copied to p4_reference/ first)")
+    ids = lambda p: set(pq.read_table(p, columns=["step_id"]).column(0).to_pylist())  # noqa: E731
+    gained = ids(PM / "resonance_pairs.parquet") - ids(before)
+    from collections import Counter
+
+    assert dict(Counter(steps[i].domain_class for i in gained)) == P4_RESONANCE_CLASSES
 
 
 def test_the_birch_step_is_flagged_and_no_admitted_pool_is_smeared():

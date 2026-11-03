@@ -7648,3 +7648,74 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   adduct of 5d007b38 and the ML1 adduct C=[O+][Sn-], which the table pairs).
 - **Train.** `--drop-domain-class` leaves the training samples of the named classes out of
   training (never out of evaluation), each logged, counted as DROPPED_DOMAIN_CLASS.
+
+## 2026-11-03: P4 build: tagged QM records, the re-ingest, the extended molecule snapshot and the exit checks
+
+- **What.** Open-shell plan P4 step 6 after the user approved the spec v9.2 QM text
+  (2026-11-03), from commit 820412b, then 1dc4f9a (law (S), below), clean tree, 3 workers
+  beside the 12-worker ReactMech full QM batch. Pre-P4 artifacts copied to
+  `data/processed/pmechdb/p4_reference/`. Training (step 7) is not run: it needs a pod.
+- **Two user decisions during the build.**
+  - **Law (S) and metals.** GFN2 smears three Cu(II) species by the plateau rule (CuCl2 and two
+    CuBr2 adducts; 7 CuCl2 steps). The committed code read law (S) on every open shell, metals
+    included; the user chose the plan's reading: (S) reads only fragments drawn with radical
+    electrons that stay open shells, and a smeared Cu(II) fragment is a flagged sample of the
+    fermi_smeared slice (its d tokens are masked either way). Commit 1dc4f9a, with the spec's
+    metal sentence reworded to say so ("Law (S) does not read the metal").
+  - **The frozen molecule split.** The P4 steps bridge molecule groups frozen in two parts, and
+    the frozen rule then sent every new step of those groups to SPLIT_CONFLICT, the 14 samples
+    P1 and P3 had placed among them (12 of the 'added' cohort, 2 radicals). U1 says existing
+    steps keep their part; the snapshot held only P0's steps. The user chose to extend it:
+    `scripts/refreeze_molecule_p4.py` rebuilds the pre-P4 split from `p4_reference/steps.parquet`
+    with the P0 snapshot (it reproduces the pre-P4 views exactly), and the new
+    `split_frozen_molecule.json` is the P0 snapshot plus the 22 steps placed since (18 train, 3
+    val, 1 test), stamped with the P0 snapshot's content hash in its trace; the P0 snapshot is
+    kept as `p4_reference/split_frozen_molecule_p0.json`. The scaffold split had no conflict.
+- **QM** (31 min): 155 molecules computed (the 49 tagged species and the earlier failures, most
+  answered from the failure memo); PMechDB 14,255 of 14,362 ok. Tagged: 48 records (Cu 28,
+  Fe 13, u = 0: 7) and 1 failure, the Et3B-O2 adduct of 5d007b38 (BOND_FORMED from both starts:
+  an O-C contact at 1.17 x r_cov), whose step is SPIN_NOT_CONSERVED anyway. CCl2 and CBr2 come
+  out bent (112.9 and 113.9 degrees: the kicked start leaves the linear saddle). Ph2C=C:
+  converges as a singlet without a new bond, unlike P2's spGFN2 starts, so its step has tokens.
+  No tagged record is dirty. SPIN_PARITY under each species' current method: placeholder 34,
+  Cu 13 (6 CuH2 and 5 CuI2 adducts, REDOX_INCOMPATIBLE; 2 NH3-CuX2), Fe 7, Ti 4, P 1 = 59 (the
+  plan expected 51 with every Fe species confirmed; was 100). The old untagged rows stay in the
+  manifest as history; the survey now counts each species under its own method.
+- **Sidecars and tokens.** 48 Wiberg sidecars built. Tokens: 77 open shells (u 1: 52, 2: 6,
+  3: 6, 5: 13), 3 of them smeared (the 3 Cu); 42 Fermi-smeared molecules in all (P2b 39).
+- **Re-ingest** equals the dry run: CARBENE_SINGLET 12 (10 steps, the 2 CO resonance pairs),
+  OSM_CU2 23 and OSM_FE3 19 (2 resonance pairs each), MULTIPLICITY_AMBIGUOUS 36, no side
+  changed, n_resonance_pairs 472 -> 478.
+- **Samples** (v18, 3 workers): 12,469 (+48: CARBENE_SINGLET 10, OSM_CU2 21, OSM_FE3 17).
+  Molecule split, extended snapshot: train +17 (Cu 15, carbenes 2), test +4 (Cu), val +0; 27
+  SPLIT_CONFLICT (Fe 17, carbenes 8, Cu 2): they share molecules with steps frozen in two
+  parts, so no part can take them without leakage. Every pre-P4 sample keeps its part.
+  Scaffold split: all 48 placed (train Cu 21, carbenes 10, Fe 10; val Fe 1; test Fe 6). So the
+  molecule split's metal ablation (step 7) can only measure Cu: OSM_FE3 has no molecule-split
+  sample. Cohorts pinned: `carbene_singlet` 10, `open_shell_metal` 38 (training steps).
+- **GBDT refit** (molecule split, `--n-jobs 3`), the new reference; test now 1,125 queries (4
+  Cu samples added), val 1,204:
+  - valid cells: trees 687 / 409 (P3 216 / 453); ranker test top-1/3/5 48.8 / 68.2 / 75.6 (P3
+    47.1 / 66.5 / 72.1), val 45.4 / 62.5 / 70.9 (P3 41.2 / 59.4 / 68.4); textbook-held-out
+    ranker test 48.1 / 65.7 / 73.5 (P3 48.2 / 68.2 / 75.6);
+  - every cell: trees 340 / 378 (P3 269 / 370); ranker test 49.1 / 66.6 / 74.7 (P3 45.9 / 65.6 /
+    73.9), val 42.6 / 61.9 / 71.0 (P3 42.0 / 61.1 / 69.9);
+  - the untrained gap kernel's test moves only by the 4 added queries (20.4 -> 20.5 top-1).
+  The refit trains on 17 more queries (15 Cu, 2 carbenes); its early stopping ends elsewhere,
+  as P1 measured for its own refit. closed_base's floor and decode do not move (below).
+- **Textbook**: gap kernel 3/5, ranker 2/2 held out (2/3 seen in training), textbook-held-out
+  ranker 4/5, as P3.
+- **Exit checks.** All pass.
+  - closed_base: floor ranks per sample identical (valid cells and every cell); flex_first's val
+    hits per sample identical (62.9 / 82.6 / 85.4); per-column digests reproduce (realdata).
+  - Every existing record key is unchanged but those of the 8 species the species table pairs
+    (their untagged triplet records stay, unused); a 5,000-species QMugs sample has no tag.
+  - Every tagged record verifies with its tagged method and is found with its sidecar and
+    tokens by the sample builder (realdata, tests/test_p4_spin_records.py).
+  - Cache index v2: `index stats` lists the tagged records by spin source (metal u 1: 28, u 5:
+    13; species u 0: 7; one species tombstone).
+- **Tests updated to the P4 data.** `test_data_domain` (P4_COUNTS), `test_open_shell_admission`
+  (radical classes only; the 6 P4 resonance pairs), `test_eval_pin` (the two P4 cohorts left
+  out of closed_base), `test_data_survey` (metal subclasses summed over every code, SPIN_PARITY
+  under each species' method), `test_open_shell_tokens` (the 3 smeared Cu species, open shells
+  counted under each species' method), new `test_p4_spin_records`.

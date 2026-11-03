@@ -110,7 +110,8 @@ def test_the_survey_matches_the_p1_oracle():
     P0a's oracle had PMechDB RADICAL_DRAWN 44 and ReactMech CDI_IMIDAZOLYL 62; P1's repairs
     returned the 9 C3_METHYL (V1), 4 BARE_ALKALI (A1), 1 BETA_LACTAM_N (BL_NAMED) and the 62 CDI
     steps (V1), and no other subclass moved. P3's admission spreads the radical drawings over
-    its law codes and KEPT; their subclasses are summed over every code, so they do not move."""
+    its law codes and KEPT, P4's the metal steps over MULTIPLICITY_AMBIGUOUS and KEPT; their
+    subclasses are summed over every code, so they do not move."""
     from collections import Counter
 
     import pandas as pd
@@ -125,19 +126,28 @@ def test_the_survey_matches_the_p1_oracle():
 
     pm = counts("pmechdb")
     genuine_names = ("RADICAL_SPECTATOR", "RADICAL_REACTIVE")
-    radical, kept = Counter(), Counter(pm["counts"].get("KEPT", {}))
+    metal_names = set(sv.METAL_ORDER)
+    radical, metal = Counter(), Counter()
+    kept = Counter(pm["counts"].get("KEPT", {}))
     for code, subclasses in pm["counts"].items():
-        if code == "RADICAL_DRAWN" or code in OPEN_SHELL_CODES:
-            radical.update(subclasses)
-    radical.update({k: kept.pop(k) for k in genuine_names if k in kept})
+        if code in ("RADICAL_DRAWN", "OPEN_SHELL_METAL") or code in OPEN_SHELL_CODES:
+            metal.update({k: n for k, n in subclasses.items() if k in metal_names})
+            radical.update({k: n for k, n in subclasses.items() if k not in metal_names})
+    # P3 and P4 admit radicals, paired carbenes and metals: their subclasses move to KEPT
+    radical.update({k: kept.pop(k) for k in (*genuine_names, "CARBENE", "CO_DRAWN") if k in kept})
+    metal.update({k: kept.pop(k) for k in metal_names if k in kept})
     genuine = radical["RADICAL_SPECTATOR"] + radical["RADICAL_REACTIVE"]
     assert (sum(radical.values()), genuine, radical["CARBENE"]) == (30, 12, 10)
     assert not {"C3_METHYL", "BARE_ALKALI", "BETA_LACTAM_N"} & set(radical)
-    osm = pm["counts"]["OPEN_SHELL_METAL"]
-    assert osm["OSM_FE3"] == 43 and osm["OSM_CU2"] + osm["CUH2_LIGAND"] + osm["CU_SUSPECT"] == 35
+    assert (
+        metal["OSM_FE3"] == 43
+        and metal["OSM_CU2"] + metal["CUH2_LIGAND"] + metal["CU_SUSPECT"] == 35
+    )
     assert pm["counts"]["METAL_PLACEHOLDER"] == {"PLACEHOLDER": 56}
     assert dict(kept) == {"ZNCL_ION": 3}
-    assert pm["spin_parity_molecules"] == {"Cu": 41, "placeholder": 34, "Fe": 20, "Ti": 4, "P": 1}
+    # P4 computes the confirmed Cu(II) and Fe(III) species tagged: 13 Cu (6 CuH2 and 5 CuI2
+    # adducts, REDOX_INCOMPATIBLE; 2 NH3-CuX2) and 7 Fe stay SPIN_PARITY (was Cu 41, Fe 20)
+    assert pm["spin_parity_molecules"] == {"Cu": 13, "placeholder": 34, "Fe": 7, "Ti": 4, "P": 1}
     rm = counts("reactmech")
     assert "RADICAL_DRAWN" not in rm["counts"]
     assert rm["counts"]["OPEN_SHELL_METAL"] == {"PD_ALREADY_NEG": 2}
