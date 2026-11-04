@@ -7840,3 +7840,7 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   method and every ok record its Wiberg sidecar; a training step without a sample holds a
   species without an ok record; every pre-P5 sample keeps its part in every view and its column
   digests (`baseline_p5_pre.json`).
+- **Tests** (from 437fcff, clean tree, beside the 12-worker ReactMech full QM batch):
+  `pytest -n 3 -m "not realdata"` 2066 passed, 12 skipped, 2 xfailed, 5 warnings;
+  `KSMECH_TEST_WORKERS=2 pytest -m realdata` 62 passed (the first pass, on the 3-thread
+  decodes, failed `test_legacy_reproduction` on the one sample above).
