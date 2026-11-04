@@ -7920,3 +7920,52 @@ disk). Code only: the v18 data of main is untouched.
   not touched" is read; without it `from_dict` would refuse them. Dry run on the reflink copy of
   `data/serve/pools`: 1,388 states, 1,319 unchanged, 69 re-keyed (68 holding the O atom `[O]`, 2
   O=O, 1 `[O+][O-]`), 0 unreadable; the plan's RDKit-radical upper bound was about 362.
+- **Exit checks on the v18 data** (`scripts/p6_checks.py`: one dump per source under the P5 code
+  of the main checkout and one under P6, compared by content). PMechDB, 13,090 steps: the
+  12,965 closed-shell ones keep every edit label (12,465 labelled training steps), every
+  resonance flag (474 RESONANCE) and every key; the sha256 over all closed-shell keys is
+  identical (`153d645f...`). The 125 open-shell steps (47 labelled) keep their labels and flags;
+  their keys gain the v2 suffix, as they must. ReactMech pilot, 10,000 steps: the 9,998
+  closed-shell ones keep all 9,450 labels, the 548 resonance flags and every key (`94c2c48e...`);
+  the 2 open-shell ones are the 2 still-excluded Pd steps. The flow law therefore keeps every
+  stored resonance pair as drawn (`tests/test_p6_resonance_pairs.py`: PMechDB 478, 471 in v17
+  plus P1/P3; ReactMech 548), CO flips nowhere (`[C]=O` keys as `[C-]#[O+]`), and the anion
+  proxy and the flow filter change no label of the v18 open-shell steps.
+- **FlowER dry run** (`scripts/probes/flower_label_dryrun.py`, read-only, the 5,088 RS/RC lines
+  as one-electron rmechdb steps): LABEL_OK 4,890, RESONANCE 187, NULL_STEP 1, NOT_ELEMENTARY 9,
+  DISSOCIATIVE_ET_STEP 1, NONCONJUGATED_SHIFT 0, SET_STEP 0, so 99.8% LABEL_OK on the 4,900
+  non-resonance lines (gate 95%); 16 lines label through another reactant drawing
+  (`redrawn_label`: the NO3. abstractions among them). The one DISSOCIATIVE_ET_STEP is the
+  persulfate O-O homolysis the plan named (test:216679): its product draws one sulfate with the
+  radical on O1 and the charge on O5, a swap RDKit's enumeration does not make on hypervalent S,
+  so the anion proxy cannot reach it; left to P8's drawing normalization. The ozone redraw the
+  plan expected as a NONCONJUGATED_SHIFT is a step under key v2 (its two drawings differ in u).
+  Masks and screens (P9), drawn R / label class: (a) closed-pool screen 0 / 0; (b) the optional
+  -1 filter on u = 0 pools 3 / 1 (the Mg + acetone ketyl line among them); (c) atom masks 0 / 0;
+  (d) the 5-class alphabet 15 / 9 (the 9 NOT_ELEMENTARY lines); (e) legacy caps 27 / 431. The
+  drawn numbers match the plan's (8 beyond 8 bonds and 19 beyond 2 atoms). The class number is
+  larger because the dominant-contributor rule picks product forms with fewer charges and more
+  atom entries (NO2. with the radical on N: 0 charges, 3 atom entries); the label maxima are 12
+  bonds and 5 atoms, which `--caps labels` will read from rmechdb's training part. PMechDB and
+  ReactMech, every v18 training label under the P6 code: all 12,465 + 9,450 closed-shell labels
+  and the 47 PMechDB open-shell ones pass (a)-(d); against the legacy caps one ReactMech label
+  exceeds the atom cap (reactmech-7172766faa0ff062, 3 atom entries, P0a's known case; the
+  ReactMech label caps are 8 and 3).
+- **v19 stores in the Release B data root** (not P8's build: the same v18 steps parquet, rebuilt
+  so that the realdata suite reads samples of the current version): `ksmech-arrows samples`
+  for PMechDB (molecule, scaffold) and ReactMech (molecule, scaffold, loco, loco_all), 3 workers
+  beside the 12-worker ReactMech full QM batch, from 8418d9d: PMechDB 12,469 samples (37 min),
+  ReactMech 9,256 (83 min), the v18 counts; the realdata suite reads them (its baselines digest
+  the v18 columns,  among them, so they compare v19 with v18 as they
+  are).
+- **The identity key's cost**: v1 plus the per-fragment count cost about 5 x the sigma key on a
+  60-atom pool (6.6 vs 1.3 ms), and the decoder keys every applied completion twice. A closed
+  shell no species-table row can raise (, by formula) now skips building its
+  fragments: 1.33 ms with N given (the decoder), 2.0 ms without, against 0.95 ms.
+- **Spec**: the v10 draft is written in place (date line marked as draft): the BE section (N
+  with single electrons, half-headed arrows, the flow law, Eq. flow, the four codes), the task
+  (+-1 atom entries per source), the decoder (masks on N, merging by the identity key), the
+  labels (balanced flows first, the anion proxy, the redrawn reactant) and resonance (identity
+  key v2, Hund rows, the flow law as the membership test with the 147 / 471 measurement). It
+  is not compiled here (the host's LaTeX lacks amsthm). It needs your approval before P8's
+  build (U3).

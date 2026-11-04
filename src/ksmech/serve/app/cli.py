@@ -135,6 +135,16 @@ def build_parser() -> argparse.ArgumentParser:
         "token cache (KSMECH_SHARED_CACHE_ROOT, real method)",
     )
     pc.add_argument("--smiles", action="append", required=True, help="a SMILES (repeatable)")
+    _add_gallery_parser(sub)
+    _add_rekey_parser(sub)
+    from ksmech.serve.app import ocr_cli, users_cli
+
+    users_cli.add_parser(sub)
+    ocr_cli.add_parser(sub)
+    return parser
+
+
+def _add_gallery_parser(sub) -> None:
     gal = sub.add_parser(
         "gallery", help="draw the 2D depiction gallery of hard molecules (PNG + SVG per method)"
     )
@@ -145,14 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also write ring_templates.smi/.json re-derived from their derivations into OUT",
     )
+
+
+def _add_rekey_parser(sub) -> None:
     rk = sub.add_parser("rekey-pools", help="re-key the stored pool states (identity key v2)")
     rk.add_argument("--dry-run", action="store_true", help="count, write nothing")
     rk.add_argument("--purge", action="store_true", help="remove a re-keyed state, not rewrite")
-    from ksmech.serve.app import ocr_cli, users_cli
-
-    users_cli.add_parser(sub)
-    ocr_cli.add_parser(sub)
-    return parser
 
 
 def normalize_argv(argv: list[str]) -> list[str]:

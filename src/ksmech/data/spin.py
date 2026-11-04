@@ -197,15 +197,27 @@ def reassigned(a: Assignment, drawn: int) -> bool:
     return a.assigned and a.unpaired != drawn
 
 
-def _formula(mol: Chem.Mol) -> tuple:
-    """(sorted (element, count) with every H counted, total charge): the index of the rows
-    that may raise a drawing. `mol` has its property cache set."""
+def _formula(mol: Chem.Mol, atoms=None) -> tuple:
+    """(sorted (element, count) with every H counted, total charge) of `mol` or of its atoms
+    `atoms`: the index of the rows that may raise a drawing. `mol` has its property cache
+    set."""
+    picked = mol.GetAtoms() if atoms is None else [mol.GetAtomWithIdx(int(i)) for i in atoms]
     counts: dict[str, int] = {}
-    for a in mol.GetAtoms():
+    charge = 0
+    for a in picked:
         counts[a.GetSymbol()] = counts.get(a.GetSymbol(), 0) + 1
+        charge += a.GetFormalCharge()
         if h := a.GetTotalNumHs():
             counts["H"] = counts.get("H", 0) + h
-    return tuple(sorted(counts.items())), sum(a.GetFormalCharge() for a in mol.GetAtoms())
+    return tuple(sorted(counts.items())), charge
+
+
+def may_raise(mol: Chem.Mol, atoms, drawn: int) -> bool:
+    """Some species-table row could raise the fragment `atoms` of `mol` above its drawn count
+    `drawn` (a row of its formula with a higher count of the same parity): the cheap test that
+    lets the identity key skip `spin_of_drawing`. `mol` has its property cache set."""
+    rows = _raising_rows().get(_formula(mol, atoms), [])
+    return any(u > drawn and (u - drawn) % 2 == 0 for _, u, _ in rows)
 
 
 def is_hund_row(entry: dict) -> bool:

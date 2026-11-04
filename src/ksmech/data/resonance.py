@@ -99,10 +99,25 @@ def _fragments(mol: Chem.Mol) -> list[tuple[tuple[int, ...], Chem.Mol]]:
 
 def fragment_spins(
     mol: Chem.Mol, nonbonding: Sequence[int] | None = None
-) -> list[tuple[tuple[int, ...], Chem.Mol, int]]:
+) -> list[tuple[tuple[int, ...], Chem.Mol | None, int]]:
     """(atom indices, fragment, unpaired count) of every fragment of `mol`, the count from the
     drawing's non-bonding electrons (`spin.spin_of_drawing`; `nonbonding` is N per atom of
-    `mol`, read from the drawing when not given)."""
+    `mol`, read from the drawing when not given). When no species-table row can raise any
+    fragment (`spin.may_raise`), the counts are the odd-N atoms and no fragment is built (its
+    place holds None): the identity key of a closed shell costs about one sigma key."""
+    from ksmech.arrows.apply import nonbonding_electrons
+
+    m, n = mol, nonbonding
+    if n is None:
+        m = spin.kekule_copy(mol) if any(b.GetIsAromatic() for b in mol.GetBonds()) else mol
+        m.UpdatePropertyCache(strict=False)
+        n = [nonbonding_electrons(a) for a in m.GetAtoms()]
+    else:
+        m.UpdatePropertyCache(strict=False)
+    groups = [tuple(g) for g in Chem.GetMolFrags(m, sanitizeFrags=False)]
+    drawn = [sum(int(n[i]) % 2 for i in g) for g in groups]
+    if not any(spin.may_raise(m, g, d) for g, d in zip(groups, drawn, strict=True)):
+        return [(g, None, d) for g, d in zip(groups, drawn, strict=True)]
     out = []
     for atoms, frag in _fragments(mol):
         n = None if nonbonding is None else [int(nonbonding[i]) for i in atoms]
@@ -124,8 +139,9 @@ def identity_key(
     parts = fragment_spins(mol, nonbonding)
     if not any(u for *_, u in parts):
         return v1
+    frags = [f for _, f in _fragments(mol)]
     rows = []
-    for _, frag, u in parts:
+    for frag, (*_, u) in zip(frags, parts, strict=True):
         smiles, charge = sigma_key(frag, keep_maps).rsplit("|", 1)
         rows.append(f"{smiles},{charge},{u}")
     return f"{v1}|{';'.join(sorted(rows))}"
