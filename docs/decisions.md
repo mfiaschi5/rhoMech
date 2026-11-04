@@ -7814,7 +7814,12 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   | (d) P5 returns in val | 0 | | | | |
 
   stop0 is reactmech/sparse_resonance_stop0; joint is pmechdb+reactmech/sparse_resonance,
-  decoded with `--run-source`. Both exit checks hold for both runs: on (a) every sample's rank
+  decoded with `--run-source`. Every P5 decode runs at 4 torch threads (`OMP_NUM_THREADS=4`):
+  the beam is sensitive to the thread count at near-ties. Decoded at 3 threads first, one
+  stop0 val sample (`reactmech-22277ce942143182`) found 4 completions instead of P0's and P0a's
+  5 (rank 0 unchanged; 1-3 threads give 4, 4-16 give 5), which `test_legacy_reproduction`
+  caught; P0 and P0a decoded with 4 or more. The top-k numbers here are the same at both
+  thread counts. Both exit checks hold for both runs: on (a) every sample's rank
   is P0's (stop0 94.5 / 96.6 / 96.6, joint 94.7 / 97.3 / 97.3), and every pre-P5 sample's rank
   is P0a's. Slice (d), all 225 returns decoded through the scaffold views (`--split scaffold
   --cohort p5_returns`; none was a sample when either checkpoint trained, so every part is
