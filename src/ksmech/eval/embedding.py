@@ -31,7 +31,7 @@ import torch
 from ksmech.arrows.batches import ANCHOR_SIDE, collate_samples
 from ksmech.arrows.lewis import reactant_lewis
 from ksmech.arrows.reactants import ReactantTokens, TokenCache
-from ksmech.arrows.steps import MechanismSample, reactant_sample
+from ksmech.arrows.steps import MechanismSample, reactant_sample, with_lewis
 from ksmech.model.encoder import TokenEmbedding
 from ksmech.model.inputs import CHARGE_MAX, MAX_Z, pair_channels, to_device
 from ksmech.model.loss import anchor_log_probs, anchor_ranks, greedy_edit
@@ -289,6 +289,4 @@ def sample_from_smiles(smiles: str, loader: TokenCache) -> MechanismSample:
     """The model inputs of a reactant pool given as SMILES (one molecule or several, '.'
     separated), without a label: tokens and the Lewis structure with its Wiberg indices."""
     rt = ReactantTokens.from_smiles(smiles, loader)
-    sample = reactant_sample("smiles", "smiles", rt)
-    sample.bonds, sample.lone_pairs, sample.wiberg = reactant_lewis(rt)
-    return sample
+    return with_lewis(reactant_sample("smiles", "smiles", rt), reactant_lewis(rt))

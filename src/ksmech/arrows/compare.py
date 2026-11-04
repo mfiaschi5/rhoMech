@@ -2,7 +2,8 @@
 
 Light on purpose (RDKit and `ksmech.data` only), so the ingest validation can use it without
 importing the token and QM layers. A match is `exact` (same canonical Kekulé SMILES with maps)
-or `resonance` (same sigma key, `data.resonance.sigma_key`: a resonance form of the products);
+or `resonance` (same identity key v2, `data.resonance.identity_key`: a resonance form of the
+products, with every fragment's charge and unpaired count);
 a failure is the `ApplyReason` of the edit or `MISMATCH` with a pattern naming which properties
 of which elements differ.
 """
@@ -13,7 +14,7 @@ from rdkit import Chem
 
 from ksmech.arrows.apply import ApplyResult
 from ksmech.data import chem
-from ksmech.data.resonance import sigma_key
+from ksmech.data.resonance import identity_key
 
 MATCH_STATUSES = ("exact", "resonance")
 
@@ -67,6 +68,6 @@ def match_products(
     want = products_smiles or chem.canonical_mapped_smiles(products)
     if result.smiles == want:
         return "exact", ""
-    if result.key == sigma_key(products):
+    if result.key == identity_key(products):
         return "resonance", ""
     return "MISMATCH", f"MISMATCH {difference_pattern(result.mol, products)}"

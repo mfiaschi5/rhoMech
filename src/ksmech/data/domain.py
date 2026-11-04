@@ -112,6 +112,9 @@ class DomainCode(StrEnum):
     SPIN_NOT_CONSERVED = "SPIN_NOT_CONSERVED"  # the total unpaired count changes
     SPIN_RULE_PENDING = "SPIN_RULE_PENDING"  # P3: the table re-assigned a species (old artifacts)
     NOT_ELEMENTARY = "NOT_ELEMENTARY"  # an odd atom entry of R, or no R from the arrows
+    # the electron-flow law's ingest codes (open-shell plan P6, `resonance.classify_step`)
+    NULL_STEP = "NULL_STEP"  # identical sides: R = 0 (never a resonance pair)
+    NONCONJUGATED_SHIFT = "NONCONJUGATED_SHIFT"  # one identity key, every flow unbalanced
 
 
 class DomainClass(StrEnum):
@@ -142,6 +145,8 @@ PRECEDENCE = (
     DomainCode.SPIN_NOT_CONSERVED,
     DomainCode.SPIN_RULE_PENDING,
     DomainCode.NOT_ELEMENTARY,
+    DomainCode.NULL_STEP,  # step codes of the flow law: after every fragment and law code
+    DomainCode.NONCONJUGATED_SHIFT,
 )
 CHARGE_REPAIRED = "CHARGE_REPAIRED"
 R1_RULE = "R1 group-14 -1 removed"
@@ -183,17 +188,29 @@ class OpenShellPolicy(StrEnum):
 class DomainPolicy:
     """What a source's ingest does with a domain phenomenon: drawn radicals (P3) and open-shell
     metals (P4). Only PMechDB admits either by rule; every other polar source keeps EXCLUDE
-    until its next re-ingest under `data.spin` (P8)."""
+    until its next re-ingest under `data.spin` (P8). `open_shell_labels` is the source's
+    elementary rule, a label rule only (P6): a source of one-electron steps (rmechdb, P8)
+    accepts atom entries of R of +-1 and +-2; the polar sources keep +-2. The source never
+    becomes a sample input, a model option or a decoder argument."""
 
     open_shell: OpenShellPolicy = OpenShellPolicy.EXCLUDE
     open_shell_metal: OpenShellPolicy = OpenShellPolicy.EXCLUDE
+    open_shell_labels: bool = False
 
 
 POLICY: dict[str, DomainPolicy] = {str(s): DomainPolicy() for s in Source}
 POLICY[str(Source.PMECHDB)] = DomainPolicy(
     OpenShellPolicy.ADMIT_BY_RULE, OpenShellPolicy.ADMIT_BY_RULE
 )
+POLICY[str(Source.RMECHDB)] = DomainPolicy(open_shell_labels=True)  # one-electron steps (P8)
 CURATION_DIR = Path(__file__).with_name("curation")
+
+
+def open_shell_labels(source: str | None) -> bool:
+    """The source's elementary rule (`DomainPolicy.open_shell_labels`); False when unknown."""
+    return POLICY.get(str(source), DomainPolicy()).open_shell_labels
+
+
 OPEN_SHELL_CODES = frozenset(  # what the open-shell laws put in place of RADICAL_DRAWN
     [
         DomainCode.MULTIPLICITY_UNTABULATED,

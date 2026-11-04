@@ -209,7 +209,7 @@ def test_a_class_holds_only_elementary_steps():
     bonds = np.array([[0, 1, 3]], dtype=np.int16)
     assert check_edit(label, bonds, np.zeros(2, dtype=np.int8)) == "NOT_ELEMENTARY"
     z = np.zeros(2, dtype=np.int8)
-    bad = Drawing(z, np.ones(1, dtype=np.int8), z, label)
+    bad = Drawing(z, np.ones(1, dtype=np.int8), z, z, z, label)
 
     class Stub:
         step_id, drawings = "s", [bad]

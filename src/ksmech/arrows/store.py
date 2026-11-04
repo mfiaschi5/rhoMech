@@ -13,8 +13,8 @@ the `pair_valid` cells only, ~89%), flattened cell by cell: `pair_z` as float16,
 features (`BINARY_FEATURES` among the sample's `pair_features`, the exclusion flags of
 `physics.pairs.pair_flags` among them) and `pair_defined` bit-packed; `pair_valid` is stored as
 the legacy mask. Its resonance drawings are stacked (`drawing_charges`, `drawing_orders`,
-`drawing_lone_pairs`, one row per drawing) with their labels in the JSON. In memory every array
-is dense float32 again.
+`drawing_lone_pairs`, and since v19 `drawing_nonbonding` and `drawing_unpaired`, one row per
+drawing) with their labels in the JSON. In memory every array is dense float32 again.
 float16 keeps 3 significant digits: the largest error measured on the pair features was 5e-3
 on log-features spanning ~30 units, below 1e-7 absolute on the tiny ones
 (docs/decisions.md, fix item 8).
@@ -42,6 +42,8 @@ DRAWING_ARRAYS = {
     "charges": "drawing_charges",
     "orders": "drawing_orders",
     "lone_pairs": "drawing_lone_pairs",
+    "nonbonding": "drawing_nonbonding",
+    "unpaired": "drawing_unpaired",
 }
 # exact 0/1 pair features: bits, not float16 (the last three: `physics.pairs.PAIR_FLAGS`)
 BINARY_FEATURES = ("inter", "clash", "bonded", "d_acceptor", "own_antibond", "site_self")
@@ -130,7 +132,7 @@ def unpack(
 
 def _pack_drawings(sample: MechanismSample) -> dict[str, np.ndarray]:
     """The drawings' arrays stacked, one row per drawing (zero rows without drawings)."""
-    width = {"charges": sample.n_atoms, "orders": len(sample.bonds), "lone_pairs": sample.n_atoms}
+    width = {f: sample.n_atoms for f in DRAWING_ARRAYS} | {"orders": len(sample.bonds)}
     out = {}
     for f, name in DRAWING_ARRAYS.items():
         rows = [getattr(d, f) for d in sample.drawings]

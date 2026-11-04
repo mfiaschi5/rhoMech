@@ -96,5 +96,5 @@ class EditDecoder(nn.Module):
         order = batch["bond_order"][b]
         pair[..., 0] = pair[..., 0].masked_fill(order == 0, NEG)
         pair[..., 2] = pair[..., 2].masked_fill(order >= 3, NEG)
-        atom[..., 0] = atom[..., 0].masked_fill(batch["lone_pairs"][b] == 0, NEG)
+        atom[..., 0] = atom[..., 0].masked_fill(~batch["can_lose_pair"][b], NEG)
         return pair, atom

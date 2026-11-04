@@ -3,13 +3,16 @@
 (`lewis_apply`), and a hit at k when one of the k best completions is a variant of the label
 class (`EditLabel.variants`, on the global atoms, as the completions are).
 
-`lewis_apply` refuses a completion with the first of: BOND_ORDER (an order leaves [0, 3]),
-LONE_PAIRS (a negative lone-pair count), OCTET_EXCEEDED (an H-Ne atom the step touches over 8
-valence electrons, H and He over 2), FORMAL_CHARGE_RANGE (a non-metal it touches left at
-|formal charge| >= 2 that it did not carry), PRODUCT_INVALID (RDKit cannot write the product),
-RESONANCE_ONLY_STEP (no atom changes its sigma bonds or H: the sigma keys with the atom maps
-agree). The product key is the map-free sigma key of the pool (`data.resonance.sigma_key`), so
-completions that draw the same products differently merge, as serve's pool key merges them.
+`lewis_apply` tracks the non-bonding electrons N of every atom (open-shell plan P6: an atom
+entry of +-1 moves one electron) and refuses a completion with the first of: BOND_ORDER (an
+order leaves [0, 3]), LONE_PAIRS (a negative N), OCTET_EXCEEDED (an H-Ne atom the step touches
+over 8 valence electrons, N + 2 x its bond orders; H and He over 2), FORMAL_CHARGE_RANGE (a
+non-metal it touches left at |formal charge| >= 2 that it did not carry), PRODUCT_INVALID
+(RDKit cannot write the product), RESONANCE_ONLY_STEP (the identity keys with the atom maps
+agree: no atom changes its sigma bonds or H, and no fragment its charge or spin). The product
+key is the map-free identity key v2 of the pool (`data.resonance.identity_key`, u from the
+tracked N), so completions that draw the same products differently merge, as serve's pool key
+merges them, while homolysis and heterolysis of one bond stay apart.
 
 The caps of the search (`decode_caps`): `legacy` keeps DecodeConfig's fixed 8 bond and 2 atom
 changes; `labels` takes the label maxima of the training part of the source decoded (the
@@ -33,7 +36,7 @@ from ksmech.arrows.delta_be import EditLabel
 from ksmech.arrows.lewis import MAX_ORDER
 from ksmech.arrows.symmetry import lewis_mol
 from ksmech.data import provenance as prov
-from ksmech.data.resonance import sigma_key
+from ksmech.data.resonance import identity_key
 from ksmech.model.decode import NONMETALS, Apply, Completion, DecodeConfig, decode_pool
 
 Decode = Callable[[object, Counter], list[Completion]]
@@ -82,18 +85,18 @@ def _valence_limit(z: int) -> int | None:
     return 2 if z <= 2 else 8 if z <= 10 else None
 
 
-def _pool_mol(z: np.ndarray, q: np.ndarray, order: dict[tuple[int, int], int]) -> Chem.Mol:
-    """The pool on the token atoms, atom k mapped k + 1."""
+def _pool_mol(z: np.ndarray, q: np.ndarray, order: dict[tuple[int, int], int], n) -> Chem.Mol:
+    """The pool on the token atoms with its radical electrons from N, atom k mapped k + 1."""
     rows = [(i, j, o) for (i, j), o in sorted(order.items()) if o > 0]
-    mol = lewis_mol(z, q, np.asarray(rows, dtype=np.int64).reshape(-1, 3))
+    mol = lewis_mol(z, q, np.asarray(rows, dtype=np.int64).reshape(-1, 3), n)
     for atom in mol.GetAtoms():
         atom.SetAtomMapNum(atom.GetIdx() + 1)
     return mol
 
 
-def _atom_issue(z, q0, q, lone_pairs, order, touched) -> str | None:
+def _atom_issue(z, q0, q, nonbonding, order, touched) -> str | None:
     """OCTET_EXCEEDED or FORMAL_CHARGE_RANGE on the touched atoms (module docstring), or None."""
-    electrons = 2 * lone_pairs.astype(np.int64)
+    electrons = nonbonding.astype(np.int64)
     for (i, j), o in order.items():
         electrons[i] += 2 * o
         electrons[j] += 2 * o
@@ -113,12 +116,15 @@ def lewis_apply(sample) -> Apply:
     z = sample.atom_categorical[:, 0].astype(np.int64)
     q0 = sample.atom_categorical[:, 1].astype(np.int64)
     order0 = {(int(i), int(j)): int(o) for i, j, o in sample.bonds}
-    lp0 = np.asarray(sample.lone_pairs, dtype=np.int64)
+    n0 = np.asarray(sample.nonbonding, dtype=np.int64)
+    if len(n0) != len(z):
+        who = getattr(sample, "step_id", "a sample")
+        raise ValueError(f"{who}: no N for every atom (a sample older than v19?)")
     with rdBase.BlockLogs():
-        before = sigma_key(_pool_mol(z, q0, order0), keep_maps=True)
+        before = identity_key(_pool_mol(z, q0, order0, n0), keep_maps=True, nonbonding=n0)
 
     def apply(bonds, lone):
-        order, lp, q = dict(order0), lp0.copy(), q0.copy()
+        order, n, q = dict(order0), n0.copy(), q0.copy()
         for i, j, d in bonds:
             o = order.get((i, j), 0) + d
             if not 0 <= o <= MAX_ORDER:
@@ -127,20 +133,19 @@ def lewis_apply(sample) -> Apply:
             q[i] -= d
             q[j] -= d
         for i, d in lone:
-            if d % 2:  # a one-electron entry: lone pairs cannot hold it (electron counts, P6)
-                raise ValueError(f"odd lone-pair entry {d} on atom {i}")
-            lp[i] += d // 2
+            n[i] += d
             q[i] -= d
-        if (lp < 0).any():
+        if (n < 0).any():
             return None, "LONE_PAIRS"
         touched = {a for i, j, _ in bonds for a in (i, j)} | {i for i, _ in lone}
-        why = _atom_issue(z, q0, q, lp, order, touched)
+        why = _atom_issue(z, q0, q, n, order, touched)
         if why is not None:
             return None, why
         try:
             with rdBase.BlockLogs():
-                mol = _pool_mol(z, q, order)
-                mapped, key = sigma_key(mol, keep_maps=True), sigma_key(mol)
+                mol = _pool_mol(z, q, order, n)
+                mapped = identity_key(mol, keep_maps=True, nonbonding=n)
+                key = identity_key(mol, nonbonding=n)
         except Exception:  # noqa: BLE001 - counted as PRODUCT_INVALID
             return None, "PRODUCT_INVALID"
         return (None, "RESONANCE_ONLY_STEP") if mapped == before else (key, None)

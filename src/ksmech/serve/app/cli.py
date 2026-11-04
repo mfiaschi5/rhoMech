@@ -10,6 +10,7 @@
     ksmech-serve gallery [--out DIR] [--only NAME ...] [--derive-templates]
     ksmech-serve users list | add LOGIN --name N [--role R] | set LOGIN [--role R] ...
     ksmech-serve ocr-setup [--relock] [--uv UV] [--skip-env] [--skip-weights]
+    ksmech-serve rekey-pools [--dry-run] [--purge]
 
 `--profile` (`KSMECH_SERVE_PROFILE`) is `lab` (the default: every feature) or `public` (no
 dataset, curation or ML route). In `lab` without `KSMECH_SERVE_TOKENS` there is no
@@ -24,7 +25,9 @@ inserted, so `ksmech-serve --port 8000` works. `run` and `recheck` hold
 and writes the PMechDB-format file (a download, never training data). `users` manages the
 accounts of `serve.accounts` (`app.users_cli`); it works while a server runs. `ocr-setup`
 installs the OCR engine under `data/ocr/` (`app.ocr_cli`: its own environment and the verified
-MolScribe weights); a running server picks it up at its next request.
+MolScribe weights); a running server picks it up at its next request. `rekey-pools` re-keys
+the stored pool states under the identity key v2 (`chem.pools.rekey_states`; once, at the
+Release B merge of the open-shell plan) and refuses while a server runs.
 
 This module imports only the standard library at module level: `main` pins the BLAS / OpenMP
 threads to 1 before numpy (or anything that imports it) is loaded.
@@ -63,6 +66,7 @@ COMMANDS = (
     "gallery",
     "users",
     "ocr-setup",
+    "rekey-pools",
 )
 CHEMISTRY_CHOICES = ("real", "cached", "synthetic")
 PROFILE_CHOICES = ("lab", "public")  # core.settings.PROFILES (stdlib-only module)
@@ -71,6 +75,7 @@ LOCK_HELD = {
     "run": "another ksmech-serve already runs on this data root ({path})",
     "recheck": "server running: use the web UI or POST /api/curate/recheck ({path})",
     "export": "server running: use the web UI or GET /api/curate/export/pmechdb ({path})",
+    "rekey-pools": "server running: stop it before re-keying its pool states ({path})",
 }
 _HELD_LOCKS: list[Any] = []  # open lock files, kept for the life of the process
 
@@ -140,6 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also write ring_templates.smi/.json re-derived from their derivations into OUT",
     )
+    rk = sub.add_parser("rekey-pools", help="re-key the stored pool states (identity key v2)")
+    rk.add_argument("--dry-run", action="store_true", help="count, write nothing")
+    rk.add_argument("--purge", action="store_true", help="remove a re-keyed state, not rewrite")
     from ksmech.serve.app import ocr_cli, users_cli
 
     users_cli.add_parser(sub)
@@ -500,6 +508,19 @@ def cmd_ocr_setup(args: argparse.Namespace) -> int:
     return ocr_cli.run(args, _settings())
 
 
+def cmd_rekey_pools(args: argparse.Namespace) -> int:
+    from ksmech.serve.chem.pools import rekey_states
+
+    settings = _settings()
+    if not args.dry_run and not _take_lock(settings, "rekey-pools"):
+        return 2
+    out = rekey_states(settings, dry_run=args.dry_run, purge=args.purge)
+    print(json.dumps({k: v for k, v in out.items() if k != "changed"}, indent=1))
+    for state_id, old, new in out["changed"]:
+        print(f"{state_id}: {old} -> {new}")
+    return 0
+
+
 HANDLERS = {
     "run": cmd_run,
     "users": cmd_users,
@@ -509,6 +530,7 @@ HANDLERS = {
     "schema-ts": cmd_schema_ts,
     "probe-cache": cmd_probe_cache,
     "gallery": cmd_gallery,
+    "rekey-pools": cmd_rekey_pools,
 }
 
 

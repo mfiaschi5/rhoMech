@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import threading
 from collections import defaultdict
 from collections.abc import Sequence
@@ -239,6 +240,52 @@ def load_state(state_id: str, s: ServeSettings) -> PoolState:
     if state.state_id != state_id:
         raise ServeError(Code.CONSISTENCY_FAILED, f"{path} holds state {state.state_id}")
     return state
+
+
+def _rekeyed(path: Path) -> tuple[dict, PoolState | None]:
+    """(the stored dict, its state recomputed under the current identity key; None when its
+    mapped SMILES no longer reads)."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return raw, state_from_mapped(raw["mapped_smiles"])
+    except ServeError as exc:
+        log.warning("%s: unreadable (%s)", path, exc)
+        return raw, None
+
+
+def rekey_states(s: ServeSettings, dry_run: bool = True, purge: bool = False) -> dict:
+    """Every stored state (`<pools>/<state id>/state.json`) under the identity key v2
+    (`contracts.KEY_VERSION`; open-shell plan P6, run once at the Release B merge). A state
+    whose pool key keeps its value only gains the version (its pool id stays byte for byte); one
+    whose key changes is rewritten atomically with its old pool id logged, or with `purge`
+    removed with its directory (states are content-addressed and regenerable); one that no
+    longer reads is counted and left alone. `dry_run` writes nothing. Returns the counts and
+    the changed states (state id, old pool id, new pool id)."""
+    counts = {"states": 0, "unchanged": 0, "rekeyed": 0, "purged": 0, "unreadable": 0}
+    changed = []
+    for path in sorted(s.pools.glob("*/state.json")):
+        counts["states"] += 1
+        raw, new = _rekeyed(path)
+        if new is None or new.state_id != raw.get("state_id"):
+            counts["unreadable"] += 1
+            continue
+        if new.pool_key == raw["pool_key"] and new.pool_id == raw["pool_id"]:
+            counts["unchanged"] += 1
+            if not dry_run and raw.get("key_version") != new.key_version:
+                text = json.dumps(raw | {"key_version": new.key_version}, sort_keys=True, indent=1)
+                atomic_write_text(path, text + "\n", s)
+            continue
+        changed.append((new.state_id, raw["pool_id"], new.pool_id))
+        counts["purged" if purge else "rekeyed"] += 1
+        log.info("state %s: pool %s -> %s", new.state_id, raw["pool_id"], new.pool_id)
+        if dry_run:
+            continue
+        if purge:
+            assert_writable(path.parent, s)
+            shutil.rmtree(path.parent)
+        else:
+            save_state(new, s)
+    return counts | {"dry_run": dry_run, "changed": changed}
 
 
 def _species_row(i: int, smiles: str, count: int, key: str | None, featurizer) -> dict:

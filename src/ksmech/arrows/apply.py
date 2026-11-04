@@ -33,7 +33,7 @@ from functools import cached_property
 from rdkit import Chem, rdBase
 
 from ksmech.data import chem
-from ksmech.data.resonance import sigma_key
+from ksmech.data.resonance import identity_key
 from ksmech.data.schema import Arrow, SourceKind
 
 ORDER_TO_TYPE = {1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}
@@ -231,8 +231,9 @@ class ApplyResult:
 
     @cached_property
     def key(self) -> str | None:
-        """The sigma key: the identity modulo resonance (`data.resonance.sigma_key`)."""
-        return None if self.mol is None else sigma_key(self.mol)
+        """The identity key v2: the identity modulo resonance (`data.resonance.identity_key`;
+        the sigma key for a closed shell)."""
+        return None if self.mol is None else identity_key(self.mol)
 
 
 def apply_moves(mol: Chem.Mol, moves: list[Move]) -> ApplyResult:

@@ -301,7 +301,7 @@ def _pool_sample(rt: Runtime, state: PoolState, digest: str):
     """(sample with its Lewis structure, orbital types or None) of the state's tokens, which
     must still be the ones of `digest` (else TOKENS_CHANGED)."""
     from ksmech.arrows.lewis import MissingBondIndex, reactant_lewis
-    from ksmech.arrows.steps import reactant_sample
+    from ksmech.arrows.steps import reactant_sample, with_lewis
     from ksmech.serve.science.analysis import (
         _checked_rt,
         _worker_error,
@@ -312,7 +312,7 @@ def _pool_sample(rt: Runtime, state: PoolState, digest: str):
     try:
         rtok = _checked_rt(rt, state)
         sample = reactant_sample(f"serve:{state.state_id}", "serve", rtok)
-        sample.bonds, sample.lone_pairs, sample.wiberg = reactant_lewis(rtok)
+        sample = with_lewis(sample, reactant_lewis(rtok))
     except MissingBondIndex as exc:
         raise ServeError(Code.MISSING_BOND_INDEX, str(exc)) from exc
     except ServeError:

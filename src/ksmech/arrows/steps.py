@@ -67,9 +67,12 @@ from ksmech.arrows.delta_be import (
 from ksmech.arrows.drawings import Drawing, resonance_drawings
 from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.arrows.lewis import (
+    LewisStructure,
     MissingBondIndex,
     check_edit,
     lewis_bonds,
+    lewis_nonbonding,
+    lewis_unpaired,
     pair_bond_orders,
     reactant_lewis,
 )
@@ -83,8 +86,9 @@ from ksmech.arrows.reactants import (
 from ksmech.arrows.symmetry import symmetric_closure
 from ksmech.data import chem, domain, splits
 from ksmech.data import provenance as prov
+from ksmech.data.domain import open_shell_labels
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
-from ksmech.data.resonance import sigma_key
+from ksmech.data.resonance import identity_key
 from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import (
     STORED_ATOM_FEATURES,
@@ -114,8 +118,9 @@ from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 18  # 18: every pair cell with the exclusion flags, the stored token extras,
-#   Kekule-closest labels without arrows, domain_class (open-shell plan P0a)
+SAMPLE_VERSION = 19  # 18: every pair cell with the exclusion flags, the stored token extras,
+#   Kekule-closest labels without arrows, domain_class (open-shell plan P0a); 19: N and u per
+#   atom and drawing, atom_categorical (Z, charge, u), the identity key v2 (P6)
 PARTS = ("train", "val", "test")
 FROZEN_SPLIT_SCHEMA = 1  # `split_frozen_<strategy>.json`, independent of SAMPLE_VERSION
 STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
@@ -143,6 +148,8 @@ class SkipReason(StrEnum):
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
     SOMO_NOT_INTEGRAL = "SOMO_NOT_INTEGRAL"  # an open-shell reactant is Fermi-smeared (law S, P3)
+    SET_STEP = "SET_STEP"  # the flow codes of the label (`delta_be.flow_skip`, P6)
+    DISSOCIATIVE_ET_STEP = "DISSOCIATIVE_ET_STEP"
 
 
 READING_ALIGNED = "aligned"  # every arrow has its ArrowLabel
@@ -155,7 +162,8 @@ class MechanismSample:
     step_id: str
     source: str
     fragment_keys: list[str]  # token-cache key (map-free canonical SMILES) per fragment
-    atom_categorical: np.ndarray  # (A, 2) int64: atomic number, formal charge
+    atom_categorical: np.ndarray  # (A, 3) int64: atomic number, formal charge (model inputs),
+    #   unpaired count u (bookkeeping, model_input=False: keys, diagnostics, P9's ablation)
     atom_features: np.ndarray  # (A, Fa) float32 in `atom_columns` order, missing values 0
     atom_missing: np.ndarray  # (A, Fa) bool
     atom_fragment: np.ndarray  # (A,) int64
@@ -178,12 +186,15 @@ class MechanismSample:
     #   is READING_ALIGNED
     labels_all: list[ArrowLabel] = field(default_factory=list)  # the aligned labels on every
     #   cell (no pair_valid filter; pair_cells 'all'); empty when an arrow does not align
-    product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
+    product_key: str = ""  # identity key v2 of the products (`data.resonance.identity_key`)
     edit_label: EditLabel | None = None  # the R class and its anchors on the global atoms
     bonds: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.int16))  # (E, 3)
     #   int16 (i, j, order), i < j: the reactant as drawn (Kekulé), implicit H included
     lone_pairs: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))  # (A,)
     wiberg: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float16))  # (E,)
+    nonbonding: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))  # (A,) N,
+    #   the non-bonding electrons (B_ii; lone_pairs = N // 2); collate refuses a sample without
+    unpaired: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))  # (A,) u
     orbital_reading: str = ""  # READING_ALIGNED, READING_FILTERED or the first unaligned reason
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
     label_filter: dict[str, int] = field(default_factory=dict)  # labeled (donor, acceptor)
@@ -208,18 +219,20 @@ class MechanismSample:
 
     def drawn(self, k: int) -> MechanismSample:
         """The sample in its k-th resonance drawing (0: as the dataset draws it): the formal
-        charges, bond orders, lone pairs, the pair feature `bond_order` and the label class of
-        that drawing; everything else is shared with this sample."""
+        charges, bond orders, lone pairs, N and u, the pair feature `bond_order` and the label
+        class of that drawing; everything else is shared with this sample."""
         if k == 0:
             return self
         d = self.drawings[k - 1]
         cat, bonds = self.atom_categorical.copy(), self.bonds.copy()
-        cat[:, 1], bonds[:, 2] = d.charges, d.orders
+        cat[:, 1], cat[:, 2], bonds[:, 2] = d.charges, d.unpaired, d.orders
         return replace(
             self,
             atom_categorical=cat,
             bonds=bonds,
             lone_pairs=d.lone_pairs,
+            nonbonding=d.nonbonding,
+            unpaired=d.unpaired,
             edit_label=d.edit_label,
             pair_z=with_pair_bond_orders(self, bonds),
             drawings=[],
@@ -266,7 +279,7 @@ def make_sample(
     computed here)."""
     sample = reactant_sample(step.step_id, str(step.source), rt)
     sample.labels = labels
-    sample.product_key = sigma_key(chem.parse_mapped(step.products_smiles))
+    sample.product_key = identity_key(chem.parse_mapped(step.products_smiles))
     return sample
 
 
@@ -280,17 +293,20 @@ def _atom_inputs(t: MoleculeTokens) -> tuple[np.ndarray, np.ndarray]:
 
 def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
-    hand-built reactant sets, e.g. the textbook selectivity checks). The pair feature
-    `bond_order` is read on the side as drawn."""
+    hand-built reactant sets, e.g. the textbook selectivity checks, and by every live
+    caller: serve, the embedding page). The pair feature `bond_order` is read on the side as
+    drawn, and so are N and u (`lewis.lewis_nonbonding`, `lewis.lewis_unpaired`)."""
     tok = [f.tokens for f in rt.fragments]
     block = stage_a_block(tok, REDUCED)
     flags = pair_flags(tok, rt.candidate)
     flag_z = np.stack([flags[n] for n in STORED_PAIR_FEATURES[len(STAGE_A_FEATURES) :]], -1)
+    unpaired = lewis_unpaired(rt)
+    categorical = np.concatenate([t.atom_categorical() for t in tok])
     sample = MechanismSample(
         step_id=step_id,
         source=source,
         fragment_keys=[f.key for f in rt.fragments],
-        atom_categorical=np.concatenate([t.atom_categorical() for t in tok]),
+        atom_categorical=np.hstack([categorical, unpaired[:, None].astype(categorical.dtype)]),
         atom_features=np.concatenate([_atom_inputs(t)[0] for t in tok]).astype(np.float32),
         atom_missing=np.concatenate([_atom_inputs(t)[1] for t in tok]),
         atom_fragment=rt.atom_fragment.astype(np.int64),
@@ -314,9 +330,29 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
         pair_features=STORED_PAIR_FEATURES,
         atom_columns=STORED_ATOM_FEATURES,
         orbital_columns=STORED_ORBITAL_FEATURES,
+        nonbonding=lewis_nonbonding(rt),
+        unpaired=unpaired,
     )
+    sample.lone_pairs = sample.nonbonding // 2
     sample.pair_z = with_pair_bond_orders(sample, lewis_bonds(rt))
     return sample
+
+
+def with_lewis(sample: MechanismSample, lewis: LewisStructure) -> MechanismSample:
+    """`sample` with the Lewis structure `lewis` (`lewis.reactant_lewis`): bonds, lone pairs,
+    Wiberg indices, N and u (the atom categorical's u column too). Every live caller (the
+    embedding page, serve) sets its pool's structure through it."""
+    cat = sample.atom_categorical.copy()
+    cat[:, 2] = lewis.unpaired
+    return replace(
+        sample,
+        atom_categorical=cat,
+        bonds=lewis.bonds,
+        lone_pairs=lewis.lone_pairs,
+        wiberg=lewis.wiberg,
+        nonbonding=lewis.nonbonding,
+        unpaired=lewis.unpaired,
+    )
 
 
 def _pair_index(sample: MechanismSample) -> tuple[dict[int, int], dict[int, int]]:
@@ -405,6 +441,8 @@ class EditTarget:
     bonds: np.ndarray
     lone_pairs: np.ndarray
     wiberg: np.ndarray
+    nonbonding: np.ndarray
+    unpaired: np.ndarray
 
 
 def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipReason:
@@ -417,17 +455,17 @@ def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipRe
     if isinstance(label, EditSkip):
         return SkipReason(str(label))
     try:
-        bonds, lone_pairs, wiberg = reactant_lewis(rt)
+        lewis = reactant_lewis(rt)
     except MissingBondIndex as exc:
         log.info("%s: %s", step.step_id, exc)
         return SkipReason.NO_BOND_INDEX
     atoms = np.concatenate([f.tokens.atom_categorical() for f in rt.fragments])
-    label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], bonds)
-    problem = check_edit(label, bonds, lone_pairs)
+    label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], lewis.bonds)
+    problem = check_edit(label, lewis.bonds, lewis.nonbonding, open_shell_labels(step.source))
     if problem is not None:
         log.info("%s: the edit label is no valid edit of the reactant (%s)", step.step_id, problem)
         return SkipReason.R_CHECK_FAILED
-    return EditTarget(edit, mol_label, label, bonds, lone_pairs, wiberg)
+    return EditTarget(edit, mol_label, label, *lewis)
 
 
 def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: EditTarget) -> None:
@@ -528,6 +566,7 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
         sample = make_sample(step, rt, alignment.labels if alignment.complete else [])
     sample.edit_label, sample.bonds = target.label, target.bonds
     sample.lone_pairs, sample.wiberg = target.lone_pairs, target.wiberg
+    sample.nonbonding, sample.unpaired = target.nonbonding, target.unpaired
     _set_drawings(sample, step, rt, target)
     _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))

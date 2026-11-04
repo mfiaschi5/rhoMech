@@ -13,7 +13,7 @@ from tests.fixtures.molecules import MOLECULES
 
 def lewis(smiles: str, loader):
     rt = ReactantTokens.from_smiles(smiles, loader)
-    return (rt, *reactant_lewis(rt))
+    return (rt, *reactant_lewis(rt)[:3])
 
 
 @pytest.mark.parametrize("name", sorted(MOLECULES))

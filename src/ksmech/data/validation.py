@@ -15,7 +15,7 @@ from ksmech.arrows.compare import MATCH_STATUSES, match_products
 from ksmech.arrows.delta_be import EditSkip, dataset_matrix
 from ksmech.data import chem, domain
 from ksmech.data.domain import DomainCode, OpenShellPolicy, Screen, screen_step
-from ksmech.data.resonance import is_resonance_step
+from ksmech.data.resonance import StepKind, classify_step
 from ksmech.data.schema import Arrow, ElementaryStep, Source, SourceKind
 
 log = logging.getLogger(__name__)
@@ -174,7 +174,7 @@ def build_step(
         chem.canonical_mapped_smiles(reactants), chem.canonical_mapped_smiles(products)
     )
     reactants, products = screen.reactants, screen.products
-    resonance = is_resonance_step(reactants, products)
+    kind = classify_step(reactants, products)
     step = ElementaryStep(
         step_id=step_id,
         source=source,
@@ -185,12 +185,28 @@ def build_step(
         arrows=list(arrows),
         mechanism_class=mechanism_class,
         conditions=conditions,
-        resonance_step=resonance,
+        resonance_step=kind is StepKind.RESONANCE,
         domain_exclusion=None if screen.code is None else str(screen.code),
         charge_repair=note,
         domain_class=screen.domain_class,
     )
-    return admit_open_shell(step)
+    return flow_exclusion(admit_open_shell(step), kind)
+
+
+FLOW_CODES = {
+    StepKind.NULL_STEP: DomainCode.NULL_STEP,
+    StepKind.NONCONJUGATED_SHIFT: DomainCode.NONCONJUGATED_SHIFT,
+}
+
+
+def flow_exclusion(step: ElementaryStep, kind: StepKind) -> ElementaryStep:
+    """The flow law's ingest codes (open-shell plan P6): an identity line (NULL_STEP) or a
+    shift that no balanced flow reaches (NONCONJUGATED_SHIFT) is no resonance pair and no
+    training step; the code stands where no other exclusion does."""
+    code = FLOW_CODES.get(kind)
+    if code is None or step.domain_exclusion is not None:
+        return step
+    return replace(step, domain_exclusion=str(code))
 
 
 def _readable(policy: domain.DomainPolicy) -> set[DomainCode]:

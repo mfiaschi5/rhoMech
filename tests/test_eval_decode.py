@@ -12,16 +12,18 @@ from ksmech.arrows.delta_be import EditLabel, ReactionMatrix, label_counts
 from ksmech.arrows.steps import SAMPLE_VERSION, samples_path
 from ksmech.data import provenance as prov
 from ksmech.data.provenance import StaleArtifact
-from ksmech.data.resonance import sigma_key
+from ksmech.data.resonance import identity_key, sigma_key
 from ksmech.eval.decode import caps_from_report, decode_caps, decode_report, hit_rank, lewis_apply
 from ksmech.model.decode import FORM, Completion, DecodeConfig, EntryTable, complete_anchor
 
 
-def _sample(z, q, bonds, lone_pairs, label=None):
+def _sample(z, q, bonds, lone_pairs, label=None, nonbonding=None):
+    lone = np.asarray(lone_pairs, dtype=np.int8)
     return SimpleNamespace(
         atom_categorical=np.stack([np.asarray(z), np.asarray(q)], axis=1).astype(np.int64),
         bonds=np.asarray(bonds, dtype=np.int16).reshape(-1, 3),
-        lone_pairs=np.asarray(lone_pairs, dtype=np.int8),
+        lone_pairs=lone,
+        nonbonding=2 * lone if nonbonding is None else np.asarray(nonbonding, dtype=np.int8),
         edit_label=label,
     )
 
@@ -54,11 +56,34 @@ def test_a_new_dianion_on_a_nonmetal_is_refused():
     assert lewis_apply(MECL_OH)(((5, 6, -1),), ((5, 2),)) == (None, "FORMAL_CHARGE_RANGE")
 
 
-def test_an_odd_lone_pair_entry_raises_instead_of_being_floored():
-    """A homolysis' +1 on each atom is a one-electron entry: d // 2 would floor it to no
-    change and score a wrong product. Until the electron counts of P6, it raises."""
-    with pytest.raises(ValueError, match="odd lone-pair entry 1"):
-        lewis_apply(MECL_OH)(((0, 1, -1),), ((0, 1), (1, 1)))
+def test_a_homolysis_moves_one_electron_to_each_atom():
+    """A homolysis' +1 on each atom is a one-electron entry (open-shell plan P6): N is tracked,
+    so the product is two radicals, keyed apart from the heterolysis of the same bond."""
+    key, why = lewis_apply(MECL_OH)(((0, 1, -1),), ((0, 1), (1, 1)))
+    assert why is None
+    assert key == identity_key(Chem.MolFromSmiles("[CH3].[Cl].[OH-]"))
+    hetero, _ = lewis_apply(MECL_OH)(((0, 1, -1),), ((1, 2),))
+    assert hetero == identity_key(Chem.MolFromSmiles("[CH3+].[Cl-].[OH-]")) != key
+
+
+def test_a_radical_recombines_through_its_odd_electron():
+    """Two methyl radicals (N = 1 on each C) form ethane: the -1 entries pass the N check, and
+    a -2 on an atom with one electron is LONE_PAIRS."""
+    z, q = [6, 1, 1, 1, 6, 1, 1, 1], [0] * 8
+    bonds = [(0, 1, 1), (0, 2, 1), (0, 3, 1), (4, 5, 1), (4, 6, 1), (4, 7, 1)]
+    methyls = _sample(z, q, bonds, [0] * 8, nonbonding=[1, 0, 0, 0, 1, 0, 0, 0])
+    key, why = lewis_apply(methyls)(((0, 4, 1),), ((0, -1), (4, -1)))
+    assert why is None and key == sigma_key(Chem.MolFromSmiles("CC"))
+    assert lewis_apply(methyls)(((0, 4, 1),), ((0, -2),)) == (None, "LONE_PAIRS")
+
+
+def test_a_pi_homolysis_is_a_step_not_resonance():
+    """C=C -> .C-C. keeps every sigma bond, but the identity key v2 counts the unpaired
+    electrons: a real step, not RESONANCE_ONLY_STEP."""
+    ethene = _sample([6, 6, 1, 1, 1, 1], [0] * 6, [(0, 1, 2), (0, 2, 1), (0, 3, 1), (1, 4, 1),
+                     (1, 5, 1)], [0] * 6)  # fmt: skip
+    key, why = lewis_apply(ethene)(((0, 1, -1),), ((0, 1), (1, 1)))
+    assert why is None and key == identity_key(Chem.MolFromSmiles("[CH2][CH2]"))
 
 
 def test_moving_only_the_pi_bond_is_resonance():

@@ -9,7 +9,9 @@ drawing (`delta_be.drawn_label`), so the model learns the step, not the drawing.
 A molecule's forms are its resonance forms (`data.resonance.resonance_forms`: H frozen, odd
 structures dropped) with no more formal charges (the sum of |q|) than the molecule as drawn
 (user decision, 2026-10-26): an enolate's charge on C or O, a carboxylate's on either O, the
-ends of an allyl ion. The charge-separated minor forms are never drawn: RDKit returns 50 or more
+ends of an allyl ion. A radical's forms come through the anion proxy (`resonance.radical_forms`,
+open-shell plan P6), one per radical site: the allyl radical's two ends, the three O of NO3.
+The charge-separated minor forms are never drawn: RDKit returns 50 or more
 structures for 9% of the PMechDB reactant molecules, nearly all of them charge-separated, so
 uniform draws over every form would mostly be zwitterions. A form keeps the drawn Kekule
 structure wherever it does not need another (`kekule_closest`): RDKit's structure of a cation
@@ -44,10 +46,16 @@ from ksmech.arrows.delta_be import (
     to_global,
     without_kekule_cycles,
 )
-from ksmech.arrows.lewis import check_edit, lewis_bonds, lewis_lone_pairs
+from ksmech.arrows.lewis import check_edit, lewis_bonds, lewis_nonbonding, lewis_unpaired
 from ksmech.arrows.reactants import ReactantTokens
 from ksmech.arrows.symmetry import symmetric_closure
-from ksmech.data.resonance import frozen_hydrogens, resonance_forms
+from ksmech.data.domain import open_shell_labels
+from ksmech.data.resonance import (
+    frozen_hydrogens,
+    radical_forms,
+    resonance_forms,
+    with_radicals,
+)
 from ksmech.data.schema import ElementaryStep
 
 MAX_DRAWINGS = 8  # pool drawings per sample, the dataset's own included
@@ -61,6 +69,8 @@ class Drawing:
     charges: np.ndarray  # (A,) int8 formal charge of every atom token
     orders: np.ndarray  # (E,) int8 bond order of every row of the sample's `bonds`
     lone_pairs: np.ndarray  # (A,) int8
+    nonbonding: np.ndarray  # (A,) int8 N (P6)
+    unpaired: np.ndarray  # (A,) int8 u (P6)
     edit_label: EditLabel  # the label class recomputed on this drawing
 
 
@@ -90,19 +100,26 @@ def kekule_closest(drawn: Chem.Mol, form: Chem.Mol) -> Chem.Mol:
         rw.GetAtomWithIdx(a.GetIdx()).SetFormalCharge(a.GetFormalCharge())
     mol = rw.GetMol()
     mol.UpdatePropertyCache(strict=False)
-    return mol
+    return with_radicals(mol) if _open(form) else mol
+
+
+def _open(mol: Chem.Mol) -> bool:
+    """`mol` has a radical electron (its flags follow N where it does: `with_radicals`)."""
+    return any(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
 
 
 def molecule_forms(frag: Chem.Mol) -> list[Chem.Mol]:
     """The forms one molecule may be drawn in: as drawn first (H frozen), then its other
     resonance forms with no more formal charges, each closest to the drawn Kekule structure
-    (`kekule_closest`) and each structure once, in RDKit's order. Only the drawn one when the
-    molecule does not sanitize."""
+    (`kekule_closest`) and each structure once, in RDKit's order, then a radical's forms
+    (`resonance.radical_forms`, one per radical site). Only the drawn one when the molecule
+    does not sanitize."""
     frozen = frozen_hydrogens(frag)
     if frozen is None:
         return [frag]
     out, seen, q = [frozen], {_structure(frozen)}, _charges(frozen)
-    for form in resonance_forms(frozen, FORM_CAP)[0]:
+    forms = resonance_forms(frozen, FORM_CAP)[0] + radical_forms(frozen, FORM_CAP, per_site=True)
+    for form in forms:
         if any(b.GetIsAromatic() for b in form.GetBonds()) or _charges(form) > q:
             continue
         form = kekule_closest(frozen, form)
@@ -140,7 +157,7 @@ def pool_drawing(base: Chem.Mol, parts: list[tuple[tuple[int, ...], Chem.Mol]]) 
             rw.GetAtomWithIdx(atoms[a.GetIdx()]).SetFormalCharge(a.GetFormalCharge())
     mol = rw.GetMol()
     mol.UpdatePropertyCache(strict=False)
-    return mol
+    return with_radicals(mol) if any(_open(f) for _, f in parts) else mol
 
 
 def _seed(step_id: str) -> int:
@@ -148,23 +165,77 @@ def _seed(step_id: str) -> int:
 
 
 def drawing_of(
-    rt: ReactantTokens, mol: Chem.Mol, label: EditLabel, bonds: np.ndarray, atoms: np.ndarray
+    rt: ReactantTokens,
+    mol: Chem.Mol,
+    label: EditLabel,
+    bonds: np.ndarray,
+    atoms: np.ndarray,
+    open_shell: bool = False,
 ) -> Drawing | str:
     """The Drawing of the pool drawing `mol` with its label on the global atoms, closed under
     the drawing's own symmetry (`symmetry.symmetric_closure`), or why the label is no valid edit
-    of it. `bonds` and `atoms` (element, formal charge) are the sample's (the drawn pool)."""
+    of it (`open_shell`: the source's elementary rule). `bonds` and `atoms` (element, formal
+    charge) are the sample's (the drawn pool)."""
     new = lewis_bonds(rt, mol)
     if not np.array_equal(new[:, :2], bonds[:, :2]):
         raise ValueError("a resonance drawing changed the sigma bonds")
-    lone = lewis_lone_pairs(rt, mol)
+    nonbonding = lewis_nonbonding(rt, mol)
     q = atoms[:, 1].astype(np.int8).copy()
     for m, g in rt.global_atom.items():
         q[g] = mol.GetAtomWithIdx(m).GetFormalCharge()
     label = symmetric_closure(label, atoms[:, 0], q, new)
-    problem = check_edit(label, new, lone)
+    problem = check_edit(label, new, nonbonding, open_shell)
     if problem is not None:
         return problem
-    return Drawing(q, new[:, 2].astype(np.int8), lone, label)
+    unpaired = lewis_unpaired(rt, mol)
+    return Drawing(q, new[:, 2].astype(np.int8), nonbonding // 2, nonbonding, unpaired, label)
+
+
+def pool_drawings(mol: Chem.Mol, step_id: str, limit: int) -> list[Chem.Mol]:
+    """Up to `limit` drawings of a reactant pool on its atom indices (H frozen), the drawn one
+    first: one form per molecule (`molecule_forms`, `combinations` seeded by the step id).
+    Empty when the pool does not sanitize."""
+    base = frozen_hydrogens(mol)
+    if base is None:
+        return []
+    mapping: list = []
+    frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False, fragsMolAtomMapping=mapping)
+    forms = [molecule_forms(f) for f in frags]
+    rng = np.random.default_rng(_seed(step_id))
+    out = []
+    for choice in combinations([len(f) for f in forms], limit, rng):
+        parts = [(tuple(a), f[k]) for a, f, k in zip(mapping, forms, choice, strict=True)]
+        out.append(pool_drawing(base, parts))
+    return out
+
+
+REDRAW_LIMIT = 64  # reactant drawings tried by `redrawn_label`
+
+
+def redrawn_label(
+    step: ElementaryStep, edit: StepEdit, limit: int = REDRAW_LIMIT
+) -> tuple[int, Chem.Mol, EditLabel] | EditSkip:
+    """(drawing index, reactant drawing, label): the drawn reactants (index 0) when their label
+    passes, else, of the other reactant drawings whose label class passes (`_label` on the
+    drawing, the product forms as candidates), the one with the fewest entries, then the
+    lowest index: the label class over the reactant drawings x the product forms (open-shell
+    plan P6). A radical drawn with its electron where the step does not use it (NO3. with the
+    H landing on the drawn O-) gets the drawing that carries it there; the drawn label's skip
+    when no drawing passes."""
+    from ksmech.arrows.delta_be import _label, edit_label
+
+    first = edit_label(step, edit)
+    if not isinstance(first, EditSkip):
+        return 0, edit.mol, first
+    found = []
+    for k, mol in enumerate(pool_drawings(edit.mol, step.step_id, limit)[1:], 1):
+        lab = _label(step, mol, edit, matrix_between(mol, edit.prod))
+        if not isinstance(lab, EditSkip):
+            found.append((lab.variants[0].size, k, mol, lab))
+    if not found:
+        return first
+    _, k, mol, lab = min(found, key=lambda x: x[:2])
+    return k, mol, lab
 
 
 def resonance_drawings(
@@ -196,7 +267,7 @@ def resonance_drawings(
         if isinstance(lab, EditSkip):
             dropped[str(lab)] += 1
             continue
-        drawing = drawing_of(rt, mol, lab, bonds, atoms)
+        drawing = drawing_of(rt, mol, lab, bonds, atoms, open_shell_labels(step.source))
         if isinstance(drawing, str):
             dropped[drawing] += 1
         else:

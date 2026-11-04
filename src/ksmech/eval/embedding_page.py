@@ -215,6 +215,7 @@ def page_payload(tr: dict, sample: MechanismSample, types: list[str] | None, met
         "tokens": rows,
         "bonds": sample.bonds.astype(int).tolist(),
         "lone_pairs": sample.lone_pairs.astype(int).tolist(),
+        "nonbonding": sample.nonbonding.astype(int).tolist(),
         "features": _features(sample, tr),
         "parts": _parts(tr),
         "layers": {

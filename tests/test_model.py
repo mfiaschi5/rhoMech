@@ -69,6 +69,8 @@ ATOM_FIELDS = (
     "atom_map",
     "atom_positions",
     "lone_pairs",
+    "nonbonding",
+    "unpaired",
 )
 ORBITAL_FIELDS = (
     "orbital_features",

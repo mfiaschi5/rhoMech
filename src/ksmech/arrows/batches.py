@@ -159,22 +159,28 @@ def _label_tensors(batch: list[MechanismSample], n_atoms: int, n_orb: int) -> di
 
 def _reactant_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
     """The reactant's Lewis structure on the padded atoms (bond orders, Wiberg indices, graph
-    distances, -1 between molecules and on padding, lone pairs) and the decoder's masks: a bond
-    may break, a pair of distinct atoms may gain an order while it stays at most 3, an atom
-    with a lone pair may lose one (spec v8, Edit decoder)."""
+    distances, -1 between molecules and on padding, lone pairs, non-bonding electrons N) and
+    the decoder's masks: a bond may break, a pair of distinct atoms may gain an order while it
+    stays at most 3, an atom with N >= 2 may lose a pair and one with N >= 1 an electron (spec
+    v8, Edit decoder; open-shell plan P6). A sample without N for every atom is refused: a live
+    sample built without it would mask every -1 and -2 entry."""
     b = len(batch)
     order = torch.zeros(b, n_atoms, n_atoms, dtype=torch.int8)
     wiberg = torch.zeros(b, n_atoms, n_atoms)
     dist = torch.full((b, n_atoms, n_atoms), -1, dtype=torch.int16)
     lone = torch.zeros(b, n_atoms, dtype=torch.int8)
+    nonbonding = torch.zeros(b, n_atoms, dtype=torch.int8)
     real = torch.zeros(b, n_atoms, dtype=torch.bool)
     for k, s in enumerate(batch):
+        if len(s.nonbonding) != s.n_atoms:
+            raise ValueError(f"{s.step_id}: N has {len(s.nonbonding)} atoms, not {s.n_atoms}")
         i, j = (torch.from_numpy(s.bonds[:, c].astype(np.int64)) for c in (0, 1))
         order[k, i, j] = order[k, j, i] = torch.from_numpy(s.bonds[:, 2].astype(np.int8))
         wiberg[k, i, j] = wiberg[k, j, i] = torch.from_numpy(s.wiberg.astype(np.float32))
         na = s.n_atoms
         dist[k, :na, :na] = torch.from_numpy(graph_distances(s.bonds, na))
         lone[k, :na] = torch.from_numpy(s.lone_pairs)
+        nonbonding[k, :na] = torch.from_numpy(s.nonbonding.astype(np.int8))
         real[k, :na] = True
     pair = real[:, :, None] & real[:, None, :] & ~torch.eye(n_atoms, dtype=torch.bool)
     return {
@@ -182,9 +188,11 @@ def _reactant_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
         "wiberg": wiberg,
         "graph_distance": dist,
         "lone_pairs": lone,
+        "nonbonding": nonbonding,
         "can_break": order > 0,
         "can_form": pair & (order < 3),
-        "can_lose_pair": lone > 0,
+        "can_lose_pair": nonbonding >= 2,
+        "can_lose_electron": nonbonding >= 1,
     }
 
 

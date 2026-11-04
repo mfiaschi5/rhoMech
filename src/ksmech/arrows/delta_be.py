@@ -51,7 +51,12 @@ from ksmech.arrows.apply import (
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
 from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.data import chem
-from ksmech.data.resonance import frozen_hydrogens, resonance_forms
+from ksmech.data.resonance import (
+    balanced_flow,
+    frozen_hydrogens,
+    radical_forms,
+    resonance_forms,
+)
 from ksmech.data.schema import ElementaryStep, SourceKind
 
 RESONANCE_CAP = 256  # product resonance structures enumerated for the label class
@@ -67,6 +72,9 @@ class EditSkip(StrEnum):
     H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"  # no unique donor -> acceptor pairing of the
     #   hydrogens that move (`arrows.hydrogens`; steps without arrows only)
     RADICAL_ARROW = "RADICAL_ARROW"  # a half-headed arrow: one-electron edits are not built yet
+    SET_STEP = "SET_STEP"  # R has atom entries only: an electron transfer, no bond changes (P6)
+    DISSOCIATIVE_ET_STEP = "DISSOCIATIVE_ET_STEP"  # bond entries, but the electron flow is
+    #   unbalanced in every variant of the class: an electron transfer coupled to a cleavage
 
 
 def _order(mol: Chem.Mol, i: int, j: int) -> int:
@@ -96,10 +104,19 @@ class ReactionMatrix:
         bonds = tuple(sorted((*sorted((index[i], index[j])), d) for i, j, d in self.bonds))
         return ReactionMatrix(bonds, tuple(sorted((index[i], d) for i, d in self.lone)))
 
-    def is_elementary(self) -> bool:
+    def is_elementary(self, open_shell: bool = False) -> bool:
         """Every bond order changes by 1 and every atom's non-bonding electrons by 2: a step of
-        spec v9, and all the decoder can write ({-1, 0, +1} per pair, {-2, 0, +2} per atom)."""
-        return all(abs(d) == 1 for *_, d in self.bonds) and all(abs(d) == 2 for _, d in self.lone)
+        spec v9, and all the decoder can write ({-1, 0, +1} per pair, {-2, 0, +2} per atom).
+        With `open_shell` (the source's label rule, `domain.open_shell_labels`) an atom entry
+        may also be +-1: homolysis, recombination, radical addition and transfer."""
+        atoms = (1, 2) if open_shell else (2,)
+        return all(abs(d) == 1 for *_, d in self.bonds) and all(
+            abs(d) in atoms for _, d in self.lone
+        )
+
+    def balanced(self) -> bool:
+        """The electron-flow law holds (`data.resonance.balanced_flow`)."""
+        return balanced_flow(self.bonds, self.lone)
 
     def anchors(self) -> tuple[tuple[int, int, str], ...]:
         """Admissible anchors: the bond orders that rise, else those that fall."""
@@ -314,10 +331,14 @@ def without_kekule_cycles(r: ReactionMatrix, reac: Chem.Mol) -> ReactionMatrix:
 
 def product_forms(prod: Chem.Mol) -> tuple[list[Chem.Mol], int]:
     """(the resonance forms of the product with its H frozen, Kekule structures as drawn
-    (`resonance.resonance_forms`), the structures RDKit counted); none when the product does
-    not sanitize."""
+    (`resonance.resonance_forms`), then a radical product's forms through the anion proxy
+    (`resonance.radical_forms`, P6), each on the product's atom indices; the structures RDKit
+    counted); none when the product does not sanitize."""
     frozen = frozen_hydrogens(prod)
-    return ([], 0) if frozen is None else resonance_forms(frozen, RESONANCE_CAP)
+    if frozen is None:
+        return [], 0
+    forms, n = resonance_forms(frozen, RESONANCE_CAP)
+    return forms + radical_forms(frozen, RESONANCE_CAP), n
 
 
 def _costs(reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix, structures) -> dict:
@@ -337,6 +358,7 @@ def parsimonious_class(
     accept=lambda r: True,
     forms: tuple[list[Chem.Mol], int] | None = None,
     extra: tuple[Chem.Mol, ...] = (),
+    open_shell: bool = False,
 ) -> tuple[tuple[ReactionMatrix, ...], int, bool, int]:
     """(the parsimonious class sorted, structures enumerated, truncated, members rejected) of
     `r_data`: the elementary R (`ReactionMatrix.is_elementary`) of lowest cost (fewest formal
@@ -344,13 +366,14 @@ def parsimonious_class(
     accepts; `r_data` is always accepted when it is elementary, and the class is empty when no
     candidate is. The product structures are `forms` (`product_forms(prod)` unless given) and
     `extra`, more resonance structures of the product. A drawing of the reactants with a triple
-    bond that the product needs single has only matrices with a -2 entry there."""
+    bond that the product needs single has only matrices with a -2 entry there. `open_shell` is
+    the source's elementary rule (`ReactionMatrix.is_elementary`)."""
     structures, n = product_forms(prod) if forms is None else forms
     cost = _costs(reac, prod, r_data, (*structures, *extra))
     rejected = 0
     for level in sorted(set(cost.values())):
         members = sorted(r for r, c in cost.items() if c == level)
-        ok = [r for r in members if r.is_elementary() and (r == r_data or accept(r))]
+        ok = [r for r in members if r.is_elementary(open_shell) and (r == r_data or accept(r))]
         rejected += len(members) - len(ok)
         if ok:
             return tuple(ok), n, n >= RESONANCE_CAP, rejected
@@ -388,15 +411,29 @@ def step_edit(step: ElementaryStep) -> StepEdit | EditSkip:
     return StepEdit(mol, prod, r_data, product_forms(prod), removed)
 
 
+def flow_skip(variants: tuple[ReactionMatrix, ...]) -> EditSkip | None:
+    """The flow codes of a non-empty class (open-shell plan P6): SET_STEP when R has atom
+    entries only, DISSOCIATIVE_ET_STEP when every variant breaks the electron-flow law."""
+    if not variants[0].bonds:
+        return EditSkip.SET_STEP
+    if not any(v.balanced() for v in variants):
+        return EditSkip.DISSOCIATIVE_ET_STEP
+    return None
+
+
 def _label(step: ElementaryStep, mol: Chem.Mol, edit: StepEdit, r_data, extra=()):
+    from ksmech.data.domain import open_shell_labels
+
     accept = lambda r: reproduces(step, mol, r)  # noqa: E731
     variants, n, truncated, rejected = parsimonious_class(
-        mol, edit.prod, r_data, accept, edit.forms, extra
+        mol, edit.prod, r_data, accept, edit.forms, extra, open_shell_labels(step.source)
     )
     if not variants:
         return EditSkip.NOT_ELEMENTARY
     if variants[0].size == 0:
         return EditSkip.RESONANCE_STEP
+    if (skip := flow_skip(variants)) is not None:
+        return skip
     anchors = tuple(v.anchors() for v in variants)
     if not all(anchors):
         return EditSkip.NO_ANCHOR

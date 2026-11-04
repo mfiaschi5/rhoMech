@@ -26,6 +26,16 @@ the species table, and tests check them (tests/test_data_spin.py).
 
 `spin_config` is what every artifact that reads this module stamps into its provenance config:
 the rule version and both tables' versions and content hashes.
+
+`spin_of_drawing` is the unpaired count of a drawing, not of a species (open-shell plan P6,
+U12): it reads the non-bonding electrons N of every atom (B_ii, `arrows.apply
+.nonbonding_electrons` unless given), so u is the number of odd-N atoms, never RDKit's
+radical perception ([Br+], [OH+] and a singlet [CH2] have even N and u = 0). The species table
+raises it, never lowers it: a row whose theory verdict is a degenerate open shell (the Hund
+case: O2, the O atom) holds for every drawing with the row's v1 identity key, so O=O keys as
+the triplet [O][O] does; any other row with a higher count holds only for the drawing it was
+scanned on (FeBr4- as drawn, u = 5), so C=C never inherits a [CH2][CH2] row. The identity key
+v2 (`data.resonance.identity_key`) and the per-drawing atom categorical read it.
 """
 
 from __future__ import annotations
@@ -185,6 +195,136 @@ def reassigned(a: Assignment, drawn: int) -> bool:
     """The assignment gives a count other than the drawing's (RDKit's): its QM record is
     computed at the assigned count under a tagged method (`qm.spin`)."""
     return a.assigned and a.unpaired != drawn
+
+
+def _formula(mol: Chem.Mol) -> tuple:
+    """(sorted (element, count) with every H counted, total charge): the index of the rows
+    that may raise a drawing. `mol` has its property cache set."""
+    counts: dict[str, int] = {}
+    for a in mol.GetAtoms():
+        counts[a.GetSymbol()] = counts.get(a.GetSymbol(), 0) + 1
+        if h := a.GetTotalNumHs():
+            counts["H"] = counts.get("H", 0) + h
+    return tuple(sorted(counts.items())), sum(a.GetFormalCharge() for a in mol.GetAtoms())
+
+
+def is_hund_row(entry: dict) -> bool:
+    """A row whose theory verdict (rule B) is a degenerate open shell: the Hund case."""
+    return bool(entry["b"].get("open_shell")) and isinstance(entry["unpaired"], int)
+
+
+@cache
+def _raising_rows() -> dict[tuple, list[tuple[str, int, bool]]]:
+    """Formula -> (SMILES, unpaired, Hund case) of every species-table row with a count of at
+    least 2 (`species_table`, read once per process)."""
+    out: dict[tuple, list[tuple[str, int, bool]]] = {}
+    for smiles, entry in species_table()["entries"].items():
+        if isinstance(entry["unpaired"], int) and entry["unpaired"] >= 2:
+            mol = Chem.MolFromSmiles(smiles)  # sanitized: its property cache is set
+            row = (smiles, entry["unpaired"], is_hund_row(entry))
+            out.setdefault(_formula(mol), []).append(row)
+    return out
+
+
+@lru_cache(maxsize=4096)
+def _v1_key(smiles: str) -> str:
+    from ksmech.data.resonance import sigma_key  # resonance reads domain, which reads spin
+
+    return sigma_key(Chem.MolFromSmiles(smiles))
+
+
+def _table_count(mol: Chem.Mol, drawn: int) -> int | None:
+    """The count a species-table row gives the drawing when it is higher than `drawn`: a Hund
+    row through the v1 identity key, any other row through the drawing's own SMILES."""
+    rows = _raising_rows().get(_formula(mol), [])
+    rows = [r for r in rows if r[1] > drawn and (r[1] - drawn) % 2 == 0]
+    if not rows:
+        return None
+    hund = [r for r in rows if r[2]]
+    if hund:
+        from ksmech.data.resonance import sigma_key
+
+        key = sigma_key(mol)
+        if hit := [u for s, u, _ in hund if _v1_key(s) == key]:
+            return hit[0]
+    smiles = chem.unmapped_canonical(mol)
+    return next((u for s, u, h in rows if not h and s == smiles), None)
+
+
+def _electron_counts(m: Chem.Mol, nonbonding) -> list[int]:
+    """N + 2 x the bond orders (every H counted) of every atom: its valence electrons."""
+    from ksmech.arrows.apply import TYPE_TO_ORDER
+
+    return [
+        int(nonbonding[a.GetIdx()])
+        + 2 * (sum(TYPE_TO_ORDER.get(b.GetBondType(), 1) for b in a.GetBonds()) + a.GetTotalNumHs())
+        for a in m.GetAtoms()
+    ]
+
+
+def _placed(m: Chem.Mol, nonbonding, parity: list[int], excess: int) -> tuple[int, ...]:
+    """The per-atom counts of a raised drawing (`m` Kekule, its property cache updated): the
+    excess on the one open d-shell metal centre; else on the one main-group atom short of its
+    octet with a pair to open (a carbene C, the O atom); else spread evenly over the heavy
+    atoms when they are one symmetry class (O=O). SpinTableError for any other drawing: a row
+    that needs a placement rule."""
+    from ksmech.data import domain
+
+    out = list(parity)
+    centres = _open_centres(m)
+    short = [
+        a.GetIdx()
+        for a, e in zip(m.GetAtoms(), _electron_counts(m, nonbonding), strict=True)
+        if a.GetAtomicNum() > 2 and a.GetAtomicNum() not in domain.GROUP
+        and e < 8 and nonbonding[a.GetIdx()] >= 2
+    ]  # fmt: skip
+    if len(centres) == 1 or (not centres and len(short) == 1):
+        out[(centres or [m.GetAtomWithIdx(short[0])])[0].GetIdx()] += excess
+        return tuple(out)
+    heavy = [a.GetIdx() for a in m.GetAtoms() if a.GetAtomicNum() > 1]
+    ranks = list(Chem.CanonicalRankAtoms(m, breakTies=False, includeChirality=False))
+    if heavy and excess % len(heavy) == 0 and len({ranks[i] for i in heavy}) == 1:
+        for i in heavy:
+            out[i] += excess // len(heavy)
+        return tuple(out)
+    raise spin_table.SpinTableError(
+        f"{chem.unmapped_canonical(m)}: no per-atom placement of {excess} raised electrons"
+    )
+
+
+def kekule_copy(mol: Chem.Mol) -> Chem.Mol:
+    """A copy with its property cache and ring info set, kekulized when it has aromatic bonds
+    (an aromatic bond would count 1 in N)."""
+    m = Chem.Mol(mol)
+    m.UpdatePropertyCache(strict=False)
+    if any(b.GetIsAromatic() for b in m.GetBonds()):
+        Chem.Kekulize(m, clearAromaticFlags=True)
+        m.UpdatePropertyCache(strict=False)
+    Chem.FastFindRings(m)
+    return m
+
+
+def spin_of_drawing(
+    mol: Chem.Mol, nonbonding: list[int] | tuple[int, ...] | None = None
+) -> tuple[int, tuple[int, ...]]:
+    """(unpaired count, count per atom) of one drawn fragment (module docstring): the odd-N
+    atoms, raised where the species table holds the species as high spin. `nonbonding` is N
+    per atom of `mol` (read from its Kekule structure when not given)."""
+    from ksmech.arrows.apply import nonbonding_electrons  # arrows reads data: lazy
+
+    m = mol
+    if nonbonding is None or any(b.GetIsAromatic() for b in mol.GetBonds()):
+        m = kekule_copy(mol)
+    else:
+        m.UpdatePropertyCache(strict=False)
+    if nonbonding is None:
+        nonbonding = [nonbonding_electrons(a) for a in m.GetAtoms()]
+    parity = [int(n) % 2 for n in nonbonding]
+    drawn = sum(parity)
+    raised = _table_count(m, drawn)
+    if raised is None:
+        return drawn, tuple(parity)
+    return raised, _placed(kekule_copy(m), nonbonding, parity, raised - drawn)
 
 
 def spin_config(table: dict | None = None, metals: dict | None = None) -> dict:

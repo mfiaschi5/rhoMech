@@ -653,7 +653,8 @@ def test_ingest_report_counts_repairs_per_rule_and_domain_classes():
         "REPAIRED_DATIVE+METAL_SUSPECT": 1,
         "REPAIRED_V1": 1,
     }
-    assert report["domain_exclusions"] == {"METAL_PLACEHOLDER": 1}
+    # the CDI line carries V1 as an identity line: NULL_STEP under the flow law (P6)
+    assert report["domain_exclusions"] == {"METAL_PLACEHOLDER": 1, "NULL_STEP": 1}
     stats = compute_stats([result.steps[k] for k in (0, 3)])
     assert stats["charge_repairs_by_rule"] == {DATIVE_RULE: 1, V1_IMIDAZOLYL: 1}
 

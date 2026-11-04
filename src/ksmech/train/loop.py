@@ -169,12 +169,17 @@ def _size(sample) -> int:
 
 def drop_undecodable_drawings(samples: list, part: str) -> int:
     """Drop, in place, the resonance drawings whose label class holds a step the decoder cannot
-    write (`ReactionMatrix.is_elementary`: a bond order changing by 2). A store built before
-    the build checked this (2026-10-26, 5 of 7,864 drawings) still has them, and one such
-    drawing put the loss's gather out of range. Returns how many were dropped, each logged."""
+    write (`ReactionMatrix.is_elementary` under the sample's source rule,
+    `domain.open_shell_labels`: a bond order changing by 2, or a one-electron atom entry from a
+    polar source). A store built before the build checked this (2026-10-26, 5 of 7,864
+    drawings) still has them, and one such drawing put the loss's gather out of range. Returns
+    how many were dropped, each logged."""
+    from ksmech.data.domain import open_shell_labels
+
     dropped = 0
     for s in samples:
-        keep = [d for d in s.drawings if all(v.is_elementary() for v in d.edit_label.variants)]
+        rule = open_shell_labels(getattr(s, "source", None))
+        keep = [d for d in s.drawings if all(v.is_elementary(rule) for v in d.edit_label.variants)]
         if len(keep) < len(s.drawings):
             log.warning("%s %s: %d resonance drawing(s) dropped: NOT_ELEMENTARY",
                         part, s.step_id, len(s.drawings) - len(keep))  # fmt: skip

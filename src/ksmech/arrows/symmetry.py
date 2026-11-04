@@ -38,14 +38,20 @@ MAX_VARIANTS = 32
 _TYPES = {1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}
 
 
-def lewis_mol(z: np.ndarray, charges: np.ndarray, bonds: np.ndarray) -> Chem.Mol:
+def lewis_mol(
+    z: np.ndarray, charges: np.ndarray, bonds: np.ndarray, nonbonding: np.ndarray | None = None
+) -> Chem.Mol:
     """The Lewis structure on the token atoms as an unsanitized RDKit molecule: atom k is token
-    atom k, every H an atom, no implicit H; ring info found."""
+    atom k, every H an atom, no implicit H; ring info found. With `nonbonding` (N of every
+    atom) each atom's radical electrons are N mod 2 (open-shell plan P6); RDKit never assigns
+    them here otherwise."""
     rw = Chem.RWMol()
-    for el, q in zip(z, charges, strict=True):
+    for k, (el, q) in enumerate(zip(z, charges, strict=True)):
         atom = Chem.Atom(int(el))
         atom.SetFormalCharge(int(q))
         atom.SetNoImplicit(True)
+        if nonbonding is not None:
+            atom.SetNumRadicalElectrons(int(nonbonding[k]) % 2)
         rw.AddAtom(atom)
     for i, j, o in bonds:
         rw.AddBond(int(i), int(j), _TYPES[int(o)])
