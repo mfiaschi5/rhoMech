@@ -351,6 +351,19 @@ def _costs(reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix, structures) -
     return cost
 
 
+def _cheapest(cost: dict, ok) -> tuple[tuple[ReactionMatrix, ...], int]:
+    """(the members `ok` keeps at the lowest cost level where it keeps any, the members it
+    dropped up to that level); ((), all dropped) when it keeps none."""
+    rejected = 0
+    for level in sorted(set(cost.values())):
+        members = sorted(r for r, c in cost.items() if c == level)
+        kept = [r for r in members if ok(r)]
+        rejected += len(members) - len(kept)
+        if kept:
+            return tuple(kept), rejected
+    return (), rejected
+
+
 def parsimonious_class(
     reac: Chem.Mol,
     prod: Chem.Mol,
@@ -362,22 +375,28 @@ def parsimonious_class(
 ) -> tuple[tuple[ReactionMatrix, ...], int, bool, int]:
     """(the parsimonious class sorted, structures enumerated, truncated, members rejected) of
     `r_data`: the elementary R (`ReactionMatrix.is_elementary`) of lowest cost (fewest formal
-    charges in the product structure, then fewest entries) that `accept` (the key check)
-    accepts; `r_data` is always accepted when it is elementary, and the class is empty when no
-    candidate is. The product structures are `forms` (`product_forms(prod)` unless given) and
-    `extra`, more resonance structures of the product. A drawing of the reactants with a triple
-    bond that the product needs single has only matrices with a -2 entry there. `open_shell` is
-    the source's elementary rule (`ReactionMatrix.is_elementary`)."""
+    charges in the product structure, then fewest entries) whose electron flow is balanced
+    (`ReactionMatrix.balanced`, open-shell plan P6) and that `accept` (the key check)
+    accepts; `r_data` is always accepted when it is elementary. Only when no candidate has a
+    balanced flow is the class taken without that law (`flow_skip` then names it); it is empty
+    when no candidate is elementary. The product structures are `forms` (`product_forms(prod)`
+    unless given) and `extra`, more resonance structures of the product. A drawing of the
+    reactants with a triple bond that the product needs single has only matrices with a -2
+    entry there. `open_shell` is the source's elementary rule. The flow law matters where a
+    product form is cheaper by charges but reached only by an electron jump (NO2. as O=N-O.
+    from an O-NO2 homolysis)."""
     structures, n = product_forms(prod) if forms is None else forms
     cost = _costs(reac, prod, r_data, (*structures, *extra))
-    rejected = 0
-    for level in sorted(set(cost.values())):
-        members = sorted(r for r, c in cost.items() if c == level)
-        ok = [r for r in members if r.is_elementary(open_shell) and (r == r_data or accept(r))]
-        rejected += len(members) - len(ok)
-        if ok:
-            return tuple(ok), n, n >= RESONANCE_CAP, rejected
-    return (), n, n >= RESONANCE_CAP, rejected
+
+    def ok(r: ReactionMatrix, flow: bool) -> bool:
+        if not r.is_elementary(open_shell) or (flow and not r.balanced()):
+            return False
+        return r == r_data or accept(r)
+
+    variants, rejected = _cheapest(cost, lambda r: ok(r, True))
+    if not variants:
+        variants, rejected = _cheapest(cost, lambda r: ok(r, False))
+    return variants, n, n >= RESONANCE_CAP, rejected
 
 
 def reproduces(step: ElementaryStep, mol: Chem.Mol, r: ReactionMatrix) -> bool:
