@@ -12,22 +12,30 @@ picture of orbital interactions instead of learning it from scratch. Curved arro
 they are a reading of R, reconstructed afterwards with the orbital pairs that drive it.
 
 The prediction target is an autoregressive sequence of elementary steps. A step is one reaction
-matrix (bond-order changes of +-1 on atom pairs, lone-pair changes of +-2 on atoms), decoded
-around an anchor bond that forms. The product is B + R; the intermediate is re-featurized (3D
+matrix (bond-order changes of +-1 on atom pairs, changes of +-2 in an atom's non-bonding
+electrons N, and +-1 for a source of one-electron steps: `DomainPolicy.open_shell_labels`, a
+label rule only), decoded around an anchor bond that forms. The product is B + R; the intermediate is re-featurized (3D
 embedding, xTB, localization, new tokens) and fed back in to predict the next step, until the
 model emits a stop token. Labels come from the dataset arrows applied as one edit, taken
-modulo resonance as the parsimonious class (spec, "Edit labels"). Resonance identity is the
-sigma key (`data.resonance.sigma_key`, spec "Resonance"): the sigma skeleton with every H count
-frozen and the charges zeroed, plus the total charge. Steps whose two sides share it with the
-atom maps kept (no atom changes its sigma bonds or H) leave the training target and are kept as
-resonance pairs; degenerate exchanges (the same molecules, atoms that change partners) are real
-steps and stay. Training draws random valid resonance forms of the reactant pool as inputs, with
+modulo resonance as the parsimonious class (spec, "Edit labels"), whose members must have a
+balanced electron flow when any candidate does (`ReactionMatrix.balanced`). Resonance identity
+is the identity key v2 (`data.resonance.identity_key`, spec v10 "Resonance"): for a closed
+shell the sigma key (`sigma_key`: the sigma skeleton with every H count frozen and the charges
+zeroed, plus the total charge), for an open shell that key plus each fragment's (sigma SMILES,
+charge, unpaired count), u from the drawing's odd-N atoms (`data.spin.spin_of_drawing`, raised
+by the species table's high-spin rows, never RDKit's radical perception). Steps whose two sides
+share it with the atom maps kept and whose electron flow balances (electrons move only between
+bonded atoms, `resonance.balanced_flow`) leave the training target and are kept as resonance
+pairs; identical sides are NULL_STEP and a shared key without a balanced flow
+NONCONJUGATED_SHIFT, both counted exclusions; degenerate exchanges (the same molecules, atoms
+that change partners) are real steps and stay. Training draws random valid resonance forms of the reactant pool as inputs, with
 the labels recomputed.
 
 ## Representation
 
-`docs/ksmech_architecture.tex` (spec v9) is the source of truth for the representation and
-the model; this section summarizes it.
+`docs/ksmech_architecture.tex` (spec v9.2; on the Release B branches the v10 draft of the
+open-shell plan P6, to be approved before its build) is the source of truth for the
+representation and the model; this section summarizes it.
 
 Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are
 localized in the occupied and the virtual block separately (the singly occupied MOs of a
@@ -236,7 +244,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `uv run ksmech-serve users list | add LOGIN --name N --role admin --generate | set LOGIN
   --role R` (accounts of `serve.accounts`: local passwords, OIDC sign-in through
   `KSMECH_SERVE_AUTH`, sessions, job quotas, admins unlimited; `docs/accounts.md`),
-  `uv run ksmech-serve recheck`, `uv run ksmech-serve export --out FILE` (curated steps as
+  `uv run ksmech-serve recheck`, `uv run ksmech-serve rekey-pools [--dry-run] [--purge]` (the
+  stored pool states under the identity key v2, `PoolState.key_version`; once, at the Release B
+  merge; refuses while a server runs), `uv run ksmech-serve export --out FILE` (curated steps as
   PMechDB raw records, never training data), `uv run ksmech-serve ocr-setup [--relock]
   [--skip-env] [--skip-weights]` (the OCR engine MolScribe 1.1.1: its isolated environment
   `tools/ocr` synced into `data/ocr/venv` and the sha256-checked checkpoint under
@@ -304,7 +314,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   scripts/probes/dative_audit.py` (the 20-case oxidation-state audit of the dative law,
   read-only); P5: `uv run python scripts/p5_rescore.py [--pin]` (the two ReactMech checkpoints'
   decode hits by slice: unchanged since P0, P0a's Kekule and dative changes, P5's returns via
-  `cohort_p5_returns.json`; `p5_rescore.json`); `uv run ksmech-eval embedding --run NAME
+  `cohort_p5_returns.json`; `p5_rescore.json`); P6: `uv run python scripts/p6_checks.py dump
+  --source S --out FILE` under two code versions, then `compare --old A --new B` (edit labels,
+  resonance flags and keys of the v18 steps by content, closed and open shells apart), `uv run
+  python scripts/probes/flower_label_dryrun.py --source flower|pmechdb|reactmech --out DIR`
+  (FlowER's RS/RC lines and the v18 labels through the P6 rules: codes, R shapes, P9's masks and
+  screens; read-only); `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
   under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts

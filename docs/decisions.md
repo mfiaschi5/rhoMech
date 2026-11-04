@@ -7844,3 +7844,79 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
   `pytest -n 3 -m "not realdata"` 2066 passed, 12 skipped, 2 xfailed, 5 warnings;
   `KSMECH_TEST_WORKERS=2 pytest -m realdata` 62 passed (the first pass, on the 3-thread
   decodes, failed `test_legacy_reproduction` on the one sample above).
+
+## 2026-11-04: P6 code: electron bookkeeping, the electron-flow law, the per-source elementary rule and the identity key v2
+
+Open-shell plan P6 (Release B, stacked branch 1 of 3, `claude/open-shell-p6` from P5), in its own
+worktree whose data root is a `cp -a --reflink=always` copy of main's `data/` (36 s, about 0
+disk). Code only: the v18 data of main is untouched.
+
+- **N and u from the drawing** (`data.spin.spin_of_drawing`). u is the number of atoms with odd
+  N (B_ii), read on a Kekule copy (an aromatic bond would count 1). The species table raises it,
+  never lowers it: a row whose theory verdict is a degenerate open shell (B's `open_shell`, the
+  Hund case; in spin_table_v2 only `[O]` and `[O][O]`) holds for every drawing with its v1
+  key, so O=O, `[O][O]` and `[O+][O-]` are one triplet; any other row with a higher count holds
+  only for the drawing it was scanned on (the 13 high-spin Fe(III) halides as drawn,
+  `COC(=O)[C]C(=O)OC`), so C=C never inherits a `[CH2][CH2]` row. The raised electrons are
+  placed on the one open d-shell metal centre, else on the one main-group atom short of its
+  octet with a pair to open (the carbene C, the O atom), else spread over heavy atoms of one
+  symmetry class (O=O); any other raised drawing raises SpinTableError (a table row that needs
+  a placement rule). U12 says "data.spin on RDKit only for bare SMILES"; the key reads N from
+  every drawing, bare SMILES included, since a SMILES is a drawing and RDKit's radical
+  perception would split `[C]=O` from `[C-]#[O+]` and give `[Br+]`, `[OH+]` and a singlet
+  `[CH2]` two radicals, all of which P6's own tests require otherwise. `data.spin.assign`
+  stays the QM spin source.
+- **Identity key v2** (`data.resonance.identity_key`): the sigma key when u = 0 (every
+  closed-shell key byte-identical), else `<v1>|<frag sigma SMILES>,<charge>,<u>;...` sorted
+  over every fragment (',' between fields, ';' between fragments, never '.', since serve splits
+  pool keys on it). It replaces `sigma_key` in `is_resonance_step`, `match_products`,
+  `ApplyResult.key`, `product_key`, eval's `lewis_apply` (u from the tracked N, so a pi-homolysis
+  is a step and a homolysis and a heterolysis of one bond are two beams), serve's
+  `species_key_of` and the curation export's round trip.
+- **The electron-flow law** (`resonance.balanced_flow`) replaces enumeration as the resonance
+  test: R's changed bonds joined into components; balanced when every atom whose N changes is on
+  a changed bond and every component has sum dN + 2 sum dB = 0. RDKit's enumeration cannot be
+  the test: from the drawn reactant it reaches the drawn product for only 147 of PMechDB's 471
+  resonance pairs (plan measurement). `classify_step` gives NULL_STEP (identical canonical
+  mapped sides), RESONANCE (one v2 key with the maps kept and a balanced flow, as drawn or
+  between some reactant drawing and product form), NONCONJUGATED_SHIFT (one key, no balanced
+  flow) or a step. NULL_STEP and NONCONJUGATED_SHIFT are ingest exclusions (`DomainCode`, last
+  in PRECEDENCE, set where no other code stands); SET_STEP (R with atom entries only) and
+  DISSOCIATIVE_ET_STEP (bond entries, every class member unbalanced) are label skips
+  (`delta_be.flow_skip`), four separate counted codes.
+- **The label class keeps balanced flows first** (`delta_be.parsimonious_class`), falling back
+  to the old rule only when no candidate balances (then DISSOCIATIVE_ET_STEP). Found by the
+  FlowER dry run: in an O-NO2 homolysis the cheapest product form by charges, NO2. drawn
+  O=N-O. (0 charges), is reached only by an electron jump, so 11 of the first 50 lines were
+  DISSOCIATIVE_ET_STEP; with the law they label as the drawn homolysis. On v18 data it changes
+  no label (below).
+- **Per-source elementary rule** (`DomainPolicy.open_shell_labels`, True for rmechdb only):
+  `ReactionMatrix.is_elementary(open_shell)` accepts atom entries of +-1 and +-2; read by
+  `parsimonious_class`, `check_edit`, `drawing_of` and `drop_undecodable_drawings` through the
+  sample's source. No batch key, ModelConfig field or decoder argument carries the source.
+- **Radical forms through an anion proxy** (`resonance.radical_forms`): each radical centre in
+  turn takes an electron, RDKit enumerates the anion's forms, and in every form whose charges
+  outside the centre's conjugated group (`ResonanceMolSupplier.GetAtomConjGrpIdx`) are the
+  anion's, each negative atom of the group gives the electron back. The plan's stricter
+  reading ("only that site moved") gives NO3. two drawings, not the three one per O that its
+  own test and the 12 FlowER NO3. abstractions (H landing on the drawn O-) need; the
+  conjugated-group rule gives them. The product forms keep every such form (the class cost
+  chooses); the input drawings keep one per radical site (fewest charges, then fewest bond
+  changes). Counts on atom indices: benzyl 4, phenoxyl 4, pentadienyl 3, allyl 2, TEMPO 1;
+  closed shells get exactly today's form lists. Where the drawn reactant gives no class,
+  `drawings.redrawn_label` takes the reactant drawing whose class passes with the fewest
+  entries (the dry run uses it; P8's rmechdb samples will).
+- **Samples (SAMPLE_VERSION 19)**: `nonbonding` and `unpaired` per atom and per drawing
+  (`drawing_nonbonding`, `drawing_unpaired`), `atom_categorical` (A, 3) with u as bookkeeping
+  (the encoder reads columns 0 and 1; the baselines digest `[:, :2]`), `LewisStructure` from
+  `reactant_lewis`, `check_edit` on N + d >= 0, batches with `nonbonding`, `can_lose_pair`
+  (N >= 2, the decoder's -2 mask, identical to lone pairs > 0) and `can_lose_electron`
+  (N >= 1); collate refuses a sample without N. Every live caller sets the structure through
+  `steps.with_lewis`, and `reactant_sample` itself fills N and u.
+- **Serve**: `PoolState.key_version` (2); `from_dict` refuses another version, so a v1 key is
+  never read silently; `ksmech-serve rekey-pools [--dry-run] [--purge]` re-keys the stored
+  states once, at the Release B merge (P8), never earlier. A state whose key does not change
+  only gains the version field (its pool id byte for byte), which is how "unchanged states are
+  not touched" is read; without it `from_dict` would refuse them. Dry run on the reflink copy of
+  `data/serve/pools`: 1,388 states, 1,319 unchanged, 69 re-keyed (68 holding the O atom `[O]`, 2
+  O=O, 1 `[O+][O-]`), 0 unreadable; the plan's RDKit-radical upper bound was about 362.
