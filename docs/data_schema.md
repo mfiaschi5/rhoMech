@@ -324,6 +324,22 @@ header (kind `anchor_floor`; inputs the val and test views; config the split) an
 ranked by |G^atom| over the valid pairs (`eval.floor`); with `--cells all`,
 `anchor_floor_report_<strategy>_allcells.json`, pooled over every pair.
 
+**`cohort_<name>.json`** (same directory, `eval.cohorts.write_cohort`; written once, replaced
+only by hand): a provenance header (kind `cohort`, schema `COHORT_SCHEMA` 1, no file inputs, the
+content hash of the sorted ids, the name in its config and a free-form note) and `ids`, sorted
+step ids. `ksmech-eval floor|decode --cohort <name>` scores only those steps. **`baseline_<name>.json`**
+(`eval.pin.write_baseline`): kind `cohort_baseline`, schema 1, `columns` (the column names of
+`eval.pin.column_digests`, once) and `digests`, step id -> one 16-hex-digit digest per column
+("" where the sample lacks it); `eval.pin.load_baseline` checks it by its content hash. The
+open-shell plan's cohorts: PMechDB `closed_base` (+ `_gbdt_valid`, `_gbdt_all`, its baseline;
+P0b), `added`, `open_shell`, `carbene_singlet`, `open_shell_metal`; ReactMech (P5)
+`p5_returns` (the 225 samples P5 added to the pilot, every sample outside `baseline_p5_pre`),
+`p5_b_kekule` (68) and `p5_c_dative` (29) (the molecule val's samples P0a re-labelled
+Kekule-closest or re-charged by the dative law, from `p0a_changes.json`), and
+`baseline_p5_pre.json` (the column digests of the 9,031 pre-P5 samples).
+`data/processed/reactmech/p5_rescore.json` (`scripts/p5_rescore.py`, unstamped) holds the
+two ReactMech checkpoints' top-k per slice and the returns' parts per view.
+
 ## Training runs: `data/models/<source>/<run>/` (`ksmech-train fit`)
 
 - `run.json`: a provenance header (kind `train_run`, schema `train.loop.TRAIN_VERSION`). Its

@@ -7722,3 +7722,116 @@ molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each
 - **Tests** (from c6176f7, clean tree, beside the 12-worker ReactMech QM batch):
   `pytest -n 3 -m "not realdata"` 2066 passed, 12 skipped, 2 xfailed, 5 warnings;
   `KSMECH_TEST_WORKERS=1 pytest -m realdata` 57 passed.
+
+## 2026-11-04: P5 build: the ReactMech pilot's returns, the dative audit and the re-scores by slice
+
+- **What.** Open-shell plan P5 from commit 01555ac (clean tree; only untracked scripts), 3
+  workers beside the 12-worker ReactMech full QM batch, no re-ingest: the pilot steps P0a's
+  dative and placeholder laws and P1's V1 (CDI) returned to the domain get QM records, tokens
+  and samples; the frozen splits and the pilot's 10,000 ids stay. Pre-P5 copies of every view,
+  report, pair statistics file, split file, token summary and the QM manifest are in
+  `data/processed/reactmech/p5_reference/`, and the column digests of all 9,031 pre-P5 samples
+  are pinned as `baseline_p5_pre.json` (`eval.pin.write_baseline`).
+- **Per-rule counts.**
+  - Pilot (the P0a / P1 ingest): rule D (dative onium -> M) repairs 254 steps, 49 kept steps
+    re-charged (computed in P0a) and 205 returned (96 odd-Pd OPEN_SHELL_METAL, 109 L1Pd
+    METAL_PLACEHOLDER); V1 returns 62 CDI steps (RADICAL_DRAWN); METAL_SUSPECT flags 35; 2 steps
+    stay OPEN_SHELL_METAL (`cfd05e0cae5eee42`, `5e7499636a4c0e94`: Pd already -1 with three X
+    ligands plus P+).
+  - Full set (114,199 unique lines, 114,046 accepted; the reactmech-full build's ingest, made
+    with P0a's laws before P1): rule D repairs 2,866 steps (2,602 REPAIRED_DATIVE, 264 with
+    METAL_SUSPECT), METAL_PLACEHOLDER excludes none (all 1,122 returned by the L1Pd exemption),
+    OPEN_SHELL_METAL keeps 44 (1,207 of 1,251 returned), RADICAL_DRAWN keeps 792 (the CDI steps
+    V1 returns at that build's next ingest). So 3,121 of the 3,165 exclusions are returnable, as
+    the plan measured; their QM belongs to the full build.
+- **QM.** 323 species of the returned steps lacked an ok record (the plan counted 327 before
+  P0a). 86 were reflink copies of the reactmech-full build's records (verified, clean headers);
+  237 were computed: 3 h 15 for the first 82 (the run stopped when the Claude session
+  restarted; records already written were kept), 4 h 24 for the remaining 173 (18 answered
+  from the failure memo), then a retry of the 13 TIMEOUT species with `--retry-reason TIMEOUT
+  --timeout 1800 --steps-from` their 13 steps only (1 h 21; none of those steps holds one of the
+  115 old pilot TIMEOUTs, so no step outside P5 changed). The retry recovered 8: 4 now stop at
+  500 iterations and 1 times out again. Result: 304 ok, 19 counted failures
+  (OPT_NOT_CONVERGED 14, EMBED_FAILED 3, TIMEOUT 1, SCF_NOT_CONVERGED 1); 15.8 CPU-h, inside the
+  plan's 12-19. SPIN_PARITY in the pilot's run view: 291 -> 4, the fragments of the 2 steps that
+  stay excluded; the drawn odd-Pd rows stay in the manifest as history.
+- **Sidecars, tokens.** 304 Wiberg sidecars and 304 token files built, 0 failed; no new
+  Fermi-smeared molecule (220). The 23 "stored AO layout differs" warnings of the sidecar run
+  are records written before 2026-10-20, corrected on load as recorded on that date.
+- **Samples** (v18; default strategies, then `--strategy loco_all --views-only`): 9,031 ->
+  9,256, +225 (REPAIRED_DATIVE 191, REPAIRED_V1 34); MISSING_TOKENS 419 -> 194 (176 old pilot
+  QM failures, 16 REPAIRED_DATIVE steps whose species failed above, 2 METAL_SUSPECT). Every
+  pre-P5 sample keeps its part in all 36 views and its digests on every column. Placement of
+  the 225:
+  - molecule: 1 train; 224 SPLIT_CONFLICT. The returns are Pd and Ni cycle intermediates that
+    join molecule groups the P0 snapshot froze in two parts, so the molecule val holds none;
+    they were SPLIT_CONFLICT already at P0a's ingest (266 such steps, unchanged), before they
+    had samples. Extending the snapshot, as P4 did for PMechDB, is left to the user: it would
+    change the molecule val and test.
+  - scaffold: train 173, val 22, test 30. loco: none (no mechanism class). loco_all:
+    locoall-anhydride train 217, every other class train 1.
+  Cohorts pinned: `p5_returns` (the 225), `p5_b_kekule` (68) and `p5_c_dative` (29), the last
+  two the slices of the molecule val.
+- **The 20-case oxidation-state audit** (`scripts/probes/dative_audit.py`, seed 0) reproduces
+  P0a: the same 20 step ids in the same strata, and every line of P0a's output recovered from
+  its transcript is identical. OS(M) as
+  drawn -> after the dative law, reactants | products, and the pool's net charge:
+
+  | # | stratum | step (reactmech-) | P0 part | reactants | products | pool |
+  |---|---|---|---|---|---|---|
+  | 1 | EVEN | `0f3a2aab50c1729e` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 2 | EVEN | `4afa77281fad754e` | train | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 3 | EVEN | `50626adad90e495a` | train | Ni(II) -> Ni(0) d10 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 4 | EVEN | `8a353a4d5d15ef62` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 5 | EVEN | `aac869091976de41` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 6 | EVEN | `d049dc0eb40459bf` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 7 | ODD | `7642a26bd65b4cf7` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 8 | ODD | `8a24432b3e4740e6` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 9 | ODD | `8b0006424bdb01f3` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 10 | ODD | `923f2564531dfaf8` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 11 | ODD | `9b029ce691479b26` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 12 | ODD | `be93f4e0b94e346a` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 13 | ODD | `df3f6706876b480d` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 14 | L1PD | `1112cc818883f8b0` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+  | 15 | L1PD | `6bc84b23f5ba38e6` | - | Pd(I) -> Pd(0) d10 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 16 | L1PD | `92a24c87849e51b2` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+  | 17 | L1PD | `ba05509f0dbd4f0a` | - | Pd(I) -> Pd(0) d10 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 18 | L1PD | `bbd094b11209cbac` | - | Pd(I) -> Pd(0) d10 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 19 | L1PD | `cb3f194cbb381f42` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+  | 20 | L1PD | `d66cc9bb6aef6693` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+
+  The census of all 254 repaired steps is P0a's too (Pd(IV) d6 only in the six palladacycle
+  C-H arylation fragments, the PyOx pool of `4ad9ef86c572981f` staying +1).
+- **Re-scores** (`scripts/p5_rescore.py`; best checkpoints, legacy caps, beam 5; full-R
+  top-1 / 3 / 5, %). Molecule val, 911 samples, the same as P0a's (P5 adds none there):
+
+  | slice | n | stop0 with | stop0 without | joint with | joint without |
+  |---|---|---|---|---|---|
+  | whole val | 911 | 91.1 / 93.0 / 93.2 | | 91.9 / 94.7 / 95.6 | |
+  | (a) unchanged since P0 | 814 | 94.5 / 96.6 / 96.6 | 62.9 / 62.9 / 64.9 | 94.7 / 97.3 / 97.3 | 68.0 / 73.2 / 81.4 |
+  | (b) P0a Kekule-closest | 68 | 89.7 / 89.7 / 89.7 | 91.2 / 93.2 / 93.5 | 89.7 / 94.1 / 94.1 | 92.1 / 94.8 / 95.7 |
+  | (c) P0a dative re-charge | 29 | 0.0 / 0.0 / 6.9 | 94.1 / 96.0 / 96.0 | 17.2 / 24.1 / 51.7 | 94.3 / 97.1 / 97.1 |
+  | (d) P5 returns in val | 0 | | | | |
+
+  stop0 is reactmech/sparse_resonance_stop0; joint is pmechdb+reactmech/sparse_resonance,
+  decoded with `--run-source`. Both exit checks hold for both runs: on (a) every sample's rank
+  is P0's (stop0 94.5 / 96.6 / 96.6, joint 94.7 / 97.3 / 97.3), and every pre-P5 sample's rank
+  is P0a's. Slice (d), all 225 returns decoded through the scaffold views (`--split scaffold
+  --cohort p5_returns`; none was a sample when either checkpoint trained, so every part is
+  unseen):
+
+  | (d) returns | n | stop0 | joint |
+  |---|---|---|---|
+  | all | 225 | 0.0 / 4.9 / 4.9 | 16.0 / 16.9 / 17.3 |
+  | scaffold train | 173 | 0.0 / 3.5 / 3.5 | 15.6 / 16.2 / 16.8 |
+  | scaffold val | 22 | 0.0 / 9.1 / 9.1 | 18.2 / 18.2 / 18.2 |
+  | scaffold test | 30 | 0.0 / 10.0 / 10.0 | 16.7 / 20.0 / 20.0 |
+
+  The v17 checkpoints never saw a re-charged Pd(0) / Pd(II) drawing ([Pd-] beside P+ or N+), and
+  they fail on it as on slice (c): this measures what the old models do on the returned
+  chemistry, not a regression. A run trained on the v18 pilot is the comparison that counts.
+- **Tests.** New `tests/test_p5_reactmech_returns.py` (realdata): the pilot keeps its 10,000
+  ids and the 2 excluded steps; every species of a training step has a manifest row under its
+  method and every ok record its Wiberg sidecar; a training step without a sample holds a
+  species without an ok record; every pre-P5 sample keeps its part in every view and its column
+  digests (`baseline_p5_pre.json`).

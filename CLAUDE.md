@@ -302,7 +302,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   --source S` (every step the P0a build changed, removed, returned or flagged, by rule,
   `p0a_changes.json`, against the v17 copy in `data/processed_v17/`), `uv run python
   scripts/probes/dative_audit.py` (the 20-case oxidation-state audit of the dative law,
-  read-only); `uv run ksmech-eval embedding --run NAME
+  read-only); P5: `uv run python scripts/p5_rescore.py [--pin]` (the two ReactMech checkpoints'
+  decode hits by slice: unchanged since P0, P0a's Kekule and dative changes, P5's returns via
+  `cohort_p5_returns.json`; `p5_rescore.json`); `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
   under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts
