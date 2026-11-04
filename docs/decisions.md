@@ -7956,11 +7956,11 @@ disk). Code only: the v18 data of main is untouched.
   for PMechDB (molecule, scaffold) and ReactMech (molecule, scaffold, loco, loco_all), 3 workers
   beside the 12-worker ReactMech full QM batch, from 8418d9d: PMechDB 12,469 samples (37 min),
   ReactMech 9,256 (83 min), the v18 counts; the realdata suite reads them (its baselines digest
-  the v18 columns,  among them, so they compare v19 with v18 as they
+  the v18 columns, `atom_categorical[:, :2]` among them, so they compare v19 with v18 as they
   are).
 - **The identity key's cost**: v1 plus the per-fragment count cost about 5 x the sigma key on a
   60-atom pool (6.6 vs 1.3 ms), and the decoder keys every applied completion twice. A closed
-  shell no species-table row can raise (, by formula) now skips building its
+  shell no species-table row can raise (`spin.may_raise`, by formula) now skips building its
   fragments: 1.33 ms with N given (the decoder), 2.0 ms without, against 0.95 ms.
 - **Spec**: the v10 draft is written in place (date line marked as draft): the BE section (N
   with single electrons, half-headed arrows, the flow law, Eq. flow, the four codes), the task
