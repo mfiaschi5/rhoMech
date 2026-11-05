@@ -241,8 +241,11 @@ RC copies kept over RS, 120 reactions in both parts. Domain codes: MULTIPLICITY_
 MULTI_RADICAL_SPECIES 23, NULL_STEP 4 (3 of them identities only after the pairing redraw: an
 ozone, a DMSO2 and an enediyne drawn as biradicals on one side), SPIN_NOT_CONSERVED 1 (O(3P)
 inserting into BrO., R even); 149 resonance steps (147 resonance pairs). PAIRED_DRAWING on 39
-steps. Kept: RC 1,188 and RS 3,145 training steps. Labels (`edit-labels`): 4,279 of 4,333
-(98.75%; NOT_ELEMENTARY 14, DISSOCIATIVE_ET_STEP 24, MISSING_TOKENS 16).
+steps. Kept: RC 1,188 and RS 3,145 training steps. Labels (`edit-labels`): 4,293 of 4,333
+(99.08%; MISSING_TOKENS 16, NOT_ELEMENTARY 12, DISSOCIATIVE_ET_STEP 12, 11 of them radical
+reactions of the paired ozone). A step whose drawn reactant gives no class is labeled on the
+reactant drawing that gives one (spec v10; `drawings.source_label`), and its sample holds that
+drawing.
 
 ## Processed: `data/processed/<source>/steps.parquet`
 

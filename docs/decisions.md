@@ -8166,20 +8166,28 @@ approved first (entry above).
   the 37 refused species already had records from the stopped run, left in the cache unused.
 - **QM and tokens** (14 workers): 4,277 species, 4,227 records (13 QM failures, 37 refused);
   bond indices for 4,000 new records; tokens in 1.6 min (open shells u = 1: 2,377, u = 2: 2, O2
-  and O). Labels: 4,279 of 4,333 training steps (98.75% >= the 95% gate): NOT_ELEMENTARY 14 (the
-  plan's 14), MISSING_TOKENS 16, DISSOCIATIVE_ET_STEP 24 where the plan expected 0. The 24 are
-  drawing artifacts, not dissociative electron transfers: 14 NO3. HAT lines draw the radical on
-  another O than the one the H reaches; 8 ozone lines become unbalanced once ozone is paired
-  (the attacked terminal O is the O- of the chosen drawing); the persulfate line (hypervalent S,
-  noted in P6); one DDQ line. The flow law tests the drawn reactant only; testing the reactant's
-  other resonance drawings would admit them. Left as counted exclusions, a question for the user.
+  and O). Labels: 4,293 of 4,333 training steps (99.08% >= the 95% gate): MISSING_TOKENS 16,
+  NOT_ELEMENTARY 12, DISSOCIATIVE_ET_STEP 12. The first build gave 4,279 (98.75%) with
+  DISSOCIATIVE_ET_STEP 24 and NOT_ELEMENTARY 14: spec v10's rule that a one-electron source whose
+  drawn reactant gives no class takes the class on the reactant drawing that gives one (NO3.
+  with the radical on the O that receives the H) was coded in P6 (`drawings.redrawn_label`) but
+  never called by the label report or the sample builder. Now `drawings.source_label` applies it
+  to rmechdb (the user said "continua" to the proposal), and the sample then holds that
+  drawing's bond orders, charges, N and u (`steps._redrawn_target`); polar sources are
+  untouched. That labels the 14 NO3. HAT lines, the DDQ line and two NOT_ELEMENTARY steps. The
+  12 left are not drawing artifacts: 11 radical reactions of ozone, which the pairing rule draws
+  O=[O+][O-] (a radical adding to an end O, or HO3. giving O3 back, moves an electron across
+  the O-O bond whose order does not change, so neither ozone drawing has a balanced flow under
+  the strict law), and the persulfate homolysis (hypervalent S, P6). They stay counted
+  exclusions, the cost of two approved rules (ozone a closed-shell singlet, the flow law).
 - **Splits** (`data.splits`, frozen at their first build): `rc_molecule` (the default) splits RC
   by molecule and puts every RS step in training except those sharing a non-trivial species
   with an RC val/test step (LEAK_GUARD); `flower_given` is FlowER's own parts, val drawn as 10%
   of the FlowER-train RC molecule groups, a reaction in both parts in test. Built: rc_molecule RC
-  950 / 118 / 120 training steps plus 3,096 RS (49 LEAK_GUARD), 3,904 / 110 / 113 samples;
+  950 / 118 / 120 training steps plus 3,096 RS (49 LEAK_GUARD), 3,916 / 111 / 113 samples;
   flower_given 3,782 / 106 / 445 steps. Samples skip SOMO_NOT_INTEGRAL 109 (law S),
-  DISSOCIATIVE_ET_STEP 23, MISSING_TOKENS 16, NOT_ELEMENTARY 14: 4,171 of 4,333.
+  MISSING_TOKENS 16, NOT_ELEMENTARY 12, DISSOCIATIVE_ET_STEP 12: 4,184 of 4,333 (4,171 before
+  the redrawn labels).
 - **Leakage audit** (`data.leakage`, `ksmech-data leakage-audit`; a module of its own rather than
   survey.py, which holds the open-shell survey): species by key v2. 36 rmechdb training steps
   (RC 17, RS 19) share a species with closed_base val/test and leave joint training
@@ -8189,7 +8197,7 @@ approved first (entry above).
   PMechDB training (28 with any PMechDB step), 13 with ReactMech, 22 with mech-USPTO's raw
   reactions; no RC val/test reaction is a PMechDB or ReactMech step.
 - **Release B stores** (SAMPLE_VERSION 19, 14 workers): PMechDB 12,469 samples (19 min),
-  ReactMech 9,256 (46 min), rmechdb 4,171 (2 min). `scripts/compare_stores.py` against main's
+  ReactMech 9,256 (46 min), rmechdb 4,184 (2 min). `scripts/compare_stores.py` against main's
   v18 stores on the named columns: ReactMech identical in every v18 column of all 9,256 samples;
   PMechDB identical except the 9 RADICAL_SPECTATOR samples that gain P7's hole tokens (every
   orbital and pair column, and the labels of 6 of them); the v19 columns are only in the new
@@ -8206,10 +8214,10 @@ approved first (entry above).
   tokens as the sample holds them (P7's roles and holes, `with_holes`): the raw token files
   lack the holes, so the candidate set's per-orbital energies ran out on the 9 radical samples
   (the embedding pages' orbital types too, which fell back to occupations there).
-- **Floors on rmechdb's radical cohort** (rc_molecule, `ksmech-eval floor`; RC val 110 and test
-  113 samples), top-1 / 3 / 5: legacy valid cells val 12.7 / 17.3 / 28.2, test 9.7 / 22.1 /
-  28.3 (15 and 17 unreachable); legacy all cells val 11.8 / 20.0 / 30.0, test 7.1 / 19.5 / 27.4;
-  own_break (all cells) the same with g and 0 unreachable, with g2 val 13.6 / 20.9 / 30.9, test
+- **Floors on rmechdb's radical cohort** (rc_molecule, `ksmech-eval floor`; RC val 111 and test
+  113 samples), top-1 / 3 / 5: legacy valid cells val 12.6 / 17.1 / 27.9, test 9.7 / 22.1 /
+  28.3 (15 and 17 unreachable); legacy all cells val 11.7 / 19.8 / 29.7, test 7.1 / 19.5 / 27.4;
+  own_break (all cells) the same with g and 0 unreachable, with g2 val 13.5 / 20.7 / 30.6, test
   7.1 / 18.6 / 25.7. By R shape (all cells, own_break g; n, top-1, top-5), test: homolysis 17,
   0, 12%; recombination 12, 8, 25%; addition 9, 33, 67%; abstraction/SH2 49, 2, 14%;
   beta-scission 10, 10, 60%; other 16, 12, 44% (groups under 30 are counts, not percentages).
