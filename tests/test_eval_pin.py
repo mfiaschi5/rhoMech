@@ -143,4 +143,5 @@ def test_closed_base_reloads_and_its_digests_reproduce_on_a_rebuild():
         rebuilt.append(store.unpack(*store.pack(s), MechanismSample))
     got = pin.compare_digests({i: base[i] for i in picked}, pin.digests_of(rebuilt))
     assert got["n_shared"] == len(picked) and not got["differ"], got["differ"]
-    assert not got["columns_only_in_baseline"] and not got["columns_only_in_current"]
+    assert not got["columns_only_in_baseline"]
+    assert set(got["columns_only_in_current"]) <= pin.V19_COLUMNS  # P7's new columns

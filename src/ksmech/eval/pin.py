@@ -29,6 +29,12 @@ BASELINE_SCHEMA = 1
 DIGEST_CHARS = 16  # 64 bits per column and sample
 CELL_SETS = ("valid", "all")
 CHUNK = 256
+# the columns v19 adds after a v18 baseline (open-shell plan P7): reported as only in the current
+# store, never a difference
+V19_COLUMNS = frozenset(
+    ["atom.somo_population", "orbital.spin_role"]
+    + [f"pair.{n}" for n in ("g2", "log_abs_g2", "own_g", "own_g2", "somo_pair", "somo_level_diff")]
+)
 
 
 def _digest(*parts) -> str:
