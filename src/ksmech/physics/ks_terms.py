@@ -153,12 +153,13 @@ def gap_kernel_matrix(
     return out
 
 
-def _two_level(gap: np.ndarray, beta: np.ndarray) -> np.ndarray:
+def _two_level(gap: np.ndarray, beta: np.ndarray, min_gap_ev: float = MIN_GAP_EV) -> np.ndarray:
     """1 / (sign(dE) D) with D = (|dE| + sqrt(dE^2 + 4 beta^2)) / 2 and sign(0) = -1: the exact
-    two-level denominator, |dE| for a large gap and |beta| at degeneracy."""
+    two-level denominator, |dE| for a large gap and |beta| at degeneracy; D is clamped at
+    `min_gap_ev` as G's gap is, so a cell with beta = 0 (no shared centre) is G itself."""
     sign = np.where(gap > 0, 1.0, -1.0)
     d = 0.5 * (np.abs(gap) + np.sqrt(gap * gap + 4.0 * beta * beta))
-    return sign / d
+    return sign / np.maximum(d, min_gap_ev)
 
 
 def gap_kernel_two_level(
@@ -167,7 +168,7 @@ def gap_kernel_two_level(
     """g2 for every pair of tokens: sum_km (n_k - n_m) p_rk p_sm / (sign(dE_km) D_km) with the
     two-level D of the cell's coupling `beta` (eV, (len(rows), len(cols)), one value per cell;
     open-shell plan P7, U23). Bounded by sum |n_k - n_m| p_rk p_sm / |beta|, finite through a
-    degeneracy, and G itself as beta -> 0 (without G's clamp at MIN_GAP_EV). The weights are
+    degeneracy, and G itself at beta = 0 (with G's clamp at MIN_GAP_EV). The weights are
     `gap_weights`; a cell of weight 0 is 0."""
     out = np.zeros((len(rows), len(cols)))
     weights = gap_weights(rows, cols)
@@ -178,7 +179,8 @@ def gap_kernel_two_level(
                 b = beta[i, ci]
                 inv = _two_level(gap[None, :, :], b[:, None, None])  # (cells, K, M)
                 vals = np.einsum("k,ckm,cm->c", P_r[a], inv, P_s)
-                out[i, ci] = weights[i, ci] * vals
+                w = weights[i, ci]
+                out[i, ci] = np.where(w != 0, w * vals, 0.0)
     return out
 
 

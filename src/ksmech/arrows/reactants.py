@@ -470,14 +470,17 @@ class ReactantTokens:
         """(n_atoms,) the restricted SOMO population rho_A = sum over the open-shell tokens t
         (`tokens.open_shell_tokens`, metal-d ones included) of min(n_t, 2 - n_t) w_tA: the
         restricted unpaired count spread over the atoms (Br. 3 x 1/3, O2 2 x 1), 0 on a closed
-        shell, independent of the drawing (open-shell plan P7, U15)."""
+        shell, independent of the drawing (open-shell plan P7, U15). w_tA are the token's
+        centre weights renormalized over its centres, so the tails below tau_atom do not take
+        their share out of the sum."""
         rho = np.zeros(self.n_atoms)
         for f, frag in enumerate(self.fragments):
             off = int(self.atom_offsets[f])
             for o in open_shell_tokens(frag.tokens):
                 n, d = o.descriptors.occupation, o.descriptors
                 atoms = np.asarray(d.all_center_atoms, dtype=int) + off
-                rho[atoms] += min(n, 2.0 - n) * np.asarray(d.all_center_weights, dtype=float)
+                w = np.asarray(d.all_center_weights, dtype=float)
+                rho[atoms] += min(n, 2.0 - n) * w / w.sum()
         return rho
 
     @cached_property

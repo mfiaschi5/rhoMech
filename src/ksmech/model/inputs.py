@@ -278,8 +278,10 @@ def pooled_gap(batch: dict, weights=None, cells: str = "valid") -> torch.Tensor:
 def pooled_own(batch: dict, weights=None) -> torch.Tensor:
     """B^own (B, A, A), open-shell plan P7: the own-pair gap factor own_g (a bonding token with
     its own antibond, `stage_a.OWN_PAIR_FEATURES`) pooled like G^atom over the cells where it is
-    defined, in the same 1/eV units; 0 where the batch has no own_g column or no such cell. The
-    own cells stay out of `pooled_gap` on the valid cells, where they are never valid."""
+    defined, in the same 1/eV units, on the bonded atom pairs only (the bond the pair is of; a
+    token's tails on other atoms do not make it theirs); 0 where the batch has no own_g column
+    or no such cell. The own cells stay out of `pooled_gap` on the valid cells, where they are
+    never valid."""
     names = tuple(batch["pair_features"])
     w_occ, w_virt = weights or centre_weights(batch)
     if "own_g" not in names:
@@ -287,7 +289,7 @@ def pooled_own(batch: dict, weights=None) -> torch.Tensor:
         return torch.zeros(w_occ.shape[0], a, a, device=w_occ.device)
     k = names.index("own_g")
     g = torch.where(batch["pair_defined"][..., k], batch["pair_z"][..., k].float(), 0.0)
-    return _pool(w_occ, g[..., None], w_virt)[..., 0]
+    return _pool(w_occ, g[..., None], w_virt)[..., 0] * (batch["bond_order"] > 0)
 
 
 def atom_pair_physics(batch: dict, z_hat: torch.Tensor, defined: torch.Tensor, cells="valid"):
