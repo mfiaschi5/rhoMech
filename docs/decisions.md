@@ -8104,3 +8104,124 @@ own-pair and recombination channels) was approved by the user on 2026-11-05 ("Ap
 P8"), as U3 requires before the Release B build. The date line no longer says draft. The one
 choice left open in P7, g2's sign on inverted pairs (G's sign, kept; the one-sign alternative
 recorded), stands as written.
+
+## 2026-11-05: open-shell plan P8 (rmechdb via FlowER, one spin and domain law, Release B build)
+
+Built in the Release B worktree (`claude/open-shell-p8`, stacked on P6 and P7), in its own data
+root (a reflink copy of main's `data/`); main's data stays the v18 / P5 state. Spec v10 was
+approved first (entry above).
+
+- **FlowER inspected** (`scripts/probes/flower_inspect.py`, read-only; `docs/data_schema.md`,
+  "rmechdb"): 2,174,470 lines, 2,140,367 with a numeric suffix (about 2.14M, not CLAUDE.md's
+  1.4M); RC 1,383 / 136, RS 3,223 / 346, PM 12,322 / 294, PC 14,746 / 1,653 (train / test; val
+  has none); full maps with explicit H; 165 bath-gas lines; O2 only `[O][O]`, CO only `[C]=O`;
+  N2 `[N]=[N]` on 5 RC lines. The suffix meanings are inferred and kept only in the schema doc.
+- **Loader and dedup** (`data.rmechdb`): the bath gases are stripped and the spin redrawings
+  applied before the id, `step_id = make_step_id('rmechdb', map-free canonical reaction)`, so no
+  id moves after the splits freeze; one step per id, RC over RS in any file order, else the first
+  line (train before test); the rest DUPLICATE_STEP. Measured as the plan's probe did: 5,088 lines
+  -> 4,535 steps, 553 DUPLICATE_STEP, 165 bath-gas lines, 83 RC copies kept over RS, 120
+  reactions in both FlowER parts (`flower_part` `train+test`). `build_step` makes (and counts)
+  the redrawings on the stripped line, so PAIRED_DRAWING is a counted repair class (39 steps).
+  The two columns `flower_suffix`, `flower_part` are nullable, so the other sources' parquets read
+  as before.
+- **One spin and domain law for every source** (`data.domain`, `data.pairing`). A species the
+  species table decides singlet but drawn with odd-N atoms is redrawn by `pairing.redraw`: only
+  the bonds touching a drawn radical atom change order (by at most 1), only those atoms and their
+  heavy neighbours change charge, and the change must be reachable by electron moves between
+  bonded atoms (components of changed bonds, each conserving its electrons; a dN atom joins a
+  component it lies on or is bonded to), so a distant biradical (p-benzyne, the terpene
+  peroxyl-alkoxyls) has no paired drawing. Ranked by complete octets, fewest formal charges, then
+  the charges on the more electronegative atoms (least sum q x chi, Pauling; the Criegee
+  intermediate is C=[O+][O-], not [CH2-][O+]=O), then fewest changed bonds. Metal fragments are
+  never redrawn (their spin is the metal table's). A Hund row (the table's verdict of one
+  degenerate open group, `spin.is_hund_row`) redraws a paired drawing of its species unpaired
+  (HIGH_SPIN_DRAWING: O=O -> [O][O]; none on disk); a drawing that is itself the table's row
+  ([O]) is left alone. MULTI_RADICAL_SPECIES: a non-metal species with u >= 2 under
+  `spin.assign` that is not a Hund case, or a table singlet still drawn with odd-N atoms; a
+  species RDKit counts u >= 2 with no table row keeps MULTIPLICITY_UNTABULATED (the table covers
+  every u >= 2 species of the three sources, P2/P3). An exempt step
+  (`curation/multi_radical_exemptions.json`) is neither redrawn nor named multi-radical;
+  5d007b38 is still held back by SPIN_NOT_CONSERVED (the table gives its adduct u = 0), the
+  difference P3 reported, left to the user. A hypervalent drawing RDKit counts u = 0 but whose
+  N is odd (O=[P-](Cl)(Cl)Cl) is not a table singlet and is not named multi-radical.
+- **Conservation and law (R) by source.** A source of one-electron steps (rmechdb,
+  `DomainPolicy.open_shell_labels`) conserves u only in a step whose R moves no single electron
+  (a homolysis raises u by 2); law (R) applies to the polar sources only. The polar sources keep
+  the P3 order (law u before law R), so an O-O homolysis drawn in PMechDB is SPIN_NOT_CONSERVED.
+- **ReactMech under data.spin** (its P8 re-ingest): odd metals are re-read by the spin law (its
+  2 odd-Pd pilot steps go from OPEN_SHELL_METAL to MULTIPLICITY_AMBIGUOUS, as P1 planned); drawn
+  radicals stay out, and a RADICAL_DRAWN step that holds a multi-radical species is coded
+  MULTI_RADICAL_SPECIES (the law counted in every source; none in the pilot).
+- **Dataset arrows and the redrawings.** `validation.screened` keeps every repair only if the
+  repaired step still validates; dataset arrows drawn on a radical drawing do not replay on a
+  paired one, so a polar step whose redrawing breaks its arrows keeps its other repairs without
+  the redrawing (then names the species by the law). None on disk: PMechDB and ReactMech steps
+  are unchanged by the law (re-ingest diff: 0 changed steps in PMechDB; the 2 ReactMech codes
+  above).
+- **The spin census before QM** (`qm.batch.census_allows`): only u in {0, 1}, Hund cases,
+  metal-table counts and an exemption's species reach QM; the rest are manifest rows
+  SPIN_CENSUS_REFUSED (37 rmechdb species, 0 PMechDB). The census landed while the first
+  rmechdb batch ran: that batch was stopped at 30%, the census committed, the batch rerun; 4 of
+  the 37 refused species already had records from the stopped run, left in the cache unused.
+- **QM and tokens** (14 workers): 4,277 species, 4,227 records (13 QM failures, 37 refused);
+  bond indices for 4,000 new records; tokens in 1.6 min (open shells u = 1: 2,377, u = 2: 2, O2
+  and O). Labels: 4,279 of 4,333 training steps (98.75% >= the 95% gate): NOT_ELEMENTARY 14 (the
+  plan's 14), MISSING_TOKENS 16, DISSOCIATIVE_ET_STEP 24 where the plan expected 0. The 24 are
+  drawing artifacts, not dissociative electron transfers: 14 NO3. HAT lines draw the radical on
+  another O than the one the H reaches; 8 ozone lines become unbalanced once ozone is paired
+  (the attacked terminal O is the O- of the chosen drawing); the persulfate line (hypervalent S,
+  noted in P6); one DDQ line. The flow law tests the drawn reactant only; testing the reactant's
+  other resonance drawings would admit them. Left as counted exclusions, a question for the user.
+- **Splits** (`data.splits`, frozen at their first build): `rc_molecule` (the default) splits RC
+  by molecule and puts every RS step in training except those sharing a non-trivial species
+  with an RC val/test step (LEAK_GUARD); `flower_given` is FlowER's own parts, val drawn as 10%
+  of the FlowER-train RC molecule groups, a reaction in both parts in test. Built: rc_molecule RC
+  950 / 118 / 120 training steps plus 3,096 RS (49 LEAK_GUARD), 3,904 / 110 / 113 samples;
+  flower_given 3,782 / 106 / 445 steps. Samples skip SOMO_NOT_INTEGRAL 109 (law S),
+  DISSOCIATIVE_ET_STEP 23, MISSING_TOKENS 16, NOT_ELEMENTARY 14: 4,171 of 4,333.
+- **Leakage audit** (`data.leakage`, `ksmech-data leakage-audit`; a module of its own rather than
+  survey.py, which holds the open-shell survey): species by key v2. 36 rmechdb training steps
+  (RC 17, RS 19) share a species with closed_base val/test and leave joint training
+  (`cohort_leak_guard_joint`; the plan measured 38 on the pre-P0a split); 79 PMechDB training
+  steps share one with RC val/test (`cohort_rc_heldout_shared`, a slice, never removed); 23
+  closed_base val/test steps share one with rmechdb training; 26 RC val/test steps share one with
+  PMechDB training (28 with any PMechDB step), 13 with ReactMech, 22 with mech-USPTO's raw
+  reactions; no RC val/test reaction is a PMechDB or ReactMech step.
+- **Release B stores** (SAMPLE_VERSION 19, 14 workers): PMechDB 12,469 samples (19 min),
+  ReactMech 9,256 (46 min), rmechdb 4,171 (2 min). `scripts/compare_stores.py` against main's
+  v18 stores on the named columns: ReactMech identical in every v18 column of all 9,256 samples;
+  PMechDB identical except the 9 RADICAL_SPECTATOR samples that gain P7's hole tokens (every
+  orbital and pair column, and the labels of 6 of them); the v19 columns are only in the new
+  stores. The script reads both stores without the provenance check (a store of another checkout
+  names its inputs relative to it) and a v18 shard's drawings with zero N and u.
+- **GBDT refit on v19** (PMechDB molecule split, `ksmech-physics gbdt`): the same samples read
+  (train 9,464, val 1,204, test 1,125) and the untrained gap kernel exactly as in P0b; the
+  rankers move as the plan said a refit would (LightGBM's 80% column sampling; the 9 radical
+  samples' holes add candidates, so their negatives differ). Valid cells, test top-1 / 3 / 5:
+  47.8 / 66.6 / 74.1 (P0b 48.8 / 68.2 / 75.6), textbook-held-out 49.2 / 66.4 / 72.6 (48.1 /
+  65.7 / 73.5); all cells 47.6 / 65.6 / 74.4, textbook-held-out 49.9 / 66.0 / 73.8, the gap
+  kernel 18.9 / 26.0 / 33.5. These are the new GBDT reference. The textbook cases: 4 of 5
+  held-out expected pairs in the top 3. The refit needed `MechanismSample.tokens` to give the
+  tokens as the sample holds them (P7's roles and holes, `with_holes`): the raw token files
+  lack the holes, so the candidate set's per-orbital energies ran out on the 9 radical samples
+  (the embedding pages' orbital types too, which fell back to occupations there).
+- **Floors on rmechdb's radical cohort** (rc_molecule, `ksmech-eval floor`; RC val 110 and test
+  113 samples), top-1 / 3 / 5: legacy valid cells val 12.7 / 17.3 / 28.2, test 9.7 / 22.1 /
+  28.3 (15 and 17 unreachable); legacy all cells val 11.8 / 20.0 / 30.0, test 7.1 / 19.5 / 27.4;
+  own_break (all cells) the same with g and 0 unreachable, with g2 val 13.6 / 20.9 / 30.9, test
+  7.1 / 18.6 / 25.7. By R shape (all cells, own_break g; n, top-1, top-5), test: homolysis 17,
+  0, 12%; recombination 12, 8, 25%; addition 9, 33, 67%; abstraction/SH2 49, 2, 14%;
+  beta-scission 10, 10, 60%; other 16, 12, 44% (groups under 30 are counts, not percentages).
+  Untrained physics: the homolyses and abstractions are what training has to learn.
+- **Store fix**: a pool of single atoms ([O] + [O]) has no bond row; its empty drawings now pack
+  as (0, 0) instead of failing on reshape(-1, 0).
+- **R shape** (`eval.cohorts.r_shape`, every floor and decode report's `by_r_shape`): from R and
+  the reactant's bond orders, homolysis, recombination, addition (the formed bond new, the broken
+  one keeping an order), abstraction / SH2 (the broken bond gone, the formed one new),
+  beta-scission (the broken bond gone, the formed one raising an order), other.
+- **Browse** INDEX_VERSION 2 -> 3.
+- **Storage (U18)**: rmechdb's artifacts (steps, records, tokens, stores, audit) are kept as
+  PMechDB's: local, the private rhoMech-data and pods only, never the public repository. The push
+  to the private HF dataset, the migration into main's data/, serve's re-key and the merges of
+  P6, P7 and P8 wait for the user's OK.

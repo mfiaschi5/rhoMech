@@ -258,14 +258,15 @@ class MechanismSample:
     def n_orbitals(self) -> int:
         return len(self.orbital_features)
 
-    def tokens(self, loader: TokenLoader) -> list[MoleculeTokens]:
+    def tokens(self, loader: TokenLoader) -> list[MoleculeTokens | None]:
         """The full token objects of every fragment, in fragment order, as the sample holds
         them: open-shell tokens in their donor role with their holes (`with_holes`, open-shell
         plan P7; a closed shell's token file as stored), so they line up with the sample's
         orbital arrays."""
         from ksmech.orbitals.tokens import with_holes
 
-        return [with_holes(loader(key)) for key in self.fragment_keys]
+        tokens = [loader(key) for key in self.fragment_keys]
+        return [None if t is None else with_holes(t) for t in tokens]  # a missing file stays None
 
 
 def with_pair_bond_orders(sample: MechanismSample, bonds: np.ndarray) -> np.ndarray:
