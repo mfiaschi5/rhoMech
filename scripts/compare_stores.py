@@ -11,7 +11,8 @@ categorical atom columns, each atom, orbital and pair column, pair_valid, the ed
 both ArrowLabel lists). The report gives the step ids only one store holds, the columns only
 one store holds (a later version's new columns are listed, never a difference), and for every
 column both hold the number of samples present in both whose digest differs, with up to
-`--examples` ids. Read-only.
+`--examples` ids. Read-only. The stores are read without the provenance check (a store of
+another checkout names its inputs relative to that checkout): this compares contents only.
 """
 
 from __future__ import annotations
@@ -37,7 +38,9 @@ def _digest_shard(task: tuple) -> dict[str, dict[str, str]]:
     from ksmech.eval.pin import column_digests
 
     path, n, version = task
-    samples = st._load_shard(Path(path), list(range(n)), MechanismSample, version, False)
+    # contents only: a store of another checkout names its inputs relative to that checkout,
+    # so its provenance cannot be verified from here (the comparison never vouches for it)
+    samples = st._load_shard(Path(path), list(range(n)), MechanismSample, version, True)
     return {s.step_id: column_digests(s) for s in samples}
 
 
