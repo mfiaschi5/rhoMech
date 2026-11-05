@@ -9,7 +9,9 @@ K enters the cross-centre coupling, eps the stored atom-atom Coulomb matrix (no 
 The features are computed at K = eps = 1 (`REDUCED`) and each one depends on the parameters in
 a fixed way (`SCALING`): the cross-centre coupling scales as K, every other feature is
 parameter-free. `to_params` applies other values. Standardization statistics are fitted at the
-physical values.
+physical values. The two-level gap column g2 (open-shell plan P7) is computed at the physical K
+(its beta within a molecule is the cross-centre coupling at K = 1.75) and with `BETA_INTER`
+between molecules: it is stored at those values and does not scale.
 """
 
 from __future__ import annotations
@@ -28,6 +30,10 @@ class KSParams:
 
 
 REDUCED = KSParams(K=1.0, eps=1.0)
+# the coupling of g2 on every intermolecular cell (eV), which has no geometry: stated once from
+# the tabulation of the intramolecular |beta_WH| (scripts/probes/open_shell_g_table.py,
+# docs/decisions.md) and frozen before the Release B build, since g2 is baked into the samples
+BETA_INTER = 1.0
 
 # pair feature -> (parameter, power):
 #   feature(params) = feature(REDUCED) * params.<parameter> ** power
@@ -47,6 +53,12 @@ SCALING = {
     "own_antibond": ("K", 0),
     "site_self": ("K", 0),
     "pair_valid": ("K", 0),
+    "g2": ("K", 0),  # computed at the physical K and BETA_INTER (module docstring)
+    "log_abs_g2": ("K", 0),
+    "own_g": ("K", 0),
+    "own_g2": ("K", 0),
+    "somo_pair": ("K", 0),
+    "somo_level_diff": ("K", 0),
 }
 
 

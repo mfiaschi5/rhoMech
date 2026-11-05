@@ -38,6 +38,8 @@ from ksmech.orbitals.tokens import (
     OrbitalKind,
     OrbitalToken,
     load_tokens,
+    open_shell_tokens,
+    with_holes,
 )
 from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, bond_index_path, load_bond_indices
 from ksmech.qm.embed import prepare_mol
@@ -318,11 +320,18 @@ def load_fragments(mol: Chem.Mol, loader: TokenLoader) -> list[FragmentTokens]:
 
 @dataclass
 class ReactantTokens:
-    """Every fragment of one reactant side in one global token index space."""
+    """Every fragment of one reactant side in one global token index space. Each fragment's
+    open-shell tokens take their donor role and get their holes here (`tokens.with_holes`,
+    under the candidate rule; open-shell plan P7): the holes are virtual tokens at the end of
+    their fragment's orbitals, in the sample only."""
 
     mol: Chem.Mol  # the side as drawn (atom-mapped, Kekulé)
     fragments: list[FragmentTokens]
     candidate: CandidateConfig = field(default_factory=CandidateConfig)
+
+    def __post_init__(self) -> None:
+        for f in self.fragments:
+            f.tokens = with_holes(f.tokens, self.candidate)
 
     @classmethod
     def from_smiles(
@@ -449,6 +458,27 @@ class ReactantTokens:
             [id(o) in chosen[k] for k, f in enumerate(self.fragments) for o in f.tokens.orbitals],
             dtype=bool,
         )
+
+    @cached_property
+    def spin_role(self) -> np.ndarray:
+        """(n_orbitals,) int8: +1 on an open-shell token in its donor role, -1 on a hole, 0
+        elsewhere (`OrbitalToken.spin_role`; the sample's `spin_role` orbital column)."""
+        return np.array([o.spin_role for o in self.orbitals], dtype=np.int8)
+
+    @cached_property
+    def somo_population(self) -> np.ndarray:
+        """(n_atoms,) the restricted SOMO population rho_A = sum over the open-shell tokens t
+        (`tokens.open_shell_tokens`, metal-d ones included) of min(n_t, 2 - n_t) w_tA: the
+        restricted unpaired count spread over the atoms (Br. 3 x 1/3, O2 2 x 1), 0 on a closed
+        shell, independent of the drawing (open-shell plan P7, U15)."""
+        rho = np.zeros(self.n_atoms)
+        for f, frag in enumerate(self.fragments):
+            off = int(self.atom_offsets[f])
+            for o in open_shell_tokens(frag.tokens):
+                n, d = o.descriptors.occupation, o.descriptors
+                atoms = np.asarray(d.all_center_atoms, dtype=int) + off
+                rho[atoms] += min(n, 2.0 - n) * np.asarray(d.all_center_weights, dtype=float)
+        return rho
 
     @cached_property
     def atom_positions(self) -> np.ndarray:

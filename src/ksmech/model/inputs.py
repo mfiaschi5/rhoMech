@@ -38,6 +38,7 @@ from ksmech.physics.params import SCALING
 
 MAX_Z = 118
 CHARGE_MAX = 4  # formal charges are clipped to [-4, 4]
+SPIN_MAX = 7  # the drawing's unpaired count per atom is clipped to [0, 7] (categorical_u, P7)
 GRAPH_CAP = 6  # graph distances are capped at 6; another molecule counts as 6
 DIST_BUCKETS = GRAPH_CAP + 2  # 0..6, and 7 for an atom of another molecule
 KINDS = 5  # pair kind: atom-atom, atom-orbital, orbital-atom, orbital-orbital, MECH
@@ -82,6 +83,10 @@ class FeatureStats:
 
 ATOM_FUKUI = ("frozen", "fd", "both")
 FD_COLUMNS = {"f_plus_fmo": "f_plus", "f_minus_fmo": "f_minus"}  # frozen -> finite difference
+ATOM_SPIN_INPUTS = ("none", "categorical_u", "somo_population")  # `ModelConfig.atom_spin_input`
+# inputs that are 0 on nearly every token (open-shell plan P7): a fixed scale, never fitted, so
+# a split with a few open shells does not blow them up
+FIXED_SCALE = ("somo_population", "spin_role")
 
 
 def token_columns(cfg) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -105,7 +110,13 @@ def token_columns(cfg) -> tuple[tuple[str, ...], tuple[str, ...]]:
         atoms = tuple(EXACT_COLUMNS.get(n, n) for n in atoms)
     if fukui == "both":
         atoms = (*atoms, *FD_COLUMNS.values())
-    return atoms, (*feature_names(), *cfg.orbital_extra)
+    spin = getattr(cfg, "atom_spin_input", "none")
+    if spin not in ATOM_SPIN_INPUTS:
+        raise ValueError(f"atom_spin_input {spin!r}, expected one of {ATOM_SPIN_INPUTS}")
+    if spin == "somo_population":
+        atoms = (*atoms, "somo_population")
+    role = ("spin_role",) if getattr(cfg, "spin_role", False) else ()
+    return atoms, (*feature_names(), *cfg.orbital_extra, *role)
 
 
 def select_columns(x, stored, names):
@@ -147,6 +158,9 @@ def fit_feature_stats(samples: Iterable, atom_names=None, orbital_names=None) ->
     energies = spectra[spectra[:, 1] > 0, 0].astype(np.float64)
     am, asd = _mean_std(atoms, ~missing)
     om, osd = _mean_std(orbitals, np.ones_like(orbitals, dtype=bool))
+    for names, mean, std in ((atom_names, am, asd), (orbital_names, om, osd)):
+        fixed = [k for k, n in enumerate(names) if n in FIXED_SCALE]
+        mean[fixed], std[fixed] = 0.0, 1.0
     em, esd = _mean_std(energies[:, None], np.ones((len(energies), 1), dtype=bool))
     return FeatureStats(am, asd, om, osd, float(em[0]), float(esd[0]), atom_names, orbital_names)
 
@@ -258,6 +272,21 @@ def pooled_gap(batch: dict, weights=None, cells: str = "valid") -> torch.Tensor:
     w_occ, w_virt = weights or centre_weights(batch)
     g = batch["pair_z"][..., tuple(batch["pair_features"]).index("g")]
     g = torch.where(cell_mask(batch, cells), g.float(), 0.0)
+    return _pool(w_occ, g[..., None], w_virt)[..., 0]
+
+
+def pooled_own(batch: dict, weights=None) -> torch.Tensor:
+    """B^own (B, A, A), open-shell plan P7: the own-pair gap factor own_g (a bonding token with
+    its own antibond, `stage_a.OWN_PAIR_FEATURES`) pooled like G^atom over the cells where it is
+    defined, in the same 1/eV units; 0 where the batch has no own_g column or no such cell. The
+    own cells stay out of `pooled_gap` on the valid cells, where they are never valid."""
+    names = tuple(batch["pair_features"])
+    w_occ, w_virt = weights or centre_weights(batch)
+    if "own_g" not in names:
+        a = w_occ.shape[-1]
+        return torch.zeros(w_occ.shape[0], a, a, device=w_occ.device)
+    k = names.index("own_g")
+    g = torch.where(batch["pair_defined"][..., k], batch["pair_z"][..., k].float(), 0.0)
     return _pool(w_occ, g[..., None], w_virt)[..., 0]
 
 

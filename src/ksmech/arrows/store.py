@@ -45,8 +45,16 @@ DRAWING_ARRAYS = {
     "nonbonding": "drawing_nonbonding",
     "unpaired": "drawing_unpaired",
 }
-# exact 0/1 pair features: bits, not float16 (the last three: `physics.pairs.PAIR_FLAGS`)
-BINARY_FEATURES = ("inter", "clash", "bonded", "d_acceptor", "own_antibond", "site_self")
+# exact 0/1 pair features: bits, not float16 (`physics.pairs.PAIR_FLAGS` and, v19, somo_pair)
+BINARY_FEATURES = (
+    "inter",
+    "clash",
+    "bonded",
+    "d_acceptor",
+    "own_antibond",
+    "site_self",
+    "somo_pair",  # v19 (open-shell plan P7)
+)
 
 
 def _binary_columns(names) -> list[int]:

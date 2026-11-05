@@ -21,7 +21,13 @@ For an ordered (occupied r, virtual s) pair of the reactant set:
 No contact geometry and no Klopman-Salem energy: the model has neither.
 
 A sample stores them with the three 0/1 exclusion flags of `pairs.pair_flags`
-(`STORED_PAIR_FEATURES`, v18). `cell_features` names what a reader of a cell set takes.
+(`STORED_PAIR_FEATURES`, v18) and, since v19 (open-shell plan P7, `open_shell_block`), three
+named channels a reader selects by name (`SAMPLE_PAIR_FEATURES`): `G2_FEATURES` (g2, the
+two-level gap factor on every cell, and log|g2|), `OWN_PAIR_FEATURES` (own_g and own_g2, the g
+and g2 of a bonding token with its own antibond, defined on those cells only) and
+`OPEN_SHELL_PAIR_FEATURES` (somo_pair and somo_level_diff E_r - E_s, defined on the
+open-shell rows x hole columns of two fragments, where g and g2 vanish). `cell_features` names
+what a reader of a cell set takes; its 'all' set stays the v18 one.
 """
 
 from __future__ import annotations
@@ -32,9 +38,15 @@ from rdkit import Chem
 from ksmech.orbitals.descriptors import DescriptorConfig
 from ksmech.orbitals.localize import P_AXIS_ORDER
 from ksmech.orbitals.tokens import MoleculeTokens, OrbitalToken
-from ksmech.physics.ks_terms import cross_center_coupling_matrix, gap_kernel_matrix, wh_matrix
+from ksmech.physics.ks_terms import (
+    cross_center_coupling_matrix,
+    gap_kernel_matrix,
+    gap_kernel_two_level,
+    gap_weights,
+    wh_matrix,
+)
 from ksmech.physics.pairs import LOG_FLOOR, PAIR_CELLS, PAIR_FLAGS, PAIR_VALID, PairBlock
-from ksmech.physics.params import REDUCED, KSParams
+from ksmech.physics.params import BETA_INTER, REDUCED, KSParams
 from ksmech.qm.embed import prepare_mol
 
 STAGE_A_FEATURES = (
@@ -52,6 +64,11 @@ STAGE_A_FEATURES = (
 )
 A = {name: k for k, name in enumerate(STAGE_A_FEATURES)}
 STORED_PAIR_FEATURES = (*STAGE_A_FEATURES, *PAIR_FLAGS)  # the pair_z columns of a v18 sample
+G2_FEATURES = ("g2", "log_abs_g2")
+OWN_PAIR_FEATURES = ("own_g", "own_g2")
+OPEN_SHELL_PAIR_FEATURES = ("somo_pair", "somo_level_diff")
+OPEN_SHELL_BLOCK = (*G2_FEATURES, *OWN_PAIR_FEATURES, *OPEN_SHELL_PAIR_FEATURES)
+SAMPLE_PAIR_FEATURES = (*STORED_PAIR_FEATURES, *OPEN_SHELL_BLOCK)  # a v19 sample's pair_z
 
 
 def cell_features(cells: str = "valid") -> tuple[str, ...]:
@@ -173,6 +190,7 @@ def stage_a_block(fragments: list[MoleculeTokens], params: KSParams = REDUCED) -
             z[..., A["g"]], z[..., A["log_abs_g"]] = G, np.log(np.maximum(np.abs(G), LOG_FLOOR))
             z[..., A["inter"]] = float(f != g)
             d[..., [A["g"], A["log_abs_g"], A["inter"]]] = True
+            d[..., [A["g"], A["log_abs_g"]]] = gap_weights(occ, virt)[..., None] != 0
             block.gap_sign[cell] = np.sign(G).astype(np.int8)
             if f == g:
                 _intra(t_f, occ, virt, z, d, params)
@@ -184,3 +202,52 @@ def stage_a_block(fragments: list[MoleculeTokens], params: KSParams = REDUCED) -
     block.defined[bad] = False
     block.z[~block.defined] = 0.0
     return block
+
+
+def _betas(fragments: list[MoleculeTokens], block: PairBlock, beta_inter: float) -> np.ndarray:
+    """(n_occ, n_virt) the coupling of g2 (eV): the cross-centre coupling at the physical K
+    within a fragment (from the block at `REDUCED`), `beta_inter` between fragments."""
+    beta = np.full(block.gap_sign.shape, float(beta_inter))
+    inter = block.z[..., A["inter"]] > 0
+    cc = block.z[..., A["cross_coupling"]] * KSParams().K
+    return np.where(inter, beta, cc)
+
+
+def open_shell_block(
+    fragments: list[MoleculeTokens],
+    block: PairBlock,
+    own: np.ndarray,
+    beta_inter: float = BETA_INTER,
+) -> tuple[np.ndarray, np.ndarray]:
+    """(z, defined), (n_occ, n_virt, len(OPEN_SHELL_BLOCK)): g2 and log|g2| on every cell of
+    nonzero weight (`ks_terms.gap_kernel_two_level`, beta per cell from `_betas`); own_g and
+    own_g2 on the cells `own` marks (a bonding token with its own antibond, `pair_flags`); and
+    on the open-shell rows x hole columns of two fragments somo_pair (1) and somo_level_diff
+    (E_r - E_s, eV). `block` is the `stage_a_block` of the same fragments at `REDUCED`."""
+    occ = [o for t in fragments for o in t.occupied()]
+    virt = [o for t in fragments for o in t.virtual()]
+    shape = block.gap_sign.shape
+    z = np.zeros((*shape, len(OPEN_SHELL_BLOCK)))
+    d = np.zeros_like(z, dtype=bool)
+    k = {name: i for i, name in enumerate(OPEN_SHELL_BLOCK)}
+    weights = gap_weights(occ, virt)
+    g2 = gap_kernel_two_level(occ, virt, _betas(fragments, block, beta_inter))
+    some = weights != 0
+    z[..., k["g2"]], z[..., k["log_abs_g2"]] = g2, np.log(np.maximum(np.abs(g2), LOG_FLOOR))
+    d[..., k["g2"]] = d[..., k["log_abs_g2"]] = some
+    own = own & some
+    z[..., k["own_g"]] = np.where(own, block.z[..., A["g"]], 0.0)
+    z[..., k["own_g2"]] = np.where(own, g2, 0.0)
+    d[..., k["own_g"]] = d[..., k["own_g2"]] = own
+    rows = np.array([o.spin_role == 1 for o in occ], dtype=bool)
+    cols = np.array([o.spin_role == -1 for o in virt], dtype=bool)
+    somo = rows[:, None] & cols[None, :] & (block.z[..., A["inter"]] > 0)
+    e_r = np.array([o.energy_ev for o in occ], dtype=float)
+    e_s = np.array([o.energy_ev for o in virt], dtype=float)
+    z[..., k["somo_pair"]] = somo.astype(float)
+    z[..., k["somo_level_diff"]] = np.where(somo, e_r[:, None] - e_s[None, :], 0.0)
+    d[..., k["somo_pair"]] = d[..., k["somo_level_diff"]] = somo
+    bad = ~np.isfinite(z)
+    d[bad] = False
+    z[~d] = 0.0
+    return z, d

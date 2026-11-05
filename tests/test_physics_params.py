@@ -5,14 +5,15 @@ import numpy as np
 from ksmech.orbitals.tokens import build_molecule_tokens
 from ksmech.physics.ks_terms import resonance_integral, wolfsberg_helmholz
 from ksmech.physics.params import REDUCED, SCALING, KSParams, to_params
-from ksmech.physics.stage_a import STAGE_A_FEATURES, cell_features
+from ksmech.physics.stage_a import OPEN_SHELL_BLOCK, STAGE_A_FEATURES, cell_features
 from ksmech.qm.fukui import HARTREE_TO_EV
 
 
 def test_defaults_are_the_textbook_values():
     assert KSParams() == KSParams(K=1.75, eps=4.0)
     assert KSParams(K=1.0, eps=1.0) == REDUCED
-    assert set(SCALING) == set(cell_features("all"))  # every stored feature and the legacy mask
+    # every stored feature, the legacy mask and the open-shell block of v19 (P7)
+    assert set(SCALING) == set(cell_features("all")) | set(OPEN_SHELL_BLOCK)
     z = np.ones((2, 3, len(STAGE_A_FEATURES)))
     out = to_params(z, KSParams(K=2.0, eps=8.0), STAGE_A_FEATURES)
     k = STAGE_A_FEATURES.index("cross_coupling")

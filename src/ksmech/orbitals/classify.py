@@ -47,6 +47,8 @@ class OrbitalType(StrEnum):
     EMPTY_D = "empty_d"
     DELOCALIZED_PI_STAR = "delocalized_pi_star"
     UNKNOWN = "unknown"
+    SOMO = "somo"  # an open-shell token with its donor role (open-shell plan P7; diagnostic)
+    SOMO_HOLE = "somo_hole"  # its hole, the acceptor twin built at sample assembly
 
 
 DELOCALIZED_TYPES = frozenset({OrbitalType.DELOCALIZED_PI, OrbitalType.DELOCALIZED_PI_STAR})

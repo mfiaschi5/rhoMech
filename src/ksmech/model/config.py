@@ -25,6 +25,9 @@ class ModelConfig:
     frontier_blocks: str = "window"  # window (0.05 eV, v17) | exact (1e-4 eV) frontier columns
     atom_fukui: str = "frozen"  # frozen (v17: frozen-orbital f+ / f-) | fd (the finite-difference
     #   f+ / f- in their place) | both (FD appended); open-shell plan P2b, ablated in P9
+    atom_spin_input: str = "none"  # none | categorical_u (the drawing's u, embedded) |
+    #   somo_population (the restricted SOMO population, a continuous atom input); P7, P9 ablates
+    spin_role: bool = False  # the orbital input spin_role (+1 open-shell donor, -1 hole); P7
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)

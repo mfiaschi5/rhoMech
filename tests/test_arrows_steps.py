@@ -390,13 +390,13 @@ def test_sample_stores_the_pair_block(mini_steps, token_loader):
 
     from ksmech.physics.pairs import PAIR_FLAGS, pair_flags, valid_pairs
     from ksmech.physics.params import REDUCED
-    from ksmech.physics.stage_a import STAGE_A_FEATURES, STORED_PAIR_FEATURES, stage_a_block
+    from ksmech.physics.stage_a import SAMPLE_PAIR_FEATURES, STAGE_A_FEATURES, stage_a_block
 
     step = mini_steps["sn2"]
     s = sample_for_step(step, token_loader)
     n_occ, n_virt = int(s.orbital_occupied.sum()), int((~s.orbital_occupied).sum())
-    assert s.pair_features == STORED_PAIR_FEATURES
-    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(STORED_PAIR_FEATURES))
+    assert s.pair_features == SAMPLE_PAIR_FEATURES
+    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(SAMPLE_PAIR_FEATURES))
     assert s.pair_z.dtype == np.float32 and s.pair_valid.shape == (n_occ, n_virt)
     tokens = s.tokens(token_loader)
     block = stage_a_block(tokens, REDUCED)
@@ -406,7 +406,7 @@ def test_sample_stores_the_pair_block(mini_steps, token_loader):
     flags = pair_flags(tokens)
     for c, name in enumerate(PAIR_FLAGS):
         assert np.array_equal(s.pair_z[..., k + c], flags[name]), name
-    assert s.pair_defined[..., k:].all()
+    assert s.pair_defined[..., k : k + len(PAIR_FLAGS)].all()
     assert np.array_equal(s.pair_gap_sign, block.gap_sign)
     assert np.array_equal(s.pair_valid, valid_pairs(tokens))
     donors = s.donor_mask[s.orbital_occupied]
@@ -531,15 +531,20 @@ def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader):
 def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path):
     from ksmech.arrows.store import BINARY_FEATURES
     from ksmech.physics.pairs import PAIR_FLAGS
-    from ksmech.physics.stage_a import STAGE_A_FEATURES, STORED_PAIR_FEATURES, stage_a_block
+    from ksmech.physics.stage_a import (
+        SAMPLE_PAIR_FEATURES,
+        STAGE_A_FEATURES,
+        STORED_PAIR_FEATURES,
+        stage_a_block,
+    )
 
     s = sample_for_step(mini_steps["e2"], token_loader)
-    assert s.pair_features == STORED_PAIR_FEATURES
-    assert s.pair_z.shape[-1] == len(STORED_PAIR_FEATURES)
+    assert s.pair_features == SAMPLE_PAIR_FEATURES
+    assert s.pair_z.shape[-1] == len(SAMPLE_PAIR_FEATURES)
     block = stage_a_block(s.tokens(token_loader))
     assert np.allclose(s.pair_z[..., : len(STAGE_A_FEATURES)], block.z, rtol=1e-6, atol=1e-6)
     (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))
-    assert back.pair_features == STORED_PAIR_FEATURES
+    assert back.pair_features == SAMPLE_PAIR_FEATURES
     assert np.array_equal(back.pair_defined, s.pair_defined)
     assert np.allclose(back.pair_z, s.pair_z, rtol=1e-3, atol=1e-3)  # float16
     assert set(PAIR_FLAGS) <= set(BINARY_FEATURES)
@@ -579,21 +584,24 @@ def test_samples_store_the_extra_token_columns_after_the_v17_ones(mini_steps, to
 
     s = sample_for_step(mini_steps["sn2"], token_loader)
     tok = s.tokens(token_loader)
-    assert s.atom_columns == STORED_ATOM_FEATURES and s.orbital_columns == STORED_ORBITAL_FEATURES
+    assert s.atom_columns == (*STORED_ATOM_FEATURES, "somo_population")
+    assert s.orbital_columns == (*STORED_ORBITAL_FEATURES, "spin_role")
     k, m = len(atom_feature_names()), len(feature_names())
     legacy = np.concatenate([t.atom_features() for t in tok]).astype(np.float32)
     assert np.array_equal(s.atom_features[:, :k], legacy)
     assert np.array_equal(s.atom_missing[:, :k], np.concatenate([t.atom_missing() for t in tok]))
     extra = np.concatenate([t.atom_extra() for t in tok])
-    assert np.array_equal(s.atom_missing[:, k:], np.isnan(extra))
-    assert np.array_equal(s.atom_features[:, k:], np.nan_to_num(extra).astype(np.float32))
+    assert np.array_equal(s.atom_missing[:, k:-1], np.isnan(extra))
+    assert np.array_equal(s.atom_features[:, k:-1], np.nan_to_num(extra).astype(np.float32))
+    assert not s.atom_features[:, -1].any() and not s.atom_missing[:, -1].any()  # closed shells
     orbitals = [o for t in tok for o in t.orbitals]
     assert np.array_equal(
         s.orbital_features[:, :m],
         np.concatenate([t.orbital_features() for t in tok]).astype(np.float32),
     )
     expect = [[o.descriptors.retained_fraction, o.descriptors.energy_ev] for o in orbitals]
-    assert np.array_equal(s.orbital_features[:, m:], np.array(expect, dtype=np.float32))
+    assert np.array_equal(s.orbital_features[:, m:-1], np.array(expect, dtype=np.float32))
+    assert not s.orbital_features[:, -1].any()  # spin_role: 0 on a closed shell (P7)
 
 
 # ---- P3: law (S) and the stretched-bond flag

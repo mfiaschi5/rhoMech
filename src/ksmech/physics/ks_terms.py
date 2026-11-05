@@ -1,6 +1,14 @@
 """The geometry-free Klopman-Salem quantities between orbital tokens.
 
-    G(r, s) = sum_k sum_m 2 p_rk p_sm / (E_k - E_m)
+    G(r, s) = sum_k sum_m (n_k - n_m) p_rk p_sm / (E_k - E_m)
+
+with n_k - n_m = 2 for a closed-shell occupied token and an empty one (the constant-2 fast path,
+bitwise the G of every model before P7), and the token occupations where an open-shell token in
+its donor role or a hole takes part (open-shell plan P7; after P2b every MO of a token's
+spectrum has the token's occupation): a SOMO to an empty token and a doubly occupied token to a
+hole weigh 1, Br.'s 4p (5/3) to an empty token 5/3, and an open-shell row to a hole column
+weighs 0, where G is undefined (`gap_weights`). `gap_kernel_two_level` is g2, the same sum with
+each canonical denominator replaced by the exact two-level one.
 
 `G` is the gap kernel, the energy denominator of the filled-empty term, over the *full*
 spectral decompositions of the two tokens on the canonical MOs of their blocks (never the
@@ -98,20 +106,79 @@ def _blocks(tokens: list[OrbitalToken]):
         yield np.array(idx), energies, weights
 
 
+def electron_counts(tokens: list[OrbitalToken], occupied: bool) -> np.ndarray:
+    """n of each token in G's weight: its occupation for an open-shell token in its donor role
+    or a hole (`spin_role` != 0), else 2 for an occupied token and 0 for a virtual one."""
+    closed = 2.0 if occupied else 0.0
+    return np.array(
+        [o.descriptors.occupation if o.spin_role else closed for o in tokens], dtype=float
+    )
+
+
+WEIGHT_TOL = 1e-4  # |n_r - n_s| below this is 0: one plateau's occupations agree to ~1e-6
+
+
+def gap_weights(rows: list[OrbitalToken], cols: list[OrbitalToken]) -> np.ndarray:
+    """(len(rows), len(cols)) n_r - n_s, rows occupied and columns virtual (`electron_counts`):
+    2 on every closed-shell cell, 0 on an open-shell row with a hole column (two SOMOs of one
+    plateau differ by ~1e-7 in their GFN2 occupations: below `WEIGHT_TOL` the weight is 0)."""
+    w = electron_counts(rows, True)[:, None] - electron_counts(cols, False)[None, :]
+    return np.where(np.abs(w) < WEIGHT_TOL, 0.0, w)
+
+
 def gap_kernel_matrix(
     rows: list[OrbitalToken], cols: list[OrbitalToken], min_gap_ev: float = MIN_GAP_EV
 ) -> np.ndarray:
     """G for every pair of tokens; works across molecules (full spectral sets only).
 
     Tokens of one block share its canonical energies, so each block pair is one product
-    G = 2 P_r D P_s^T with D_km = 1 / (E_k - E_m).
+    G = 2 P_r D P_s^T with D_km = 1 / (E_k - E_m). Where a row or a column has a spin role the
+    weight 2 is replaced by `gap_weights` (0 on an open-shell row with a hole column, where G
+    is undefined); every other cell is computed as before, bit for bit.
     """
     out = np.empty((len(rows), len(cols)))
+    open_r = np.array([o.spin_role != 0 for o in rows], dtype=bool)
+    open_c = np.array([o.spin_role != 0 for o in cols], dtype=bool)
+    weights = gap_weights(rows, cols) if open_r.any() or open_c.any() else None
     for ri, e_r, P_r in _blocks(rows):
         for ci, e_s, P_s in _blocks(cols):
             gap = e_r[:, None] - e_s[None, :]
             gap = np.where(gap >= 0, 1.0, -1.0) * np.maximum(np.abs(gap), min_gap_ev)
             out[np.ix_(ri, ci)] = 2.0 * P_r @ (1.0 / gap) @ P_s.T
+            if weights is not None and (open_r[ri].any() or open_c[ci].any()):
+                base = P_r @ (1.0 / gap) @ P_s.T
+                w = weights[np.ix_(ri, ci)]
+                touched = open_r[ri][:, None] | open_c[ci][None, :]
+                out[np.ix_(ri, ci)] = np.where(touched, w * base, out[np.ix_(ri, ci)])
+    return out
+
+
+def _two_level(gap: np.ndarray, beta: np.ndarray) -> np.ndarray:
+    """1 / (sign(dE) D) with D = (|dE| + sqrt(dE^2 + 4 beta^2)) / 2 and sign(0) = -1: the exact
+    two-level denominator, |dE| for a large gap and |beta| at degeneracy."""
+    sign = np.where(gap > 0, 1.0, -1.0)
+    d = 0.5 * (np.abs(gap) + np.sqrt(gap * gap + 4.0 * beta * beta))
+    return sign / d
+
+
+def gap_kernel_two_level(
+    rows: list[OrbitalToken], cols: list[OrbitalToken], beta: np.ndarray
+) -> np.ndarray:
+    """g2 for every pair of tokens: sum_km (n_k - n_m) p_rk p_sm / (sign(dE_km) D_km) with the
+    two-level D of the cell's coupling `beta` (eV, (len(rows), len(cols)), one value per cell;
+    open-shell plan P7, U23). Bounded by sum |n_k - n_m| p_rk p_sm / |beta|, finite through a
+    degeneracy, and G itself as beta -> 0 (without G's clamp at MIN_GAP_EV). The weights are
+    `gap_weights`; a cell of weight 0 is 0."""
+    out = np.zeros((len(rows), len(cols)))
+    weights = gap_weights(rows, cols)
+    for ri, e_r, P_r in _blocks(rows):
+        for ci, e_s, P_s in _blocks(cols):
+            gap = e_r[:, None] - e_s[None, :]
+            for a, i in enumerate(ri):
+                b = beta[i, ci]
+                inv = _two_level(gap[None, :, :], b[:, None, None])  # (cells, K, M)
+                vals = np.einsum("k,ckm,cm->c", P_r[a], inv, P_s)
+                out[i, ci] = weights[i, ci] * vals
     return out
 
 

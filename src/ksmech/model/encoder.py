@@ -12,7 +12,14 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from ksmech.model.config import ModelConfig
-from ksmech.model.inputs import CHARGE_MAX, MAX_Z, frozen, pair_channel_count, pair_channels
+from ksmech.model.inputs import (
+    CHARGE_MAX,
+    MAX_Z,
+    SPIN_MAX,
+    frozen,
+    pair_channel_count,
+    pair_channels,
+)
 
 
 def mlp(n_in: int, hidden: int, n_out: int) -> nn.Sequential:
@@ -33,6 +40,8 @@ class TokenEmbedding(nn.Module):
         self.orbital = mlp(n_orbital_x, d, d)
         self.spectral = mlp(2, d, d)
         self.fragment = nn.Embedding(cfg.fragments, d)
+        if getattr(cfg, "atom_spin_input", "none") == "categorical_u":  # P7, P9's ablation arm
+            self.spin = nn.Embedding(SPIN_MAX + 1, d)
         self.mech = nn.Parameter(torch.randn(1, 1, d) / math.sqrt(d))
         self.n_fragments = cfg.fragments
 
@@ -41,6 +50,8 @@ class TokenEmbedding(nn.Module):
         n_atoms = cat.shape[1]
         charge = cat[..., 1].clamp(-CHARGE_MAX, CHARGE_MAX) + CHARGE_MAX
         h_atom = self.z(cat[..., 0].clamp(0, MAX_Z)) + self.charge(charge)
+        if hasattr(self, "spin"):
+            h_atom = h_atom + self.spin(cat[..., 2].clamp(0, SPIN_MAX))
         h_atom = (h_atom + self.atom(inp["atom_x"])) * batch["is_atom"][:, :n_atoms, None]
         spectral = self.spectral(inp["spectra"]) * inp["spectra_mask"][..., None]
         inherited = batch["incidence"][:, n_atoms:, :].to(h_atom.dtype) @ h_atom
