@@ -176,33 +176,74 @@ def _run_molecule(task: MolTask) -> list[dict]:
     return [_row(task.smiles, 0, reason=str(reason), detail=detail, seconds=seconds)]
 
 
+def census_allows(smiles: str) -> bool:
+    """The spin census (open-shell plan P8 step 5): a species reaches QM with u in {0, 1}, as
+    a Hund case (one degenerate open group: O2, O(3P)) or with a metal table's count; a
+    non-metal with RDKit u >= 2 and no count, a MULTI_RADICAL_SPECIES (`data.domain`) and a
+    singlet no closed-shell drawing reaches do not."""
+    from ksmech.data import domain, spin
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return True  # the record's own build reports it
+    m = spin.kekule_copy(mol)
+    if any(domain._is_metal(a) for a in m.GetAtoms()):
+        return True
+    if not spin.assign(m).assigned:
+        return spin.rdkit_unpaired(m) <= 1
+    return not domain.multi_radical_species(m)
+
+
+def _census(keys: set[str], exempt: set[str]) -> tuple[list[str], list[dict]]:
+    """(the keys the census admits, a SPIN_CENSUS_REFUSED row for each other one); the species
+    of a counted exemption (`exempt`) pass."""
+    refused = sorted(k for k in keys - exempt if not census_allows(k))
+    rows = [
+        _row(k, -1, reason=str(ReasonCode.SPIN_CENSUS_REFUSED), detail="u >= 2, not a Hund case")
+        for k in refused
+    ]
+    if refused:
+        log.warning("spin census: %d species refused (SPIN_CENSUS_REFUSED)", len(refused))
+    return sorted(keys - set(refused)), rows
+
+
 def collect_molecules(
     source: str,
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
     step_ids: Collection[str] | None = None,
 ) -> tuple[list[str], list[dict]]:
     """Unique map-free canonical SMILES of every fragment (of the steps `step_ids` only, when
-    given), plus rows for fragments that fail."""
-    columns = ["reactants_smiles", "products_smiles"] + (
-        ["step_id"] if step_ids is not None else []
-    )
-    table = pq.read_table(steps_path(source, processed_dir), columns=columns).to_pylist()
+    given) that the spin census admits (`census_allows`), plus rows for fragments that fail
+    or that the census refuses."""
+    from ksmech.data.domain import is_exempt
+
+    path = steps_path(source, processed_dir)
+    sides_cols = ["reactants_smiles", "products_smiles"]
+    has_ids = "step_id" in pq.read_schema(path).names
+    table = pq.read_table(path, columns=sides_cols + ["step_id"] * has_ids).to_pylist()
     if step_ids is not None:
         wanted = set(step_ids)  # an empty list selects nothing
         table = [r for r in table if r["step_id"] in wanted]
     sides = {r["reactants_smiles"] for r in table} | {r["products_smiles"] for r in table}
+    exempt_sides = {r[k] for r in table if is_exempt(r.get("step_id")) for k in sides_cols}
     keys: set[str] = set()
+    exempt: set[str] = set()
     failures: dict[str, dict] = {}
     for side in sorted(sides):
         for frag in chem.fragments(chem.parse_mapped(side)):
             try:
-                keys.add(chem.unmapped_canonical(frag))
+                key = chem.unmapped_canonical(frag)
             except (chem.SanitizeError, ValueError) as exc:
                 raw = Chem.MolToSmiles(frag)
                 failures[raw] = _row(
                     raw, -1, reason=str(ReasonCode.CANONICALIZE_FAILED), detail=str(exc)
                 )
-    return sorted(keys), list(failures.values())
+                continue
+            keys.add(key)
+            if side in exempt_sides:
+                exempt.add(key)
+    admitted, refused = _census(keys, exempt)
+    return admitted, list(failures.values()) + refused
 
 
 def _is_done(

@@ -204,3 +204,35 @@ def test_every_new_code_and_class_is_ordered_and_admitted():
     for cls in (DomainClass.RADICAL_STEP, DomainClass.HIGH_SPIN_DRAWING):
         assert str(cls) in domain.ADMIT[str(Source.RMECHDB)]
         assert str(cls) not in domain.ADMIT[str(Source.REACTMECH)]
+
+
+# ---- the spin census before QM (step 5)
+
+
+@pytest.mark.parametrize(
+    "smiles, allowed",
+    [
+        ("C", True),
+        ("C[CH2]", True),
+        ("[O][O]", True),  # Hund
+        ("[O]", True),  # Hund
+        ("[C]=O", True),  # the table's singlet, paired in the BE drawing
+        ("[Cl][Fe-]([Cl])([Cl])[Cl]", True),  # a metal table's count
+        (P_BENZYNE, False),  # a singlet no closed-shell drawing reaches
+        ("COC(=O)[C]C(=O)OC", False),  # a triplet that is not a Hund case
+        ("[CH2]CCC[CH2]", False),  # RDKit u = 2 without a count
+    ],
+)
+def test_the_census_refuses_u2_species_without_a_hund_verdict(smiles, allowed):
+    from ksmech.qm.batch import census_allows
+
+    assert census_allows(chem.unmapped_canonical(mol(smiles))) is allowed
+
+
+def test_the_census_lets_an_exemptions_species_through():
+    from ksmech.qm.batch import _census
+
+    adduct = "CC[B-](CC)(CC)[O+][O]"
+    kept, refused = _census({adduct, "C"}, exempt=set())
+    assert kept == ["C"] and [r["reason"] for r in refused] == ["SPIN_CENSUS_REFUSED"]
+    assert _census({adduct, "C"}, exempt={adduct}) == (["C", adduct], [])

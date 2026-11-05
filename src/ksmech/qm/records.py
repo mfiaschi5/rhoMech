@@ -42,6 +42,7 @@ class ReasonCode(StrEnum):
     SDF_UNREADABLE = "SDF_UNREADABLE"  # a dataset's molfile RDKit cannot read (QMugs)
     RECORD_ORDER = "RECORD_ORDER"  # a dataset's atoms do not map onto the record's (QMugs)
     BOND_FORMED = "BOND_FORMED"  # a tagged species formed a bond from every start (P4)
+    SPIN_CENSUS_REFUSED = "SPIN_CENSUS_REFUSED"  # u >= 2, not a Hund case nor exempt (P8)
     # warnings: the record is still written
     FUKUI_SCF_FAIL = "FUKUI_SCF_FAIL"
     VBUR_FAIL = "VBUR_FAIL"
