@@ -8221,6 +8221,16 @@ approved first (entry above).
   one keeping an order), abstraction / SH2 (the broken bond gone, the formed one new),
   beta-scission (the broken bond gone, the formed one raising an order), other.
 - **Browse** INDEX_VERSION 2 -> 3.
+- **Tests.** New `tests/test_p8_spin_law.py` (the pairing rule, MULTI_RADICAL_SPECIES under three
+  policies, the exemption, the policies, the census), `test_p8_rmechdb.py` (the nine hand-written
+  FlowER-format lines of `tests/fixtures/mini_flower.txt`: twins, the RC/RS collision, N2 paired
+  before the id, the columns; 5 real lines), `test_p8_splits.py`, `test_p8_leakage.py` (both
+  directions, the R shapes), `test_compare_stores.py`, `test_p8_no_flower_lines.py` (no real RS/RC
+  line in a tracked file: the first hand-written allyl line matched one by chance and was
+  remapped). Oracles moved by the law: the ReactMech P4 counts and the survey oracle (the 2
+  odd-Pd steps), the singlet ozone and N2 fixtures (now PAIRED_DRAWING). `pytest -n 14 -m "not
+  realdata"` (5fdc5f5): 2262 passed, 21 skipped, 2 xfailed, 10 warnings; `pytest -m realdata`
+  (5fdc5f5, on the Release B stores): 67 passed.
 - **Storage (U18)**: rmechdb's artifacts (steps, records, tokens, stores, audit) are kept as
   PMechDB's: local, the private rhoMech-data and pods only, never the public repository. The push
   to the private HF dataset, the migration into main's data/, serve's re-key and the merges of
