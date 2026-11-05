@@ -144,7 +144,8 @@ def _pack_drawings(sample: MechanismSample) -> dict[str, np.ndarray]:
     out = {}
     for f, name in DRAWING_ARRAYS.items():
         rows = [getattr(d, f) for d in sample.drawings]
-        out[name] = np.array(rows, dtype=np.int8).reshape(-1, width[f])
+        # (rows, width), not (-1, width): a pool of single atoms has no bond row to stack
+        out[name] = np.array(rows, dtype=np.int8).reshape(len(rows), width[f])
     return out
 
 

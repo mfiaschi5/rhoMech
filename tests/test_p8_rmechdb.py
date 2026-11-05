@@ -134,3 +134,16 @@ def test_five_real_lines_load():
     assert result.n_records == 5
     assert len(result.steps) + len(result.rejections) == 5
     assert all(s.flower_part == "test" and s.flower_suffix in ("RS", "RC") for s in result.steps)
+
+
+def test_a_pool_of_single_atoms_packs_its_empty_drawings():
+    """[O] + [O] -> O2: no bond row, no other drawing (the store stacked (-1, 0) before)."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from ksmech.arrows.store import _pack_drawings
+
+    s = SimpleNamespace(n_atoms=2, bonds=np.zeros((0, 3), np.int16), drawings=[])
+    shapes = {k: v.shape for k, v in _pack_drawings(s).items()}
+    assert shapes["drawing_orders"] == (0, 0) and shapes["drawing_charges"] == (0, 2)
