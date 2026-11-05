@@ -7969,3 +7969,10 @@ disk). Code only: the v18 data of main is untouched.
   key v2, Hund rows, the flow law as the membership test with the 147 / 471 measurement). It
   is not compiled here (the host's LaTeX lacks amsthm). It needs your approval before P8's
   build (U3).
+- **Tests.** New `tests/test_p6_electron_flow.py` (82: N and u, the flow law and its codes, the
+  8 radical shapes under both rules, key v2, the anion proxy, the per-drawing u),
+  `tests/test_serve_pools_rekey.py` (6), and realdata `tests/test_p6_resonance_pairs.py` and
+  `tests/test_p6_flower_dryrun.py`. `pytest -n 3 -m "not realdata"` (9f352ab's tree, src as
+  2f54d33): 2147 passed, 21 skipped, 2 xfailed, 5 warnings; `KSMECH_TEST_WORKERS=3 pytest -m
+  realdata` (2f54d33, on the v19 stores, beside the 12-worker ReactMech full QM batch): 65
+  passed. The spec is not compiled (no amsthm on this host).
