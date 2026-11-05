@@ -190,7 +190,7 @@ def build_step(
         charge_repair=note,
         domain_class=screen.domain_class,
     )
-    return flow_exclusion(admit_open_shell(step), kind)
+    return source_classes(flow_exclusion(admit_open_shell(step), kind))
 
 
 FLOW_CODES = {
@@ -235,16 +235,17 @@ def admit_open_shell(step: ElementaryStep) -> ElementaryStep:
     keeps its exclusion with the curated reason as its class. R is the dataset arrows' edit
     (`delta_be.dataset_matrix`); a step whose edit fails is NOT_ELEMENTARY. Law (S) needs the
     tokens and is the sample builder's (SOMO_NOT_INTEGRAL)."""
-    readable = _readable(domain.POLICY.get(str(step.source), domain.DomainPolicy()))
+    policy = domain.POLICY.get(str(step.source), domain.DomainPolicy())
+    readable = _readable(policy)
+    if step.domain_exclusion == str(DomainCode.RADICAL_DRAWN) and (
+        DomainCode.RADICAL_DRAWN not in readable
+    ):
+        return _multi_radical_named(step)
     if step.domain_exclusion not in {str(c) for c in readable}:
         return step
     reactants = chem.parse_mapped(step.reactants_smiles)
     products = chem.parse_mapped(step.products_smiles)
-    code = _blocking_code(reactants, products, readable)
-    code = code or domain.spin_law(reactants, products)
-    edit = dataset_matrix(step) if code is None else None
-    if code is None and (isinstance(edit, EditSkip) or not domain.parity_law(edit[2].lone)):
-        code = DomainCode.NOT_ELEMENTARY
+    code, edit = _open_shell_code(step, reactants, products, readable, policy)
     if code is not None:
         return replace(step, domain_exclusion=str(code))
     mol, _, r, _ = edit
@@ -255,6 +256,45 @@ def admit_open_shell(step: ElementaryStep) -> ElementaryStep:
     return replace(step, domain_exclusion=exclusion, domain_class=classes)
 
 
+def _open_shell_code(step, reactants, products, readable, policy):
+    """(the code the open-shell laws give the step or None, its R_data edit or None): a
+    blocking fragment code; the spin law (`domain.spin_law`), whose conservation clause holds
+    for a polar source's step and for a step whose R moves no single electron; then
+    NOT_ELEMENTARY for an edit that fails, or odd atom entries in a polar source (law R)."""
+    code = _blocking_code(reactants, products, readable)
+    if code is not None:
+        return code, None
+    edit = dataset_matrix(step)
+    paired = not isinstance(edit, EditSkip) and domain.parity_law(edit[2].lone)
+    conserved = paired or not policy.open_shell_labels
+    exempt = domain.is_exempt(step.step_id)
+    code = domain.spin_law(reactants, products, conserved=conserved, exempt=exempt)
+    if code is None and (isinstance(edit, EditSkip) or not (paired or policy.open_shell_labels)):
+        code = DomainCode.NOT_ELEMENTARY
+    return code, edit
+
+
+def _multi_radical_named(step: ElementaryStep) -> ElementaryStep:
+    """A RADICAL_DRAWN step of a source that keeps drawn radicals out, coded
+    MULTI_RADICAL_SPECIES when one of its species is one (P8: the law is counted in every
+    source; the step stays excluded either way)."""
+    if domain.is_exempt(step.step_id):
+        return step
+    sides = (chem.parse_mapped(step.reactants_smiles), chem.parse_mapped(step.products_smiles))
+    if any(domain.multi_radical_species(f) for m in sides for f in chem.fragments(m)):
+        return replace(step, domain_exclusion=str(DomainCode.MULTI_RADICAL_SPECIES))
+    return step
+
+
+def source_classes(step: ElementaryStep) -> ElementaryStep:
+    """An admitted step of a source of one-electron steps (`DomainPolicy.open_shell_labels`,
+    rmechdb) carries RADICAL_STEP (open-shell plan P8)."""
+    if step.domain_exclusion is not None or not domain.open_shell_labels(step.source):
+        return step
+    found = domain.domain_classes(step.domain_class) | {str(domain.DomainClass.RADICAL_STEP)}
+    return replace(step, domain_class=domain.join_classes(found))
+
+
 def screened(
     reactants: Chem.Mol,
     products: Chem.Mol,
@@ -263,16 +303,18 @@ def screened(
     step_id: str | None = None,
 ) -> Screen:
     """`domain.screen_step`, keeping its repairs (V1, A1, the named repairs of `step_id`, R1,
-    the dative law) only if the repaired sides parse and the repaired step validates (charge
-    balance, maps, arrow replay); otherwise the step is screened as drawn, without repairs."""
-    try:
-        screen = screen_step(reactants, products, step_id=step_id)
-        if screen.repairs:
-            validate(screen.reactants, screen.products, arrows, require_arrows)
-    except StepRejected as exc:
-        log.warning("charge repair dropped (%s): %s", exc.reason, exc.detail)
-        return screen_step(reactants, products, repair=False)
-    except (chem.SanitizeError, chem.SmilesParseError) as exc:
-        log.warning("charge repair dropped (%s): %s", RejectReason.SANITIZE_FAILED, exc)
-        return screen_step(reactants, products, repair=False)
-    return screen
+    the dative law, the spin redrawings) only if the repaired sides parse and the repaired
+    step validates (charge balance, maps, arrow replay); otherwise without the spin
+    redrawings (dataset arrows drawn on the radical drawing do not replay on the paired one),
+    and failing that as drawn, without repairs."""
+    for redraw in (True, False):
+        try:
+            screen = screen_step(reactants, products, step_id=step_id, redraw=redraw)
+            if screen.repairs:
+                validate(screen.reactants, screen.products, arrows, require_arrows)
+            return screen
+        except StepRejected as exc:
+            log.warning("repair dropped (redraw=%s, %s): %s", redraw, exc.reason, exc.detail)
+        except (chem.SanitizeError, chem.SmilesParseError) as exc:
+            log.warning("repair dropped (redraw=%s, SANITIZE_FAILED): %s", redraw, exc)
+    return screen_step(reactants, products, repair=False)
