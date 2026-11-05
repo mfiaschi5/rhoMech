@@ -7976,3 +7976,121 @@ disk). Code only: the v18 data of main is untouched.
   2f54d33): 2147 passed, 21 skipped, 2 xfailed, 5 warnings; `KSMECH_TEST_WORKERS=3 pytest -m
   realdata` (2f54d33, on the v19 stores, beside the 12-worker ReactMech full QM batch): 65
   passed. The spec is not compiled (no amsthm on this host).
+
+## 2026-11-05: P7 code: SOMO donors and holes, the SOMO population, the occupation-weighted G, g2, the own-pair and recombination channels
+
+Open-shell plan P7 (Release B, stacked branch 2 of 3, `claude/open-shell-p7` from P6, the same
+worktree and data root). Code, a tabulation, two floors and a radical suite; no token or QM file
+changes.
+
+- **Roles and holes** (`orbitals.tokens`): `CandidateConfig.somo_roles` (default True) and
+  `metal_d_open_shell` (default False, P9's ablation). `open_shell_tokens` reads P2b's plateau
+  group from the token file alone: occupied tokens at a fractional occupation (0.2, 1.8) in a file
+  whose record ran as an open shell (`record_unpaired` > 0, the spin tag included) that is not
+  Fermi-smeared. `with_holes` gives them `spin_role` +1 (type SOMO) and appends one VIRTUAL twin
+  each (`spin_role` -1, type SOMO_HOLE, the same coefficients, centres, descriptors, occupation
+  and spectrum) at the end of the fragment's orbitals; `ReactantTokens` applies it, so every
+  sample, the textbook cases and serve's live samples hold the holes, and `save_tokens` refuses
+  tokens with holes. `spin_role` is an in-memory field of `OrbitalToken`, never in a file, so no
+  token file goes stale; the candidate rule is stamped into the samples' config only
+  (`steps._config`: `candidate`, `beta_inter`). Within a fragment an open-shell row and a hole
+  column are invalid (`pairs.open_self_cells`, also in `acceptor_candidates(donor=...)`); across
+  fragments they stay valid (recombination). No SOMO->partner exclusion: the C6H6.- SOMO keeps its
+  pi* cells. The metal-d test: the token's main centre is a valence-d metal and it is mostly d
+  there (FeBr4-: 5 open tokens, no role; 5 holes with the flag). CuCl2 at its geometry is
+  Fermi-smeared and has no open-shell token at all.
+- **SOMO population** (`ReactantTokens.somo_population`, the sample's atom column
+  `somo_population`): rho_A = sum over the open-shell tokens (metal-d included) of
+  min(n_t, 2 - n_t) w_tA, with w_tA the centre weights renormalized over the token's centres
+  (the centre cut at tau_atom drops the tails, which would take their share out of the sum: an
+  allyl SOMO summed to 0.99998 unnormalized). Sums to u on [CH3], Br., .OH, O2; 0 on closed
+  shells; one array for every resonance drawing.
+- **Model inputs**: `ModelConfig.atom_spin_input` (none | categorical_u | somo_population,
+  default none; categorical_u embeds `atom_categorical[:, 2]` clipped to 7) and
+  `ModelConfig.spin_role` (default False); `model.inputs.FIXED_SCALE` gives both a fixed scale
+  (mean 0, std 1), never fitted, since they are 0 on nearly every token. Old configs read 'none'
+  and False, so every checkpoint selects its columns by name as before.
+- **Occupation-weighted G** (`ks_terms.gap_kernel_matrix`, `gap_weights`): n_r - n_s, with a
+  token's n its occupation when it has a spin role, else 2 occupied / 0 virtual. Every cell
+  without a role keeps the old product, bit for bit (checked against the v18 product on the 10
+  fixtures); SOMO->empty and doubly->hole weigh 1, Br.'s three holes 1/3 each (pooled 1), an
+  open row with a hole column 0 (g and log_abs_g undefined). Two SOMOs of one plateau differ by
+  ~1e-7 in their GFN2 occupations, so |weight| < 1e-4 is 0 (`WEIGHT_TOL`).
+- **g2** (`ks_terms.gap_kernel_two_level`, `stage_a.open_shell_block`): the plan's U23 form with
+  sign(dE) and D = (|dE| + sqrt(dE^2 + 4 beta^2)) / 2, the inverted pairs keeping g's sign (the
+  one-sign alternative, -1/D on every pair, differs only there and stays recorded for your
+  decision). D is clamped at G's 1e-3 eV: without it a cell with beta = 0 (no shared centre)
+  and dE = 0 (an open-shell token with its own hole's MO) is 0/0; with it g2 at beta = 0 is G
+  exactly, clamp included. beta within a fragment is K x cross_coupling (K = 1.75); between
+  fragments `params.BETA_INTER`.
+- **BETA_INTER = 0.40 eV** (`scripts/probes/open_shell_g_table.py`, 500 closed_base pools, unflagged
+  intramolecular cells): |beta| by the graph distance of the two centre sets, median (p90):
+  sharing an atom 1.16 (1.87), bonded 0.405 (1.46), two bonds 0.091 (0.40), three or more
+  ~0 (0.024). The stated rule: the median coupling of two tokens whose centre sets are bonded
+  but share no atom, two orbitals one bond apart, as two molecules are at a forming bond; not
+  tuned on any exit test, frozen before P8's build.
+- **Tabulation** (same probe, BETA_INTER 0.40): closed_base, 2.27 M cells: |g| p50 0.105, p99
+  0.333, p99.9 0.661, max 742.7 (the 1e-3 eV clamp); |g2| p99.9 0.608, max 4.59. Own pairs
+  (27,905 cells): |g| p99 0.334, max 0.587. PMechDB's 57 open-shell pools (110 k cells): |g|
+  p99.9 2.62, max 38.2; |g2| 1.31 and 2.10. SOMO->empty within a fragment |g| max 4.70, |g2|
+  1.32; doubly->hole between fragments |g| max 2.84, |g2| 1.26. Without the intramolecular
+  open-shell cells the open-shell p99.9 moves from 2.62 to 2.61 (|g|). Diagnostics only.
+- **Own-pair channel**: `own_g`, `own_g2` on the `own_antibond` cells (`OWN_PAIR_FEATURES`),
+  pooled into B^own on bonded atom pairs only (`model.inputs.pooled_own`; a token's tails on
+  other atoms would otherwise make the bond's homolysis score theirs). `pooled_gap` and
+  `atom_pair_physics` are unchanged: on the valid cells the own pairs never enter; with
+  `pair_cells='all'` they enter as before, and taking them out there is P9's own_pair_channel.
+- **Recombination channel**: `somo_pair` (bit-packed in the store) and `somo_level_diff`,
+  defined on the open-shell rows x hole columns of two fragments only (CH3. + CH3.: two cells,
+  one per orientation, level difference 0).
+- **Store**: `SAMPLE_PAIR_FEATURES` = the 14 v18 columns + G2 + OWN + OPEN_SHELL;
+  `cell_features('all')` and `STAGE_A_FEATURES`, so the GBDT feature lists, stay the v18 ones.
+- **Floors** (FLOOR_VERSION 4; `ksmech-eval floor --floor own_break --kernel g|g2
+  --drop-intra-open`): `own_break` adds a break anchor on every bonded pair scored by |B^own|
+  beside the form anchors by |G^atom|; HO-OH -> 2 HO. is unreachable under the legacy floor and
+  reachable under own_break with g and g2.
+- **Radical suite** (`ksmech-physics textbook --radical`, untrained kernel; rank of the expected
+  pair, 0 = first; |g| / |g2|, with the intramolecular open-shell cells): Me3Sn. + MeI / MeBr /
+  MeCl 15 / 19 / 68 and 14 / 17 / 57, the order I > Br > Cl by score with both; Br. + propene
+  anti-Markovnikov 0 / 16; tBu. prefers acrylonitrile 0 / 0 (methyl vinyl ether 1063); CF3.
+  prefers methyl vinyl ether 0 / 0 (acrylonitrile 45); tBuO. + THF alpha C-H 2 / 2 (beta 8 /
+  6); Br. + toluene benzylic 3 / 59 (ring pi 21 / 73); CH3. + CH3. by somo_pair 1 (the two
+  orientations tie). Without the intramolecular open-shell cells: MeCl / MeBr / MeI 57 / 8 / 4 and 46 / 6 /
+  4, tBuO. 1 / 1, the rest as above. Diagnostics: nothing is gated on them.
+- **Fishhook alignment** (plan step 2's align.py / apply_predicted.py) is not built: no source
+  has half-headed arrows (PMechDB rejects them at ingest, FlowER has none); polar arrows that end
+  on a radical atom now find its hole among the acceptors by atom, as any virtual token.
+- **Wiki**: drafts of klopman-salem.md and orbital-tokens.md in `docs/wiki_drafts/`, to replace
+  the published pages at the Release B merge (serve refuses radical pools until S2).
+- **The v19 build in the Release B data root** (the same steps parquet; from 7cf4f09, 3 workers
+  beside the 12-worker ReactMech full QM batch): PMechDB 12,469 samples (59 min, 37 under P6:
+  g2 is computed per cell), ReactMech 9,256 (113 min, 83). Open-shell tokens in a role: PMechDB
+  10 donors with 10 holes in 9 samples (molecule split: train 6, val 4, test 0), ReactMech
+  none. The plan's "about 104" counted every open-shell token of PMechDB's token files: most
+  sit in Cu(II) and Fe(III) d shells (masked by default), in drawn radicals law (S) keeps out
+  (Fermi-smeared), or in carbenes the species table pairs.
+- **Exit gates on closed_base** (molecule split, the v18 references copied aside in the data
+  root's `p7_gate/` folders, the v18 files kept in place for the P0b tests): the legacy floor
+  gives every closed_base sample its P0b rank, valid and all cells, val (1,238) and test
+  (1,182). Decoded on closed_base val at 4 torch threads from the superset batch, flex_first,
+  dense_plain GENERAL s0 and LEGACY s0 give every sample its P0b rank (top-1 / 3 / 5: 62.9 /
+  82.6 / 85.4, 67.7 / 86.2 / 88.6, 65.2 / 83.0 / 85.4, all equal to P0b). The number of
+  distinct completions differs in 24, 19 and 18 samples (+1, one LEGACY sample -1): absurd
+  completions that strip an O atom make it a Hund species, the identity key then carries every
+  fragment's charge, and two products the v1 key merged (CH2F+ / CH3- against CH2F- / CH3+)
+  stay apart; with 5 completions per anchor that also changes which ones an anchor keeps
+  (pmechdb-e0ab5a70b32122bb: 13 -> 12). The own_break floor on closed_base: the same top-k as the
+  legacy floor with g (val 15.6 / 26.0 / 31.1, test 17.8 / 27.3 / 31.6), 15.4 / 25.6 / 30.8 and
+  17.4 / 26.8 / 31.0 with g2, unreachable 39 + 77 -> 0 (those break anchors are now proposed,
+  ranked low); without the intramolecular open-shell cells nothing changes on closed_base (no
+  open shell there). The radical cohort of PMechDB's molecule val (3 samples): rank 90 at
+  median, none in the top 5. The 'radical cohort by R shape' of the plan is rmechdb's, in P8.
+- **Tests.** New `tests/test_p7_open_shell_physics.py` (62: roles and holes, the candidate rule on
+  closed shells, the cyclization and C6H6.- cells, FeBr4-'s masked d shell, the SOMO population,
+  the weights of G, g2 at beta = 0 and its bound, the two-level sweep, the own-pair channel and
+  B^own, the recombination cells, dense and cell inputs on a radical pool, the own_break floor,
+  the tabulation and the radical suite); `pin.V19_COLUMNS` lets the digest gates
+  (`test_eval_pin`, `test_p5_reactmech_returns`) see P7's new columns as current-only.
+  `pytest -n 3 -m "not realdata"` (7910d53): 2209 passed, 21 skipped, 2 xfailed, 5 warnings;
+  `KSMECH_TEST_WORKERS=3 pytest -m realdata` (7910d53, on the P7 v19 stores): 65 passed. The
+  spec is not compiled here (no amsthm).
