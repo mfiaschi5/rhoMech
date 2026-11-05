@@ -8094,3 +8094,13 @@ changes.
   `pytest -n 3 -m "not realdata"` (7910d53): 2209 passed, 21 skipped, 2 xfailed, 5 warnings;
   `KSMECH_TEST_WORKERS=3 pytest -m realdata` (7910d53, on the P7 v19 stores): 65 passed. The
   spec is not compiled here (no amsthm).
+
+## 2026-11-05: spec v10 approved
+
+The v10 draft of `docs/ksmech_architecture.tex` (P6: N with single electrons, the electron-flow
+law and its four codes, the identity key v2, the label class with balanced flows first; P7: the
+open-shell tokens and their holes, the occupation-weighted G, g2 with BETA_INTER 0.40 eV, the
+own-pair and recombination channels) was approved by the user on 2026-11-05 ("Approvo, inizia
+P8"), as U3 requires before the Release B build. The date line no longer says draft. The one
+choice left open in P7, g2's sign on inverted pairs (G's sign, kept; the one-sign alternative
+recorded), stands as written.
