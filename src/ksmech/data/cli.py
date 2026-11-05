@@ -50,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     f = sub.add_parser("freeze-sample", help="snapshot a pilot's step ids (sample_frozen.json)")
     f.add_argument("--source", required=True, choices=[str(s) for s in LOADERS])
     f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    a = sub.add_parser("leakage-audit", help="rmechdb's leakage audit in both directions (P8)")
+    a.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    a.add_argument("--seed", type=int, default=0)
+    a.add_argument("--write-cohorts", action="store_true", help="pin the four overlap cohorts")
     v = sub.add_parser("provenance", help="print an artifact's provenance chain, or backfill")
     v.add_argument("path", type=Path, nargs="?", help="artifact to describe")
     v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
@@ -69,11 +73,27 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_provenance(args, console)
     if args.command == "open-shell-survey":
         return cmd_survey(Source(args.source), args.processed_dir, console)
+    if args.command == "leakage-audit":
+        return cmd_leakage(args, console)
     if args.command == "freeze-sample":
         out = freeze_sample(Source(args.source), args.processed_dir)
         console.print(f"wrote {out}")
         return 0
     return cmd_stats(Source(args.source), args.processed_dir, console)
+
+
+def cmd_leakage(args: argparse.Namespace, console: Console) -> int:
+    """`leakage_audit.json` (`data.leakage`): every overlapping step id, in both directions."""
+    from ksmech.data.leakage import write_audit
+
+    out, report = write_audit(args.processed_dir, args.seed, args.write_cohorts)
+    for key, block in report.items():
+        if isinstance(block, dict) and "n" in block:
+            console.print(f"{key}: {block['n']}")
+        elif key.startswith("rc_heldout"):
+            console.print(f"{key}: {block}")
+    console.print(f"wrote {out}")
+    return 0
 
 
 def cmd_survey(source: Source, processed: Path, console: Console) -> int:

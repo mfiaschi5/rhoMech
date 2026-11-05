@@ -40,7 +40,8 @@ from ksmech.serve.core.settings import ServeSettings, assert_writable
 
 log = logging.getLogger(__name__)
 
-INDEX_VERSION = 2  # 2: molecule split badges (split_ids has no "random" any more), sigma keys
+INDEX_VERSION = 3  # 3: the P8 re-ingest (key v2, the spin law, flower columns); 2: molecule
+#   split badges (split_ids has no "random" any more), sigma keys
 CHUNK_STEPS = 500
 CHUNK_TIMEOUT_S = 600
 BUILD_HINT = "POST /api/browse/index"
