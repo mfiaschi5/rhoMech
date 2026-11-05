@@ -12,7 +12,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from ksmech.data import mech_uspto, pmechdb, provenance, reactmech
+from ksmech.data import mech_uspto, pmechdb, provenance, reactmech, rmechdb
 from ksmech.data.ingest import (
     IngestResult,
     freeze_sample,
@@ -27,6 +27,7 @@ LOADERS: dict[Source, Callable[[Path | None], IngestResult]] = {
     Source.PMECHDB: pmechdb.load,
     Source.REACTMECH: reactmech.load,
     Source.MECH_USPTO: mech_uspto.load,
+    Source.RMECHDB: rmechdb.load,
 }
 
 

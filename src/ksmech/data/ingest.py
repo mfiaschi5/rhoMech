@@ -41,6 +41,7 @@ class IngestResult:
     notes: Counter[str] = field(default_factory=Counter)  # non-fatal normalizations, counted
     _seen: set[str] = field(default_factory=set, repr=False)
     sample: dict | None = None  # (`keep_sample`) n, seed and the accepted steps drawn from
+    via: str | None = None  # the distribution the source's files come in (rmechdb: flower)
 
     def add(self, step_id: str, raw: str, make: Callable[[], ElementaryStep]) -> None:
         """Run one record through `make` and record either the step or the rejection."""
@@ -90,6 +91,7 @@ class IngestResult:
     def report(self) -> dict:
         return {
             "source": str(self.source),
+            "via": self.via,
             "inputs": self.inputs,
             "n_records": self.n_records,
             "n_accepted": len(self.steps),

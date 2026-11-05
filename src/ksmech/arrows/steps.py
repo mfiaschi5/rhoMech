@@ -127,10 +127,18 @@ SAMPLE_VERSION = 19  # 18: every pair cell with the exclusion flags, the stored 
 #   spin_role, somo_population, g2, the own-pair and open-shell pair channels (P7)
 PARTS = ("train", "val", "test")
 FROZEN_SPLIT_SCHEMA = 1  # `split_frozen_<strategy>.json`, independent of SAMPLE_VERSION
-STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
+STRATEGIES = (
+    "molecule", "scaffold", "loco", "loco_all", "random_leaky", "rc_molecule", "flower_given"
+)  # fmt: skip
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
 # which leaks molecules across sets on PMechDB (no pathway ids; docs/review_2026-10-21.md, D1)
 DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
+SOURCE_STRATEGIES = {"rmechdb": ("rc_molecule", "flower_given")}  # FlowER's two splits (P8)
+
+
+def default_strategies(source: str) -> tuple[str, ...]:
+    """The strategies `ksmech-arrows samples` builds for a source unless told otherwise."""
+    return SOURCE_STRATEGIES.get(str(source), DEFAULT_STRATEGIES)
 
 
 LEGACY_ATOM_FEATURES = tuple(atom_feature_names())  # the atom columns of a v17 sample
@@ -650,6 +658,8 @@ def _strategy_splits(steps, strategy: str, seed: int, frozen) -> dict[str, split
         "molecule": splits.split_by_molecule,
         "random_leaky": splits.split_by_pathway,
         "scaffold": splits.split_by_scaffold,
+        "rc_molecule": splits.split_rc_molecule,
+        "flower_given": splits.split_flower_given,
     }
     if strategy in simple:
         pinned = _frozen_parts(frozen, strategy)
@@ -667,18 +677,23 @@ def split_ids(
     seed: int = 0,
     frozen: dict[str, list[str]] | None = None,
     conflicts: Counter | None = None,
+    excluded: Counter | None = None,
 ) -> dict[str, list[str]]:
     """Split name (`<strategy>_<part>`) -> step ids. Raises ValueError when the strategy
     cannot run on these steps (leave-one-class-out without class labels). With `frozen` (the
     ids of a `split_frozen_<strategy>.json` snapshot) existing steps keep their parts
     (`data.splits`); new steps of a group frozen in two parts are left out and counted per
-    split name in `conflicts` (SPLIT_CONFLICT)."""
+    split name in `conflicts` (SPLIT_CONFLICT). The steps a strategy cannot place (loco's
+    unlabelled and leaking steps, rc_molecule's LEAK_GUARD) are counted per split name in
+    `excluded`."""
     if strategy == "random":
         raise ValueError("the per-step split is now `random_leaky` and must be asked for by name")
     per = _strategy_splits(steps, strategy, seed, frozen)
-    if conflicts is not None:
-        for name, sp in per.items():
+    for name, sp in per.items():
+        if conflicts is not None:
             conflicts[name] += len(sp.conflict)
+        if excluded is not None:
+            excluded[name] += len(sp.excluded)
     return {f"{name}_{part}": getattr(sp, part) for name, sp in per.items() for part in PARTS}
 
 
@@ -913,15 +928,17 @@ def write_strategy_views(
     statistics of every training part. A strategy that cannot run on the source is reported,
     not raised."""
     parquet = steps_path(source, processed_dir)
-    report: dict = {"splits": {}, "strategies_not_applicable": {}, "frozen": {}}
+    report: dict = {"splits": {}, "strategies_not_applicable": {}, "frozen": {}, "excluded": {}}
     for strategy in strategies:
         frozen = load_frozen_split(source, strategy, processed_dir)
         conflicts: Counter = Counter()
+        excluded: Counter = Counter()
         try:
-            ids = split_ids(steps, strategy, seed, frozen, conflicts)
+            ids = split_ids(steps, strategy, seed, frozen, conflicts, excluded)
         except ValueError as exc:
             report["strategies_not_applicable"][strategy] = str(exc)
             continue
+        report["excluded"][strategy] = dict(excluded)  # LEAK_GUARD for rc_molecule
         if frozen is not None:
             gone = frozen_excluded(frozen, steps)
             report["frozen"][strategy] = {"SPLIT_CONFLICT": dict(conflicts), "excluded": gone}

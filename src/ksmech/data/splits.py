@@ -264,8 +264,69 @@ def split_by_molecule(
     return _assign_groups(molecule_groups(steps), fractions, seed, frozen)
 
 
+def _flower(steps: Sequence[ElementaryStep], suffix: str) -> list[ElementaryStep]:
+    if any(s.flower_suffix is None for s in steps):
+        raise ValueError("a FlowER split needs flower_suffix on every step (rmechdb only)")
+    return [s for s in steps if s.flower_suffix == suffix]
+
+
+def leak_guarded(
+    candidates: Sequence[ElementaryStep], held: Sequence[ElementaryStep]
+) -> tuple[list[str], list[str]]:
+    """(kept ids, LEAK_GUARD ids): a candidate training step that shares a non-trivial
+    molecule (`step_molecules`) with a held-out step leaves training."""
+    seen = frozenset().union(*(step_molecules(s.reactants_smiles, s.products_smiles) for s in held))
+    keep, leak = [], []
+    for s in candidates:
+        mols = step_molecules(s.reactants_smiles, s.products_smiles)
+        (leak if mols & seen else keep).append(s.step_id)
+    return keep, leak
+
+
+def split_rc_molecule(
+    steps: Sequence[ElementaryStep],
+    fractions: Fractions = (0.8, 0.1, 0.1),
+    seed: int = 0,
+    frozen: Frozen | None = None,
+) -> Split:
+    """rmechdb's default (open-shell plan P8 step 4): the molecule split over the RC steps;
+    every RS step is training data (RS cannot be split by molecule: almost all of it is one
+    group), except the RS steps that share a non-trivial molecule with an RC val or test step,
+    excluded as LEAK_GUARD (the split's `excluded`). `frozen` pins the RC parts."""
+    rc, rs = _flower(steps, "RC"), _flower(steps, "RS")
+    sp = split_by_molecule(rc, fractions, seed, frozen)
+    held_ids = set(sp.val) | set(sp.test)
+    keep, leak = leak_guarded(rs, [s for s in rc if s.step_id in held_ids])
+    train = sorted(sp.train + keep)
+    return Split(train, sp.val, sp.test, sorted(leak), sp.conflict)
+
+
+def split_flower_given(
+    steps: Sequence[ElementaryStep],
+    val_fraction: float = 0.1,
+    seed: int = 0,
+    frozen: Frozen | None = None,
+) -> Split:
+    """FlowER's own train/test (`flower_part`), RC and RS alike, leaky by construction: for
+    the RMechRP comparison only. Test is every step FlowER's test holds (a reaction in both
+    parts, `train+test`, included); val is `val_fraction` of the molecule groups of the
+    FlowER-train RC steps; the other FlowER-train steps are train."""
+    _flower(steps, "RC")
+    test = [s for s in steps if s.flower_part and "test" in s.flower_part.split("+")]
+    rest = [s for s in steps if s not in test]
+    rc_train = [s for s in rest if s.flower_suffix == "RC"]
+    # test fraction 0: groups that overflow val spill into "test" and are folded back into val
+    tv = split_by_molecule(rc_train, (1.0 - val_fraction, val_fraction, 0.0), seed, frozen)
+    val = set(tv.val) | set(tv.test)
+    train = sorted(s.step_id for s in rest if s.step_id not in val)
+    return Split(train, sorted(val), sorted(s.step_id for s in test), [], tv.conflict)
+
+
 SplitFn = Callable[..., Split]
-DEFAULT_SPLIT: dict[Source, SplitFn] = {Source.PMECHDB: split_by_molecule}
+DEFAULT_SPLIT: dict[Source, SplitFn] = {
+    Source.PMECHDB: split_by_molecule,
+    Source.RMECHDB: split_rc_molecule,
+}
 
 
 def default_split(source: Source | str) -> SplitFn:
