@@ -609,6 +609,7 @@ def test_the_ingest_report_counts_admitted_open_shells():
     assert report["open_shell"] == {
         "admitted": {"RADICAL_SPECTATOR": 1},
         "admitted_with_u_ge_2": [],
+        "admitted_with_hund_species": 0,
         "curated_out": {},
     }
     assert report["spin"]["spin_table"] == "spin_table_v2"

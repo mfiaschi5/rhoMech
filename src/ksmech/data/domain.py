@@ -896,6 +896,22 @@ def max_species_unpaired(step: ElementaryStep) -> int:
     return max((spin.rdkit_unpaired(f) for f in frags), default=0)
 
 
+def high_spin_species(step: ElementaryStep) -> tuple[bool, bool]:
+    """(holds a non-metal species with u >= 2 under `spin.assign` that is a Hund case, holds
+    one that is not): an admitted step may hold the first (O2, O(3P)); the second only as a
+    counted exemption of MULTI_RADICAL_SPECIES (P8)."""
+    hund = other = False
+    for smi in (step.reactants_smiles, step.products_smiles):
+        for _, frag in _fragments(chem.parse_mapped(smi)):
+            m = spin.kekule_copy(frag)
+            if any(_is_metal(a) for a in m.GetAtoms()):
+                continue
+            a = spin.assign(m)
+            if a.assigned and a.unpaired >= 2:
+                hund, other = (True, other) if hund_case(m) else (hund, True)
+    return hund, other
+
+
 def _reparsed(mol: Chem.Mol, side: str, repairs: Sequence[tuple[str, ...]]) -> Chem.Mol:
     """A repaired side re-parsed from its canonical mapped SMILES (sanitized as at ingest;
     `chem.SanitizeError` propagates), so its radical electrons and rings are recomputed."""

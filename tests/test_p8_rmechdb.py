@@ -12,8 +12,8 @@ import pytest
 
 from ksmech.data import domain, rmechdb
 from ksmech.data.domain import DomainClass
-from ksmech.data.io import read_steps, steps_path
 from ksmech.data.ingest import write_outputs
+from ksmech.data.io import read_steps, steps_path
 from ksmech.data.schema import Source
 
 MINI = Path(__file__).parent / "fixtures" / "mini_flower.txt"
@@ -76,8 +76,7 @@ def test_n2_drawn_with_radicals_is_paired_before_the_id(result):
 def test_every_admitted_step_carries_radical_step_and_the_resonance_line_is_flagged(result):
     assert all(s.domain_exclusion is None for s in result.steps)
     assert all(
-        str(DomainClass.RADICAL_STEP) in domain.domain_classes(s.domain_class)
-        for s in result.steps
+        str(DomainClass.RADICAL_STEP) in domain.domain_classes(s.domain_class) for s in result.steps
     )
     assert [s.resonance_step for s in result.steps].count(True) == 1
     assert by_tag_rxn(result, 5).resonance_step
@@ -122,7 +121,7 @@ def test_five_real_lines_load():
     if not raw.is_file():
         pytest.skip("FlowER's files are not under data/raw/flower")
     picked = []
-    for part, tag, rxn in rmechdb.radical_lines([("test", raw)]):
+    for _part, tag, rxn in rmechdb.radical_lines([("test", raw)]):
         picked.append(f"{rxn}|{tag}")
         if len(picked) == 5:
             break
