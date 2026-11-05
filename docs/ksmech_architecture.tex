@@ -46,7 +46,7 @@
 
 \title{\textbf{ksmech}: a localized-orbital transformer\\for elementary-step reaction mechanism prediction\\[4pt]\large Theoretical framework and architecture specification}
 \author{Project design document}
-\date{4 November 2026 (v10 draft: electron bookkeeping, open-shell plan P6; to be approved before the Release~B build)}
+\date{5 November 2026 (v10 draft: electron bookkeeping and open-shell tokens and physics, open-shell plan P6 and P7; to be approved before the Release~B build)}
 
 \begin{document}
 \maketitle
@@ -444,6 +444,8 @@ Hybridization, aromaticity flags and functional-group ids are computed and store
 \end{definition}
 The coefficient vector $\vb{l}_r$ and the full spectral vector $\vb{p}_r$ are kept on the token only to evaluate the pair features (the gap factor and the cross-centre coupling); they are not embedded directly.
 
+\paragraph{Open-shell tokens and their holes.} The open-shell tokens of a record run as an open shell (its plateau group at fractional occupation: a SOMO at $1$, Br$^\bullet$'s $4p$ at $5/3$, the $\pi^*$ pair of NO at $1/2$; never a Fermi-smeared level) are donors, and each gets at sample assembly a virtual twin, its \emph{hole}, with the same coefficients, centres, descriptors, occupation and spectral set, which is an acceptor: a one-electron donation into the SOMO's vacancy. Token files are never changed; the twin exists in the sample only. A role flag, $+1$ on an open-shell token in its donor role, $-1$ on a hole, $0$ elsewhere, is an orbital column a model may select; it is the split of a duplicated orbital, not an $m_s$. Within one fragment an open-shell token and a hole are never a candidate pair (an excitation inside the open shell, the token with its own hole among them); between fragments they are a recombination, read through the recombination channel. An open-shell token whose main centre is a metal $d$ shell (Cu(II), Fe(III)) takes no role by default. The atom input of the open shell is the restricted SOMO population $\rho_A=\sum_t\min(n_t,2-n_t)\,w^{(t)}_A$ over the open-shell tokens ($w$ renormalized over the centres), which sums to the restricted unpaired count ($1$ for Br$^\bullet$ as $3\times1/3$, $2$ for O$_2$), is zero on a closed shell and, being the record's, does not depend on the resonance drawing; a model selects it, or the drawing's unpaired count as an embedded category, or neither.
+
 \begin{remark}
 The per-atom frontier weights $\omega_{a,k}$ carry exactly the cross-LMO information that a token-level spectral marginal cannot: the ortho/para preference of anisole's HOMO lives in $\omega_{a,\mathrm{HOMO}}$ and reaches the orbital tokens through their centre embeddings (Section~\ref{sec:model}).
 \end{remark}
@@ -492,10 +494,17 @@ This section specifies the quantities of Section~\ref{sec:pt} that are evaluated
 \subsection{Gap factor}
 Following Eq.~\eqref{eq:ks3-theory},
 \begin{equation}
-G(r,s)=\sum_{k\in\occ}\sum_{m\in\virt}\frac{2\,p_{rk}\,p_{sm}}{\epsilon_k-\epsilon_m},
+G(r,s)=\sum_{k}\sum_{m}\frac{(n_k-n_m)\,p_{rk}\,p_{sm}}{\epsilon_k-\epsilon_m},
 \label{eq:ks3}
 \end{equation}
-computed from the \emph{full} spectral vectors over the canonical MOs of each block. $G<0$, and a larger $|G|$ means a smaller effective gap. It is the factor of the filled--empty term that depends on the two orbitals alone; the other factor, the coupling at contact, is not computed (Section~\ref{sec:beyond}). The dominant canonical pair $(k,m)$ in $G$ is reported as the physical explanation of a predicted bond.
+computed from the \emph{full} spectral vectors over the canonical MOs of each block. Every MO of a token's spectrum has the token's occupation (the blocks are equal-occupation plateaus), so $n_k-n_m$ is the difference of the two tokens' occupations: $2$ for a doubly occupied donor and an empty acceptor (the constant factor of every version before~10, kept bit for bit on closed-shell pairs although GFN2-xTB's smeared occupations are not exactly $2$), $1$ for a SOMO with an empty acceptor and for a doubly occupied donor with a hole (one- and three-electron interactions), the plateau difference for a degenerate open group (Br$^\bullet$'s $4p$ at $5/3$), and $0$ for an open-shell token with a hole, where $G$ is undefined. For a closed-shell pair $G<0$, and a larger $|G|$ means a smaller effective gap.
+
+\paragraph{Two-level gap factor.} A SOMO lies inside the closed-shell gap near one of its edges, and between molecules a donor level can cross an acceptor level, so single canonical denominators can be tiny. The column
+\begin{equation}
+g_2(r,s)=\sum_{k,m}\frac{(n_k-n_m)\,p_{rk}\,p_{sm}}{\operatorname{sign}(\Delta_{km})\,D_{km}},\qquad D_{km}=\tfrac12\Big(|\Delta_{km}|+\sqrt{\Delta_{km}^2+4\beta_{rs}^2}\Big),\quad \Delta_{km}=\epsilon_k-\epsilon_m,
+\label{eq:g2}
+\end{equation}
+($\operatorname{sign}(0)=-1$) replaces each denominator by the exact two-level one: $|\Delta|$ for a large gap, $|\beta|$ at degeneracy. $g_2$ is finite through a level crossing, bounded by $1/|\beta_{rs}|$ per unit weight, keeps $G$'s sign on an inverted pair, and equals $G$ at $\beta=0$ (both clamp $D$ at $10^{-3}$\,eV). Within a molecule $\beta_{rs}$ is the cross-centre coupling below at $K=1.75$; between molecules, which have no geometry, it is one constant $\beta_{\mathrm{inter}}=0.40$\,eV, the median intramolecular coupling of two tokens whose centre sets are bonded but share no atom (two orbitals one bond apart, as two molecules are at a forming bond), measured once on a closed\_base slice and frozen. $g_2$ and $\log|g_2|$ are a column of their own beside $G$; $G$ is unchanged, and a model selects $G$, $g_2$ or both by name. It is the factor of the filled--empty term that depends on the two orbitals alone; the other factor, the coupling at contact, is not computed (Section~\ref{sec:beyond}). The dominant canonical pair $(k,m)$ in $G$ is reported as the physical explanation of a predicted bond.
 
 \subsection{Cross-centre coupling and alignment}
 Within one molecule the reactant pose is a geometry that the two orbitals share. With the Wolfsberg--Helmholz resonance integrals of the molecule's own AOs,
@@ -559,6 +568,8 @@ For an ordered (occupied $r$, virtual $s$) pair the feature vector $\vb{z}_{rs}$
 \item within a fragment: the centroid distance, the cross-centre coupling and the two alignment cosines.
 \end{itemize}
 An entry that is not defined (an intramolecular feature of a pair across fragments, an alignment without $p$ character on a centre) is zero and masked. All entries are standardized with statistics of the defined entries of the valid pairs of the training set.
+
+Three named channels beside these are stored since version~10 and read only by a model that selects them: $g_2$ and $\log|g_2|$ on every pair of non-zero weight; the own-pair channel, $G$ and $g_2$ of a bonding token with its own antibonding partner (defined on those pairs only, which the flag below marks), whose atom-pair pooling $B^{\mathrm{own}}_{ij}=\sum_{(r,s)\ \mathrm{own}}\omega^{rs}_{ij}\,G(r,s)$ on the bonded pair $(i,j)$ (in $G^{\mathrm{atom}}$'s units) scores the homolysis of that bond and stays out of $G^{\mathrm{atom}}$; and the recombination channel, a flag and the level difference $\epsilon_r-\epsilon_s$ on the pairs of an open-shell token of one fragment with a hole of another, where $G$ and $g_2$ vanish.
 
 Every (occupied, virtual) pair is stored, with three flags beside $\vb{z}_{rs}$ that the pair track reads as channels: the acceptor is $d$-type (its main centre is mostly $d$ on an element whose $d$ shell GFN2-xTB treats as polarization), the acceptor is the antibonding partner of the donor's own bond, and the two tokens are one site (every centre of one is the same atom as, or bonded to, every centre of the other, at weights of at least $0.20$: a bond interacting with itself). These were deletions until version~9: the $d$-type rule removed $10.4\%$ of the virtual tokens and, in $15.2\%$ of the PMechDB training steps, more than half of the pooled weight on the annotated anchor (O--Si, C--S, O--P, Al--O); the own-antibond and site rules removed $1.6\%$ of the cells, the annotated arrow's own orbital pair among them in $271$ steps. As channels they are inputs the model weighs, and the $d$ share of the acceptor is already one of its descriptors.
 

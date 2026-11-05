@@ -786,6 +786,25 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         ),
         "label_filter": dict(sum((Counter(s.label_filter) for s in kept), Counter()).most_common()),
         "n_fermi_smeared": sum(s.fermi_smeared for s in kept),
+        **hole_counts(kept),
+    }
+
+
+def hole_counts(samples: list[MechanismSample]) -> dict:
+    """The open-shell tokens in their donor role and their holes (open-shell plan P7, the
+    `spin_role` column), and the samples that hold any."""
+
+    def role(s: MechanismSample) -> np.ndarray:
+        cols = s.orbital_columns
+        if "spin_role" not in cols:
+            return np.zeros(0)
+        return s.orbital_features[:, cols.index("spin_role")]
+
+    roles = [role(s) for s in samples]
+    return {
+        "n_somo_donors": int(sum((r == 1).sum() for r in roles)),
+        "n_holes": int(sum((r == -1).sum() for r in roles)),
+        "n_samples_with_holes": int(sum((r == -1).any() for r in roles)),
     }
 
 
