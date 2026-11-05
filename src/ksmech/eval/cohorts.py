@@ -100,6 +100,68 @@ def sliced(rows: list[dict], samples: dict, name: str) -> dict:
     return {"slice": name, "with": top_k(with_), "without": top_k(without)}
 
 
+R_SHAPES = ("homolysis", "recombination", "addition", "abstraction_sh2", "beta_scission", "other")
+
+
+def _order(sample, i: int, j: int) -> int:
+    i, j = min(i, j), max(i, j)
+    hit = [int(o) for a, b, o in sample.bonds if a == i and b == j]
+    return hit[0] if hit else 0
+
+
+def _two_bond_shape(sample, bonds, odd: dict[int, int]) -> str:
+    """One bond formed and one broken that share an atom, the single electrons on the two
+    other ends: abstraction or SH2 (the broken bond goes, the formed one is new), addition
+    (the formed bond is new, the broken one keeps an order), beta-scission (the broken bond
+    goes, the formed one raises an order)."""
+    (fi, fj, _), (ki, kj, _) = sorted(bonds, key=lambda b: -b[2])
+    shared = {fi, fj} & {ki, kj}
+    if len(shared) != 1:
+        return "other"
+    x = shared.pop()
+    f_end, k_end = ({fi, fj} - {x}).pop(), ({ki, kj} - {x}).pop()
+    if odd != {f_end: -1, k_end: 1}:
+        return "other"
+    before_f, before_k = _order(sample, fi, fj), _order(sample, ki, kj)
+    if before_f == 0 and before_k == 1:
+        return "abstraction_sh2"
+    if before_f == 0 and before_k >= 2:
+        return "addition"
+    return "beta_scission" if before_f >= 1 and before_k == 1 else "other"
+
+
+def r_shape(sample) -> str:
+    """The shape of a sample's R (its first label variant; open-shell plan, evaluation (6)),
+    read from R and the reactant's bond orders alone: one of `R_SHAPES`."""
+    label = getattr(sample, "edit_label", None)
+    if label is None or not label.variants:
+        return "other"
+    r = label.variants[0]
+    bonds = [(i, j, d) for i, j, d in r.bonds if d]
+    odd = {a: d for a, d in r.lone if d % 2}
+    if len(odd) != len([d for _, d in r.lone if d]):
+        return "other"  # an even atom entry beside: not one of the one-electron shapes
+    if len(bonds) == 1:
+        i, j, d = bonds[0]
+        if d == -1 and odd == {i: 1, j: 1}:
+            return "homolysis"
+        if d == 1 and odd == {i: -1, j: -1}:
+            return "recombination"
+        return "other"
+    if len(bonds) == 2 and {d for *_, d in bonds} == {1, -1}:
+        return _two_bond_shape(sample, bonds, odd)
+    return "other"
+
+
+def by_r_shape(rows: list[dict], samples: dict) -> dict:
+    """Top-k of the per-sample `rows` (step id, rank) by `r_shape`; `samples` maps step id ->
+    sample. A group under 30 is reported as counts (its n), never read as a percentage."""
+    groups: dict[str, list] = {shape: [] for shape in R_SHAPES}
+    for row in rows:
+        groups[r_shape(samples[row["step_id"]])].append(row["rank"])
+    return {shape: top_k(ranks) for shape, ranks in groups.items() if ranks}
+
+
 def covered_fraction(view: Path) -> dict:
     """Steps of the view's split, samples among them, their ratio and the skip reasons of the
     rest (`arrows.steps.split_report` counts stored in the view)."""

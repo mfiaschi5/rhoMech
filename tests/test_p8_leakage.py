@@ -46,3 +46,39 @@ def test_the_audit_lists_every_overlapping_id_in_both_directions():
         "leak_guard_joint", "rc_heldout_overlap", "rc_heldout_shared",
         "closed_base_rmechdb_overlap",
     }  # fmt: skip
+
+
+# ---- the R-shape breakdown of the cohort reports (open-shell plan, evaluation (6))
+
+
+def _sample(r_bonds, r_lone, bonds):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from ksmech.arrows.delta_be import ReactionMatrix
+
+    r = ReactionMatrix(tuple(r_bonds), tuple(r_lone))
+    label = SimpleNamespace(variants=(r,))
+    return SimpleNamespace(edit_label=label, bonds=np.array(bonds, dtype=np.int16).reshape(-1, 3))
+
+
+def test_r_shapes_from_r_and_the_reactant_bond_orders():
+    from ksmech.eval.cohorts import by_r_shape, r_shape
+
+    homolysis = _sample([(0, 1, -1)], [(0, 1), (1, 1)], [(0, 1, 1)])
+    recombination = _sample([(0, 1, 1)], [(0, -1), (1, -1)], [])
+    # X. + C1=C2 -> X-C1-C2.
+    addition = _sample([(0, 1, 1), (1, 2, -1)], [(0, -1), (2, 1)], [(1, 2, 2)])
+    # X. + H-Y -> X-H + Y.
+    abstraction = _sample([(0, 1, 1), (1, 2, -1)], [(0, -1), (2, 1)], [(1, 2, 1)])
+    # X-C1-C2. -> X. + C1=C2
+    beta = _sample([(0, 1, -1), (1, 2, 1)], [(0, 1), (2, -1)], [(0, 1, 1), (1, 2, 1)])
+    polar = _sample([(0, 1, 1)], [(0, -2)], [])
+    shapes = [r_shape(s) for s in (homolysis, recombination, addition, abstraction, beta, polar)]
+    assert shapes == [
+        "homolysis", "recombination", "addition", "abstraction_sh2", "beta_scission", "other"
+    ]  # fmt: skip
+    rows = [{"step_id": "a", "rank": 0}, {"step_id": "b", "rank": 4}]
+    report = by_r_shape(rows, {"a": homolysis, "b": homolysis})
+    assert report == {"homolysis": {"top1": 0.5, "top3": 0.5, "top5": 1.0, "n": 2}}

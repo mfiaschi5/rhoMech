@@ -57,7 +57,14 @@ from ksmech.arrows.steps import MechanismSample, load_samples, sample_ids, sampl
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir, steps_path
 from ksmech.data.schema import Source
-from ksmech.eval.cohorts import SLICES, covered_fraction, load_cohort, restrict, sliced
+from ksmech.eval.cohorts import (
+    SLICES,
+    by_r_shape,
+    covered_fraction,
+    load_cohort,
+    restrict,
+    sliced,
+)
 from ksmech.eval.floor import floor_report
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.train.loop import DEFAULT_MODELS_DIR
@@ -171,6 +178,7 @@ def _cohort_ids(args, path: Path) -> list[str]:
 def _extras(args, rows: list[dict], samples: list, view: Path) -> dict:
     """The report's cohort, covered fraction and (with --slice) the with / without numbers."""
     out = {"cohort": args.cohort, "covered": covered_fraction(view)}
+    out["by_r_shape"] = by_r_shape(rows, {s.step_id: s for s in samples})
     if args.slice:
         out["slice"] = sliced(rows, {s.step_id: s for s in samples}, args.slice)
     return out
