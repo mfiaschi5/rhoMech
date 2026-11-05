@@ -150,7 +150,9 @@ def test_the_survey_matches_the_p1_oracle():
     assert pm["spin_parity_molecules"] == {"Cu": 13, "placeholder": 34, "Fe": 7, "Ti": 4, "P": 1}
     rm = counts("reactmech")
     assert "RADICAL_DRAWN" not in rm["counts"]
-    assert rm["counts"]["OPEN_SHELL_METAL"] == {"PD_ALREADY_NEG": 2}
+    # P8 re-reads ReactMech's odd metals by the spin law: OPEN_SHELL_METAL -> AMBIGUOUS
+    assert "OPEN_SHELL_METAL" not in rm["counts"]
+    assert rm["counts"]["MULTIPLICITY_AMBIGUOUS"] == {"PD_ALREADY_NEG": 2}
     assert "METAL_PLACEHOLDER" not in rm["counts"]
     # 49 re-charged + 205 returned, each named by its first suspicious fragment, reactants first
     assert rm["counts"]["KEPT"] == {"ONIUM_PD_NI_EVEN": 209, "ML1": 45, "CR_IV": 10}
