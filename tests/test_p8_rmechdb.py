@@ -147,3 +147,13 @@ def test_a_pool_of_single_atoms_packs_its_empty_drawings():
     s = SimpleNamespace(n_atoms=2, bonds=np.zeros((0, 3), np.int16), drawings=[])
     shapes = {k: v.shape for k, v in _pack_drawings(s).items()}
     assert shapes["drawing_orders"] == (0, 0) and shapes["drawing_charges"] == (0, 2)
+
+
+def test_a_samples_tokens_line_up_with_its_orbitals(token_loader, mini_steps):
+    """`MechanismSample.tokens` gives the tokens as the sample holds them (P7's roles and
+    holes), so the GBDT's per-orbital energies index the sample's own orbitals (P8 refit)."""
+    from ksmech.arrows.steps import sample_for_step
+
+    s = sample_for_step(mini_steps["e2"], token_loader)
+    tokens = s.tokens(token_loader)
+    assert sum(len(t.orbitals) for t in tokens) == s.n_orbitals

@@ -259,8 +259,13 @@ class MechanismSample:
         return len(self.orbital_features)
 
     def tokens(self, loader: TokenLoader) -> list[MoleculeTokens]:
-        """The full token objects of every fragment, in fragment order."""
-        return [loader(key) for key in self.fragment_keys]
+        """The full token objects of every fragment, in fragment order, as the sample holds
+        them: open-shell tokens in their donor role with their holes (`with_holes`, open-shell
+        plan P7; a closed shell's token file as stored), so they line up with the sample's
+        orbital arrays."""
+        from ksmech.orbitals.tokens import with_holes
+
+        return [with_holes(loader(key)) for key in self.fragment_keys]
 
 
 def with_pair_bond_orders(sample: MechanismSample, bonds: np.ndarray) -> np.ndarray:
