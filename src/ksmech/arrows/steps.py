@@ -59,12 +59,11 @@ from ksmech.arrows.delta_be import (
     EditSkip,
     StepEdit,
     class_shape,
-    edit_label,
     label_counts,
     step_edit,
     to_global,
 )
-from ksmech.arrows.drawings import Drawing, resonance_drawings
+from ksmech.arrows.drawings import Drawing, drawing_of, resonance_drawings, source_label
 from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.arrows.lewis import (
     LewisStructure,
@@ -467,15 +466,22 @@ class EditTarget:
     wiberg: np.ndarray
     nonbonding: np.ndarray
     unpaired: np.ndarray
+    charges: np.ndarray | None = None  # the label drawing's formal charges when it is not the
+    #   drawn reactant (a one-electron source's redrawn label, `drawings.source_label`)
 
 
 def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipReason:
     """The target of a step, or why it has none: an edit-label code, a bond without a Wiberg
     index, or a label that is no valid edit of the reactant (`lewis.check_edit`). The label on
-    the global atoms is closed under the pool's symmetry (`symmetry.symmetric_closure`)."""
+    the global atoms is closed under the pool's symmetry (`symmetry.symmetric_closure`). A
+    one-electron source whose drawn reactant gives no class takes the label and the Lewis
+    structure of the reactant drawing that gives one (`drawings.source_label`, spec v10)."""
     edit = step_edit(step)
-    mol_label = edit if isinstance(edit, EditSkip) else edit_label(step, edit)
-    label = mol_label if isinstance(mol_label, EditSkip) else to_global(mol_label, rt.global_atom)
+    found = edit if isinstance(edit, EditSkip) else source_label(step, edit)
+    if isinstance(found, EditSkip):
+        return SkipReason(str(found))
+    k, mol, mol_label = found
+    label = to_global(mol_label, rt.global_atom)
     if isinstance(label, EditSkip):
         return SkipReason(str(label))
     try:
@@ -484,12 +490,28 @@ def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipRe
         log.info("%s: %s", step.step_id, exc)
         return SkipReason.NO_BOND_INDEX
     atoms = np.concatenate([f.tokens.atom_categorical() for f in rt.fragments])
+    if k:
+        return _redrawn_target(step, rt, edit, mol, mol_label, label, lewis, atoms)
     label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], lewis.bonds)
     problem = check_edit(label, lewis.bonds, lewis.nonbonding, open_shell_labels(step.source))
     if problem is not None:
         log.info("%s: the edit label is no valid edit of the reactant (%s)", step.step_id, problem)
         return SkipReason.R_CHECK_FAILED
     return EditTarget(edit, mol_label, label, *lewis)
+
+
+def _redrawn_target(step, rt, edit, mol, mol_label, label, lewis, atoms) -> EditTarget | SkipReason:
+    """The target on the reactant drawing `mol` (`edit_target`): its bond orders, lone pairs, N,
+    u and formal charges (`drawings.drawing_of`, which closes and checks the label), the Wiberg
+    indices of the drawn pool (the sigma skeleton is the same)."""
+    d = drawing_of(rt, mol, label, lewis.bonds, atoms, open_shell_labels(step.source))
+    if isinstance(d, str):
+        log.info("%s: the redrawn label is no valid edit of its drawing (%s)", step.step_id, d)
+        return SkipReason.R_CHECK_FAILED
+    bonds = lewis.bonds.copy()
+    bonds[:, 2] = d.orders
+    return EditTarget(edit, mol_label, d.edit_label, bonds, d.lone_pairs, lewis.wiberg,
+                      d.nonbonding, d.unpaired, d.charges)  # fmt: skip
 
 
 def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: EditTarget) -> None:
@@ -591,6 +613,13 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
     sample.edit_label, sample.bonds = target.label, target.bonds
     sample.lone_pairs, sample.wiberg = target.lone_pairs, target.wiberg
     sample.nonbonding, sample.unpaired = target.nonbonding, target.unpaired
+    if target.charges is not None:  # the label's drawing is not the dataset's
+        sample.atom_categorical = sample.atom_categorical.copy()
+        sample.atom_categorical[:, 1], sample.atom_categorical[:, 2] = (
+            target.charges,
+            target.unpaired,
+        )
+        sample.pair_z = with_pair_bond_orders(sample, target.bonds)
     _set_drawings(sample, step, rt, target)
     _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))

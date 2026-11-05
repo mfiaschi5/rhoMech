@@ -498,14 +498,17 @@ def step_label(step: ElementaryStep, loader) -> EditLabel | str:
     """The edit label of a step on the global atoms of its reactant tokens, or the reason code
     it has none (an EditSkip, or from the tokens MISSING_TOKENS / STALE_ARTIFACT /
     NO_BOND_INDEX (`MissingTokens.reason`) or CORRESPONDENCE)."""
+    from ksmech.arrows.drawings import source_label
     from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
 
     step = explicit_moving_hydrogens(step)
     if step is None:
         return str(EditSkip.H_TRANSFER_AMBIGUOUS)
-    label = edit_label(step)
-    if isinstance(label, EditSkip):
-        return str(label)
+    edit = step_edit(step)
+    found = edit if isinstance(edit, EditSkip) else source_label(step, edit)
+    if isinstance(found, EditSkip):
+        return str(found)
+    label = found[2]
     try:
         rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
     except MissingTokens as exc:

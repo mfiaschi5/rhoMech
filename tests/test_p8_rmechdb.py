@@ -157,3 +157,50 @@ def test_a_samples_tokens_line_up_with_its_orbitals(token_loader, mini_steps):
     s = sample_for_step(mini_steps["e2"], token_loader)
     tokens = s.tokens(token_loader)
     assert sum(len(t.orbitals) for t in tokens) == s.n_orbitals
+
+
+NO3_HAT = (  # the H lands on the O drawn as O-: the drawn NO3 gives no balanced class
+    "[CH3:1][CH2:2][O:3][CH2:4][CH3:5].[O:6][N+:7](=[O:8])[O-:9]>>"
+    "[CH3:1][CH:2][O:3][CH2:4][CH3:5].[O-:6][N+:7](=[O:8])[OH:9]"
+)
+
+
+def _no3_step(source):
+    from ksmech.arrows.hydrogens import explicit_moving_hydrogens
+    from ksmech.data.validation import build_step
+
+    step = build_step(
+        step_id="h", source=source, rxn_smiles=NO3_HAT, arrows=[], require_arrows=False
+    )
+    return explicit_moving_hydrogens(step)
+
+
+def test_a_one_electron_source_takes_the_class_on_the_drawing_that_gives_one():
+    """spec v10, "Edit labels": the drawn reactant gives no class (every variant unbalanced),
+    so rmechdb's label is the class on the NO3 drawing with the radical on O9; a polar source
+    keeps the drawn reactant and its skip (never redrawn)."""
+    from ksmech.arrows.delta_be import EditLabel, EditSkip, step_edit
+    from ksmech.arrows.drawings import source_label
+
+    step = _no3_step(Source.RMECHDB)
+    k, mol, label = source_label(step, step_edit(step))
+    assert k > 0 and isinstance(label, EditLabel)
+    assert all(v.balanced() for v in label.variants)
+    polar = _no3_step(Source.RMECHDB)
+    polar.source = Source.PMECHDB
+    # a polar source's +-2 rule leaves the one-electron step no class on any drawing tried
+    assert source_label(polar, step_edit(polar)) is EditSkip.NOT_ELEMENTARY
+
+
+def test_the_sample_carries_the_label_drawing(token_loader):
+    """The sample of the NO3 step holds the drawing its label is on: O9 neutral with N = 5,
+    O6 charged -1, and every bond order of that drawing."""
+    from ksmech.arrows.steps import sample_for_step
+
+    step = _no3_step(Source.RMECHDB)
+    s = sample_for_step(step, token_loader)
+    assert not isinstance(s, str), s
+    by_map = {int(m): g for g, m in enumerate(s.atom_map) if m}
+    assert s.atom_categorical[by_map[9], 1] == 0 and s.nonbonding[by_map[9]] == 5
+    assert s.atom_categorical[by_map[6], 1] == -1 and s.unpaired[by_map[9]] == 1
+    assert all(v.balanced() for v in s.edit_label.variants)
