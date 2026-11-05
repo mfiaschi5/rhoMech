@@ -139,7 +139,8 @@ ranked a step's first arrow worse than G alone.
 |---|---|
 | PMechDB | Curated polar mechanistic steps. Development set. |
 | ReactMech | 67 reaction classes. Out-of-distribution splits. |
-| FlowER dataset | About 2.14M numeric-suffix lines (train+val+test). Scale-up. Its RS/RC lines (RMechDB, radical steps) are the open-shell plan's source. |
+| RMechDB (source `rmechdb`) | Radical (one-electron) steps: FlowER's RS/RC lines now, the official CSV later. 4,535 steps after dedup; split `rc_molecule` (RC by molecule, RS in training). CC-BY-NC-ND: artifacts local, private rhoMech-data and pods only, never public. |
+| FlowER dataset | About 2.14M numeric-suffix lines (train+val+test). Scale-up. Its RS/RC lines are ingested as rmechdb; PM and PC never. |
 | mech-USPTO-31K | Held-out benchmark. Never trained on. |
 | QMugs | QM pretraining. |
 
@@ -150,6 +151,14 @@ even, the side's net charge >= 0 and both sides' totals equal (rule 'D dative on
 non-s-block metal with exactly one neighbour and charge <= 0 is a ligand-dropped placeholder
 (METAL_PLACEHOLDER) unless it compensates an onium donor (ML1); an even fragment with a 3d
 metal left d1-d9 by the bookkeeping is flagged METAL_SUSPECT (`domain_class`), never excluded.
+Since P8 one spin law holds for every source (`data.domain`, spec v10): the species table
+decides a drawn species' multiplicity; a singlet drawn with odd-N atoms is redrawn closed shell
+where bonded electron moves reach one (PAIRED_DRAWING: N#N, ozone, Criegee) and a Hund-case
+species drawn paired is redrawn unpaired (HIGH_SPIN_DRAWING: O=O); a species left with u >= 2
+that is not a Hund case, or a singlet no closed-shell drawing reaches, is MULTI_RADICAL_SPECIES
+except in a counted exemption (`curation/multi_radical_exemptions.json`); the spin census keeps
+such species out of QM (SPIN_CENSUS_REFUSED). ReactMech re-reads odd metals by the spin law; a
+source of one-electron steps (rmechdb) conserves u only where R moves no single electron.
 
 ## Engineering rules
 
@@ -184,10 +193,15 @@ uv run pre-commit install     # enable the commit hook: ruff, then the two pytes
 
 Main CLI entry points are added phase by phase and listed here as they land:
 
-- Data: `uv run ksmech-data ingest --source pmechdb|reactmech [--sample N --seed S]` (steps parquet,
+- Data: `uv run ksmech-data ingest --source pmechdb|reactmech|rmechdb [--sample N --seed S]` (steps parquet,
   `resonance_pairs.parquet`, rejections and report under `data/processed/<source>/`; `--sample`
   keeps N random accepted steps for a pilot; ReactMech reads its ID and OOD split files once each,
-  classes from the OOD mechanism files), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
+  classes from the OOD mechanism files; rmechdb streams FlowER's RS/RC lines, strips bath gases,
+  keys each line by its map-free reaction after the spin redrawings and keeps one step per id,
+  RC over RS, `flower_suffix` / `flower_part`), `uv run ksmech-data stats --source pmechdb` (writes
+  `stats.json`), `uv run ksmech-data leakage-audit [--write-cohorts]` (rmechdb's leakage audit
+  in both directions, species by key v2, `leakage_audit.json`; the cohorts `leak_guard_joint`,
+  `rc_heldout_overlap`, `rc_heldout_shared`, `closed_base_rmechdb_overlap`, each pinned once)
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
@@ -229,8 +243,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   resonance drawings of the pool with their labels (`arrows.drawings`), and the orbital-pair labels
   where every arrow aligns; one `samples_<strategy>_<part>.json` view per
   split of `molecule`, `scaffold` and
-  `loco`; the per-step `random_leaky` split and `loco_all` (the class held out as test, the
-  unlabelled steps in train and val) only when named with `--strategy`; `--views-only` writes
+  `loco` (rmechdb: `rc_molecule`, RC split by molecule with RS in training except LEAK_GUARD,
+  and `flower_given`, FlowER's own parts); the per-step `random_leaky` split and `loco_all` (the
+  class held out as test, the unlabelled steps in train and val) only when named with
+  `--strategy`; `--views-only` writes
   the named strategies' views over the store already built; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`)
