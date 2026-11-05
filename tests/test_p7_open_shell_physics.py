@@ -333,3 +333,51 @@ def test_dense_and_cell_inputs_agree_on_a_radical_pool(token_loader):
     i, j = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
     cells = pair_channels_at(ctx, b, torch.zeros_like(i), i, j, 8, 8.0)
     assert torch.allclose(cells, dense[0], atol=1e-6)
+
+
+# ---- step 9 and 10: the tabulation and the own_break floor
+
+
+def test_a_homolysis_is_reachable_only_under_own_break(token_loader):
+    """HO-OH -> 2 HO. as a one-electron rmechdb step: its only admissible anchor breaks the
+    O-O bond. The legacy floor proposes O-O as a form anchor (its order may rise), so the step
+    is unreachable there; own_break proposes the break, scored by |B^own|."""
+    from ksmech.arrows.batches import collate_samples
+    from ksmech.arrows.steps import MechanismSample, sample_for_step
+    from ksmech.data import chem
+    from ksmech.data.schema import ElementaryStep, Source
+    from ksmech.eval.floor import floor_ranks, floor_scores
+
+    r, p = chem.parse_mapped("[OH:1][OH:2]"), chem.parse_mapped("[OH:1].[OH:2]")
+    sides = (chem.canonical_mapped_smiles(r), chem.canonical_mapped_smiles(p))
+    step = ElementaryStep("h2o2", Source.RMECHDB, None, None, *sides)
+    s = sample_for_step(step, token_loader)
+    assert isinstance(s, MechanismSample)
+    assert all(k == "break" for a in s.edit_label.anchors for *_, k in a)
+    b = collate_samples([s])
+    _, legacy = floor_ranks(b, "valid", "legacy")
+    rank, own = floor_ranks(b, "valid", "own_break")
+    assert not legacy[0] and own[0]
+    _, b_own = floor_scores(b, "valid", "g", False)
+    ((i, j, _),) = s.edit_label.anchors[0]
+    assert b_own[0, i, j] > 0
+    _, own2 = floor_ranks(b, "valid", "own_break", kernel="g2")
+    assert own2[0]
+
+
+def test_the_tabulation_runs_on_small_species(token_loader):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "probes" / "open_shell_g_table.py"
+    spec = importlib.util.spec_from_file_location("open_shell_g_table", path)
+    table = importlib.util.module_from_spec(spec)
+    sys.modules["open_shell_g_table"] = table
+    spec.loader.exec_module(table)
+    rows = [table.cell_rows(s, token_loader) for s in ("[CH3:1].[CH2:2]=[CH2:3]", "[Br:1].[CH4:2]")]
+    out = table.summarize(rows)
+    kinds = {g.split("/")[0] for g in out["groups"]}
+    assert {"somo_empty", "doubly_hole", "doubly_empty", "own_pair"} <= kinds
+    assert out["whole"]["all"]["g2"]["max"] <= out["whole"]["all"]["g"]["max"] + 1e-9
+    assert out["beta_by_graph_distance"]["0"]["n"] > 0

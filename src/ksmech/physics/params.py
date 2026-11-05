@@ -30,10 +30,13 @@ class KSParams:
 
 
 REDUCED = KSParams(K=1.0, eps=1.0)
-# the coupling of g2 on every intermolecular cell (eV), which has no geometry: stated once from
-# the tabulation of the intramolecular |beta_WH| (scripts/probes/open_shell_g_table.py,
-# docs/decisions.md) and frozen before the Release B build, since g2 is baked into the samples
-BETA_INTER = 1.0
+# the coupling of g2 on every intermolecular cell (eV), which has no geometry: the median
+# intramolecular |beta_WH| (K x cross_coupling) of the cells whose centre sets are bonded but
+# share no atom, i.e. two orbitals one bond apart, as two molecules are at a forming bond (0.405
+# eV on a 500-pool closed_base slice, scripts/probes/open_shell_g_table.py, 2026-11-05; shared
+# centre 1.16, two bonds apart 0.09); frozen before the Release B build, since g2 is baked into
+# the samples (docs/decisions.md)
+BETA_INTER = 0.40
 
 # pair feature -> (parameter, power):
 #   feature(params) = feature(REDUCED) * params.<parameter> ** power
