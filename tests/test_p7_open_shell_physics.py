@@ -381,3 +381,24 @@ def test_the_tabulation_runs_on_small_species(token_loader):
     assert {"somo_empty", "doubly_hole", "doubly_empty", "own_pair"} <= kinds
     assert out["whole"]["all"]["g2"]["max"] <= out["whole"]["all"]["g"]["max"] + 1e-9
     assert out["beta_by_graph_distance"]["0"]["n"] > 0
+
+
+# ---- step 11: the radical selectivity suite
+
+
+def test_the_radical_suite_runs_with_both_kernels(qm_record):
+    from ksmech.orbitals.tokens import build_molecule_tokens
+    from ksmech.physics.textbook import RADICAL_CASES, run_radical_suite
+
+    memo: dict = {}
+
+    def loader(key: str):
+        if key not in memo:
+            memo[key] = build_molecule_tokens(qm_record(key))
+        return memo[key]
+
+    for kernel in ("g", "g2"):
+        out = run_radical_suite(loader, kernel, drop_intra_open=kernel == "g2")
+        assert [r.case.name for r in out["results"]] == [c.name for c in RADICAL_CASES]
+        assert all(r.expected_rank is not None for r in out["results"])
+        assert isinstance(out["snap_order_i_br_cl"], bool)

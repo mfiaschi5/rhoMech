@@ -15,6 +15,7 @@ method and cache as the dataset) and tokens, both written to the caches.
 
 from __future__ import annotations
 
+import itertools
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -212,3 +213,90 @@ def run_suite(scorer, loader: TokenCache) -> list[CaseResult]:
         sample, rt = case_sample(case, loader)
         out.append(run_case(case, sample, rt, scorer(sample, loader)))
     return out
+
+
+# ---- the radical selectivity suite (open-shell plan P7 step 11): diagnostics only
+
+RADICAL_CASES = (
+    *(
+        TextbookCase(
+            f"Me3Sn. + Me{x}",
+            f"C[Sn:1](C)C.[CH3:2][{x}:3]",
+            Expectation(f"SH2: Sn -> sigma*(C-{x})", 1, 2),
+            (Expectation(f"Sn -> sigma*(C-{x}) at {x}", 1, 3),),
+        )
+        for x in ("Cl", "Br", "I")
+    ),
+    TextbookCase(
+        "Br. + propene",
+        "[Br:1].[CH2:2]=[CH:3][CH3:4]",
+        Expectation("anti-Markovnikov: terminal C pi -> Br hole", 2, 1),
+        (Expectation("Markovnikov: internal C pi -> Br hole", 3, 1),),
+    ),
+    TextbookCase(
+        "tBu. + acrylonitrile + MVE",
+        "C[C:1](C)C.[CH2:2]=[CH:3]C#N.[CH2:4]=[CH:5]OC",
+        Expectation("nucleophilic: tBu SOMO -> acrylonitrile pi*", 1, 2),
+        (Expectation("tBu SOMO -> methyl vinyl ether pi*", 1, 4),),
+    ),
+    TextbookCase(
+        "CF3. + acrylonitrile + MVE",
+        "F[C:1](F)F.[CH2:2]=[CH:3]C#N.[CH2:4]=[CH:5]OC",
+        Expectation("electrophilic: methyl vinyl ether pi -> CF3 hole", 4, 1),
+        (Expectation("acrylonitrile pi -> CF3 hole", 2, 1),),
+    ),
+    TextbookCase(
+        "tBuO. + THF",
+        "CC(C)(C)[O:1].[CH2:2]1[CH2:3][CH2:5][CH2:6][O:4]1",
+        Expectation("HAT: alpha C-H -> O hole", 2, 1),
+        (Expectation("HAT: beta C-H -> O hole", 3, 1),),
+    ),
+    TextbookCase(
+        "Br. + toluene",
+        "[Br:1].[CH3:2][c:3]1[cH:4][cH:5][cH:6][cH:7][cH:8]1",
+        Expectation("HAT: benzylic C-H -> Br hole", 2, 1),
+        (Expectation("ring pi -> Br hole", 4, 1),),
+    ),
+    TextbookCase(
+        "CH3. + CH3.",
+        "[CH3:1].[CH3:2]",
+        Expectation("recombination: SOMO -> the other's hole (somo_pair)", 1, 2),
+    ),
+)
+SNAP_ORDER = ("Me3Sn. + MeI", "Me3Sn. + MeBr", "Me3Sn. + MeCl")  # expected I > Br > Cl
+
+
+def radical_scorer(kernel: str = "g", drop_intra_open: bool = False):
+    """`scorer(sample, loader)` of the radical suite: |g| or |g2| of every cell where defined,
+    and somo_pair on the recombination cells (where both vanish); with `drop_intra_open` the
+    open-shell rows and hole columns within one fragment score -inf."""
+
+    def scorer(sample: MechanismSample, loader) -> np.ndarray:
+        names = sample.pair_features
+        k = names.index(kernel)
+        score = np.where(sample.pair_defined[..., k], np.abs(sample.pair_z[..., k]), 0.0)
+        somo = sample.pair_z[..., names.index("somo_pair")] > 0
+        score = np.where(somo, 1.0 + score.max(initial=0.0), score)
+        if drop_intra_open:
+            role = sample.orbital_features[:, sample.orbital_columns.index("spin_role")]
+            occ, virt = role[sample.orbital_occupied], role[~sample.orbital_occupied]
+            intra = sample.pair_z[..., names.index("inter")] == 0
+            out = ((occ[:, None] != 0) | (virt[None, :] != 0)) & intra
+            score = np.where(out, -np.inf, score)
+        return score
+
+    return scorer
+
+
+def run_radical_suite(loader, kernel: str = "g", drop_intra_open: bool = False) -> dict:
+    """The radical cases with the untrained kernel (`radical_scorer`): each expected pair's rank
+    against the top 3 (`run_case`), and whether the Me3Sn. halogen abstractions order I > Br >
+    Cl by their expected pair's score. Diagnostics: no count of passes triggers anything."""
+    scorer = radical_scorer(kernel, drop_intra_open)
+    results = []
+    for case in RADICAL_CASES:
+        sample, rt = case_sample(case, loader)
+        results.append(run_case(case, sample, rt, scorer(sample, loader)))
+    score = {r.case.name: r.expected_score for r in results}
+    ordered = all(score[a] > score[b] for a, b in itertools.pairwise(SNAP_ORDER))
+    return {"results": results, "snap_order_i_br_cl": bool(ordered), "kernel": kernel}
