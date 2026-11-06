@@ -8293,3 +8293,70 @@ approved first (entry above).
   changed before Release B (run.json of every run, stage-B contact shards, the P0 surveys,
   p0a_changes, baselines); 22 are mixed. v18_reference is the only copy of the P5-state v18
   stores (the HF v18 revision 7aef081 predates P1-P5).
+
+## 2026-11-06: open-shell plan P9 code (steps 1-7)
+
+Branch `claude/open-shell-p9`, from the P8 tip, in the Release B worktree. The user said "continua"
+after the merges: read as the go for P9's code. Steps 8-10 stay out: the gate and the ablations
+need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release A models.
+
+- **Configuration.** `open_shell=False`, `somo_channels=True`, `own_pair_channel=True`: each default
+  is today's behaviour, and `from_dict` fills them, so every existing run loads strictly with its
+  3-class head. Preset `open_shell`: GENERAL, the head, `atom_spin_input=somo_population`,
+  `spin_role`. The plan's bare `--open-shell` would give the head on legacy inputs, so the commands
+  use the preset; `--open-shell` stays as the field's option.
+- **g and g2 both in the default.** No phase set P7's default, which step 9 (ii) leaves as "the two
+  arms other than P7's default". By its rule that a physically motivated input leaves only by its
+  ablation, the default reads both; `--drop-pair-features g log_abs_g` and `g2 log_abs_g2` are the
+  other two arms. A choice of mine, step 9's numbers can change it.
+- **Head and masks.** {-2,-1,0,+1,+2}; -1 needs N >= 1, -2 needs N >= 2; nothing pool-level in the
+  head or the loss. The loss needed no change: its class table was already by value.
+- **Beam.** The pair (P,3) and atom (A,K) log-probabilities are two arrays, since the widths differ.
+  The sums run over the same concatenated order as before, so a 3-class decode is bitwise the old
+  one (gate below). `EntryTable` carries the alphabet and whether the pool is closed (no odd N).
+- **Closed-shell screen.** After CHARGE_NOT_CONSERVED, before B + R: ODD_OFF_BROKEN_BOND always,
+  CLOSED_MINUS1 with `--closed-minus1-filter`. A 3-class model has no odd entry, so it never fires.
+  DECODE_VERSION 3 -> 4; hit files of version 3 no longer pair with new ones, so joint against
+  the P0b baseline needs the P0b checkpoints decoded again.
+- **What an open-shell run reads.** `stage_a.cell_features` stays the v18 set, so the GBDT and the
+  old checkpoints see nothing new. A run with `open_shell` adds `OPEN_SHELL_BLOCK`; no stored
+  statistics file holds it, so its statistics are fitted on its training samples, one source
+  or several, as the joint plan already did for the pool.
+- **Switches** are batch-time, in `KSMech.prepare`, so dense, flex and sparse read them alike.
+  `without_open_cells` clears `pair_valid` and every feature on the open-shell rows and hole columns,
+  and `cell_mask` leaves them out of the pooling on either cell set, which clearing `pair_valid`
+  alone would not do under `pair_cells='all'`. **The metal-d mask (step 9 iv) cannot be flipped at
+  batch time:** `metal_d_open_shell` decides the hole tokens at sample assembly, so its arm needs a
+  store rebuild and by step 4 is reported as such and not run, if P4 keeps the metals at all.
+- **Joint plumbing.** `--split a=x,b=y` must name every source. The leak guard is applied by the
+  trainer whenever a run holds pmechdb and rmechdb: the plan's exclusion is a property of that pair
+  of sources, not an option to remember. `--val-cohort pmechdb=closed_base` is new: step 5 (f) says
+  `best.pt` is picked on closed_base val and RC val, and the molecule val view also holds samples
+  added after the pin. run.json's provenance `extra` states the selection and the statistics, and
+  each decode report copies them. Serve's NAME_RE accepts '+'. rmechdb's stop weight is 0.
+- **Per-subset metrics** read as the pools with an unpaired electron (`open_top1`, `open_r_exact`,
+  `open_n`, pooled by their own count), the subset the pooled numbers hide.
+- **compare** keeps its keys: `closed_minus1_filter` is not one, since ablation (viii) pairs a
+  decode with the filter against one without; `run_source` is not one either, so a joint and a
+  control run pair on one cohort.
+- **Radical suite with a model** (`textbook --radical --checkpoint`): a cell scores the forming
+  anchor on its two main centres, since a model has no orbital-level head. The HAT cases name the
+  pair C-H -> O hole while a model's anchor is the forming O-H bond, so those cases read
+  differently from the kernel's; diagnostics, as the suite always was.
+- **Spec.** The v10 approved on 2026-11-05 covers P6-P8 and still gave the atom alphabet as
+  {-2,0,+2} with no screen, although the plan's table lists that text under v10 "P6 and P9". Drafted
+  now in the tex (`Remaining entries`, `Closed-shell decode screen`), marked draft in the date line.
+  It must be approved before P9's training runs (U3).
+- **Smoke run** (step 7), code 7828d48, on the RX 6600 XT: `--preset open_shell --source
+  pmechdb+rmechdb --split pmechdb=molecule,rmechdb=rc_molecule --val-cohort pmechdb=closed_base
+  --limit 64 --epochs 1`: 128 train, 128 val (51 open pools), 6 steps, no non-finite batch. The four
+  decodes (32 samples each, with and without the filter; rmechdb with `--caps labels`: 12 bonds,
+  5 atoms, the first time the P8 labels set them) finish and each hit file equals its report;
+  compare runs on the two pairs and refuses pmechdb against rmechdb (exit 2). A smoke model finds
+  nothing: near-uniform classes put about 100,000 charge-unbalanced completions ahead of any valid
+  one (DECODE_DROPPED:CHARGE_NOT_CONSERVED) and the 5 classes widen that. Harmless here, it says
+  nothing about a trained model, but it is what step 9 (x, max_candidates) has to watch.
+- **3-class gate** (step 2's test, on real data): P0b GENERAL s0 decoded on closed_base val with the
+  new code against its P7 gate file: ranks identical on all 1,238 samples, top-1/3/5 67.7 / 86.2 /
+  88.6 unchanged. `n_found` is +1 on 6 samples, with 8 PRODUCT_INVALID gone: the same 6 values come
+  out of main's P8 code, so that is P8's fix of mapped O=O (`spin._placed`), not this change.

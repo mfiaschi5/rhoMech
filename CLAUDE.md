@@ -261,7 +261,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   PATH] [--allow-stale]` (five textbook selectivity cases, expected vs top-3, with the untrained
   gap kernel and the two geometry-free LightGBM models of the molecule split, cases seen in a
   model's training marked; builds missing QM records and tokens; `--radical`: the radical
-  selectivity suite of open-shell plan P7, untrained kernel, g and g2, diagnostics). After a
+  selectivity suite of open-shell plan P7, untrained kernel, g and g2, diagnostics, or with
+  `--checkpoint PATH` a trained model's anchors). After a
   token rebuild:
   `ksmech-arrows samples` (geometry-free pair features and `pair_feature_stats_<strategy>.json`
   from each training part), then `ksmech-physics gbdt`, then `textbook`.
