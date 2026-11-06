@@ -66,8 +66,31 @@ descriptors:
 - an **acceptor** is an empty token, other than a d-type polarization function and other than
   the antibonding partner of the donor's own bond.
 
-A token with a fractional occupation (between 0.2 and 1.8) is neither. Its occupation stays a
-continuous input.
+A token with a fractional occupation (between 0.2 and 1.8) is neither, with one exception: the
+open-shell tokens of a radical.
+
+## Radicals: open-shell tokens and their holes
+
+In a radical computed as an open shell, the singly occupied orbitals (one SOMO at occupation 1,
+or a degenerate set such as the three 4p orbitals of a bromine atom at 5/3 each) are
+**open-shell tokens**. A Fermi-smeared level of a small-gap molecule is not one.
+
+- An open-shell token is a **donor**: it can give one electron.
+- Each open-shell token gets a twin at sample assembly, its **hole**: a virtual token with the
+  same coefficients, centres, descriptors and spectrum. The hole is an **acceptor**: it can
+  take one electron into the vacancy.
+- Inside one molecule an open-shell token and a hole never pair (that would be an excitation
+  inside the open shell). Between two radicals the same pair is a recombination.
+- Token files never change: the hole exists only in the sample.
+- An open-shell token on a metal d shell, as in Cu(II) or Fe(III), takes no role by default.
+
+Two inputs describe the open shell, and a model chooses which to read:
+
+- a **spin role** on each orbital: +1 for an open-shell token in its donor role, −1 for a hole,
+  0 otherwise;
+- the **SOMO population** of each atom, how much of the unpaired electron density sits there.
+  It sums to the number of unpaired electrons (1 for Br·, 2 for O₂), is 0 for a closed shell,
+  and does not depend on which resonance structure is drawn.
 
 How pairs of these tokens interact is the subject of
 [[klopman-salem|the Klopman–Salem pair features]].

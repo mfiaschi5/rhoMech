@@ -8272,3 +8272,6 @@ approved first (entry above).
   only by `key_version`, the 69 by key_version, pool_key, pool_id and species. A second dry run
   gives 1,388 unchanged, and every state loads under P8. The states before the re-key are kept
   by reflink in data/processed/v18_reference/serve/pools/ (2,136 files, sha256-checked).
+  For the merge (its OK given), the three wiki drafts of P7 and P8 replace the published
+  `content/wiki/klopman-salem.md`, `orbital-tokens.md` and `reaction-matrix.md` (the published
+  pages were last changed on 2026-10-27, before the drafts); `docs/wiki_drafts/` is removed.
