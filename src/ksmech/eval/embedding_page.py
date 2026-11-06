@@ -25,6 +25,7 @@ TEMPLATE = Path(__file__).with_name("embedding_page.html")
 TAU_ATOM = 0.15  # centre weight of an atom that names an orbital (spec, tau_atom)
 ONE_CENTRE = 0.8  # an orbital with a centre this heavy is drawn beside that atom
 ATTENTION_BUDGET = 8_000_000  # attention cells kept per head; above, only the head mean
+ROLE_LABEL = {1: "SOMO", -1: "hole"}  # the orbital column spin_role of an open-shell token
 TYPE_SYMBOL = {
     "lone_pair": "n",
     "sigma": "σ",
@@ -63,9 +64,18 @@ def _charge(q: int) -> str:
     return f"{abs(q) if abs(q) > 1 else ''}{'+' if q > 0 else '-'}".translate(SUPERSCRIPT)
 
 
+def _spin_roles(sample: MechanismSample) -> np.ndarray:
+    """(O,) the orbitals' spin_role (+1 an open-shell donor, -1 its hole), 0 without the column."""
+    cols = tuple(sample.orbital_columns)
+    if "spin_role" not in cols:
+        return np.zeros(sample.n_orbitals)
+    return sample.orbital_features[:, cols.index("spin_role")]
+
+
 def token_rows(sample: MechanismSample, types: list[str] | None) -> list[dict]:
-    """One row per token on the MECH layout: name, kind (mech, atom, occupied, virtual), the
-    element of an atom, the diagnostic type and the centres of an orbital, the fragment."""
+    """One row per token on the MECH layout: name (a SOMO and a hole named so whatever their
+    diagnostic type), kind (mech, atom, occupied, virtual), the element of an atom, the
+    diagnostic type and the centres of an orbital, the fragment."""
     pt = Chem.GetPeriodicTable()
     z, q = sample.atom_categorical[:, 0], sample.atom_categorical[:, 1]
     symbols = [pt.GetElementSymbol(int(x)) for x in z]
@@ -74,11 +84,13 @@ def token_rows(sample: MechanismSample, types: list[str] | None) -> list[dict]:
         name = f"{sym}{g}{_charge(int(q[g]))}"
         frag = int(sample.atom_fragment[g])
         rows.append({"name": name, "kind": "atom", "el": sym, "q": int(q[g]), "frag": frag})
+    role = _spin_roles(sample)
     for j, centres in enumerate(orbital_centres(sample)):
         lead = [g for g, w in centres if w >= TAU_ATOM][:2] or [centres[0][0]]
         occupied = bool(sample.orbital_occupied[j])
         kind = "occupied" if occupied else "virtual"
         label = TYPE_SYMBOL.get(types[j], types[j]) if types else ("occ" if occupied else "virt")
+        label = ROLE_LABEL.get(int(role[j]), label)
         rows.append({
             "name": f"{label} {'-'.join(f'{symbols[g]}{g}' for g in lead)}",
             "kind": kind,

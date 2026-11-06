@@ -79,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="the radical selectivity suite instead (untrained kernel, P7 diagnostics)",
     )
+    t.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="with --radical: a trained model's anchors instead of the untrained kernel",
+    )
     return parser
 
 
@@ -467,11 +473,13 @@ def _gbdt_scorer(path: Path, allow_stale: bool):
 
 def cmd_radical(args: argparse.Namespace, console: Console) -> int:
     """The radical selectivity suite (open-shell plan P7 step 11) with the untrained kernel,
-    g and g2, with and without the intramolecular open-shell cells. Diagnostics: exit 0."""
+    g and g2, with and without the intramolecular open-shell cells, or with `--checkpoint` a
+    trained model's anchors (P9 step 6). Diagnostics: exit 0."""
     from ksmech.physics.textbook import (
         RADICAL_CASES,
         ensure_tokens,
         fragment_keys,
+        network_scorer,
         run_radical_suite,
     )
 
@@ -479,6 +487,14 @@ def cmd_radical(args: argparse.Namespace, console: Console) -> int:
     if built := ensure_tokens(keys, args.tokens_dir):
         console.print(f"built tokens for {built}")
     loader = TokenCache(args.tokens_dir)
+    if args.checkpoint is not None:
+        from ksmech.train.loop import load_model
+
+        model, _ = load_model(args.checkpoint, "cpu")
+        out = run_radical_suite(loader, scorer=network_scorer(model))
+        print_textbook(out["results"], console, f"radical suite, {args.checkpoint}")
+        console.print(f"Me3Sn. abstraction order I > Br > Cl: {out['snap_order_i_br_cl']}")
+        return 0
     for kernel in ("g", "g2"):
         for drop in (False, True):
             out = run_radical_suite(loader, kernel, drop)

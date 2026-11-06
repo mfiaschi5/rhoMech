@@ -28,6 +28,11 @@ class ModelConfig:
     atom_spin_input: str = "none"  # none | categorical_u (the drawing's u, embedded) |
     #   somo_population (the restricted SOMO population, a continuous atom input); P7, P9 ablates
     spin_role: bool = False  # the orbital input spin_role (+1 open-shell donor, -1 hole); P7
+    open_shell: bool = False  # P9: the atom head over {-2, -1, 0, +1, +2} and the pair features of
+    #   `stage_a.OPEN_SHELL_BLOCK` (g2, the own-pair and the open-shell pair channels)
+    somo_channels: bool = True  # False (P9's ablation): the open-shell pair channel is undefined
+    #   and no reader sees an open-shell row or a hole column (`inputs.without_open_cells`)
+    own_pair_channel: bool = True  # False (P9's ablation): own_g and own_g2 are undefined
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)
@@ -52,8 +57,18 @@ class ModelConfig:
 # The two configurations of the open-shell plan's P0b comparison (U2): GENERAL, the reference,
 # reads every pair cell with the exclusion flags as channels and the two orbital extras; LEGACY
 # turns every P0a flag off (the v17 inputs). frontier_blocks and the FD columns stay at their
-# legacy settings in both: P9 ablates them. Explicit options override a preset.
+# legacy settings in every preset: P9 ablates them. Explicit options override a preset.
 PRESETS: dict[str, dict[str, Any]] = {
     "general": {"pair_cells": "all", "orbital_extra": ("retained_fraction", "energy_ev")},
     "legacy": {"pair_cells": "valid", "orbital_extra": ()},
+    # P9's joint and pm_control arms: GENERAL, the 5-class head, the P7 inputs. Every physically
+    # motivated input starts in and leaves only by its ablation (plan P9, step 9), so g and g2 are
+    # both read; `--drop-pair-features g log_abs_g` or `g2 log_abs_g2` are the two other arms.
+    "open_shell": {
+        "pair_cells": "all",
+        "orbital_extra": ("retained_fraction", "energy_ev"),
+        "open_shell": True,
+        "atom_spin_input": "somo_population",
+        "spin_role": True,
+    },
 }

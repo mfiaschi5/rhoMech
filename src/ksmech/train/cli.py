@@ -3,10 +3,13 @@
     ksmech-train fit --source pmechdb --split molecule --run first
     ksmech-train fit --run smoke --limit 64 --epochs 1        # a smoke run
     ksmech-train fit --run dense_plain_general_s0 --preset general --seed 0 --no-resonance-draws
+    ksmech-train fit --run joint_s0 --preset open_shell --source pmechdb+rmechdb \\
+        --split pmechdb=molecule,rmechdb=rc_molecule --val-cohort pmechdb=closed_base
 
-`--preset general|legacy` sets the P0a flags of `model.config.PRESETS` as the defaults of their
-options (GENERAL: every pair cell, the orbital extras; LEGACY: the v17 inputs); an option given
-explicitly wins. run.json records the resulting flags.
+`--preset general|legacy|open_shell` sets the flags of `model.config.PRESETS` as the defaults of
+their options (GENERAL: every pair cell, the orbital extras; LEGACY: the v17 inputs; open_shell:
+GENERAL, the 5-class atom head, the P7 inputs); an option given explicitly wins. run.json records
+the resulting flags.
 
 On the ROCm build an RDNA2 card without kernels of its own (the RX 6600 XT, gfx1032) gets
 HSA_OVERRIDE_GFX_VERSION=10.3.0 unless the variable is already set (`train.loop.rocm_override`).
@@ -62,7 +65,7 @@ def build_parser(preset: str | None = None) -> argparse.ArgumentParser:
     f.add_argument("--device", default="auto", help="auto | cpu | cuda (ROCm is cuda)")
     f.add_argument("--resume", action="store_true", help="continue from the run's last.pt")
     f.add_argument("--preset", choices=sorted(PRESETS), default=preset,
-                   help="the P0a flags of GENERAL or LEGACY as defaults")  # fmt: skip
+                   help="the flags of a preset as defaults")  # fmt: skip
     _add_fields(f, TrainConfig)
     _add_fields(f, ModelConfig, PRESETS.get(preset or "", {}))
     return parser

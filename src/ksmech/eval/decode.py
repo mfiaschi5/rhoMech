@@ -37,7 +37,14 @@ from ksmech.arrows.lewis import MAX_ORDER
 from ksmech.arrows.symmetry import lewis_mol
 from ksmech.data import provenance as prov
 from ksmech.data.resonance import identity_key
-from ksmech.model.decode import NONMETALS, Apply, Completion, DecodeConfig, decode_pool
+from ksmech.model.decode import (
+    NONMETALS,
+    SCREEN_CODES,
+    Apply,
+    Completion,
+    DecodeConfig,
+    decode_pool,
+)
 
 Decode = Callable[[object, Counter], list[Completion]]
 CAPS = ("legacy", "labels")
@@ -177,11 +184,19 @@ def sample_decoder(model, cfg: DecodeConfig, scope: str = "all") -> Decode:
     return decode
 
 
+def _odd_top1(found: list[Completion]) -> bool:
+    """Whether the best completion has an odd atom entry."""
+    return bool(found) and any(d % 2 for _, d in found[0].lone)
+
+
 def decode_report(samples: Iterable, decode: Decode, ks: tuple[int, ...] = (1, 3, 5)) -> dict:
     """Top-k exact-R hits over `samples`, the misses, the decoder's drop counts and the time
     per sample. A sample without a label class is counted as NO_EDIT_LABEL and left out.
     `per_sample` holds one row per scored sample (step id, the 0-based rank of the first hit or
-    None, the completions found), so two decodes can be compared sample by sample."""
+    None, the completions found, whether the best completion has an odd atom entry, and with
+    any the completions the closed-shell screen and filter dropped, by code), so two decodes
+    can be compared sample by sample. `odd_top1` is the share of the samples with a completion
+    whose best one has an odd entry."""
     ranks: list[int | None] = []
     rows: list[dict] = []
     skips: Counter = Counter()
@@ -190,19 +205,25 @@ def decode_report(samples: Iterable, decode: Decode, ks: tuple[int, ...] = (1, 3
         if sample.edit_label is None:
             skips["NO_EDIT_LABEL"] += 1
             continue
+        before = {c: skips[f"DECODE_DROPPED:{c}"] for c in SCREEN_CODES}
         t0 = time.perf_counter()
         found = decode(sample, skips)
         seconds.append(time.perf_counter() - t0)
         ranks.append(hit_rank(found, sample.edit_label))
         rows.append({"step_id": getattr(sample, "step_id", None), "rank": ranks[-1]})
-        rows[-1]["n_found"] = len(found)
+        rows[-1] |= {"n_found": len(found), "odd_top1": _odd_top1(found)}
+        dropped = {c: skips[f"DECODE_DROPPED:{c}"] - before[c] for c in SCREEN_CODES}
+        if any(dropped.values()):
+            rows[-1]["screened"] = {c: k for c, k in dropped.items() if k}
         if not found:
             skips["DECODE_NOTHING_FOUND"] += 1
     n = len(ranks)
     out = {f"top{k}": sum(r is not None and r < k for r in ranks) / n if n else 0.0 for k in ks}
+    with_found = [r for r in rows if r["n_found"]]
     return out | {
         "n": n,
         "not_found": sum(r is None for r in ranks),
+        "odd_top1": sum(r["odd_top1"] for r in with_found) / max(len(with_found), 1),
         "mean_seconds": float(np.mean(seconds)) if seconds else 0.0,
         "skips": dict(sorted(skips.items())),
         "per_sample": rows,

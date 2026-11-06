@@ -50,7 +50,7 @@ def _segment_logsumexp(x: torch.Tensor, seg: torch.Tensor, n: int) -> torch.Tens
 def atom_classes(r_atoms: torch.Tensor, values: tuple[int, ...], real: torch.Tensor):
     """Class index of every atom entry in the head's alphabet `values` (the decoder's
     `atom_values`). A real entry outside it raises: an odd entry of a one-electron step is not
-    a class of the {-2, 0, +2} head, and mapping it to one would train on the wrong target."""
+    a class of the 3-class head, and mapping it to one would train on the wrong target."""
     table = torch.tensor(values, dtype=torch.long, device=r_atoms.device)
     hit = r_atoms.long()[..., None] == table
     bad = real & ~hit.any(-1)
@@ -155,9 +155,10 @@ def greedy_edit(dec: EditDecoder, h, p, lp_anchor: torch.Tensor, batch: dict):
     """(R pairs (B, A, A) int, R atoms (B, A) int): the top anchor and, given it, the most
     probable class of every other entry (no beam, no conservation check)."""
     n_b, n = lp_anchor.shape[:2]
+    sides = lp_anchor.shape[-1]  # len(ANCHOR_SIDE)
     flat = lp_anchor.flatten(1).argmax(1)
-    i, rest = flat // (n * 2), flat % (n * 2)
-    j, sign = rest // 2, rest % 2
+    i, rest = flat // (n * sides), flat % (n * sides)
+    j, sign = rest // sides, rest % sides
     b = torch.arange(n_b, device=flat.device)
     pair, atom = dec.entry_logits(h, p, batch, torch.stack([b, i, j, sign], 1))
     r_pairs = pair.argmax(-1) - 1

@@ -213,7 +213,7 @@ def anchor_readout(model: KSMech, h, p, y, batch: dict, top: int = 10) -> dict:
     n = lp.shape[1]
     rows = []
     for f in idx.tolist():
-        i, j, s = f // (2 * n), (f % (2 * n)) // 2, f % 2
+        i, j, s = f // (len(SIDE) * n), (f % (len(SIDE) * n)) // len(SIDE), f % len(SIDE)
         row = {"i": i, "j": j, "side": SIDE[s], "p": float(prob[i, j, s])}
         row |= {"logit": float(logits[0, i, j, s]), "in_label": bool(label[i, j, s])}
         rows.append(row | dict(zip(TERMS, terms[i, j, s].tolist(), strict=True)))

@@ -1,7 +1,10 @@
 """The edit decoder (spec v9, "Edit decoder"): a pointer over the candidate atom pairs with a
 sign (form, break) chooses the anchor; given it, every other pair entry is classified over
-{-1, 0, +1} and every atom entry over {-2, 0, +2}. A Bernoulli head on h_MECH gives
-P(END_MECH), whether the mechanism ends after the step (spec v9, "Stop head").
+{-1, 0, +1} and every atom entry over the head's alphabet: {-2, 0, +2}, or with
+`ModelConfig.open_shell` {-2, -1, 0, +1, +2} (spec v10). The atom masks are electron bookkeeping
+on the non-bonding count N: -1 needs N >= 1, -2 needs N >= 2; no pool-level rule enters the head
+or the loss. A Bernoulli head on h_MECH gives P(END_MECH), whether the mechanism ends after the
+step (spec v9, "Stop head").
 
 Atom tokens sit at positions 1..A of the encoder output (MECH at 0). `p` is the encoder's
 atom-pair block (B, A, A, d_p), symmetric in (i, j) since an entry of R is: the symmetrized
@@ -23,8 +26,10 @@ from ksmech.model.inputs import DIST_BUCKETS, GRAPH_CAP
 NEG = float("-inf")
 FORM, BREAK = ANCHOR_SIDE["form"], ANCHOR_SIDE["break"]
 # The value of each class of the atom head, in class order. An odd entry (a one-electron
-# step) is outside this alphabet: the loss raises on it instead of mapping it to a class.
+# step) is outside the 3-class alphabet: the loss raises on it instead of mapping it to a class.
 ATOM_VALUES = (-2, 0, 2)
+OPEN_SHELL_ATOM_VALUES = (-2, -1, 0, 1, 2)
+ATOM_MASKS = {-2: "can_lose_pair", -1: "can_lose_electron"}  # a class -> the batch mask it needs
 
 
 def anchor_buckets(dist: torch.Tensor, b, a, c) -> torch.Tensor:
@@ -52,7 +57,7 @@ class EditDecoder(nn.Module):
         self.n_tok, self.n_anchor = nn.Linear(d, hid), nn.Linear(d, hid, bias=False)
         self.n_join = nn.Linear(dp, hid, bias=False)
         self.n_dist = nn.Embedding(DIST_BUCKETS, hid)
-        self.atom_values = ATOM_VALUES
+        self.atom_values = OPEN_SHELL_ATOM_VALUES if cfg.open_shell else ATOM_VALUES
         self.n_out = nn.Linear(hid, len(self.atom_values))
         self.stop = mlp(d, hid, 1)  # END_MECH
 
@@ -76,8 +81,8 @@ class EditDecoder(nn.Module):
 
     def entry_logits(self, h, p, batch: dict, anchors: torch.Tensor):
         """Entry logits given K anchors (rows: sample, atom a, atom c, sign): pairs (K, A, A, 3)
-        over {-1, 0, +1} and atoms (K, A, 3) over {-2, 0, +2}, -inf on the masked classes (-1
-        without a bond, +1 on a triple bond, -2 without a lone pair)."""
+        over {-1, 0, +1} and atoms (K, A, len(atom_values)), -inf on the masked classes (-1
+        without a bond, +1 on a triple bond, -2 with N < 2, -1 on an atom with N < 1)."""
         b, a, c = anchors[:, 0], anchors[:, 1], anchors[:, 2]
         n_atoms = batch["bond_order"].shape[1]
         h_a, p_a = h[:, 1 : n_atoms + 1], p
@@ -96,5 +101,7 @@ class EditDecoder(nn.Module):
         order = batch["bond_order"][b]
         pair[..., 0] = pair[..., 0].masked_fill(order == 0, NEG)
         pair[..., 2] = pair[..., 2].masked_fill(order >= 3, NEG)
-        atom[..., 0] = atom[..., 0].masked_fill(~batch["can_lose_pair"][b], NEG)
+        for k, value in enumerate(self.atom_values):
+            if value in ATOM_MASKS:
+                atom[..., k] = atom[..., k].masked_fill(~batch[ATOM_MASKS[value]][b], NEG)
         return pair, atom

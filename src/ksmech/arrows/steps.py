@@ -1025,15 +1025,18 @@ def pair_stats_path(
 
 
 def pair_stats(
-    samples: list[MechanismSample], params: KSParams | None = None, cells: str = "valid"
+    samples: list[MechanismSample],
+    params: KSParams | None = None,
+    cells: str = "valid",
+    extra: tuple[str, ...] = (),
 ) -> PairStats:
-    """Statistics of the pair features a reader of `cells` takes (`stage_a.cell_features`) over
-    `samples` at the physical K and eps, on the defined entries of those cells (`valid`: the
-    `pair_valid` cells, the v17 statistics; `all`: every cell), with the values rounded to
-    float16 as stored. The statistics of samples just built therefore equal those refitted
-    from the store."""
+    """Statistics of the pair features a reader of `cells` takes (`stage_a.cell_features`), then
+    `extra` (an open-shell run's `stage_a.OPEN_SHELL_BLOCK`), over `samples` at the physical K
+    and eps, on the defined entries of those cells (`valid`: the `pair_valid` cells, the v17
+    statistics; `all`: every cell), with the values rounded to float16 as stored. The statistics
+    of samples just built therefore equal those refitted from the store."""
     params = params or KSParams()
-    names = cell_features(cells)
+    names = (*cell_features(cells), *extra)
     stored = samples[0].pair_features if samples else STORED_PAIR_FEATURES
     if any(s.pair_features != stored for s in samples):
         raise ValueError("pair statistics over samples with different pair features")

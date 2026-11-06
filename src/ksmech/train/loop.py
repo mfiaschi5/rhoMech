@@ -19,7 +19,13 @@ counted in `run.json` and in every metrics line.
 pooled, the pair statistics are fitted on the pool (each source's stored statistics were fitted
 on its own part), and validation runs on each source's part, reported per source
 (`val_<source>_top1`, ...) and pooled (`val_top1`, which picks `best.pt`). The run lives in
-`data/models/pmechdb+reactmech/<run>/`.
+`data/models/pmechdb+reactmech/<run>/`. `--split pmechdb=molecule,rmechdb=rc_molecule` names
+each source's split, `--val-cohort pmechdb=closed_base` restricts a source's validation part to
+a cohort; a run with both pmechdb and rmechdb leaves the rmechdb training steps of the cohort
+leak_guard_joint out (LEAK_GUARD, counted). run.json states how the run is selected and how its
+pair statistics were fitted. An open-shell run reads the pair features of
+`stage_a.OPEN_SHELL_BLOCK`, which no stored statistics file holds, so its statistics are fitted
+here on its training samples, one source or several.
 """
 
 from __future__ import annotations
@@ -44,15 +50,18 @@ from ksmech.arrows.steps import (
     load_samples,
     pair_stats,
     pair_stats_path,
+    sample_ids,
     samples_path,
 )
 from ksmech.data import provenance as prov
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
+from ksmech.eval.cohorts import load_cohort, restrict
 from ksmech.model.config import ModelConfig
 from ksmech.model.inputs import FeatureStats, fit_feature_stats, to_device, token_columns
 from ksmech.model.loss import anchor_ranks, edit_matches, greedy_edit, step_loss
 from ksmech.model.net import KSMech
 from ksmech.physics.pairs import PairStats
+from ksmech.physics.stage_a import OPEN_SHELL_BLOCK
 from ksmech.train.batching import CellBudgetSampler, DrawnSamples
 
 log = logging.getLogger(__name__)
@@ -60,12 +69,13 @@ log = logging.getLogger(__name__)
 TRAIN_VERSION = 1
 DEFAULT_MODELS_DIR = Path("data/models")
 TOO_LARGE = "TOO_LARGE"
+OPEN_METRICS = ("open_n", "open_top1", "open_r_exact")  # `evaluate`: the open-shell pools
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     source: str = "pmechdb"  # several joined by "+": pmechdb+reactmech
-    split: str = "molecule"
+    split: str = "molecule"  # every source's, or per source: pmechdb=molecule,rmechdb=rc_molecule
     epochs: int = 30
     cell_budget: int = 1_100_000  # padded pair-track cells per batch
     max_batch: int = 64
@@ -83,9 +93,12 @@ class TrainConfig:
     resonance_draws: bool = True  # each epoch, every training sample in a random drawing
     eval_test: bool = False  # also score the split's test part each epoch (test_*), never for best
     drop_domain_class: tuple[str, ...] = ()  # training samples of these classes left out (P4)
+    val_cohort: str = ""  # validation restricted to a cohort, per source: pmechdb=closed_base
 
 
-STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0}  # PMechDB: isolated steps, no stop labels
+# PMechDB and rmechdb: isolated steps, no stop labels; the minimum over a joint run's sources is
+# 0, so END_MECH stays untrained there
+STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0, "rmechdb": 0.0}
 # a non-finite run stops (docs/decisions.md, 2026-10-28): at a loss scale of 0 the unscaled
 # gradients are NaN and the scaler's inf check misses them (0 * inf); so many skipped batches
 # in a row is no glitch
@@ -100,6 +113,22 @@ class NonFiniteError(RuntimeError):
 def sources(cfg: TrainConfig) -> tuple[str, ...]:
     """The sources of a run: `pmechdb+reactmech` names two."""
     return tuple(cfg.source.split("+"))
+
+
+def _source_map(text: str) -> dict[str, str]:
+    """{source: value} of `a=x,b=y`."""
+    return dict(item.split("=", 1) for item in text.split(",") if item)
+
+
+def split_of(cfg: TrainConfig, source: str) -> str:
+    """The split strategy of one source: `cfg.split`, or its entry when that is a map. A map
+    must name every source of the run, and only those."""
+    if "=" not in cfg.split:
+        return cfg.split
+    named = _source_map(cfg.split)
+    if set(named) != set(sources(cfg)):
+        raise ValueError(f"--split {cfg.split!r} must name each of {sources(cfg)}")
+    return named[source]
 
 
 def stop_weight(cfg: TrainConfig) -> float:
@@ -189,6 +218,7 @@ def drop_undecodable_drawings(samples: list, part: str) -> int:
 
 
 DROPPED_DOMAIN_CLASS = "DROPPED_DOMAIN_CLASS"
+LEAK_GUARD = "LEAK_GUARD"
 
 
 def drop_domain_classes(samples: list, source: str, classes, processed_dir: Path) -> list:
@@ -209,21 +239,54 @@ def drop_domain_classes(samples: list, source: str, classes, processed_dir: Path
     return [s for s in samples if s.step_id not in held]
 
 
+def leak_guarded(samples: list, cfg: TrainConfig, source: str, processed_dir: Path) -> list:
+    """The samples of a training part without those of the cohort leak_guard_joint: the rmechdb
+    steps of a run with PMechDB that share a species with closed_base val or test (open-shell
+    plan P8 step 6); each one left out is logged."""
+    if source != "rmechdb" or "pmechdb" not in sources(cfg):
+        return samples
+    held = load_cohort("rmechdb", "leak_guard_joint", processed_dir) or set()
+    for s in samples:
+        if s.step_id in held:
+            log.info("train %s left out: %s", s.step_id, LEAK_GUARD)
+    return [s for s in samples if s.step_id not in held]
+
+
+def _part_ids(cfg: TrainConfig, source: str, part: str, path: Path, processed_dir: Path):
+    """The ids to read of a part: all (None), or for a validation part with a cohort in
+    `cfg.val_cohort`, the cohort's."""
+    name = _source_map(cfg.val_cohort).get(source)
+    if part != "val" or not name:
+        return None
+    return restrict(sample_ids(path), load_cohort(source, name, processed_dir))
+
+
+def _train_filters(samples: list, cfg: TrainConfig, source: str, processed_dir: Path):
+    """(the training samples kept, the skip counts): `drop_domain_classes`, `leak_guarded`."""
+    skipped, total = {}, len(samples)
+    if cfg.drop_domain_class:
+        samples = drop_domain_classes(samples, source, cfg.drop_domain_class, processed_dir)
+        skipped[DROPPED_DOMAIN_CLASS] = total - len(samples)
+        log.info("%d training samples left out by --drop-domain-class", total - len(samples))
+    guarded = leak_guarded(samples, cfg, source, processed_dir)
+    if len(guarded) < len(samples):
+        skipped[LEAK_GUARD] = len(samples) - len(guarded)
+    return guarded, skipped
+
+
 def load_source_part(
     cfg: TrainConfig, source: str, part: str, processed_dir: Path
 ) -> tuple[list, dict]:
     """The samples of one source's part that fit the token cap, and the skip counts (samples
     too large, drawings the decoder cannot write, and in the training part the samples of the
-    domain classes `cfg.drop_domain_class` names)."""
-    path = samples_path(source, f"{cfg.split}_{part}", processed_dir)
-    samples = load_samples(path)
+    domain classes `cfg.drop_domain_class` names and the leak guard's)."""
+    path = samples_path(source, f"{split_of(cfg, source)}_{part}", processed_dir)
+    samples = load_samples(path, ids=_part_ids(cfg, source, part, path, processed_dir))
     if cfg.limit:
         samples = samples[: cfg.limit]
     skipped, total = {}, len(samples)
-    if part == "train" and cfg.drop_domain_class:
-        samples = drop_domain_classes(samples, source, cfg.drop_domain_class, processed_dir)
-        skipped[DROPPED_DOMAIN_CLASS] = total - len(samples)
-        log.info("%d training samples left out by --drop-domain-class", total - len(samples))
+    if part == "train":
+        samples, skipped = _train_filters(samples, cfg, source, processed_dir)
     keep = [s for s in samples if _size(s) + 1 <= cfg.max_tokens]
     if len(keep) < len(samples):
         skipped[TOO_LARGE] = len(samples) - len(keep)
@@ -280,10 +343,12 @@ def evaluate(
 ) -> dict:
     """Mean loss and anchor NLL; anchor top-1/3/5 with set marginalization; the greedy R
     (top anchor, most probable entries) matching a variant of the label class; the mean
-    P(END_MECH)."""
+    P(END_MECH); and the anchor top-1 and greedy R over the pools with an unpaired electron
+    (`open_n` of them, an odd N), the subset the pooled numbers hide."""
     model.eval()
     sums = {"loss": 0.0, "anchor_nll": 0.0, "top1": 0, "top3": 0, "top5": 0, "r_exact": 0}
     sums["p_stop"], n = 0.0, 0
+    opened = dict.fromkeys(OPEN_METRICS, 0)
     for batch in loader:
         batch = to_device(batch, device)
         with torch.autocast(device.type, dtype=dtype or torch.float32, enabled=dtype is not None):
@@ -299,7 +364,13 @@ def evaluate(
             sums[f"top{k}"] += int((rank < k).sum())
         sums["r_exact"] += int(exact.sum())
         n += len(rank)
-    return {k: v / max(n, 1) for k, v in sums.items()} | {"n": n}
+        pools = (batch["nonbonding"] % 2 != 0).any(1)
+        opened["open_top1"] += int((rank[pools] < 1).sum())
+        opened["open_r_exact"] += int(exact[pools].sum())
+        opened["open_n"] += int(pools.sum())
+    m = opened.pop("open_n")
+    rates = {k: v / max(m, 1) for k, v in opened.items()}
+    return {k: v / max(n, 1) for k, v in sums.items()} | {"n": n, "open_n": m} | rates
 
 
 def evaluate_sources(model: KSMech, loaders: dict, *args) -> dict:
@@ -307,8 +378,12 @@ def evaluate_sources(model: KSMech, loaders: dict, *args) -> dict:
     sample, and with several sources each source's under `<source>_`."""
     per = {s: evaluate(model, loader, *args) for s, loader in loaders.items()}
     n = sum(r["n"] for r in per.values())
-    keys = [k for k in next(iter(per.values())) if k != "n"]
+    m = sum(r["open_n"] for r in per.values())
+    keys = [k for k in next(iter(per.values())) if k not in ("n", *OPEN_METRICS)]
     out = {k: sum(r[k] * r["n"] for r in per.values()) / max(n, 1) for k in keys} | {"n": n}
+    rates = OPEN_METRICS[1:]
+    out |= {k: sum(r[k] * r["open_n"] for r in per.values()) / max(m, 1) for k in rates}
+    out["open_n"] = m
     if len(per) > 1:
         out |= {f"{s}_{k}": v for s, r in per.items() for k, v in r.items()}
     return out
@@ -431,14 +506,36 @@ def _optimizer(model: KSMech, cfg: TrainConfig) -> torch.optim.AdamW:
     return torch.optim.AdamW(groups, lr=cfg.lr)
 
 
-def run_pair_stats(cfg: TrainConfig, train: list, processed_dir: Path, cells: str = "valid"):
+def run_pair_stats(
+    cfg: TrainConfig,
+    train: list,
+    processed_dir: Path,
+    cells: str = "valid",
+    extra: tuple[str, ...] = (),
+):
     """(the statistics file or None, the pair statistics of the cells `cells`): one source's
-    stored `pair_feature_stats_<split>[_allcells].json`; for several, fitted here on the
-    pooled training samples, as `ksmech-arrows samples` fits one source's on its own."""
-    if len(sources(cfg)) == 1:
-        path = pair_stats_path(cfg.source, cfg.split, processed_dir, cells)
+    stored `pair_feature_stats_<split>[_allcells].json`; for several, or with the `extra`
+    features no stored file holds, fitted here on the training samples, as `ksmech-arrows
+    samples` fits one source's on its own."""
+    if len(sources(cfg)) == 1 and not extra:
+        split = split_of(cfg, cfg.source)
+        path = pair_stats_path(cfg.source, split, processed_dir, cells)
         return path, load_pair_stats(path)
-    return None, pair_stats(train, cells=cells)
+    return None, pair_stats(train, cells=cells, extra=extra)
+
+
+def run_notes(cfg: TrainConfig, stats_path: Path | None) -> dict:
+    """How the run is selected and how its pair statistics were fitted (plan P9, step 5f)."""
+    parts = []
+    cohorts = _source_map(cfg.val_cohort)
+    for s in sources(cfg):
+        cohort = f", cohort {cohorts[s]}" if s in cohorts else ""
+        parts.append(f"{s} {split_of(cfg, s)} val{cohort}")
+    pool = "pooled over " if len(parts) > 1 else "on "
+    return {
+        "selection": f"best.pt: the highest anchor top-1 {pool}{' and '.join(parts)}",
+        "pair_statistics": str(stats_path) if stats_path else "fitted on the training samples",
+    }
 
 
 def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_path: Path | None):
@@ -449,7 +546,8 @@ def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_pat
     if stats_path is not None:
         inputs |= prov.file_input(stats_path)
     config = {"train": asdict(cfg), "model": model_cfg.to_dict(), "sample_version": SAMPLE_VERSION}
-    return prov.stamp("train_run", TRAIN_VERSION, inputs, config, extra={"parts": parts})
+    extra = {"parts": parts} | run_notes(cfg, stats_path)
+    return prov.stamp("train_run", TRAIN_VERSION, inputs, config, extra=extra)
 
 
 def _resume(path: Path, header, model, opt, sched, scaler) -> dict:
@@ -532,7 +630,8 @@ def fit(
     val, val_info = load_part(cfg, "val", processed_dir)
     held = load_part(cfg, "test", processed_dir) if cfg.eval_test else ({}, None)
     train = [s for part in by_source.values() for s in part]
-    stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells)
+    extra = OPEN_SHELL_BLOCK if model_cfg.open_shell else ()
+    stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells, extra)
     feature_stats = fit_feature_stats(train, *token_columns(model_cfg))
     model = KSMech(model_cfg, feature_stats, stats).to(device)
     parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})

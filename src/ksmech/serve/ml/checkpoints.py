@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,99}")  # '+': a joint run's source
 METRIC_KEYS = ("val_top1", "val_top3", "val_top5", "val_r_exact", "val_loss", "val_anchor_nll")
 MODULES = ("torch", "ksmech.model.net", "ksmech.train.loop", "ksmech.eval.embedding")
 _SHA: LRU[tuple[str, int, int], str] = LRU(16)
