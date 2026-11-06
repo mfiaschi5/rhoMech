@@ -8262,3 +8262,13 @@ approved first (entry above).
   not started. Until P6, P7 and P8 are merged, main's P5 code reads v18 stores and refuses these
   v19 ones. The QM index (data/cache/index.sqlite) is not refreshed yet. Serve's re-key, the
   merges, the provenance check, the deletion and serve's restart still wait.
+  Then, after its OK, serve's re-key on main's `data/serve/pools`, by the P8 code with
+  `KSMECH_DATA_ROOT` set to main. The dry run first gave the P6 numbers again: 1,388 states,
+  1,319 unchanged, 69 re-keyed (66 holding the O atom, 2 O=O, 1 `[O+][O-]`; the key of `[O]`
+  gains `|[O],0,2`), 0 unreadable, and it wrote nothing. Re-keyed, not purged: seven jobs of
+  2026-10-27 name all 69 state ids, which the re-key keeps and a purge would delete; their 58 old
+  pool ids are stale either way. The re-key ran with no server holding the lock and its changed
+  list equals the dry run's. It wrote only the 1,388 `state.json` files: 1,319 differ from before
+  only by `key_version`, the 69 by key_version, pool_key, pool_id and species. A second dry run
+  gives 1,388 unchanged, and every state loads under P8. The states before the re-key are kept
+  by reflink in data/processed/v18_reference/serve/pools/ (2,136 files, sha256-checked).
