@@ -8360,3 +8360,6 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   new code against its P7 gate file: ranks identical on all 1,238 samples, top-1/3/5 67.7 / 86.2 /
   88.6 unchanged. `n_found` is +1 on 6 samples, with 8 PRODUCT_INVALID gone: the same 6 values come
   out of main's P8 code, so that is P8's fix of mapped O=O (`spin._placed`), not this change.
+- **Suites** on ac4b18d, with the reactmech-full QM batch holding 12 processes, at 2 workers:
+  `pytest -n 2 -m "not realdata"`: 2338 passed, 21 skipped, 2 xfailed, 4 warnings;
+  `KSMECH_TEST_WORKERS=2 pytest -m realdata`: 67 passed.
