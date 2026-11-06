@@ -238,6 +238,21 @@ def redrawn_label(
     return k, mol, lab
 
 
+def source_label(
+    step: ElementaryStep, edit: StepEdit
+) -> tuple[int, Chem.Mol, EditLabel] | EditSkip:
+    """(drawing index, reactant drawing, label) of a step under its source's rule (spec v10,
+    "Edit labels"): a source of one-electron steps (`domain.open_shell_labels`, rmechdb) whose
+    drawn reactant gives no class takes the class on the reactant drawing that gives one
+    (`redrawn_label`); every other source keeps the drawn reactant (index 0) or its skip."""
+    from ksmech.arrows.delta_be import edit_label
+
+    if open_shell_labels(step.source):
+        return redrawn_label(step, edit)
+    label = edit_label(step, edit)
+    return label if isinstance(label, EditSkip) else (0, edit.mol, label)
+
+
 def resonance_drawings(
     step: ElementaryStep,
     rt: ReactantTokens,

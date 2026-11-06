@@ -59,12 +59,11 @@ from ksmech.arrows.delta_be import (
     EditSkip,
     StepEdit,
     class_shape,
-    edit_label,
     label_counts,
     step_edit,
     to_global,
 )
-from ksmech.arrows.drawings import Drawing, resonance_drawings
+from ksmech.arrows.drawings import Drawing, drawing_of, resonance_drawings, source_label
 from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.arrows.lewis import (
     LewisStructure,
@@ -127,10 +126,18 @@ SAMPLE_VERSION = 19  # 18: every pair cell with the exclusion flags, the stored 
 #   spin_role, somo_population, g2, the own-pair and open-shell pair channels (P7)
 PARTS = ("train", "val", "test")
 FROZEN_SPLIT_SCHEMA = 1  # `split_frozen_<strategy>.json`, independent of SAMPLE_VERSION
-STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
+STRATEGIES = (
+    "molecule", "scaffold", "loco", "loco_all", "random_leaky", "rc_molecule", "flower_given"
+)  # fmt: skip
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
 # which leaks molecules across sets on PMechDB (no pathway ids; docs/review_2026-10-21.md, D1)
 DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
+SOURCE_STRATEGIES = {"rmechdb": ("rc_molecule", "flower_given")}  # FlowER's two splits (P8)
+
+
+def default_strategies(source: str) -> tuple[str, ...]:
+    """The strategies `ksmech-arrows samples` builds for a source unless told otherwise."""
+    return SOURCE_STRATEGIES.get(str(source), DEFAULT_STRATEGIES)
 
 
 LEGACY_ATOM_FEATURES = tuple(atom_feature_names())  # the atom columns of a v17 sample
@@ -250,9 +257,15 @@ class MechanismSample:
     def n_orbitals(self) -> int:
         return len(self.orbital_features)
 
-    def tokens(self, loader: TokenLoader) -> list[MoleculeTokens]:
-        """The full token objects of every fragment, in fragment order."""
-        return [loader(key) for key in self.fragment_keys]
+    def tokens(self, loader: TokenLoader) -> list[MoleculeTokens | None]:
+        """The full token objects of every fragment, in fragment order, as the sample holds
+        them: open-shell tokens in their donor role with their holes (`with_holes`, open-shell
+        plan P7; a closed shell's token file as stored), so they line up with the sample's
+        orbital arrays."""
+        from ksmech.orbitals.tokens import with_holes
+
+        tokens = [loader(key) for key in self.fragment_keys]
+        return [None if t is None else with_holes(t) for t in tokens]  # a missing file stays None
 
 
 def with_pair_bond_orders(sample: MechanismSample, bonds: np.ndarray) -> np.ndarray:
@@ -453,15 +466,22 @@ class EditTarget:
     wiberg: np.ndarray
     nonbonding: np.ndarray
     unpaired: np.ndarray
+    charges: np.ndarray | None = None  # the label drawing's formal charges when it is not the
+    #   drawn reactant (a one-electron source's redrawn label, `drawings.source_label`)
 
 
 def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipReason:
     """The target of a step, or why it has none: an edit-label code, a bond without a Wiberg
     index, or a label that is no valid edit of the reactant (`lewis.check_edit`). The label on
-    the global atoms is closed under the pool's symmetry (`symmetry.symmetric_closure`)."""
+    the global atoms is closed under the pool's symmetry (`symmetry.symmetric_closure`). A
+    one-electron source whose drawn reactant gives no class takes the label and the Lewis
+    structure of the reactant drawing that gives one (`drawings.source_label`, spec v10)."""
     edit = step_edit(step)
-    mol_label = edit if isinstance(edit, EditSkip) else edit_label(step, edit)
-    label = mol_label if isinstance(mol_label, EditSkip) else to_global(mol_label, rt.global_atom)
+    found = edit if isinstance(edit, EditSkip) else source_label(step, edit)
+    if isinstance(found, EditSkip):
+        return SkipReason(str(found))
+    k, mol, mol_label = found
+    label = to_global(mol_label, rt.global_atom)
     if isinstance(label, EditSkip):
         return SkipReason(str(label))
     try:
@@ -470,12 +490,28 @@ def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipRe
         log.info("%s: %s", step.step_id, exc)
         return SkipReason.NO_BOND_INDEX
     atoms = np.concatenate([f.tokens.atom_categorical() for f in rt.fragments])
+    if k:
+        return _redrawn_target(step, rt, edit, mol, mol_label, label, lewis, atoms)
     label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], lewis.bonds)
     problem = check_edit(label, lewis.bonds, lewis.nonbonding, open_shell_labels(step.source))
     if problem is not None:
         log.info("%s: the edit label is no valid edit of the reactant (%s)", step.step_id, problem)
         return SkipReason.R_CHECK_FAILED
     return EditTarget(edit, mol_label, label, *lewis)
+
+
+def _redrawn_target(step, rt, edit, mol, mol_label, label, lewis, atoms) -> EditTarget | SkipReason:
+    """The target on the reactant drawing `mol` (`edit_target`): its bond orders, lone pairs, N,
+    u and formal charges (`drawings.drawing_of`, which closes and checks the label), the Wiberg
+    indices of the drawn pool (the sigma skeleton is the same)."""
+    d = drawing_of(rt, mol, label, lewis.bonds, atoms, open_shell_labels(step.source))
+    if isinstance(d, str):
+        log.info("%s: the redrawn label is no valid edit of its drawing (%s)", step.step_id, d)
+        return SkipReason.R_CHECK_FAILED
+    bonds = lewis.bonds.copy()
+    bonds[:, 2] = d.orders
+    return EditTarget(edit, mol_label, d.edit_label, bonds, d.lone_pairs, lewis.wiberg,
+                      d.nonbonding, d.unpaired, d.charges)  # fmt: skip
 
 
 def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: EditTarget) -> None:
@@ -577,6 +613,13 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
     sample.edit_label, sample.bonds = target.label, target.bonds
     sample.lone_pairs, sample.wiberg = target.lone_pairs, target.wiberg
     sample.nonbonding, sample.unpaired = target.nonbonding, target.unpaired
+    if target.charges is not None:  # the label's drawing is not the dataset's
+        sample.atom_categorical = sample.atom_categorical.copy()
+        sample.atom_categorical[:, 1], sample.atom_categorical[:, 2] = (
+            target.charges,
+            target.unpaired,
+        )
+        sample.pair_z = with_pair_bond_orders(sample, target.bonds)
     _set_drawings(sample, step, rt, target)
     _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))
@@ -650,6 +693,8 @@ def _strategy_splits(steps, strategy: str, seed: int, frozen) -> dict[str, split
         "molecule": splits.split_by_molecule,
         "random_leaky": splits.split_by_pathway,
         "scaffold": splits.split_by_scaffold,
+        "rc_molecule": splits.split_rc_molecule,
+        "flower_given": splits.split_flower_given,
     }
     if strategy in simple:
         pinned = _frozen_parts(frozen, strategy)
@@ -667,18 +712,23 @@ def split_ids(
     seed: int = 0,
     frozen: dict[str, list[str]] | None = None,
     conflicts: Counter | None = None,
+    excluded: Counter | None = None,
 ) -> dict[str, list[str]]:
     """Split name (`<strategy>_<part>`) -> step ids. Raises ValueError when the strategy
     cannot run on these steps (leave-one-class-out without class labels). With `frozen` (the
     ids of a `split_frozen_<strategy>.json` snapshot) existing steps keep their parts
     (`data.splits`); new steps of a group frozen in two parts are left out and counted per
-    split name in `conflicts` (SPLIT_CONFLICT)."""
+    split name in `conflicts` (SPLIT_CONFLICT). The steps a strategy cannot place (loco's
+    unlabelled and leaking steps, rc_molecule's LEAK_GUARD) are counted per split name in
+    `excluded`."""
     if strategy == "random":
         raise ValueError("the per-step split is now `random_leaky` and must be asked for by name")
     per = _strategy_splits(steps, strategy, seed, frozen)
-    if conflicts is not None:
-        for name, sp in per.items():
+    for name, sp in per.items():
+        if conflicts is not None:
             conflicts[name] += len(sp.conflict)
+        if excluded is not None:
+            excluded[name] += len(sp.excluded)
     return {f"{name}_{part}": getattr(sp, part) for name, sp in per.items() for part in PARTS}
 
 
@@ -913,15 +963,17 @@ def write_strategy_views(
     statistics of every training part. A strategy that cannot run on the source is reported,
     not raised."""
     parquet = steps_path(source, processed_dir)
-    report: dict = {"splits": {}, "strategies_not_applicable": {}, "frozen": {}}
+    report: dict = {"splits": {}, "strategies_not_applicable": {}, "frozen": {}, "excluded": {}}
     for strategy in strategies:
         frozen = load_frozen_split(source, strategy, processed_dir)
         conflicts: Counter = Counter()
+        excluded: Counter = Counter()
         try:
-            ids = split_ids(steps, strategy, seed, frozen, conflicts)
+            ids = split_ids(steps, strategy, seed, frozen, conflicts, excluded)
         except ValueError as exc:
             report["strategies_not_applicable"][strategy] = str(exc)
             continue
+        report["excluded"][strategy] = dict(excluded)  # LEAK_GUARD for rc_molecule
         if frozen is not None:
             gone = frozen_excluded(frozen, steps)
             report["frozen"][strategy] = {"SPLIT_CONFLICT": dict(conflicts), "excluded": gone}

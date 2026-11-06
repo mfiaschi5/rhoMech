@@ -30,19 +30,40 @@ With localized orbitals, term 3 of a pair splits into a coupling times a factor 
 only on the two orbitals' canonical spectra:
 
 ```
-G(r, s) = Σ_k Σ_m  2 · p(r, k) · p(s, m) / (ε_k − ε_m)
+G(r, s) = Σ_k Σ_m  (n_k − n_m) · p(r, k) · p(s, m) / (ε_k − ε_m)
 ```
 
-Here *k* runs over the occupied canonical orbitals, *m* over the virtual ones, `p(r, k)` is the
-weight of canonical orbital *k* in localized orbital *r*, and ε are the canonical energies.
+Here *k* runs over the canonical orbitals of the donor's block, *m* over those of the
+acceptor's, `p(r, k)` is the weight of canonical orbital *k* in localized orbital *r*, ε are the
+canonical energies and *n* their occupations.
 
-- G is negative.
-- A larger |G| means a smaller effective gap.
+- For a filled donor and an empty acceptor `n_k − n_m = 2`: the familiar factor 2, two
+  electrons stabilized.
+- For a radical's singly occupied orbital and an empty acceptor, or for a filled donor and a
+  radical's hole, it is 1: a one-electron or a three-electron interaction.
+- For a singly occupied orbital and a hole it is 0, and G is not defined.
+- For a closed-shell pair G is negative, and a larger |G| means a smaller effective gap.
 - The dominant canonical pair (*k*, *m*) in the sum is the physical explanation of a predicted
   bond.
 
 G is defined for every occupied–virtual pair, between molecules and within one. The model gets
 G and log|G|.
+
+## The two-level gap factor g2
+
+A radical's singly occupied orbital lies inside the gap, close to the filled or the empty
+levels, and between two molecules a filled level can cross an empty one. A single small
+denominator then makes G huge. The column **g2** replaces each denominator by the exact one of
+a two-level system coupled by β:
+
+```
+D = ( |ε_k − ε_m| + sqrt( (ε_k − ε_m)² + 4 β² ) ) / 2
+```
+
+D is the gap itself when the gap is large and |β| at degeneracy, so g2 stays finite and equals
+G when β = 0. Inside one molecule β is the cross-centre coupling below; between molecules it is
+one constant, 0.40 eV, the typical coupling of two orbitals one bond apart. A model reads G,
+g2, or both.
 
 ## Why no contact geometry
 
@@ -103,3 +124,15 @@ of donation, weighted by the orbitals' centre weights on *i* and *j*.
 Ranked by |G| alone, with no learned parameter, these atom pairs give the **physics floor**,
 the baseline every trained model must beat. The orbital pair with the largest term is the
 orbital reading of a forming bond.
+
+## Homolysis and recombination
+
+Two pairs of orbitals need channels of their own.
+
+- **A bond with its own antibond** (σ with σ\*, π with π\*): their G is the gap factor of
+  breaking that very bond. It is pooled onto the bond as **B^own**, kept apart from the pooled
+  gap factor of forming bonds. Ranking break anchors by |B^own| next to form anchors by |G|
+  makes a homolysis reachable for the physics floor.
+- **Two radicals meeting**: the singly occupied orbital of one and the hole of the other have
+  no G (their occupations cancel). A flag and the difference of their levels mark these
+  recombination pairs.

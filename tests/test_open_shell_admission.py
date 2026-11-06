@@ -71,8 +71,10 @@ def test_every_curated_step_passes_the_laws(steps):
 
 
 def test_every_admitted_step_with_a_u2_species_is_an_exemption(steps):
+    """P8's invariant: a non-Hund u >= 2 species (MULTI_RADICAL_SPECIES) only in an exempt
+    step; a Hund case (triplet O2) may stand in any admitted step."""
     exempt = {i for src, i in domain.multi_radical_exemptions() if src == "pmechdb"}
-    multi = {i for i, s in steps.items() if _admitted(s) and domain.max_species_unpaired(s) >= 2}
+    multi = {i for i, s in steps.items() if _admitted(s) and domain.high_spin_species(s)[1]}
     assert multi <= exempt
 
 

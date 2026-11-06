@@ -294,7 +294,10 @@ def _placed(m: Chem.Mol, nonbonding, parity: list[int], excess: int) -> tuple[in
         out[(centres or [m.GetAtomWithIdx(short[0])])[0].GetIdx()] += excess
         return tuple(out)
     heavy = [a.GetIdx() for a in m.GetAtoms() if a.GetAtomicNum() > 1]
-    ranks = list(Chem.CanonicalRankAtoms(m, breakTies=False, includeChirality=False))
+    plain = Chem.Mol(m)
+    for a in plain.GetAtoms():
+        a.SetAtomMapNum(0)  # a mapped drawing's atoms rank by element and bonds, not by map
+    ranks = list(Chem.CanonicalRankAtoms(plain, breakTies=False, includeChirality=False))
     if heavy and excess % len(heavy) == 0 and len({ranks[i] for i in heavy}) == 1:
         for i in heavy:
             out[i] += excess // len(heavy)

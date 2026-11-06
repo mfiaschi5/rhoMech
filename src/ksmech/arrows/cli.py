@@ -18,6 +18,7 @@ from ksmech.arrows.steps import (
     DEFAULT_STRATEGIES,
     STRATEGIES,
     build_all_samples,
+    default_strategies,
     write_views_from_store,
 )
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps, source_dir
@@ -46,9 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--strategy",
         nargs="+",
-        default=list(DEFAULT_STRATEGIES),
+        default=None,
         choices=STRATEGIES,
-        help="random_leaky (the per-step split) only when named",
+        help=f"default {' '.join(DEFAULT_STRATEGIES)} (rmechdb: rc_molecule flower_given); "
+        "random_leaky (the per-step split) only when named",
     )
     s.add_argument("--seed", type=int, default=0)
     s.add_argument(
@@ -159,6 +161,7 @@ def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
 
 
 def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
+    args.strategy = list(args.strategy or default_strategies(args.source))
     if args.views_only:
         return _views_only(args, console)
     report = build_all_samples(

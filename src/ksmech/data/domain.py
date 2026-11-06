@@ -115,6 +115,9 @@ class DomainCode(StrEnum):
     # the electron-flow law's ingest codes (open-shell plan P6, `resonance.classify_step`)
     NULL_STEP = "NULL_STEP"  # identical sides: R = 0 (never a resonance pair)
     NONCONJUGATED_SHIFT = "NONCONJUGATED_SHIFT"  # one identity key, every flow unbalanced
+    # P8: a non-metal species with u >= 2 that is not a Hund case, or one the table decides
+    # singlet that no closed-shell drawing reaches (`pairing.redraw`); exempt steps aside
+    MULTI_RADICAL_SPECIES = "MULTI_RADICAL_SPECIES"
 
 
 class DomainClass(StrEnum):
@@ -133,6 +136,9 @@ class DomainClass(StrEnum):
     CARBENE_SINGLET = "CARBENE_SINGLET"  # the species table pairs a drawn carbene or CO (P4)
     OSM_CU2 = "OSM_CU2"  # an admitted Cu(II) fragment, u = 1 (the open_shell_metal cohort, P4)
     OSM_FE3 = "OSM_FE3"  # an admitted high-spin Fe(III) fragment, u = 5 (idem)
+    PAIRED_DRAWING = "PAIRED_DRAWING"  # a singlet species redrawn closed-shell (P8, `pairing`)
+    HIGH_SPIN_DRAWING = "HIGH_SPIN_DRAWING"  # a Hund-case species redrawn unpaired (P8)
+    RADICAL_STEP = "RADICAL_STEP"  # a step of a one-electron source (rmechdb, P8)
 
 
 PRECEDENCE = (
@@ -144,6 +150,7 @@ PRECEDENCE = (
     DomainCode.MULTIPLICITY_AMBIGUOUS,  # listed so that every count report shows them
     DomainCode.SPIN_NOT_CONSERVED,
     DomainCode.SPIN_RULE_PENDING,
+    DomainCode.MULTI_RADICAL_SPECIES,
     DomainCode.NOT_ELEMENTARY,
     DomainCode.NULL_STEP,  # step codes of the flow law: after every fragment and law code
     DomainCode.NONCONJUGATED_SHIFT,
@@ -155,6 +162,8 @@ V1_METHYL = "V1 methyl [C] +3H"
 V1_IMIDAZOLYL = "V1 imidazol-2-yl C +H"
 A1_RULE = "A1 bare alkali +1"
 BL_RULE = "BL_NAMED"
+PAIRED_RULE = "P paired drawing"  # P8: the drawings the spin decision asks for
+HIGH_SPIN_RULE = "H high-spin drawing"
 # the class each repair rule gives a step (R1 gives none: a charge typo, not a drawing choice)
 RULE_CLASS = {
     DATIVE_RULE: DomainClass.REPAIRED_DATIVE,
@@ -162,6 +171,8 @@ RULE_CLASS = {
     V1_IMIDAZOLYL: DomainClass.REPAIRED_V1,
     A1_RULE: DomainClass.REPAIRED_A1,
     BL_RULE: DomainClass.REPAIRED_BL,
+    PAIRED_RULE: DomainClass.PAIRED_DRAWING,
+    HIGH_SPIN_RULE: DomainClass.HIGH_SPIN_DRAWING,
 }
 REPAIRS_V1 = Path(__file__).with_name("repairs_v1.json")
 CLASS_SEP = "+"
@@ -173,6 +184,7 @@ CLOSED_SHELL_CLASSES = (  # the P0a and P1 classes, every source admits them
     DomainClass.REPAIRED_A1,
     DomainClass.REPAIRED_BL,
     DomainClass.METAL_SUSPECT,
+    DomainClass.PAIRED_DRAWING,  # P8: a closed-shell drawing, admitted wherever it occurs
 )
 ADMIT: dict[str, frozenset[str]] = {
     str(s): frozenset(map(str, CLOSED_SHELL_CLASSES)) for s in Source
@@ -187,10 +199,13 @@ class OpenShellPolicy(StrEnum):
 @dataclass(frozen=True)
 class DomainPolicy:
     """What a source's ingest does with a domain phenomenon: drawn radicals (P3) and open-shell
-    metals (P4). Only PMechDB admits either by rule; every other polar source keeps EXCLUDE
-    until its next re-ingest under `data.spin` (P8). `open_shell_labels` is the source's
-    elementary rule, a label rule only (P6): a source of one-electron steps (rmechdb, P8)
-    accepts atom entries of R of +-1 and +-2; the polar sources keep +-2. The source never
+    metals (P4). PMechDB admits both by rule; ReactMech, re-ingested under `data.spin` in P8,
+    admits open-shell metals by rule (an odd metal without a row is MULTIPLICITY_AMBIGUOUS
+    instead of OPEN_SHELL_METAL) and keeps drawn radicals out; rmechdb admits both.
+    `open_shell_labels` is the source's elementary rule (P6), read by the labels and by the
+    open-shell laws (P8): a source of one-electron steps (rmechdb) accepts atom entries of R of
+    +-1 and +-2, and its spin is conserved only by a step whose R moves no single electron; the
+    polar sources keep +-2. The source never
     becomes a sample input, a model option or a decoder argument."""
 
     open_shell: OpenShellPolicy = OpenShellPolicy.EXCLUDE
@@ -202,7 +217,12 @@ POLICY: dict[str, DomainPolicy] = {str(s): DomainPolicy() for s in Source}
 POLICY[str(Source.PMECHDB)] = DomainPolicy(
     OpenShellPolicy.ADMIT_BY_RULE, OpenShellPolicy.ADMIT_BY_RULE
 )
-POLICY[str(Source.RMECHDB)] = DomainPolicy(open_shell_labels=True)  # one-electron steps (P8)
+POLICY[str(Source.REACTMECH)] = DomainPolicy(  # its re-ingest under data.spin (P8)
+    OpenShellPolicy.EXCLUDE, OpenShellPolicy.ADMIT_BY_RULE
+)
+POLICY[str(Source.RMECHDB)] = DomainPolicy(  # one-electron steps (P8)
+    OpenShellPolicy.ADMIT_BY_RULE, OpenShellPolicy.ADMIT_BY_RULE, open_shell_labels=True
+)
 CURATION_DIR = Path(__file__).with_name("curation")
 
 
@@ -217,11 +237,18 @@ OPEN_SHELL_CODES = frozenset(  # what the open-shell laws put in place of RADICA
         DomainCode.MULTIPLICITY_AMBIGUOUS,
         DomainCode.SPIN_NOT_CONSERVED,
         DomainCode.SPIN_RULE_PENDING,
+        DomainCode.MULTI_RADICAL_SPECIES,
         DomainCode.NOT_ELEMENTARY,
     ]
 )
 ADMITTED_OPEN_SHELL = frozenset(
-    [DomainClass.RADICAL_SPECTATOR, DomainClass.RADICAL_REACTIVE, DomainClass.CARBENE_SINGLET]
+    [
+        DomainClass.RADICAL_SPECTATOR,
+        DomainClass.RADICAL_REACTIVE,
+        DomainClass.CARBENE_SINGLET,
+        DomainClass.HIGH_SPIN_DRAWING,
+        DomainClass.RADICAL_STEP,
+    ]
 )
 ADMITTED_METAL = frozenset([DomainClass.OSM_CU2, DomainClass.OSM_FE3])
 for _source, _policy in POLICY.items():  # a source that admits open shells admits their classes
@@ -679,11 +706,111 @@ def _curation(source: str) -> tuple[tuple[str, str], ...]:
     return tuple((r["step_id"], r["reason"]) for r in rows)
 
 
-def multi_radical_exemptions() -> set[tuple[str, str]]:
+def _odd_count(m: Chem.Mol) -> int:
+    from ksmech.arrows.apply import nonbonding_electrons  # arrows reads data: lazy
+
+    return sum(nonbonding_electrons(a) % 2 for a in m.GetAtoms())
+
+
+def drawing_decision(frag: Chem.Mol) -> tuple[str | None, int]:
+    """The drawing one fragment's spin asks for (open-shell plan P8, step 3): (PAIRED_RULE, 0)
+    when the species table decides a species drawn with odd-N atoms singlet; (HIGH_SPIN_RULE,
+    u) when a Hund row raises a drawing with fewer odd-N atoms to u (O=O -> [O][O]); (None, 0)
+    otherwise. A metal fragment's spin is the metal table's (P4) and is never redrawn."""
+    m = spin.kekule_copy(frag)
+    if any(_is_metal(a) for a in m.GetAtoms()):
+        return None, 0
+    odd = _odd_count(m)
+    if odd and spin.rdkit_unpaired(m) >= 2 and spin.assign(m).unpaired == 0:
+        return PAIRED_RULE, 0
+    raised, _ = spin.spin_of_drawing(m)
+    if raised > spin.rdkit_unpaired(m) and raised >= 2 and hund_case(m):
+        return HIGH_SPIN_RULE, raised  # not [O]: its own row is the drawing
+    return None, 0
+
+
+def hund_case(frag: Chem.Mol) -> bool:
+    """The species table holds this drawing's species as a Hund case (one degenerate open
+    group, `spin.is_hund_row`): its own row when it has one, else a Hund row with its v1 key
+    (a Hund verdict holds for every drawing of the species, O=O and [O][O])."""
+    from ksmech.data.resonance import sigma_key  # resonance reads domain: lazy
+
+    entries = spin.species_table()["entries"]
+    own = entries.get(chem.unmapped_canonical(frag))
+    if own is not None:
+        return spin.is_hund_row(own)
+    key = sigma_key(frag)
+    return any(spin.is_hund_row(e) and spin._v1_key(s) == key for s, e in entries.items())
+
+
+def _apply_fragment(mol: Chem.Mol, atoms: Sequence[int], frag: Chem.Mol) -> Chem.Mol:
+    """`mol` (Kekule) with the bonds, charges and radical electrons of `frag` (a redrawing of
+    its fragment on `atoms`, Kekule) copied onto those atoms; H counts stay as drawn."""
+    rw = Chem.RWMol(mol)
+    for a in frag.GetAtoms():
+        atom = rw.GetAtomWithIdx(atoms[a.GetIdx()])
+        atom.SetNumExplicitHs(atom.GetTotalNumHs())
+        atom.SetNoImplicit(True)
+        atom.SetFormalCharge(a.GetFormalCharge())
+        atom.SetNumRadicalElectrons(a.GetNumRadicalElectrons())
+    for b in frag.GetBonds():
+        i, j = atoms[b.GetBeginAtomIdx()], atoms[b.GetEndAtomIdx()]
+        rw.GetBondBetweenAtoms(i, j).SetBondType(b.GetBondType())
+    out = rw.GetMol()
+    with rdBase.BlockLogs():
+        out.UpdatePropertyCache(strict=False)
+    return out
+
+
+def redrawn_side(mol: Chem.Mol, side: str) -> tuple[Chem.Mol, list[tuple[str, str, str, str]]]:
+    """Every fragment of one side in the drawing its spin asks for (`drawing_decision`,
+    `pairing.redraw`), with the repairs as (side, rule, before, after). A fragment the search
+    cannot redraw stays as drawn (the spin law then names it). The side is returned Kekule
+    when a fragment was redrawn (it is re-parsed before it is coded)."""
+    from ksmech.data.pairing import redraw
+
+    out, repairs = None, []
+    for atoms, frag in _fragments(mol):
+        rule, target = drawing_decision(frag)
+        new = redraw(spin.kekule_copy(frag), target) if rule else None
+        if new is None:
+            continue
+        Chem.Kekulize(new, clearAromaticFlags=True)
+        out = _apply_fragment(spin.kekule_copy(mol) if out is None else out, atoms, new)
+        repairs.append((side, rule, *_before_after(frag, new)))
+    return (mol if out is None else out), repairs
+
+
+def multi_radical_species(frag: Chem.Mol) -> bool:
+    """MULTI_RADICAL_SPECIES (open-shell plan P8, step 3): a non-metal species with u >= 2
+    after the decision (`spin.assign`, raised by `spin.spin_of_drawing`) that is not a Hund
+    case (`hund_case`, the only u >= 2 form the tokens represent), or one the table decides
+    singlet that is still drawn with odd-N atoms (no closed-shell drawing reached it: an
+    open-shell singlet biradical). A species without a count is the spin law's
+    MULTIPLICITY_UNTABULATED or MULTIPLICITY_AMBIGUOUS, not this."""
+    m = spin.kekule_copy(frag)
+    if any(_is_metal(a) for a in m.GetAtoms()):
+        return False
+    a = spin.assign(m)
+    if not a.assigned:
+        return False
+    if a.unpaired == 0:  # the table's singlet (not RDKit's count of a hypervalent drawing)
+        return a.source == spin.SPECIES and _odd_count(m) > 0
+    u = max(a.unpaired, spin.spin_of_drawing(m)[0])
+    return u >= 2 and not hund_case(m)
+
+
+@cache
+def multi_radical_exemptions() -> frozenset[tuple[str, str]]:
     """(source, step id) of every counted exemption of the MULTI_RADICAL_SPECIES policy
-    (`curation/multi_radical_exemptions.json`; written in P3, read by P8's policy)."""
+    (`curation/multi_radical_exemptions.json`; written in P3, read by P8's policy). An exempt
+    step's species are kept as drawn: neither redrawn nor named multi-radical."""
     rows = json.loads((CURATION_DIR / "multi_radical_exemptions.json").read_text())["entries"]
-    return {(r["source"], r["step_id"]) for r in rows}
+    return frozenset((r["source"], r["step_id"]) for r in rows)
+
+
+def is_exempt(step_id: str | None) -> bool:
+    return step_id is not None and any(step_id == i for _, i in multi_radical_exemptions())
 
 
 def side_spins(mol: Chem.Mol) -> tuple[list[int | str], list[int]]:
@@ -692,15 +819,21 @@ def side_spins(mol: Chem.Mol) -> tuple[list[int | str], list[int]]:
     return [spin.species_u(f) for f in frags], [spin.rdkit_unpaired(f) for f in frags]
 
 
-def spin_law(reactants: Chem.Mol, products: Chem.Mol) -> DomainCode | None:
-    """Law (u) of the open-shell admission, None when it holds: every species has a count and
-    the total is conserved across the step."""
+def spin_law(
+    reactants: Chem.Mol, products: Chem.Mol, conserved: bool = True, exempt: bool = False
+) -> DomainCode | None:
+    """Law (u) of the open-shell admission, None when it holds: every species has a count, no
+    species is a multi-radical one (`multi_radical_species`, unless the step is `exempt`), and,
+    for a step whose R moves no single electron (`conserved`), the total is conserved."""
     (r, _), (p, _) = side_spins(reactants), side_spins(products)
     every = r + p
     for code in (DomainCode.MULTIPLICITY_UNTABULATED, DomainCode.MULTIPLICITY_AMBIGUOUS):
         if str(code) in every:
             return code
-    if sum(r) != sum(p):
+    frags = [f for mol in (reactants, products) for _, f in _fragments(mol)]
+    if not exempt and any(multi_radical_species(f) for f in frags):
+        return DomainCode.MULTI_RADICAL_SPECIES
+    if conserved and sum(r) != sum(p):
         return DomainCode.SPIN_NOT_CONSERVED
     return None
 
@@ -763,6 +896,22 @@ def max_species_unpaired(step: ElementaryStep) -> int:
     return max((spin.rdkit_unpaired(f) for f in frags), default=0)
 
 
+def high_spin_species(step: ElementaryStep) -> tuple[bool, bool]:
+    """(holds a non-metal species with u >= 2 under `spin.assign` that is a Hund case, holds
+    one that is not): an admitted step may hold the first (O2, O(3P)); the second only as a
+    counted exemption of MULTI_RADICAL_SPECIES (P8)."""
+    hund = other = False
+    for smi in (step.reactants_smiles, step.products_smiles):
+        for _, frag in _fragments(chem.parse_mapped(smi)):
+            m = spin.kekule_copy(frag)
+            if any(_is_metal(a) for a in m.GetAtoms()):
+                continue
+            a = spin.assign(m)
+            if a.assigned and a.unpaired >= 2:
+                hund, other = (True, other) if hund_case(m) else (hund, True)
+    return hund, other
+
+
 def _reparsed(mol: Chem.Mol, side: str, repairs: Sequence[tuple[str, ...]]) -> Chem.Mol:
     """A repaired side re-parsed from its canonical mapped SMILES (sanitized as at ingest;
     `chem.SanitizeError` propagates), so its radical electrons and rings are recomputed."""
@@ -772,11 +921,16 @@ def _reparsed(mol: Chem.Mol, side: str, repairs: Sequence[tuple[str, ...]]) -> C
 
 
 def screen_step(
-    reactants: Chem.Mol, products: Chem.Mol, repair: bool = True, step_id: str | None = None
+    reactants: Chem.Mol,
+    products: Chem.Mol,
+    repair: bool = True,
+    step_id: str | None = None,
+    redraw: bool = True,
 ) -> Screen:
-    """Repair (V1, A1 and the named repairs, then R1, then the dative law), then code both
-    sides: the step's code is the first of `PRECEDENCE` that any fragment has. Repaired sides
-    are re-parsed after the drawing repairs and again before they are coded."""
+    """Repair (V1, A1 and the named repairs, then R1, then the dative law, then, with
+    `redraw`, the spin redrawings of `redrawn_side` unless the step is an exemption), then
+    code both sides: the step's code is the first of `PRECEDENCE` that any fragment has.
+    Repaired sides are re-parsed after the drawing repairs and again before they are coded."""
     r, p, repairs = reactants, products, []
     if repair:
         r, p, v_rep = completed_step(r, p, step_id)
@@ -784,7 +938,12 @@ def screen_step(
         r, r_rep = _r1_side(r, "reactants")
         p, p_rep = _r1_side(p, "products")
         r, p, d_rep = dative_step(r, p)
-        later = r_rep + p_rep + d_rep
+        s_rep = []
+        if redraw and not is_exempt(step_id):
+            r, r_s = redrawn_side(r, "reactants")
+            p, p_s = redrawn_side(p, "products")
+            s_rep = r_s + p_s
+        later = r_rep + p_rep + d_rep + s_rep
         r, p = _reparsed(r, "reactants", later), _reparsed(p, "products", later)
         repairs = v_rep + later
     (r_codes, r_sus), (p_codes, p_sus) = side_codes(r), side_codes(p)

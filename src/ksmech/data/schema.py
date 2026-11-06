@@ -121,6 +121,8 @@ class ElementaryStep:
     domain_exclusion: str | None = None  # `data.domain.DomainCode`: outside the closed shell
     charge_repair: str | None = None  # JSON of the ingest charge repairs (`data.domain`)
     domain_class: str | None = None  # `data.domain.DomainClass` values joined by '+'
+    flower_suffix: str | None = None  # rmechdb: FlowER's raw suffix (RS or RC), P8
+    flower_part: str | None = None  # rmechdb: FlowER's part (train, test or train+test)
 
     def __post_init__(self) -> None:
         self.source = Source(self.source)
@@ -140,6 +142,8 @@ class ElementaryStep:
             "domain_exclusion": self.domain_exclusion,
             "charge_repair": self.charge_repair,
             "domain_class": self.domain_class,
+            "flower_suffix": self.flower_suffix,
+            "flower_part": self.flower_part,
         }
 
     @classmethod
@@ -158,6 +162,8 @@ class ElementaryStep:
             domain_exclusion=d.get("domain_exclusion"),
             charge_repair=d.get("charge_repair"),
             domain_class=d.get("domain_class"),
+            flower_suffix=d.get("flower_suffix"),
+            flower_part=d.get("flower_part"),
         )
 
 
@@ -185,5 +191,7 @@ STEP_SCHEMA = pa.schema(
         pa.field("domain_exclusion", pa.string()),
         pa.field("charge_repair", pa.string()),
         pa.field("domain_class", pa.string()),  # nullable; null in files written before it
+        pa.field("flower_suffix", pa.string()),  # rmechdb only (P8); null elsewhere and before
+        pa.field("flower_part", pa.string()),  # rmechdb only (P8)
     ]
 )

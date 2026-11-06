@@ -181,13 +181,79 @@ step boundary: 2-11 species in ID_CRM, 4 in Set1, 5 in Set2.
   58 of the paper's 67 classes are not released.
 - Not used yet: the pathways themselves (step order), ID_CRM's mechanisms.
 
+## rmechdb (RMechDB via FlowER's data release)
+
+Inspected 2026-11-05 (`scripts/probes/flower_inspect.py`, read-only; open-shell plan P8 step 1).
+
+### Where the files are
+
+FlowER (Joung et al., github.com/schwallergroup/FlowER; data figshare 32513667),
+`flower_new_dataset/{train,val,test}.txt` under `data/raw/flower/`. Its RS and RC lines are
+RMechDB's radical steps (Tavakoli, Chiu, Baldi et al., J. Chem. Inf. Model. 2023, PMC9976277).
+License chain: RMechDB is CC-BY-NC-ND per its article; FlowER's repository and figshare record
+carry an MIT label, which is not relied on for the RMechDB lines. Artifacts built from them are
+kept as PMechDB's are (U18): local, the private rhoMech-data and pods, never the public
+repository (not legal advice; the NC clause matters if ChemRho is offered commercially). No
+real RS/RC line is tracked (`tests/test_p8_no_flower_lines.py`); `tests/fixtures/mini_flower.txt`
+is written by hand.
+
+| File | Lines | Numeric suffix | RC | RS | PM | PC |
+|---|---|---|---|---|---|---|
+| `train.txt` (3.1 GB, streamed) | 1,933,750 | 1,902,076 | 1,383 | 3,223 | 12,322 | 14,746 |
+| `val.txt` | 21,723 | 21,723 | 0 | 0 | 0 | 0 |
+| `test.txt` | 218,997 | 216,568 | 136 | 346 | 294 | 1,653 |
+
+2,174,470 lines in all, 2,140,367 with a numeric suffix (about 2.14M).
+
+### Line format
+
+`mapped reactants>>mapped products|SUFFIX`, one elementary step per line, no header. Every atom
+is mapped (RXNMapper style) with explicit H atoms: 0 unmapped atoms and 0 heavy atoms with
+implicit H on the RS/RC lines. The suffix meanings are **inferred**, not documented: RS and RC
+RMechDB's specific and core sets, PM PMechDB, PC unknown; numeric suffixes FlowER's own
+generated steps. Only RS and RC are ingested; the stored column is the raw suffix
+(`flower_suffix`), and the inferred core / specific reading lives only here, to be replaced
+when the official RMechDB CSV joins (D1).
+
+Measured on the RS/RC lines:
+
+- bath gases: `[Ar]` and `[He]` third bodies on 165 lines (RC 137, RS 28), in every case one
+  unbonded atom with one map number on both sides;
+- O2 drawn only `[O][O]` (RC 89, RS 1,210 lines); CO only `[C]=O` (RC 5, RS 28); ozone `[O]O[O]`
+  (RC 10, RS 10) or `[O][O+][O-]` (RC 1, RS 2); N2 `[N]=[N]` on 5 RC lines and `N#N` on 8;
+- metals on RC lines only: Sn 56, Na 12, Si 10, K 3, Mg 3, B 1; Na and K are often drawn
+  covalently (`[O][Na]` ketyls, the Na...benzene Birch adduct, K persulfate).
+
+### Ingest (`ksmech-data ingest --source rmechdb`, `ksmech.data.rmechdb`)
+
+Before the id, in this order: the bath gases are stripped (an unbonded noble-gas atom with one
+map number on both sides; counted per line as the note `NOBLE_GAS_STRIPPED`), then the spin
+redrawings (`domain.redrawn_side`: PAIRED_DRAWING, HIGH_SPIN_DRAWING) give the key. `step_id` is
+`rmechdb-` + 16 hex of SHA-1 of the map-free canonical reaction after both, so a line drawn with
+other maps or with a bath gas shares its twin's id. One step per id: the RC copy wins over RS
+in any file order (note `rc_wins_over_rs`), otherwise the first line in file order (train, val,
+test); every other line is rejected as `DUPLICATE_STEP`. A reaction in both FlowER parts has
+`flower_part` `train+test` (note `in_train_and_test`). The steps carry no arrows: R is the
+difference of the mapped sides. `ingest_report.json` records `via: flower`.
+
+Measured (2026-11-05): 5,088 lines -> 4,535 steps; 553 DUPLICATE_STEP, 165 bath-gas lines, 83
+RC copies kept over RS, 120 reactions in both parts. Domain codes: MULTIPLICITY_AMBIGUOUS 27,
+MULTI_RADICAL_SPECIES 23, NULL_STEP 4 (3 of them identities only after the pairing redraw: an
+ozone, a DMSO2 and an enediyne drawn as biradicals on one side), SPIN_NOT_CONSERVED 1 (O(3P)
+inserting into BrO., R even); 149 resonance steps (147 resonance pairs). PAIRED_DRAWING on 39
+steps. Kept: RC 1,188 and RS 3,145 training steps. Labels (`edit-labels`): 4,293 of 4,333
+(99.08%; MISSING_TOKENS 16, NOT_ELEMENTARY 12, DISSOCIATIVE_ET_STEP 12, 11 of them radical
+reactions of the paired ozone). A step whose drawn reactant gives no class is labeled on the
+reactant drawing that gives one (spec v10; `drawings.source_label`), and its sample holds that
+drawing.
+
 ## Processed: `data/processed/<source>/steps.parquet`
 
 There is one row per `ksmech.data.schema.ElementaryStep`:
 
 | Column | Arrow type | Notes |
 |---|---|---|
-| `step_id` | string | `pmechdb-` + first 16 hex chars of SHA-1 of the raw record (the text inside the quotes) |
+| `step_id` | string | `pmechdb-` + first 16 hex chars of SHA-1 of the raw record (the text inside the quotes); `reactmech-` of the line; `rmechdb-` of the map-free canonical reaction after the bath-gas strip and the spin redrawings |
 | `source` | string | `pmechdb`, `rmechdb`, `reactmech`, `mech_uspto`, `flower` |
 | `pathway_id` | string, nullable | null for PMechDB (not in the release) |
 | `step_index` | int32, nullable | null when `pathway_id` is null |
@@ -197,9 +263,11 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 | `mechanism_class` | string, nullable | null for PMechDB (not in the release) |
 | `conditions` | string, nullable | null for PMechDB (not in the release) |
 | `resonance_step` | bool | reactants and products are resonance structures: one identity key v2 with the atom maps kept and a balanced electron flow (`data.resonance.classify_step`, open-shell plan P6); dropped from the training target |
-| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). On a source that admits open shells by rule (PMechDB, open-shell plan P3) a RADICAL_DRAWN step is re-read by the open-shell laws, and a failed law puts its own code in place: `MULTIPLICITY_UNTABULATED`, `MULTIPLICITY_AMBIGUOUS` (a u >= 2 species the species table, `data.spin_table` v2, lacks or does not assign), `SPIN_NOT_CONSERVED` or `NOT_ELEMENTARY` (an odd atom entry of the arrows' R); a curated step keeps `RADICAL_DRAWN`. `SPIN_RULE_PENDING` (the table re-assigned a species) is P3's code, which old artifacts carry; since P4 such a count stands. Since P4 the same laws re-read an `OPEN_SHELL_METAL` step of a source that admits open-shell metals by rule (PMechDB): a metal fragment the metal table (`spin_tables/metal_v1.json`) assigns no count is `MULTIPLICITY_AMBIGUOUS` (or `MULTIPLICITY_UNTABULATED` when the species table lacks it), and a fragment code the laws do not re-read (`CHARGE_UNREPAIRED`, `METAL_PLACEHOLDER`) keeps the step out under that code. Since P6 the electron-flow law adds two step codes, set where no other code stands (`data.resonance.classify_step`): `NULL_STEP` (identical sides, R = 0; formerly a resonance pair) and `NONCONJUGATED_SHIFT` (one identity key with the atom maps kept, but no balanced flow between any reactant drawing and product form). Null otherwise |
+| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). On a source that admits open shells by rule (PMechDB, open-shell plan P3) a RADICAL_DRAWN step is re-read by the open-shell laws, and a failed law puts its own code in place: `MULTIPLICITY_UNTABULATED`, `MULTIPLICITY_AMBIGUOUS` (a u >= 2 species the species table, `data.spin_table` v2, lacks or does not assign), `SPIN_NOT_CONSERVED` or `NOT_ELEMENTARY` (an odd atom entry of the arrows' R); a curated step keeps `RADICAL_DRAWN`. `SPIN_RULE_PENDING` (the table re-assigned a species) is P3's code, which old artifacts carry; since P4 such a count stands. Since P4 the same laws re-read an `OPEN_SHELL_METAL` step of a source that admits open-shell metals by rule (PMechDB): a metal fragment the metal table (`spin_tables/metal_v1.json`) assigns no count is `MULTIPLICITY_AMBIGUOUS` (or `MULTIPLICITY_UNTABULATED` when the species table lacks it), and a fragment code the laws do not re-read (`CHARGE_UNREPAIRED`, `METAL_PLACEHOLDER`) keeps the step out under that code. Since P6 the electron-flow law adds two step codes, set where no other code stands (`data.resonance.classify_step`): `NULL_STEP` (identical sides, R = 0; formerly a resonance pair) and `NONCONJUGATED_SHIFT` (one identity key with the atom maps kept, but no balanced flow between any reactant drawing and product form). Since P8 one spin and domain law holds for every source: a species with u >= 2 under `data.spin` that is not a Hund case (one degenerate open group: triplet O2, O(3P)), or one the species table decides singlet that no closed-shell drawing reaches (an open-shell singlet biradical), is `MULTI_RADICAL_SPECIES`, except in a counted exemption (`curation/multi_radical_exemptions.json`); a source that keeps drawn radicals out (ReactMech) relabels such a `RADICAL_DRAWN` step with the code too. ReactMech re-reads odd metals under the spin law since P8 (its 2 odd-Pd pilot steps are `MULTIPLICITY_AMBIGUOUS`). A source of one-electron steps (rmechdb) conserves u only in a step whose R moves no single electron, and law (R) does not apply to it. Null otherwise |
 | `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an ingest repair of `ksmech.data.domain` changed the drawing (`CHARGE_REPAIRED`; the step stays): a formal charge (R1, the dative law `D dative onium->M`, A1 `A1 bare alkali +1`) or missing H (V1 `V1 methyl [C] +3H` and `V1 imidazol-2-yl C +H`, the named repairs of `src/ksmech/data/repairs_v1.json`, rule `BL_NAMED`); one row per side, fragment and rule; the SMILES columns hold the repaired sides |
-| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none); an admitted open shell `RADICAL_SPECTATOR` or `RADICAL_REACTIVE` (an R entry on an atom drawn with radical electrons); a curated open-shell exclusion `RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED` (with `RADICAL_DRAWN`); since P4 `CARBENE_SINGLET` (the species table pairs a species drawn with radical electrons: a carbene, CO drawn `[C]=O`) and `OSM_CU2` / `OSM_FE3` (an admitted Cu(II) or high-spin Fe(III) fragment, the open_shell_metal cohort). A training candidate is kept only when its source's admit set (`domain.ADMIT`: the five P0a/P1 classes for every source, plus `RADICAL_SPECTATOR`, `RADICAL_REACTIVE` and `CARBENE_SINGLET` where the source admits open shells by rule and `OSM_CU2`, `OSM_FE3` where it admits open-shell metals by rule) holds all of its classes. Null otherwise |
+| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none); an admitted open shell `RADICAL_SPECTATOR` or `RADICAL_REACTIVE` (an R entry on an atom drawn with radical electrons); a curated open-shell exclusion `RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED` (with `RADICAL_DRAWN`); since P4 `CARBENE_SINGLET` (the species table pairs a species drawn with radical electrons: a carbene, CO drawn `[C]=O`) and `OSM_CU2` / `OSM_FE3` (an admitted Cu(II) or high-spin Fe(III) fragment, the open_shell_metal cohort); since P8 `PAIRED_DRAWING` (a species the species table decides singlet, drawn with odd-N atoms, redrawn as the closed-shell Lewis structure its bonded electrons reach: N#N, ozone O=[O+][O-], the Criegee C=[O+][O-]; every source admits it), `HIGH_SPIN_DRAWING` (a Hund-case species drawn paired, redrawn unpaired: O=O -> [O][O]; none on disk) and `RADICAL_STEP` (every admitted rmechdb step). A training candidate is kept only when its source's admit set (`domain.ADMIT`: the five P0a/P1 classes for every source, plus `RADICAL_SPECTATOR`, `RADICAL_REACTIVE` and `CARBENE_SINGLET` where the source admits open shells by rule and `OSM_CU2`, `OSM_FE3` where it admits open-shell metals by rule) holds all of its classes (rmechdb's also `RADICAL_STEP` and `HIGH_SPIN_DRAWING`). Null otherwise |
+| `flower_suffix` | string, nullable | rmechdb only (P8): FlowER's raw suffix of the line kept, `RS` or `RC`; null for every other source and in files written before it |
+| `flower_part` | string, nullable | rmechdb only (P8): `train`, `test`, or `train+test` for a reaction FlowER holds in both parts |
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`. Charge repairs are also listed one per row in
@@ -210,7 +278,8 @@ Rejected records go to `data/processed/<source>/rejections.csv`, with columns `s
 `RESONANCE_STEP`), `charge_repairs_by_rule` and `domain_class`, and `n_training_steps`
 excludes the resonance steps, the excluded ones and those the admit set leaves out.
 `ingest_report.json` also holds `open_shell` (admitted steps by class, the admitted ones that
-hold a species drawn with u >= 2, the curated exclusions by reason) and `spin` (`data.spin`'s
+hold a non-metal species with u >= 2 that is not a Hund case (each must be an exemption), the
+count of those holding a Hund-case species, the curated exclusions by reason) and `spin` (`data.spin`'s
 rule version, the species table and the metal table with their content hashes).
 
 Two tracked spin tables (`src/ksmech/data/spin_tables/`), read by `data.spin.assign`:
@@ -231,7 +300,18 @@ Two tracked curation files (open-shell plan P3), step ids and reasons, no SMILES
   open-shell laws admit and the hand reading rejects. Each must pass the laws.
 - `src/ksmech/data/curation/multi_radical_exemptions.json`: `entries` of `source`, `step_id`,
   `species` (map-free SMILES of its u >= 2 species), `reason`: the counted exemptions of P8's
-  MULTI_RADICAL_SPECIES policy. Every admitted step with a u >= 2 species must be listed.
+  MULTI_RADICAL_SPECIES policy (an exempt step is neither redrawn nor named multi-radical).
+  Every admitted step with a non-Hund u >= 2 species must be listed. One entry: PMechDB
+  5d007b38 (Et3B + O2), which the spin law still holds back as SPIN_NOT_CONSERVED (the table
+  gives the adduct u = 0).
+
+`data/processed/rmechdb/leakage_audit.json` (`ksmech-data leakage-audit`, `data.leakage`; P8
+step 6): species matched by the identity key v2 of every non-trivial (> 3 heavy atoms)
+fragment; every overlapping step id of RC val/test with PMechDB's training part and any
+PMechDB, ReactMech or mech-USPTO species, of RC val/test reactions with PMechDB and ReactMech
+steps, of rmechdb training with closed_base val/test (LEAK_GUARD for joint training) and the
+reverse. `--write-cohorts` pins `cohort_leak_guard_joint` and `cohort_rc_heldout_overlap`
+(rmechdb), `cohort_rc_heldout_shared` and `cohort_closed_base_rmechdb_overlap` (pmechdb).
 
 ## Processed: `data/processed/<source>/samples/` and `samples_<split>.json`
 
@@ -255,7 +335,12 @@ step's sample once:
 
 A split is a view, `samples_<strategy>_<part>.json` next to the store (its ids and counts, with
 the index and the split file as inputs); strategy `molecule` (default), `scaffold`,
-`loco-<class>` or, only when named, `random_leaky`; part `train`, `val`, `test`. Loaders refuse
+`loco-<class>` or, only when named, `random_leaky`; for rmechdb (P8) `rc_molecule` (default:
+the molecule split over RC, every RS step in training except those sharing a non-trivial
+species with an RC val/test step, LEAK_GUARD, counted in `samples_report.json` under
+`excluded`) and `flower_given` (FlowER's own parts, val drawn as 10% of the FlowER-train RC
+molecule groups; leaky by construction, for the RMechRP comparison only); part `train`, `val`,
+`test`. Loaders refuse
 another schema version and stale or dirty artifacts (STALE_ARTIFACT). On disk the pair arrays
 keep every (occupied, virtual) cell, flattened cell by cell (since v18; v17 kept the
 `pair_valid` cells only, about 89%): `pair_z` as float16 byte planes, the 0/1 features
@@ -442,7 +527,9 @@ the cache, unused by the engine.
 
 One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cache_path`,
 `status` (`ok` / `failed`), `reason` (a `ReasonCode`, empty when ok), `detail`, `warnings`,
-`seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`.
+`seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`,
+and so do the species the spin census refuses before QM (P8: `SPIN_CENSUS_REFUSED`, a
+non-metal with u >= 2 that is not a Hund case or has no count, unless a counted exemption's).
 `method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
 row whose method is its own species' method under the run's configuration
 (`qm.batch.row_method`).

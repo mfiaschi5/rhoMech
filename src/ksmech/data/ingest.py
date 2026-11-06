@@ -18,7 +18,7 @@ from ksmech.data.domain import (
     CURATED_CLASSES,
     DomainClass,
     domain_classes,
-    max_species_unpaired,
+    high_spin_species,
     repair_rule_counts,
 )
 from ksmech.data.io import source_dir, write_resonance_pairs, write_steps
@@ -41,6 +41,7 @@ class IngestResult:
     notes: Counter[str] = field(default_factory=Counter)  # non-fatal normalizations, counted
     _seen: set[str] = field(default_factory=set, repr=False)
     sample: dict | None = None  # (`keep_sample`) n, seed and the accepted steps drawn from
+    via: str | None = None  # the distribution the source's files come in (rmechdb: flower)
 
     def add(self, step_id: str, raw: str, make: Callable[[], ElementaryStep]) -> None:
         """Run one record through `make` and record either the step or the rejection."""
@@ -90,6 +91,7 @@ class IngestResult:
     def report(self) -> dict:
         return {
             "source": str(self.source),
+            "via": self.via,
             "inputs": self.inputs,
             "n_records": self.n_records,
             "n_accepted": len(self.steps),
@@ -116,26 +118,31 @@ class IngestResult:
 
 
 def open_shell_report(steps: list[ElementaryStep]) -> dict:
-    """The open-shell admission of the steps (open-shell plan P3, P4): admitted steps by class,
-    the admitted radical steps that hold a species drawn with u >= 2 (each must be a counted
-    exemption of `curation/multi_radical_exemptions.json`) and the curated exclusions by
-    reason."""
+    """The open-shell admission of the steps (open-shell plan P3, P4, P8): admitted steps by
+    class, the admitted radical steps that hold a non-metal species with u >= 2 that is not a
+    Hund case (each must be a counted exemption of `curation/multi_radical_exemptions.json`),
+    the count of those that hold a Hund-case species (O2, O(3P)), and the curated exclusions
+    by reason."""
     admitted_classes = {str(c) for c in ADMITTED_OPEN_SHELL | ADMITTED_METAL}
     radical = {str(DomainClass.RADICAL_SPECTATOR), str(DomainClass.RADICAL_REACTIVE)}
     curated = {str(c) for c in CURATED_CLASSES}
     admitted, held = Counter(), Counter()
-    multi = []
+    multi, n_hund = [], 0
     for s in steps:
         classes = domain_classes(s.domain_class)
         if s.domain_exclusion is None and classes & admitted_classes:
             admitted.update(classes & admitted_classes)
-            if classes & radical and max_species_unpaired(s) >= 2:
-                multi.append(s.step_id)
+            if classes & radical:
+                hund, other = high_spin_species(s)
+                n_hund += hund
+                if other:
+                    multi.append(s.step_id)
         elif s.domain_exclusion is not None:
             held.update(classes & curated)
     return {
         "admitted": dict(sorted(admitted.items())),
         "admitted_with_u_ge_2": sorted(multi),
+        "admitted_with_hund_species": n_hund,
         "curated_out": dict(sorted(held.items())),
     }
 

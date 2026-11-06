@@ -151,7 +151,9 @@ def test_dative_law_leaves_correctly_charged_adducts_alone(smiles):
 def test_dative_law_needs_the_same_total_on_both_sides():
     step = unmapped_step(ONE_SIDE_ONLY)
     assert step.charge_repair is None and step.domain_class is None
-    assert step.domain_exclusion == DomainCode.OPEN_SHELL_METAL  # the odd Cu(II) adduct stays
+    # the odd Cu(II) adduct stays out: since P8 ReactMech re-reads odd metals under data.spin,
+    # and this unscanned Cu(II) species has no confirmed row
+    assert step.domain_exclusion == DomainCode.MULTIPLICITY_UNTABULATED
 
 
 def test_fragments_that_would_overdraw_the_side_leave_it_as_drawn():
@@ -441,11 +443,24 @@ def test_the_fixed_molecules_pass_the_screen_unchanged(name):
     assert Chem.MolToSmiles(screen.reactants) == Chem.MolToSmiles(frag(MOLECULES[name]))
 
 
-@pytest.mark.parametrize("name", sorted(OPEN_SHELL))
+PAIRED_FIXTURES = {"ozone_drawn", "ozone_charge_separated", "n2_drawn"}  # P8: singlet species
+
+
+@pytest.mark.parametrize("name", sorted(set(OPEN_SHELL) - PAIRED_FIXTURES))
 def test_open_shell_fixtures_are_excluded_never_repaired_or_flagged(name):
     screen = same_on_both_sides(OPEN_SHELL[name][0])
     assert screen.code in (DomainCode.RADICAL_DRAWN, DomainCode.OPEN_SHELL_METAL)
     assert not screen.repairs and not screen.classes
+
+
+@pytest.mark.parametrize("name", sorted(PAIRED_FIXTURES))
+def test_singlet_open_shell_fixtures_are_redrawn_paired(name):
+    """P8's pairing rule: ozone and N2 drawn with odd-N atoms are decided singlet by the
+    species table and redrawn closed shell on both sides, counted as PAIRED_DRAWING."""
+    screen = same_on_both_sides(OPEN_SHELL[name][0])
+    assert screen.code is None and screen.classes == {str(DomainClass.PAIRED_DRAWING)}
+    assert {rule for _, rule, _, _ in screen.repairs} == {domain.PAIRED_RULE}
+    assert not any(a.GetNumRadicalElectrons() for a in screen.reactants.GetAtoms())
 
 
 # ---- P3: open shells admitted by counted laws (PMechDB's admit_by_rule)
@@ -557,7 +572,7 @@ def test_pmechdb_admits_metals_and_paired_carbenes_by_the_spin_laws(spectator, e
 
 def test_a_source_that_excludes_open_shell_metals_keeps_open_shell_metal():
     rxn, arrows = _beside("[Cl][Cu][Cl]")
-    step = build_step(step_id="x", source=Source.REACTMECH, rxn_smiles=rxn, arrows=arrows)
+    step = build_step(step_id="x", source=Source.MECH_USPTO, rxn_smiles=rxn, arrows=arrows)
     assert step.domain_exclusion == DomainCode.OPEN_SHELL_METAL and step.domain_class is None
 
 
@@ -594,6 +609,7 @@ def test_the_ingest_report_counts_admitted_open_shells():
     assert report["open_shell"] == {
         "admitted": {"RADICAL_SPECTATOR": 1},
         "admitted_with_u_ge_2": [],
+        "admitted_with_hund_species": 0,
         "curated_out": {},
     }
     assert report["spin"]["spin_table"] == "spin_table_v2"
@@ -608,7 +624,8 @@ def test_domain_class_values_join_and_split():
     assert join_classes(["Z_LATER", "METAL_SUSPECT"]) == "METAL_SUSPECT+Z_LATER"
     assert domain_classes(None) == frozenset()
     assert admit_config("reactmech") == [
-        "METAL_SUSPECT", "REPAIRED_A1", "REPAIRED_BL", "REPAIRED_DATIVE", "REPAIRED_V1"
+        "METAL_SUSPECT", "OSM_CU2", "OSM_FE3", "PAIRED_DRAWING", "REPAIRED_A1", "REPAIRED_BL",
+        "REPAIRED_DATIVE", "REPAIRED_V1"
     ]  # fmt: skip
 
 
@@ -686,7 +703,7 @@ def _rescreened(step: ElementaryStep) -> ElementaryStep:
 # SPIN_RULE_PENDING are CARBENE_SINGLET (2 of them the CO resonance pairs); the 78
 # OPEN_SHELL_METAL steps are OSM_CU2 23, OSM_FE3 19 (2 resonance pairs each) and 36
 # MULTIPLICITY_AMBIGUOUS (12 Cu, REDOX_INCOMPATIBLE or a failed scan; 24 Fe the species table
-# does not confirm). ReactMech keeps OPEN_SHELL_METAL until P8.
+# does not confirm). ReactMech kept OPEN_SHELL_METAL until P8, which re-reads its 2 odd-Pd steps.
 P4_COUNTS = {
     "pmechdb": (
         {None: 12990, "MULTIPLICITY_AMBIGUOUS": 36, "METAL_PLACEHOLDER": 56, "RADICAL_DRAWN": 5,
@@ -697,7 +714,7 @@ P4_COUNTS = {
          "OSM_CU2": 23, "OSM_FE3": 19},
     ),
     "reactmech": (  # the pilot
-        {None: 9998, "OPEN_SHELL_METAL": 2},
+        {None: 9998, "MULTIPLICITY_AMBIGUOUS": 2},  # P8: odd Pd re-read under data.spin
         {DATIVE_RULE: 254, V1_IMIDAZOLYL: 62},  # dative: 49 kept steps re-charged, 205 returned
         {"REPAIRED_DATIVE": 229, "REPAIRED_DATIVE+METAL_SUSPECT": 25, "METAL_SUSPECT": 10,
          "REPAIRED_V1": 62},

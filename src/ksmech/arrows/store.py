@@ -123,6 +123,9 @@ def unpack(
     }
     skip = (*CELL_ARRAYS, "pair_valid", "pair_flags", *DRAWING_ARRAYS.values())
     out = {k: v for k, v in arrays.items() if k not in skip}
+    n_drawn = len(arrays["drawing_orders"])
+    for name in ("drawing_nonbonding", "drawing_unpaired"):  # a v18 shard's drawings: no N, u
+        arrays.setdefault(name, np.zeros((n_drawn, len(arrays["atom_map"])), dtype=np.int8))
     rows = [
         {f: arrays[name][k] for f, name in DRAWING_ARRAYS.items()}
         for k in range(len(arrays["drawing_orders"]))
@@ -144,7 +147,8 @@ def _pack_drawings(sample: MechanismSample) -> dict[str, np.ndarray]:
     out = {}
     for f, name in DRAWING_ARRAYS.items():
         rows = [getattr(d, f) for d in sample.drawings]
-        out[name] = np.array(rows, dtype=np.int8).reshape(-1, width[f])
+        # (rows, width), not (-1, width): a pool of single atoms has no bond row to stack
+        out[name] = np.array(rows, dtype=np.int8).reshape(len(rows), width[f])
     return out
 
 
