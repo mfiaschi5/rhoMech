@@ -47,14 +47,28 @@ def _segment_logsumexp(x: torch.Tensor, seg: torch.Tensor, n: int) -> torch.Tens
     return top + torch.log(total)
 
 
-def _entry_sums(pair_lp, atom_lp, r_pairs, r_atoms, real, i, j) -> torch.Tensor:
+def atom_classes(r_atoms: torch.Tensor, values: tuple[int, ...], real: torch.Tensor):
+    """Class index of every atom entry in the head's alphabet `values` (the decoder's
+    `atom_values`). A real entry outside it raises: an odd entry of a one-electron step is not
+    a class of the {-2, 0, +2} head, and mapping it to one would train on the wrong target."""
+    table = torch.tensor(values, dtype=torch.long, device=r_atoms.device)
+    hit = r_atoms.long()[..., None] == table
+    bad = real & ~hit.any(-1)
+    if bad.any():
+        odd = sorted({int(x) for x in r_atoms[bad].tolist()})
+        raise ValueError(f"atom entries {odd} are outside the head's alphabet {values}")
+    return torch.where(hit.any(-1), hit.long().argmax(-1), values.index(0))
+
+
+def _entry_sums(pair_lp, atom_lp, r_pairs, r_atoms, real, i, j, values) -> torch.Tensor:
     """Sum of the target classes' log-probabilities over the real entries, the anchor (i, j)
-    left out. pair_lp (K, A, A, 3), atom_lp (K, A, 3); targets (K, A, A) and (K, A)."""
+    left out. pair_lp (K, A, A, 3), atom_lp (K, A, len(values)); targets (K, A, A) and (K, A);
+    `values` the atom classes' values."""
     n = r_pairs.shape[1]
     lp = pair_lp.gather(-1, (r_pairs.long() + 1)[..., None])[..., 0]
     m = _upper(n, lp.device)[None] & real[:, :, None] & real[:, None, :]
     m[torch.arange(len(i)), i, j] = False
-    la = atom_lp.gather(-1, (torch.div(r_atoms.long(), 2, rounding_mode="floor") + 1)[..., None])
+    la = atom_lp.gather(-1, atom_classes(r_atoms, values, real)[..., None])
     return torch.where(m, lp, 0.0).sum((1, 2)) + torch.where(real, la[..., 0], 0.0).sum(1)
 
 
@@ -100,6 +114,7 @@ def step_loss(
         _real_atoms(batch)[b],
         i,
         j,
+        dec.atom_values,
     )
     terms = lp_anchor[b, i, j, sign] + sums
     per_sample = -_segment_logsumexp(terms, b, lp_anchor.shape[0])
@@ -122,14 +137,18 @@ def anchor_ranks(lp_anchor: torch.Tensor, batch: dict) -> torch.Tensor:
     score at least as high (set marginalization: any admissible anchor of any variant counts).
     A tie with such a candidate counts against the label, so the rank does not depend on how
     the precision breaks ties: in bfloat16, equivalent atoms tie exactly and a tie used to count
-    as a hit (docs/decisions.md, 2026-10-26)."""
+    as a hit (docs/decisions.md, 2026-10-26). A NaN score counts against the label too, and a
+    NaN label score ranks last: NaN logits compare false with everything, so a model with NaN
+    weights used to score top-1 = 1 (docs/decisions.md, 2026-10-28)."""
     rows = admissible_rows(batch)
     b, _, i, j, sign = rows.unbind(1)
     best = torch.full((lp_anchor.shape[0],), float("-inf"), device=lp_anchor.device)
     best = best.scatter_reduce(0, b, lp_anchor[b, i, j, sign], "amax")
     label = torch.zeros_like(lp_anchor, dtype=torch.bool)
     label[b, i, j, sign] = True
-    return ((lp_anchor >= best[:, None, None, None]) & ~label).flatten(1).sum(1)
+    beats = (lp_anchor >= best[:, None, None, None]) | lp_anchor.isnan()
+    rank = (beats & ~label).flatten(1).sum(1)
+    return torch.where(best.isnan(), lp_anchor[0].numel(), rank)
 
 
 def greedy_edit(dec: EditDecoder, h, p, lp_anchor: torch.Tensor, batch: dict):
@@ -147,7 +166,8 @@ def greedy_edit(dec: EditDecoder, h, p, lp_anchor: torch.Tensor, batch: dict):
     r_pairs = r_pairs + r_pairs.transpose(1, 2)
     real = _real_atoms(batch)
     r_pairs = r_pairs * (real[:, :, None] & real[:, None, :])
-    return r_pairs, (atom.argmax(-1) - 1) * 2 * real
+    values = torch.tensor(dec.atom_values, device=atom.device)
+    return r_pairs, values[atom.argmax(-1)] * real
 
 
 def edit_matches(r_pairs: torch.Tensor, r_atoms: torch.Tensor, batch: dict) -> torch.Tensor:

@@ -3572,7 +3572,8 @@ is now v7.5, sha256 6c6a023f66dd).
   - SCF_NOT_CONVERGED, tblite's 250 cycles: 58 (47);
   - TIMEOUT, more than 900 s: 23 (21);
   - EMBED_FAILED, arynes: 6 (2);
-  - SPIN_PARITY, Fe radicals in products: 100 (0).
+  - SPIN_PARITY, Fe radicals in products: 100 (0). *Corrected 2026-10-28 (open-shell survey):
+    not Fe radicals: Cu 41, placeholder metals 34, Fe 20, Ti charge errors 4 and one P.*
 - **Decision (user).** Retry with relaxed convergence only and the same method string:
   - `--timeout 3600`;
   - `--maxiter 2000`, a new CLI flag on `QMConfig.maxiter`;
@@ -5442,6 +5443,56 @@ committed; the user kept two network views and all three step views.
   - A batch's label tensors are (B, V, A, A) and V now reaches 32: watch memory in the first
     training run.
 
+## 2026-10-26 — ReactMech: the loader checked on the released files, a 10,000-step pilot
+
+- **Download (user request).** FlowER (`data.zip`, Figshare 10.6084/m9.figshare.32513667, MIT),
+  ReactMech (Zenodo 10.5281/zenodo.20305780, CC BY 4.0) and mech-USPTO-31k (Figshare
+  10.6084/m9.figshare.24797220, CC BY 4.0) are in `data/raw/`. mech-USPTO-31k stays for
+  evaluation only (user). The model checkpoints of FlowER and DeepMech were not unpacked.
+- **The ReactMech loader** (`data.reactmech`, no longer `untested_on_real_data`;
+  docs/data_schema.md, "ReactMech").
+  - It reads the ID and OOD split files, each line once: 114,199 steps. 114,046 are accepted
+    and 153 rejected (0.13%).
+  - Classes come from the OOD mechanism files: 9,948 steps of Set1's 5 classes. Set2's 4
+    classes match no step, and the other 58 classes are not released.
+  - `ID_CRM.csv` and `PrebioMech/` are not read.
+  - The real-data test reads only the two val files: 2 min, against 12 for all six.
+- **Size of a full build** (estimated from the PMechDB QM manifest: GFN2 time and record size
+  per heavy-atom count).
+  - ReactMech has 108,615 distinct reactant molecules (median 26 heavy atoms, against 13 in
+    PMechDB). Its QM would take about 2,300 CPU-hours, with 62 GB of QM records and 68 GB of
+    tokens, more than this host has free (105 GB).
+  - FlowER has 1,134,119 distinct molecules, about ten times that. It also contains PMechDB
+    and RMechDB steps, which must leave it before any split with our PMechDB.
+  - Model tokens per step's reactant pool (median / p99): PMechDB 125 / 484, ReactMech
+    251 / 498, FlowER 336 / 1,022. 1.0% of FlowER's steps are over the 1,024 cap.
+- **A 10,000-step pilot (user decision).** `ksmech-data ingest --sample N --seed S` keeps N
+  accepted steps drawn at random over the sorted step ids, independent of file order; the
+  report records the draw.
+  - QM, bond indices and tokens run from the worktree `claude/reactmech`, at a fixed commit.
+    A batch of a day does not then block edits in the main checkout: an edit to a tracked
+    file there would make the batch's records dirty.
+  - The worktree has its own `data/cache`. The raw files are hard links. Provenance records
+    resolved paths relative to the repository, so files reached through a symlink into the
+    main checkout would be recorded by their absolute path, which does not travel to a pod.
+    The worktree's caches are moved into the main checkout's after the batch: their
+    relative paths stay valid there.
+- **d-metal geometries** (`tests/test_qm_dmetals.py`).
+  - RDKit's force fields type none of these metals (`EMBED_UFF_FALLBACK`), so GFN2 starts
+    from raw ETKDG coordinates.
+  - GFN2 then finds the right coordination:
+    - [PdCl4]2-: square planar, Pd-Cl 2.29 Å (experiment 2.30);
+    - trans-PdCl2(PMe3)2: square planar and trans, Pd-P 2.30 and Pd-Cl 2.28 Å (2.33 / 2.30);
+    - chromate: tetrahedral, Cr-O 1.62 Å (1.65);
+    - chromic acid as ReactMech draws it: tetrahedral, Cr=O 1.57 Å against Cr-OH 1.65 Å.
+  - 3-27 s per species.
+- **Open: the Pd(0) phosphines.** ReactMech writes a Pd(0)-phosphine as a phosphonium on a
+  neutral metal (`[P+]([Pd])`). That has an odd electron count, so the domain screen excludes it
+  as `OPEN_SHELL_METAL` (1,251 steps). Read as a dative bond (Pd-1, as rule R2 does for d0 / d10
+  acceptors), Pd(0) is d10 and closed shell; adding Pd and Pt to R2's acceptors is a decision
+  left to the user. FlowER draws the same complexes with a neutral four-bonded `[P]`, which
+  RDKit does not sanitize; its loader does not exist yet.
+
 ## 2026-10-26 — Five PMechDB runs on the molecule split: encoders and the resonance augmentation (schema 16)
 
 - **Setup.** One split (molecule), 30 epochs, seed 0, `d=256`, 8 layers, lr 3e-4, bf16, cell budget
@@ -6057,3 +6108,1871 @@ talks to the engine. Kept minimal on purpose; the larger split (a `ksmech.api` f
   share a row; distinct groups each span the column, and zoomed out near levels may be drawn on
   top of each other. `levelSlots` no longer clusters by pixel distance; raise the threshold to
   put the toluene C-H groups (0.13 eV apart) side by side.
+
+## 2026-10-27: ReactMech samples without arrows: R from the mapped sides, moving hydrogens as atoms
+
+- **The need (user request: prepare the ReactMech pilot for training).** ReactMech has no
+  arrows, so `delta_be.dataset_matrix` applied an empty edit and every step would have been
+  skipped as PRODUCT_MISMATCH.
+- **R from the two mapped sides** (`delta_be.mapped_matrix`). A step without arrows takes as
+  R_data the difference of its sides on the reactant indices: every mapped atom is read on its
+  product partner, and unmapped atoms (spectators such as triethylamine or CO2, in 3,294 steps)
+  are taken as unchanged. The product check that arrow steps pass (`match_products`) then
+  verifies the edit. The label is the parsimonious class of that R_data, as for PMechDB.
+- **Moving hydrogens as atoms** (`arrows.hydrogens.explicit_moving_hydrogens`).
+  - ReactMech writes every hydrogen as a count on its heavy atom. A proton that moves from O to
+    Cl reads `[OH+:5]` -> `[O:5]` and `[Cl-:1]` -> `[ClH:1]`. The difference of the heavy atoms
+    alone shows the two lone-pair changes and no bond change, so the step has no anchor, and the
+    spec's R covers the hydrogens.
+  - Each hydrogen that moves is written as a mapped atom on both sides, as PMechDB draws it
+    (`[H:20]`): one hydrogen of the donor (a mapped atom that loses hydrogens) in the
+    reactants, one on the acceptor (a mapped atom that gains them) in the products, with a fresh
+    map number. Which of a donor's hydrogens moves is arbitrary; the symmetric closure of the
+    label (schema 17) makes equivalent hydrogens one.
+  - The pairing is unique when the step has one donor or one acceptor. A step with several of
+    both is skipped as H_TRANSFER_AMBIGUOUS. In the pilot's 9,183 training steps: 4,729 move no
+    hydrogen, 4,443 one donor to one acceptor, 11 two donors to one acceptor; none is ambiguous.
+  - Steps with arrows are left as they are: their arrows name their hydrogens. Over the mini
+    fixture, R from the mapped sides with the arrows removed is the arrows' label class (a test).
+- **Coverage on the pilot.** All 9,183 training steps get a label; R_data itself is in the class
+  for 8,503 (elsewhere a resonance form with fewer charges, then fewer entries, wins). On 300
+  random steps with tokens, 293 are samples and 7 lack tokens (a molecule without a QM record);
+  each of the 140 steps that move a hydrogen anchors on the hydrogen's new bond.
+- **No ArrowLabels.** A sample of a step without arrows has `orbital_reading` `NO_ARROWS` and no
+  ArrowLabels: the network trains on R and its anchors. The LightGBM reference
+  (`ksmech-physics gbdt`) ranks ArrowLabels, so it has nothing to rank on ReactMech.
+- **The pilot's sample store** (`ksmech-arrows samples --source reactmech --workers 8` from the
+  clean tree at e58af8c, 22 min, 650 MB): 8,999 samples from 9,183 training steps, 184 skipped
+  as MISSING_TOKENS. Label classes of 1 / 2 / 3 / 4+ variants: 5,575 / 2,067 / 839 / 518;
+  anchors 8,943 form and 56 break. Molecule split 7,189 / 908 / 902 samples (scaffold
+  7,212 / 888 / 899). The five leave-one-class-out splits use only the 856 classified steps
+  (train 417-734 samples each). Val pools: median 213 tokens, at most 483. A one-epoch run on
+  64 samples (`ksmech-train fit --source reactmech --limit 64`) trains and validates on the GPU.
+- **The pilot's failed molecules are left for later (user decision).** The TIMEOUT retry was
+  stopped after 3 minutes, before a record came out. The QM manifest now lists all 20,185
+  molecules: 19,543 ok and 642 failed, after the 209 failures of the pod and extra runs, whose
+  rows had never been merged, were appended to it (backup
+  `qm_manifest.before_merge_2026-10-27.parquet`). The steps that use a failed molecule are
+  skipped as MISSING_TOKENS.
+
+## 2026-10-28: PMechDB and ReactMech in one checkout; a run over several sources
+
+- **The request (user).** Two sparse-encoder runs on the molecule split: PMechDB and ReactMech
+  together, and ReactMech alone.
+- **One data tree.** Provenance resolves `file:` inputs against the checkout that runs the code,
+  and training reads only artifacts built from committed code, so both sources' samples, tokens,
+  bond indices and QM records must sit in one clean checkout: the `claude/reactmech` worktree.
+  - Main's `data/cache/{qm,bond_index,tokens}` and `data/processed/pmechdb` are hard-linked into
+    it (no disk space; main's files are never written in place, `prov.atomic_write`).
+  - 344 molecules are in both caches, computed by different runs (no file identical). Main's
+    copies win, so every PMechDB artifact stays valid as it is; the worktree's copies are kept
+    in `data/cache/overlap_reactmech/`. The ReactMech store was rebuilt on main's copies (e58af8c,
+    20 min): the same 8,999 samples and split counts.
+- **A run over several sources** (`--source pmechdb+reactmech`, `train.loop.sources`).
+  - The training parts are pooled. The pair statistics are fitted on the pool
+    (`arrows.steps.pair_stats`, as the samples build fits one source's on its part); a run of
+    one source still reads its stored `pair_feature_stats_<split>.json`.
+  - Validation runs on each source's part: `val_<source>_<metric>` per source and `val_<metric>`
+    pooled over every sample, which picks `best.pt`. The comparison with a ReactMech-only run is
+    `val_reactmech_*`.
+  - lambda_stop defaults to the smallest of the sources' defaults (0 with PMechDB); neither
+    source has stop labels, so the stop term is absent either way.
+  - The run lives in `data/models/pmechdb+reactmech/<run>/`; `run.json` lists every view.
+  - The evaluation CLIs still take one source.
+
+
+## 2026-10-28: a non-finite run stops; NaN never makes a hit or a `best.pt`
+
+- **What happened.** The ReactMech-only sparse run (fp16, lambda_stop 0.5) went non-finite at
+  optimizer step ~9,480 (epoch 19 of 30). The fp16 GradScaler halved its scale on every
+  overflowing step until the scale was 0. At a scale of 0 the unscaled gradients are
+  0 * inf = NaN, and the scaler's inf check misses them: it tests the scaled gradients, which
+  are 0 (checked on the RX 6600 XT: `found_inf` 0, NaN gradients, NaN weights after AdamW).
+  The weights became NaN (257 of 261 tensors), and the run went on for 11 more epochs.
+- **NaN made a hit.** `anchor_ranks` counts the candidates outside the label that score at
+  least as high as the label. NaN compares false with everything, so with NaN logits every
+  rank was 0: validation top-1 = 1.000, and `best.pt` was overwritten with the NaN weights.
+  The good epoch-18 checkpoint (top-1 0.900) was lost.
+- **The fix** (`train.loop`, `model.loss`):
+  - a training batch whose loss is not finite takes no backward and no optimizer step. It is
+    logged with its step ids and its non-finite loss terms, and counted
+    (`nonfinite_batches` in `metrics.jsonl`). 50 such batches in a row stop the run.
+  - the run stops (`NonFiniteError`, CLI exit 3, `NONFINITE` in the log) when the fp16 loss
+    scale falls below 1, or when a parameter is no longer finite. The weights are checked every
+    `log_every` steps and at the end of each epoch.
+  - the run stops before the epoch's checkpoints are written, so `last.pt` and `best.pt` keep
+    the last finite epoch.
+  - a NaN score counts against the label, and a NaN label score ranks last: a NaN model scores
+    0, never 1.
+  - `better_epoch`: an epoch with a non-finite training or validation loss is never `best.pt`.
+- **Not settled: the cause of the overflow.** The ReactMech-only gradient norms ran about 10x
+  those of the combined run (median 116 vs 12). The one difference in configuration is
+  lambda_stop (0.5 vs 0, the smallest default of the two sources). The rerun uses
+  `--stop-weight 0`, as the combined run did, so the two runs compare like for like. The log
+  of a skipped batch now names the loss terms that were not finite.
+
+## 2026-10-28: `loco_all`, leave one class out with the unlabelled steps; the test part scored each epoch
+
+- **Why.** Only 5 ReactMech classes are released (`data.reactmech`): 856 of the 10,000 pilot
+  steps carry a class. The `loco` split trains on the other labelled classes only (427 to
+  748 steps), too few to tell anything. Out of distribution, the ReactMech-only model scored
+  0.27 top-1 on PMechDB against 0.92 on its molecule-split val, so the in-distribution number
+  says little about unseen reaction types.
+- **`locoall-<class>`** (`splits.split_leave_one_class_out_all`, strategy `loco_all`, only
+  when named): test = every step of the held-out class. The steps sharing a non-trivial
+  molecule or a pathway with a held-out step are excluded: unlabelled steps may belong to the
+  same mechanisms. Every other step, unlabelled ones included, is split by molecule into train
+  and an in-distribution val (10%). On the pilot, holding out `acid_halide`: 7,809 train,
+  868 val, 381 test, 125 excluded.
+- **`ksmech-arrows samples --views-only`** writes the views of the named strategies over the
+  store already built. A rebuild takes an hour and rewrites the index, which makes every
+  other view stale.
+- **`ksmech-train fit --eval-test`** scores the split's test part after each epoch
+  (`test_*` in `metrics.jsonl`). It is reported only: `best.pt` is still chosen on val, so the
+  held-out class never selects the model.
+
+## 2026-10-28: Open shells: the plan, its decisions, and phase P0
+
+- **The plan (user request: include the open-shell molecules excluded at the start).**
+  `docs/open_shell_plan.md` holds it: why open shells were deferred rule by rule (none of the
+  290 excluded PMechDB and ReactMech-pilot steps is a radical step; most exclusions are drawing
+  errors), the phases P0, P0a, P0b, P1-P9, S1-S3 and D1-D3, the spec changes per version
+  (v9.1, v9.2, v10), the evaluation and what stays out. Drafted by three planners, merged,
+  checked by three reviewers and a fact-check of every decision against code and data.
+- **The user's decisions, one by one.** The recommendation on 21 of the 23 decisions; their own
+  choice on U6 (all 10 training steps and 2 resonance pairs of genuine PMechDB radicals, the
+  Et3B + O2 step included, as a counted exemption) and U9 (Cu(II) and Fe(III) enter together).
+  Then the user asked that the model stay general and learn only from physics and data, with no
+  limitation inserted arbitrarily. A generality audit found the model's inputs clean (no
+  taxonomy reaches the network) and the hand rules around it (d-type acceptor cells deleted from
+  the store, the own-antibond and site rule, Kekule swaps in 9.4% of ReactMech labels, decoder
+  caps from PMechDB, the spectral-set truncation, element- and parity-gated metal repairs), and
+  in the plan (spin clauses, a 0.1 e go/no-go gate, a percentile delta, a strict decode screen,
+  a -1 mask inside the loss). The user approved all its corrections and a new phase **P0a**
+  before any baseline. **Governing principle:** every rule left in the model path is a physical
+  law or exact bookkeeping, a QM-derived input the model weighs, or an option behind a flag
+  whose default an ablation justifies here; data curation stays, counted, one law per
+  phenomenon.
+- **P0, on the branch `claude/open-shell-p0`.**
+  - **Merge of `claude/reactmech`** (its last commit, `loco_all`, landed first). The only
+    conflict was this file. The worktree's data was copied into `data/` by `cp -a
+    --reflink=always` (btrfs, copy-on-write, no disk used), not hard links: steps.parquet, the
+    QM manifest, index.sqlite and metrics.jsonl are written in place and a hard link would write
+    through (fact-check of U14). The running loco_all run was not copied; the worktree stays.
+  - **Odd entries fail loudly.** The atom head's alphabet is an explicit table
+    (`model.decoder.ATOM_VALUES`): the loss raised nothing before and floored an odd entry into
+    a class (`floor(r / 2) + 1`); now it raises. eval's `lewis_apply` raises on an odd
+    lone-pair entry instead of `d // 2`. Even batches give the same classes.
+  - **Radical arrows counted.** RADICAL_ARROW at ingest (it only logged and accepted the step
+    unchecked), in the edit label and in the round trip. 0 steps in either source.
+  - **Evaluation fields.** decode's `--run-source`, the sample versions (warn, never refuse:
+    flex_first is v15), per-sample hits and ranks for paired comparisons (U20's McNemar), the
+    stored GBDT scored without a refit (a refit samples 80% of the columns), cohorts
+    (`cohort_<name>.json`, pinned once, no file inputs), the fermi_smeared slice and the
+    covered fraction. FLOOR_VERSION and DECODE_VERSION 2.
+  - **Frozen splits.** `_assign_groups` re-ran a global permutation, so one added group moved
+    others between val and test, and `keep_sample` redrew the pilot when the accepted set
+    changed. Snapshots `split_frozen_<strategy>.json` (FROZEN_SPLIT_SCHEMA 1, independent of
+    SAMPLE_VERSION, no file inputs, content hash) of PMechDB molecule and scaffold and ReactMech
+    molecule, scaffold, loco and loco_all, and the pilot's 10,000 ids (`sample_frozen.json`).
+    With a snapshot a group holding frozen steps keeps their part, a group frozen in two parts
+    sends its new steps to SPLIT_CONFLICT (counted), a new group goes where sha256(seed, key)
+    puts it, and frozen steps a later rule removes are counted. Re-splitting reproduces every
+    frozen part (`tests/test_split_stability.py`).
+  - **Survey.** `ksmech-data open-shell-survey` (read-only) reproduces the plan's oracle: PMechDB
+    RADICAL_DRAWN 52 = 12 genuine radical steps (11 spectator, 1 reactive) / 10 carbenes / 2 CO
+    / 9 C3 methyls / 8 Sn / 4 bare alkali / 3 ambiguous ketyls / 1 beta-lactam N / 1 Al / 1
+    nitrone / 1 four-bonded P; OPEN_SHELL_METAL 78 = Fe 43 / Cu 35 (25 + 6 CuH2 + 4 CuI2);
+    kept placeholder-shaped 24 + 3 [Cl][Zn+]; SPIN_PARITY 100 = Cu 41 / placeholders 34 / Fe 20
+    / Ti 4 / P 1 (the 2026-10-24 entry called them Fe radicals; corrected there). ReactMech pilot:
+    CDI 62, Pd dative 96 + Pd already -1 2, L1Pd 109, kept onium Pd/Ni 49 and Cr(IV) 10,
+    SPIN_PARITY 291 all Pd. The 12 genuine radicals were read: Birch radical anion, peroxyl
+    deprotonations and eliminations, superoxide protonation, Et3B + O2, and two resonance steps
+    with a spectator ethyl radical. The CDI test is topological (RDKit does not flag that C
+    aromatic). The 3 'isopropoxides' stay apart as AMBIGUOUS_KETYL (possibly sodium ketyls).
+  - **Fixtures.** `OPEN_SHELL` in `tests/fixtures/molecules.py`, hand-written, with the radical
+    counts RDKit assigns (the misread drawings kept on purpose).
+- **Reference files on the v17 store, per sample (P0's exit).** Reproduced exactly: the floor
+  (val 15.6 / 26.0 / 31.1 on 1,239, test 17.8 / 27.3 / 31.6 on 1,182), the stored GBDT
+  scored without a refit (val 44.1 / 62.0 / 70.8 on 1,203, test 48.8 / 67.7 / 75.1 on 1,120)
+  and flex_first decode (val 63.0 / 82.6 / 85.4; trained on v15, decoded on v17 with a
+  warning). New, on ReactMech molecule val (908): reactmech/sparse_resonance_stop0 85.0 / 87.0 /
+  87.2 and pmechdb+reactmech/sparse_resonance (`--run-source`) 86.0 / 88.8 / 88.9.
+- **Tests.** Run with fewer processes while the loco_all training held the RAM (the commits used
+  --no-verify): `pytest -n 3 -m "not realdata"` 1716 passed, 12 skipped, 2 xfailed;
+  `KSMECH_TEST_WORKERS=3 pytest -m realdata` 14 passed.
+- **Left open.** The worktree and `claude/reactmech` stay while its session works; the branch is
+  not merged into main yet; ksmech-serve is down since the Claude Code restart. The four pod
+  runs' weights are not on disk (only SHA256SUMS.pod).
+
+## 2026-10-29: Open-shell P0a: generality fixes and unified domain laws (SAMPLE_VERSION 18)
+
+Phase P0a of `docs/open_shell_plan.md`, on branch `claude/open-shell-p0a` after spec v9.1. Each
+new behaviour is a flag whose default is the v17 behaviour, so old checkpoints, the floor and
+the GBDT reproduce; which default the GENERAL configuration takes is an ablation's (P0b, P9).
+
+- **Every pair cell stored; the three exclusions as flags (item 1).** `physics.pairs.pair_flags`
+  returns `d_acceptor` (the virtual token is a d polarization function, `tokens.is_d_type`,
+  whatever `allow_d_acceptors` says), `own_antibond` and `site_self` on every (occupied,
+  virtual) cell; a sample stores them as 0/1 pair features after the v17 ones
+  (`stage_a.STORED_PAIR_FEATURES`, bit-packed with `inter`, `clash`, `bonded`) and the store
+  keeps every cell (v17 kept the `pair_valid` cells, about 89%), `pair_valid` as the legacy mask.
+  On the fixed molecules `pair_valid` = donor x empty acceptor x no flag
+  (`tests/test_physics_pairs.py`). Readers select pair features by name (`pairs.cell_columns`,
+  `inputs.named_pair_z`), so a v15-v17 checkpoint reads a v18 batch.
+  `ModelConfig.pair_cells`: `valid` (default) leaves every feature undefined outside `pair_valid`
+  and pools G^atom and y_ij over the valid cells, bit for bit the v17 inputs and outputs
+  (`tests/test_model.py::test_valid_cells_reproduce_a_v17_batch_bit_for_bit`); `all` reads
+  every cell with the flags and `pair_valid` as channels and pooled means. Pair statistics are
+  written for both (`pair_feature_stats_<split>.json`, `..._allcells.json`). The floor and the
+  GBDT take `--cells valid|all` (`anchor_floor_*_<split>_allcells.json`,
+  `gbdt_lgbm_*_<split>_geomfree_allcells.*`); with `all` the GBDT's candidates are every cell
+  and the flags and `pair_valid` are features.
+  - **Labels on every cell: stored, not refiltered at load.** The plan said the orbital-pair
+    labels would be stored unfiltered and the legacy filter applied at load. The filter needs
+    the reactant tokens (teacher pair, leaving bonds, the group of each rejected cell), which a
+    loaded sample does not hold, so both are stored: `labels` as in v17 (filtered, its
+    LABEL_FILTERED counts unchanged) and `labels_all` (the aligned labels on every cell, the
+    teacher pair chosen among all of them), read by the `all` readers.
+- **The spectral truncation and the FD and exact-frontier columns as stored inputs (items 2,
+  3).** A sample stores its token inputs as the v17 columns followed by the extras, named by
+  `atom_columns` / `orbital_columns`: the orbital extras `retained_fraction` and `energy_ev`
+  (E_r; both already in every token file as diagnostics), the atom extras the
+  finite-difference f+ / f- and the exact-degeneracy frontier set (`f_plus_fmo_exact`,
+  `f_minus_fmo_exact`, `fmo_exact_<level>`). The exact set groups only levels within
+  `frontier.EXACT_EV` = 1e-4 eV (numerical degeneracy) and is stored in the token files beside
+  the 0.05 eV set, whose content is unchanged: token SCHEMA_VERSION 9 -> 10, additive.
+  `FeatureStats` carries the column names it was fitted on; statistics without names are a
+  v15-v17 checkpoint's and read the v17 columns. `ModelConfig.orbital_extra` (default `()`) and
+  `frontier_blocks` (`window` default, `exact`) select the extras; with the defaults the
+  standardized token inputs are bit for bit the v17 ones
+  (`test_default_token_inputs_are_the_v17_ones_bit_for_bit`). The FD f+ / f- stay unselected
+  until P2b's switch. The GBDT keeps its v17 columns (it already reads E_r).
+- **ReactMech labels from the Kekule structure closest to the reactant (item 4).** A step
+  without arrows takes R_data = `without_kekule_cycles(mapped_matrix(reac, prod), reac)`
+  (`delta_be.mapped_closest`): the two sides are kekulized independently, and an unchanged ring
+  written the other way round entered R as a swap the step does not make. Every label records
+  the entries removed (`EditLabel.kekule_closest`, rule KEKULE_CLOSEST) and each part's report
+  counts them with the labels still cut at RESONANCE_CAP. Steps with arrows are untouched (0
+  PMechDB labels change). Measured read-only on the v17 ReactMech samples (train / val / test):
+  the rule fires on 719 / 68 / 81 = 868 (the plan's estimate, from removing cycles out of the
+  stored variants, was 695 / 66 / 75 = 836: rebuilding the class on the closest product also
+  shrinks labels whose old cheapest member moved the charge into the swapped ring, such as the
+  ortho carbanion of a toluene-type deprotonation); 866 shrink, 2 keep their size and gain an
+  equal-cost member (oxindole deprotonations: the enolate O- joins the aromatic carbanion);
+  none gains entries; labels over 8 bond entries go from 212 / 13 / 12 to 0; RESONANCE_CAP
+  still cuts 2,964 / 317 / 243 (unchanged: `resonance_forms` keeps its cap).
+- **Decoder caps per source (item 5).** `DecodeConfig` keeps 8 bonds, 2 atoms, 48 candidates as
+  defaults (`--caps legacy`). `ksmech-eval decode --caps labels` reads the label maxima of the
+  training view of the source decoded, never val or test (the largest bond and atom counts of
+  a label's smallest variant: fewest entries, then fewest bond entries), then `--max-bonds`,
+  `--max-atoms`, `--max-candidates`; the header records the caps, and caps other than the legacy
+  ones add `_caps<b>-<a>-<c>` to the file names so the legacy hit files stay comparable.
+  Measured on v17: PMechDB 6 / 2 on every part (7 / 2 with the fewer-atoms tie-break: 280
+  training labels split their size differently); ReactMech train 33 / 4 before item 4 and 8 /
+  3 after it, val and test 6 / 2. The single 3-atom training label,
+  `reactmech-7172766faa0ff062`, is a P-N cleavage of a Mitsunobu betaine (1 bond, 1 atom)
+  whose class also rewrites a spectator quinolinium-olate zwitterion into its neutral form,
+  because the class is chosen by fewest formal charges over the whole product pool; so it was
+  in v17 too (19 bonds, 3 atoms). An open label-cost question, not changed here.
+- **Unified domain laws (item 6), replacing R2 and the element- and parity-gated R3 / U5
+  repairs (`data.domain`).** (a) Dative law: an onium donor (a positively charged non-metal
+  other than C) bonded to an acceptor (a metal, or B); per acceptor u = its onium donors minus
+  the negative charge it carries (never below 0); in each fragment the acceptors' charges are
+  lowered by the largest j <= sum(u) that leaves the fragment's electron count even (Z + H -
+  charge, drawn radicals not corrected), the side's net charge >= 0 and both sides' totals
+  equal; the step then re-validates, else stays as drawn. Rule 'D dative onium->M' in
+  `charge_repair` and `charge_repairs.csv`. The literal form ('metal -1 per onium donor', only
+  the pool gate) was rejected on measurement: it would re-charge 101 PMechDB kept steps whose
+  drawn charge is right (Li, Na, K, Mg, Ca, Sc, Cu, Zn and B onium adducts such as [Li][O+]=C)
+  and 58 more ReactMech ones (51 [OH2+][Mg], 7 [OH2+]B), and leave odd two-onium Pd fragments
+  odd. (b) Placeholder law, any parity, checked first: a non-s-block metal with exactly one
+  neighbour (H counted) and charge <= 0, unless that neighbour is an onium donor it compensates
+  (ML1, [Pd-][P+]R3). A free atom or ion and MX+ with the charge on the metal ([Cl][Zn+]) are
+  defined species. (c) METAL_SUSPECT: an even fragment of a kept step with a first-row
+  transition metal (Sc to Cu) that the oxidation-state bookkeeping leaves d1-d9, flagged and
+  never excluded: 3d ligand-field splittings are comparable to the pairing energy, so the
+  closed-shell singlet the QM computes is an assumption (P2's scan measures them). (d)
+  `domain_class` (nullable STEP_SCHEMA column: REPAIRED_DATIVE, METAL_SUSPECT, joined by '+'
+  when both); `training_steps` takes a per-source admit set (`domain.ADMIT`, every class in
+  P0a), recorded in each view's provenance; `stats.json` counts every exclusion and class.
+  - **Oxidation-state bookkeeping (`domain.oxidation_state`, moved from the survey).** An
+    onium bond counts like any bond to a non-metal (its +1 cancels the metal's compensating
+    -1: [Pd-][P+]R3 reads Pd(0), NiCl2(PMe3)2 drawn [Ni-2] reads Ni(II)); metal-metal bonds
+    count both ways by Pauling electronegativity (the Gilman [Li][Cu](C)C reads Cu(I) d10,
+    not Cu(II)); RDKit dative bonds count 0. The survey's oracle counts are unchanged; its
+    per-row oxidation states now read the drawing as drawn (one test expectation changed:
+    Br[Pd-](Br)(C)[P+]Me3 reads Pd(III)).
+  - **Measured by a real ingest compared step by step with the v17 stores.** PMechDB: the
+    dative law changes 0 steps (the one repair is still R1); the placeholder law removes 24
+    kept steps (21 molecule-split train, 1 val, 2 resonance pairs; exactly the survey's
+    PLACEHOLDER_EVEN), keeps the 3 [Cl][Zn+] steps, moves the 8 Sn steps from RADICAL_DRAWN to
+    METAL_PLACEHOLDER and keeps the 24 old METAL_PLACEHOLDER; METAL_SUSPECT 0. Kept steps
+    12,935 -> 12,911, training steps 12,464 -> 12,442. ReactMech pilot: 49 kept steps
+    re-charged (25 Ni, 24 Pd; 20 train, 29 val), 205 excluded steps returned (109
+    METAL_PLACEHOLDER L1Pd(0), 96 OPEN_SHELL_METAL), 2 stay OPEN_SHELL_METAL, the 4 returned
+    steps with a spectator [Ag+] kept, METAL_SUSPECT 35 (Cr(IV) 10 test, Ni(II) 25: 9 train,
+    16 val); the other 9,736 steps are field-identical. No repair was dropped at
+    re-validation, and no fragment had two acceptors competing for the lowering.
+  - **The 20-case oxidation-state audit (`scripts/probes/dative_audit.py`, seed 0; EVEN 6,
+    ODD 7, L1PD 7), read by hand: all 20 correct.** EVEN: Ni(dppp)ArX Suzuki and
+    transmetalation drawings Ni(IV) d6 as drawn -> Ni(II) d8, and Ni(0)L2 + BnCl -> Ni(II).
+    ODD: Pd(III) d7 as drawn -> Pd(II) d8 in Buchwald-Hartwig amine complexes, the cationic
+    [PdAr(HNR2)(PR3)]+ keeping its halide counterion. L1PD: Pd(0)L <-> Pd(II)ArXL oxidative
+    additions and reductive eliminations. Each side's pool goes to 0. The census of all 254
+    repaired steps lands every fragment at Pd(0), Pd(II), Ni(0) or Ni(II), except six Pd(IV)
+    d6 C-H arylation intermediates (a palladacycle adding ArI: genuine) and one step,
+    `reactmech-4ad9ef86c572981f`, whose pool stays +1 (two cationic Pd(II)-PyOx fragments
+    drawn with one PF6-: a counterion the drawing omits, not electrons).
+  - **Spec wording.** Spec v9.1's bullet says "a non-alkali metal with at most one neighbour
+    ... except [Pd]-P+R3" and omits the charge clause; the code follows the plan's law
+    (non-s-block, exactly one neighbour, charge <= 0, ML1 compensated, free ions and MX+
+    defined), which is what was measured. The spec text was aligned after the build (three
+    sentences of v9.1, no version change): the placeholder bullet now states the law, the
+    dative bullet adds the clause that the side's net charge stays >= 0, and the decoder's caps
+    are the training part's label maxima (6 bonds and 2 atoms on PMechDB), the version-9 caps
+    8 and 2 being the legacy setting.
+- **Gate support.** A token build compares every token file it replaces field by field
+  (`tokens.legacy_differences`, NaN-aware and exact, the schema number and the fields only the
+  new file has left out) and counts the files whose stored fields changed
+  (`summary["replaced"]`); the summary is also kept per source as
+  `data/processed/<source>/tokens_summary.json`, and counts the closed-shell molecules whose
+  frontier blocks at 0.01, 0.05 and 0.1 eV differ from the exact ones. `ksmech-physics gbdt
+  --score-only --model PATH --allow-stale` scores a reference copy of a ranker on the new
+  store. `ksmech-qm run --steps-from FILE` featurizes only the fragments of the steps a JSON
+  file lists (`qm_steps`, else `ids`). The v17 processed directories were copied by reflink to
+  `data/processed_v17/` and the P0 decode hits to `<run>/p0_reference/` before the rebuild.
+- **The rebuild (item 7), 2026-10-29 03:42-06:23, from the clean commit 4f075a0.**
+  `ksmech-data ingest` (PMechDB 44 s; ReactMech pilot, frozen ids, 12 min 49 s), `stats`,
+  `scripts/p0a_changes.py` per source, `ksmech-qm run --source reactmech --steps-from
+  data/processed/reactmech/p0a_changes.json` (the 49 re-charged steps: 116 unique species, 57
+  cache hits, 59 computed in 28 min 44 s at 8 workers, 51 ok, 8 failed: 6 OPT_NOT_CONVERGED, 2
+  SCF_NOT_CONVERGED, tombstoned), `bond-index` (51 new sidecars), `ksmech-orbitals build` (PMechDB
+  14,232 files in 19 min 41 s; ReactMech 19,204 built and 344 already rebuilt by the PMechDB pass
+  in 44 min 47 s), `ksmech-arrows samples` (PMechDB 17 min 43 s, ReactMech with `loco` and
+  `loco_all` 31 min 23 s).
+  - **p0a_changes.json equals the oracle.** PMechDB: PLACEHOLDER removed 24 (21 molecule train,
+    1 val, 2 outside the split: the resonance pairs), relabelled from RADICAL_DRAWN 8 (Sn); no
+    DATIVE, no METAL_SUSPECT, no KEKULE_CLOSEST (every step has arrows): 32 changed steps.
+    ReactMech: DATIVE changed 49 (20 train, 29 val) and returned 205 (none in the frozen split),
+    KEKULE_CLOSEST 908 kept steps without arrows (734 / 68 / 85, and 21 returned steps outside
+    the split; 868 of them have samples, the number measured read-only on v17), METAL_SUSPECT 35
+    (9 / 16 / 10); OTHER empty: no other step changed a side, a code or the resonance flag.
+  - **Tokens.** Every file is schema 10 and kept its schema-9 payload: 0 of 14,232 (PMechDB) and
+    0 of 19,153 (ReactMech) replaced files changed a stored field. The 0.05 eV frontier window
+    differs from the exact (1e-4 eV) blocks on 3,124 of 14,184 closed-shell PMechDB molecules
+    and 4,310 of 19,310 ReactMech ones (0.01 eV: 481 and 423; 0.1 eV: 6,101 and 8,872): the
+    reach of `frontier_blocks exact`.
+  - **Samples.** PMechDB: 12,399 samples of 12,442 training steps (MISSING_TOKENS 43; v17
+    12,418 of 12,464); molecule split 9,979 / 1,238 / 1,182 (v17 9,997 / 1,239 / 1,182); label
+    maxima 6 bonds, 2 atoms; fermi_smeared 18 / 2 / 8 (v17 24 / 2 / 8). ReactMech: 9,003 of
+    9,388 (MISSING_TOKENS 385: the 205 returned steps, REPAIRED_DATIVE, waiting for P5; 2
+    re-charged train steps whose species failed QM; 178 as before); molecule split 7,190 / 911
+    / 902 (v17 7,189 / 908 / 902: 4 re-charged steps whose old drawing had no QM record now
+    have one); label maxima 8 / 3; kekule_closest 868. The returned steps are not in the frozen
+    splits and their groups straddle two parts (SPLIT_CONFLICT 188-204 per strategy, counted);
+    they have no samples, so P5 places them. The report gains `skipped_by_domain_class`
+    (added after the build, e75fe3e; this build's split was measured from the store index: 205
+    REPAIRED_DATIVE, 2 REPAIRED_DATIVE re-charged, 2 METAL_SUSPECT and 176 without a class).
+  - **New references (valid cells unless named).** Floor, molecule split: PMechDB val 15.6 /
+    26.0 / 31.1, test 17.8 / 27.3 / 31.6; ReactMech val 5.2 / 11.5 / 14.3, test 7.1 / 11.8 /
+    14.7. With `--cells all` the floor falls (PMechDB test 13.3 / 22.9 / 27.0, ReactMech 5.7 /
+    7.9 / 9.9): the untrained |G| ranks own-antibond and d-acceptor cells high and has no way to
+    discount them; the flags are for learned readers. GBDT (PMechDB, geometry-free, first
+    arrow), refitted on v18: molecule test 48.1 / 67.8 / 75.4 (val top-5 70.7), scaffold 45.5
+    / 66.1 / 76.0 (68.0); the v17 models gave 48.8 / 67.7 / 75.1 and 45.1 / 66.1 / 75.3. With
+    every cell as a candidate and the flags as features: molecule 50.4 / 66.6 / 74.9 (70.8),
+    scaffold 45.7 / 63.4 / 74.6 (66.2). One fit each, differences within 3 points and of both
+    signs: no evidence for either cell set, so `pair_cells` stays `valid` until P0b's
+    ablation.
+- **The legacy reproduction gate (item 8): passed** (`tests/test_legacy_reproduction.py`, 9
+  passed). With every new flag off, on every sample P0a did not change (`changed_steps`), per
+  sample: the floor (PMechDB val 1,238 and test 1,182 identical; test top-k 17.8 / 27.3 / 31.6
+  exactly; the one val sample gone is a placeholder removal), the stored v17 GBDT model scored
+  on the v18 store (val 1,202, test 1,120 identical), and the three decodes with legacy caps
+  (flex_first on PMechDB val: 1,238 identical, 62.9 / 82.6 / 85.4 against 63.0 / 82.6 / 85.4
+  on 1,239; sparse_resonance_stop0 and the PMechDB+ReactMech sparse_resonance on ReactMech
+  val: 814 identical each). Every sample that differs is a changed one.
+  - **ReactMech val moves with its labels, not with the models.** The same checkpoints score
+    91.1 / 93.0 / 93.2 (stop0, 911) and 91.9 / 94.7 / 95.6 (joint) against P0's 85.0 / 87.0 /
+    87.2 and 86.0 / 88.8 / 88.9 (908); without the 49 re-charged steps 94.1 / 96.0 / 96.0 and
+    94.3 / 97.1 / 97.1 (882) against 87.4 / 89.3 / 89.3 and 87.5 / 89.9 / 89.9. In both runs 61
+    KEKULE_CLOSEST samples go from a miss to a top-1 hit: their old label held Kekule swaps no
+    prediction reproduces. 1-2 KEKULE_CLOSEST samples go the other way (an equal-cost member
+    or a smaller class the model does not emit), and the 29 re-charged val steps, drawn
+    differently from what the checkpoints were trained on, mostly stay misses (stop0: 18
+    miss to miss, 1 hit to miss; joint: 16, 5 and 1 miss to hit). So P0's ReactMech val numbers
+    were understated by about 6 points of label noise. The checkpoints still trained on the old
+    labels (734 training labels changed); a v18 retrain is P0b's comparison.
+- **GENERAL configuration smoke (item 7's exit).** `ksmech-train fit --pair-cells all
+  --orbital-extra retained_fraction energy_ev --limit 64 --epochs 1` on the RX 6600 XT: 5
+  steps, finite loss, no non-finite batch. `ksmech-eval decode --caps labels --limit 20` read
+  6 / 2 / 48 from the PMechDB training view and wrote `_caps6-2-48` files (0 hits from a
+  5-step model, as expected).
+- **Threshold reach on v18 (item 9, `scripts/probes/threshold_reach.py`,
+  `data/processed/<source>/threshold_reach.json`; molecule split, train samples PMechDB 9,979
+  and ReactMech 7,190; self-check 0 at the current values).** Samples whose inputs change,
+  train / val / test, PMechDB then ReactMech:
+  - `tau_atom` 0.10: 6,742 / 548 / 558 and 6,432 / 797 / 747 (gold anchor atom-specifically
+    touched in 2,224 and 2,042 train samples; 10,334 and 23,006 train cells flip
+    `pair_valid`); 0.20: 6,410 / 615 / 601 and 6,692 / 830 / 808 (strict 2,363 and 2,529).
+  - spectral-set merge at 1e-4, 0.01, 0.1 eV (today 0.05): 9,070-9,446 train PMechDB samples
+    and 7,156-7,175 ReactMech (nearly all); no atom-specific change, only the set inputs.
+  - fractional band 0.1-1.9: 8 / 2 / 3 and 31 / 5 / 2 (4 PMechDB train samples change a
+    labelled token's mask); 0.4-1.6: 1 / 1 / 2 and 16 / 2 / 2.
+  - SMEAR_TOL 0.025: at most 10 samples per part; 0.1: at most 21; all flag flips.
+  - block split 0.25-1.75: at most 4 (PMechDB) and 23 (ReactMech) molecules re-blocked per
+    part; 0.75-1.25: at most 2 and 7.
+  A variant in the token path costs a token rebuild of about 3.0 (PMechDB) and 3.2
+  (ReactMech) CPU-h plus the sample store. Proposed, not decided: `tau_atom` and the spectral
+  merge become P9 ablation flags (their reach is most samples); the band, SMEAR_TOL and the
+  block split stay fixed at their values, since none touches more than 0.6% of a part.
+- **The open-shell survey follows the placeholder law on kept steps.** P0's survey named a kept
+  step PLACEHOLDER_EVEN by its own shape (a non-s-block metal with at most one neighbour, any
+  charge), so on v18 it called 49 returned L1Pd(0) steps placeholders, which the law exempts
+  as ML1. Its kept classes now use `domain.is_placeholder` (PLACEHOLDER_EVEN: a kept step the
+  law would exclude, 0 after P0a) and a new ML1 class (one neighbour, H counted, an onium donor
+  the metal compensates); a step is named by its first suspicious fragment, reactants first.
+  The realdata oracle is now P0a's: PMechDB RADICAL_DRAWN 44 (12 genuine radicals, 10
+  carbenes, 9 C3 methyls), METAL_PLACEHOLDER 56, OPEN_SHELL_METAL unchanged (Fe(III) 43, Cu 35),
+  KEPT ZNCL_ION 3; ReactMech RADICAL_DRAWN CDI 62, OPEN_SHELL_METAL PD_ALREADY_NEG 2, no
+  METAL_PLACEHOLDER, KEPT ONIUM_PD_NI_EVEN 209, ML1 45, CR_IV 10 (the 49 re-charged and 205
+  returned steps).
+
+## 2026-10-29: Open-shell P0b: the closed_base cohort, the paired comparison and the presets
+
+Phase P0b of `docs/open_shell_plan.md`, on branch `claude/open-shell-p0b` (from
+`claude/open-shell-p0a`).
+
+- **closed_base is every sample of the PMechDB molecule split on the v18 store**
+  (`ksmech-eval pin`, `eval.pin`). The cohort file holds the sample ids of train, val and test
+  (the plan's 12,396 was an estimate; the build has 9,979 / 1,238 / 1,182). Beside it, two
+  cohorts of the samples a first-arrow ranker scores, one per cell set (`closed_base_gbdt_valid`,
+  `closed_base_gbdt_all`: the samples with ArrowLabels on the valid cells, `labels`, or on every
+  cell, `labels_all`), so the GBDT's denominators are pinned too.
+- **Digests by named column, per sample, without file inputs.** `baseline_closed_base.json`
+  holds the column names once and, per sample, a 64-bit truncated sha256 of each column's
+  content: the ids (step id and fragment keys), atom_categorical[:, :2], every atom column by
+  name (values zeroed where missing, plus the missing mask), every orbital column by name, the
+  spectral sets, every pair feature by name (zeroed where undefined, plus the definition mask:
+  a value in an undefined cell is not content), pair_valid, the edit label and both ArrowLabel
+  lists. Like a cohort it has no file inputs and a content hash, so no rebuild makes it stale;
+  the views it was read from and the sample version are in its note. A later store is compared
+  column by column over the samples both hold (`compare_digests`), and a column only one side
+  has is reported, not failed, so later phases add columns. The digests are taken on the
+  samples as the store returns them (after its float16 packing of pair_z), and the realdata
+  test rebuilds 30 samples from their tokens through the same packing.
+- **The paired rule (`ksmech-eval compare`, `eval.paired`).** One-sided: arm A (GENERAL) fails
+  against arm B (LEGACY) when its mean top-1 is lower by more than max(2 x pooled SD, 1 point);
+  the pooled SD is the within-arm SD of all six runs with 4 degrees of freedom. Beside it, the
+  exact McNemar test of "A is worse" (p = P(X >= n_ab), X ~ Binomial(n_ab + n_ba, 1/2), exact
+  integer arithmetic, no SciPy) on the majority-of-seeds hits (a sample is a hit when more than
+  half an arm's runs hit it) and on each of the 9 seed pairs. Hit files decoded on other
+  samples, parts, cohorts, scopes, beams, caps or decode versions are refused.
+- **Presets.** `ksmech-train fit --preset general|legacy` sets the P0a flags of
+  `model.config.PRESETS` as option defaults (general: `pair_cells all`, `orbital_extra
+  retained_fraction energy_ev`; legacy: `pair_cells valid`, no extras); `frontier_blocks` and
+  the FD columns stay at their legacy settings in both (P9 ablates them); an explicit option
+  wins; run.json records the resulting flags and the seed.
+
+- **Pinned (P0b steps 1-2, code d1b869b, 2026-10-29).** closed_base holds 12,399 samples (train
+  9,979, val 1,238, test 1,182); the GBDT subsets hold 9,432 / 1,202 / 1,120 on the valid
+  cells and 9,433 / 1,203 / 1,120 on every cell. The baseline has 64 columns per sample (18.7
+  MB). `tests/test_closed_base_rescore.py` (realdata) checks every number below that has a P0a
+  reference.
+- **Re-scored on closed_base (float32, per-sample hits; old checkpoints with every flag off and
+  the legacy caps).** Top-1 / 3 / 5:
+
+  | scorer | val | test |
+  |---|---|---|
+  | floor, valid cells | 15.6 / 26.0 / 31.1 | 17.8 / 27.3 / 31.6 |
+  | floor, every cell | 14.4 / 23.7 / 28.8 | 13.3 / 22.9 / 27.0 |
+  | GBDT v18, valid cells (first arrow, 1,202 / 1,120) | 45.0 / 62.3 / 70.7 | 48.1 / 67.8 / 75.4 |
+  | GBDT v18, every cell (1,203 / 1,120) | 44.3 / 62.5 / 70.8 | 50.4 / 66.6 / 74.9 |
+  | flex_first (trained on v15), full R | 62.9 / 82.6 / 85.4 | 62.7 / 77.8 / 81.6 |
+  | pmechdb+reactmech/sparse_resonance (v17), full R | 61.6 / 79.3 / 81.6 | 64.1 / 82.4 / 84.2 |
+
+  The floor ranks and the flex_first val hits are those of the P0a gate, sample by sample, and
+  the GBDT rank files cover exactly their subsets' val and test samples. The test numbers of
+  the two checkpoints are a report of what exists, not a selection: no new configuration was
+  chosen on them. Decoding took 0.7 s per sample (flex_first) and 0.9 s (sparse) on the CPU,
+  15-18 min per part.
+- **ReactMech test, read for the first time: the molecule split puts two reagent families in
+  test.** On ReactMech molecule test (902) sparse_resonance_stop0 scores 72.1 / 74.7 / 75.5 and
+  the joint sparse_resonance 70.4 / 73.9 / 74.9, against 91.1 and 91.9 top-1 on val. The
+  sulfonium steps of the Swern oxidation ([S+] in the reactants: train 13, val 4, test 188) and
+  the chromium oxidations (Cr: 6, 1, 25) sit almost all in test, because steps that share a
+  molecule share a part: 186 of the 188 test sulfonium samples are one molecule group of 223
+  steps (the activated-DMSO intermediates join them), and 23 of the 25 Cr samples sit in two
+  groups of 14 and 11 steps. On those 213 samples
+  the runs score 25.8 and 15.5 top-1; on the other 689, 86.4 / 89.7 / 90.7 and 87.4 / 91.6 /
+  92.3, close to val. So ReactMech test is partly an unseen-family test, and a ReactMech result
+  is reported on both subsets. The split stays as frozen (P0); a class-aware split is a later
+  decision, not a P0b one.
+- **Timing of the presets on the RX 6600 XT** (`--epochs 1 --no-resonance-draws --seed 0`, the
+  full PMechDB molecule train, 3 TOO_LARGE samples skipped). One epoch: 429 s (general) and 435 s
+  (legacy), about 23 samples/s, against about 90 s on the pod's RTX 5080. Thirty epochs take
+  about 3.6 h per run, so the 6 runs of step 3 take about 22 h here and about 4.5 h on a pod.
+  Both presets trained with finite losses.
+
+## 2026-10-29: the v18 training set on a private Hugging Face dataset
+
+- **Where (user request).** The dataset `mfiaschi5/rhoMech-data` on Hugging Face is private,
+  revision 7aef081976cb6324687088855a1c0a55968fa102: 210 files, 9.63 GB. It holds what a pod
+  needs to train and evaluate on sample store version 18 (code 4f075a0) for PMechDB and the
+  ReactMech pilot:
+  - `data/processed/<source>/`: the store shards and index, every split view, the splits and
+    frozen splits, the pair-feature statistics, the steps and resonance-pair parquets, the
+    cohorts with `baseline_closed_base.json`, and the ingest reports;
+  - the 20,885 token files and 20,885 Wiberg sidecars the shards read (their header inputs),
+    packed as `archives/tokens_<0-f>.tar` (by the key's first hex digit, about 500 MB each) and
+    `archives/bond_index.tar`, with checkout paths inside so extraction at the repo root
+    restores them;
+  - `SHA256SUMS` (41,959 files) and a README with the restore commands.
+  The old `contacts_*` folders in the store directory (stage B) are left out. The GitHub repo
+  `mfiaschi5/rhoMech-data` still holds schema 16 and the flex_first weights. For v18, the
+  plan's "push the v18 stores to rhoMech-data before any pod run" is met by this dataset.
+- **Why tars on Hugging Face.** GitHub caps a file at 100 MB and a push at 2 GB, and the token
+  set alone is 7.6 GiB in 41,770 small files. Seventeen tars keep the upload and the pod's
+  download to a few large files, and the loaders still verify every file by its sha256 after
+  extraction. The token files are already compressed npz, so the tars are not compressed.
+- **Verified.** The revision was downloaded into an empty folder, the archives extracted, and
+  every one of the 41,959 sha256 sums matched; the README is byte-identical. The upload took 73
+  min at about 2.2 MB/s and the download 20 min.
+- **Access.** The dataset is private because it is derived from PMechDB (via the PMechRP release;
+  redistribution terms not established) and from ReactMech (CC BY 4.0). A pod gets a
+  fine-grained read-only token scoped to this repository, which is deleted from the pod after
+  the download, as was done with the GitHub deploy key. The staging script is not in the repo:
+  the README and this entry describe the layout.
+
+## 2026-10-29: P0b general runs on the pod, and the cross-source evaluation
+
+Plan step 3 of P0b (`docs/open_shell_plan.md`), on a RunPod RTX 5090. The code went over as a
+git bundle of `claude/open-shell-p0b` (`uv sync --no-group rocm --group cuda`, torch
+2.14.1+cu130). The data came from the private Hugging Face dataset (previous entry), and every
+sha256 was verified. All runs use dense_plain: dense encoder, `--no-resonance-draws`, 30 epochs,
+molecule split, seeds 0, 1 and 2. Three lanes share the GPU at about 6-8 GB each. Timings:
+- PMechDB: 75 min a run.
+- ReactMech pilot: 95 min a run (15,330 steps by the padded-cell budget).
+- A decode on CPU (8 threads, 0.6-0.8 s a sample): about 10 min for 1,238 samples.
+
+- **User decisions.**
+  - General first, PMechDB alone, then general on the ReactMech pilot alone, right after
+    ("niente pmechdb solo reactmech"). Then legacy on both sources, separately.
+  - Before legacy, a cross-source evaluation of the general models ("to measure the out of
+    distribution"). The legacy lanes were then started while the last decodes still ran on
+    CPU.
+  - The stop weight keeps its default: 0 on PMechDB, 0.5 on ReactMech.
+- **General on PMechDB, full-R decode on closed_base val** (1,238 samples, best.pt at epochs
+  17, 24 and 21). Top-1/3/5 by seed: 67.7/86.2/88.6, 64.1/82.3/84.4 and 65.1/82.2/86.9, a mean
+  top-1 of 65.6. The old checkpoints on the same samples:
+  - flex_first: 62.9. McNemar on the majority-of-seeds hits: 94 losses, 129 wins, p 0.011
+    that general is better.
+  - joint sparse_resonance: 61.6, with 81 losses and 132 wins, p 0.0003.
+  Those were trained on v15 / v17 (the joint also on ReactMech), so this is context, not the
+  P0b decision, which is general vs legacy on v18.
+- **Decode caps.**
+  - PMechDB: the label caps (6-2-48) and the legacy ones (8-2-48) give identical ranks on
+    every val sample, in all three seeds.
+  - ReactMech: the label caps are 8-3-48. A third changed atom lets more candidates compete,
+    and it costs 2, 2 and 5 top-1 hits per seed, never gains one.
+  The caps stay legacy.
+- **General on ReactMech**: val anchor top-1 is 95.4, 95.4 and 95.3 at epochs 21, 17 and 23.
+  Full-R decode on val (911 samples): 94.7, 92.9 and 94.4, a mean of 94.0.
+- **Cross-source evaluation** (val only, the test parts untouched). Each checkpoint carries
+  its own feature and pair statistics, so `ksmech-eval decode --run-source A --source B`
+  normalizes B's samples as A's training did. Full-R top-1, mean of three seeds:
+
+  | trained on \ evaluated on | PMechDB closed_base val | ReactMech val |
+  |---|---|---|
+  | PMechDB | 65.6 | 52.3 |
+  | ReactMech | 27.7 | 94.0 |
+
+  Both cross arms fail the paired comparison against the source's own models
+  (`ksmech-eval compare`):
+  - on ReactMech: -41.7 points, 371 vs 5 discordant, p 4e-103;
+  - on PMechDB: -38.0 points, 547 vs 67 discordant, p 7e-95.
+  Split by distance from the model's training part:
+  - "shared": a non-trivial molecule (> 3 heavy atoms) in common;
+  - "new element": an element no training step has;
+  - "novel": neither.
+
+  | model -> val | novel | shared molecule | new element |
+  |---|---|---|---|
+  | PMechDB -> PMechDB | 66.2 (1,213) | - | 37.3 (25; As, Ca) |
+  | PMechDB -> ReactMech | 53.0 (849) | 54.1 (45) | 5.6 (30; Cr, Ni, Pd) |
+  | ReactMech -> ReactMech | 95.3 (895) | - | 20.8 (16; K) |
+  | ReactMech -> PMechDB | 27.6 (1,159) | 38.1 (14) | 26.2 (70; As, Ca, Cu, K, Sn, Ti, Zn) |
+
+- **Reading.**
+  - The two sources barely overlap: 45 ReactMech val steps share a molecule with PMechDB
+    train, and 14 the other way. So the cross arms measure transfer to another distribution
+    almost entirely.
+  - Transfer is asymmetric. PMechDB's broad set keeps 80% of its in-distribution top-1 on
+    ReactMech (53.0 vs 66.2 on novel steps) but stays 42 points below ReactMech's own
+    models.
+  - The ReactMech pilot's narrow set does not reach PMechDB (27.6). Its 94% in distribution
+    says that its molecule split still holds out molecules within known reaction templates.
+    Leave-one-class-out (`loco`, `loco_all`) is the out-of-distribution measure inside
+    ReactMech.
+  - An unseen element (an untrained z embedding) is worst where it is in the edit, meaning a
+    mapped atom of it changes a bond or its charge. Top-1 by where the unseen element sits:
+
+    | model -> val | in the edit | spectator |
+    |---|---|---|
+    | PMechDB -> ReactMech (Cr, Ni, Pd) | 0.0 (25) | 33.3 (5) |
+    | PMechDB -> PMechDB (As, Ca) | 20.8 (8) | 45.1 (17) |
+    | ReactMech -> PMechDB | 22.9 (16) | 27.2 (54) |
+    | ReactMech -> ReactMech (K) | - | 20.8 (16) |
+
+    A spectator costs too, but less; the counts are small. Within ReactMech, the K steps fall
+    from 95 to 21.
+  - Not done: k-fold or leave-one-class-out retraining, which needs new runs.
+
+## 2026-10-30: P0b decision: GENERAL against LEGACY
+
+- **Runs.** The legacy preset, three seeds on PMechDB and then on the ReactMech pilot, ran on the
+  same pod on 2026-10-29: started 20:45 UTC, while the cross-source decodes ran on the CPU (the
+  user asked for that). PMechDB took 76 min a run and ReactMech 100 min, three at a time on the
+  RTX 5090. The checkpoints and decode files were copied back, and their sha256 match the pod's.
+
+  | best.pt | PMechDB epoch (val anchor top-1) | ReactMech epoch (val anchor top-1) |
+  |---|---|---|
+  | legacy s0 | 21 (66.8) | 21 (94.7) |
+  | legacy s1 | 24 (67.4) | 23 (95.0) |
+  | legacy s2 | 17 (64.6) | 22 (94.8) |
+
+- **Decision (P0b step 4).** The metric is closed_base val full-R top-1 with caps legacy.
+  - GENERAL: 67.7, 64.1 and 65.1 (mean 65.6). LEGACY: 65.2, 65.9 and 62.4 (mean 64.5).
+  - Difference +1.1 points; pooled SD 1.87, so the tolerance is 3.75.
+  - GENERAL passes. It would fail only if it were below LEGACY by more than the tolerance.
+  - McNemar on majority-of-seeds hits: GENERAL misses 65 samples that LEGACY gets, and gets
+    70 that LEGACY misses; p 0.70. No seed pair is significant at top-1.
+
+  So keeping every cell (the d-type acceptors, the donor's own antibond and the site
+  self-pairs, as flag channels) and adding E_r and the retained spectral fraction cost nothing
+  measurable. The old deleting rules are dropped: GENERAL is the reference configuration, and
+  no leave-one-flag-out runs are needed.
+- **Every arm**, full-R top-1 / top-3, means of three seeds; the cross arms are the
+  evaluation of the previous section:
+
+  | model -> val | GENERAL | LEGACY | top-1 diff (tolerance) | McNemar top-1 / top-3 |
+  |---|---|---|---|---|
+  | PMechDB -> PMechDB (1,238) | 65.6 / 83.6 | 64.5 / 82.8 | +1.1 (3.75) | 0.70 / 0.98 |
+  | ReactMech -> ReactMech (911) | 94.0 / 95.6 | 93.5 / 94.8 | +0.5 (1.45) | 0.70 / 1.0 |
+  | PMechDB -> ReactMech (911) | 52.3 / 70.7 | 50.6 / 70.4 | +1.7 (7.31) | 0.93 / 0.93 |
+  | ReactMech -> PMechDB (1,238) | 27.7 / 42.7 | 29.1 / 43.6 | -1.4 (3.37) | 0.38 / 0.021 |
+
+  GENERAL passes on all four arms, at top-1 and at top-3.
+- **The one significant McNemar result inside the tolerance** (the plan asks for it to be
+  explained): ReactMech models on PMechDB val, top-3.
+  - The difference is -0.9 points, inside the 4.9-point tolerance. On majority-of-seeds hits,
+    GENERAL misses 96 samples that LEGACY gets and gets 69 that LEGACY misses, p 0.021.
+  - The three seed pairs that contain GENERAL s1 are significant (p <= 0.009), and none of
+    the other six is.
+  - GENERAL s1 is the weak seed of that arm: 25.4 top-1 and 39.0 top-3 on PMechDB, against
+    28-29 and 44 for the other GENERAL seeds; on its own val it is also the weakest seed,
+    92.9.
+  - With three seeds, the majority vote follows the weak seed on every sample where the
+    other two disagree.
+  - Read as seed variance in an out-of-distribution arm, not as a cost of the preset. The
+    same arm's top-1 is not significant (p 0.38).
+  - Single seed pairs are significant in three more comparisons. Each time it is a weak
+    GENERAL seed against a strong LEGACY one (the test is one-sided, GENERAL worse):
+    - top-3 on PMechDB: GENERAL s1 and s2 (82.3 and 82.2) against LEGACY s1 (84.6);
+    - PMechDB models on ReactMech: GENERAL s1 against LEGACY s0 and s1 at top-1, and
+      against LEGACY s1 at top-3.
+
+    The majority test of each of these comparisons is far from significant (p >= 0.93). This
+    is the seed spread that the pooled-SD tolerance is there to absorb.
+- **Subsets** (the split of the previous section), top-1, GENERAL against LEGACY. The
+  differences sit where the counts are small:
+  - unseen K on ReactMech val, a spectator in all 16 steps: 20.8 against 2.1;
+  - PMechDB models on ReactMech steps that share a molecule with PMechDB train (45): 54.1
+    against 45.9;
+  - with Cr, Ni or Pd (30): 5.6 against 0.0;
+  - novel steps: within 1.5 points everywhere.
+- **Label caps on the legacy runs.** The result is the same as for GENERAL:
+  - PMechDB: the label caps (6-2-48) give identical ranks on every val sample, in all three
+    seeds.
+  - ReactMech: the label caps (8-3-48) cost 1, 1 and 3 top-1 hits per seed and gain none.
+
+  The caps stay legacy for both presets.
+- **Old checkpoints beside the new means** (closed_base val full-R top-1), so drift is
+  visible:
+  - flex_first (v15): 62.9;
+  - the joint pmechdb+reactmech sparse_resonance (v17): 61.6.
+
+  Both are below both v18 arms. On ReactMech val, sparse_resonance_stop0 scores 91.1 and the
+  joint run 91.9, against 94.0 (GENERAL) and 93.5 (LEGACY).
+- **Test, read once for the selected configuration** (GENERAL, PMechDB, closed_base test,
+  1,182 samples, caps legacy).
+  - Full-R top-1 is 67.6, 65.2 and 66.0, a mean of 66.3; top-3 is 84.0 and top-5 86.5.
+  - The cohort covers 1,182 of 1,185 test steps; 3 are MISSING_TOKENS.
+  - On the same test, the old checkpoints score 62.7 (flex_first) and 64.1 (the joint run).
+  - The test was decoded after the decision and selected nothing. LEGACY's test is not read.
+  - Test top-1 (66.3) is close to val (65.6), so selecting best.pt on val did not overfit
+    val.
+- **Flag defaults.**
+  - The `ModelConfig` defaults stay the legacy ones (`pair_cells 'valid'`, `orbital_extra ()`).
+    This keeps every older checkpoint and the P0a reproduction gate reading as before.
+  - GENERAL is selected with `--preset general`. It is the configuration the later phases
+    train with: Release A in P4 step 7, against these three GENERAL seeds.
+  - `frontier_blocks` and the finite-difference f+/f- columns stay unselected until their P9
+    ablations.
+- **Where the runs are (user request).** Everything is in the private dataset
+  `mfiaschi5/rhoMech-data`, revision 728a967227051b5891c1c00b727a68eb295c9f83 (444 files), at
+  its checkout paths:
+  - the twelve run directories: checkpoints, logs and every decode file;
+  - `data/models/pod_runs/p0b_2026-10-29/`:
+    - the pod's logs and scripts;
+    - the analysis scripts and the paired comparisons;
+    - the staging script of the v18 upload.
+  - `SHA256SUMS.models`, which lists all 233 of these files.
+
+  Every uploaded file was checked against the local copy, by sha256 or by git blob hash. The
+  local copies match the pod's.
+
+## 2026-10-30: Open-shell P1: the drawing repairs V1, A1 and the named beta-lactam repair
+
+- **What (open-shell plan P1, U4).** Three drawing repairs return closed-shell polar steps that
+  were excluded as RADICAL_DRAWN only because a species was drawn with a missing H or charge.
+  They run first among the ingest repairs (`data.domain.completed_step`, before R1 and the
+  dative law). Each is kept only if the repaired step still validates (charge balance, maps,
+  arrow replay where arrows exist). Each touches only an atom drawn the same way on both
+  sides: the same map number with the same shape, or, for unmapped atoms, equally many of the
+  same element and shape on both sides. An atom that reacts, or a radical drawn on one side
+  only, is never touched.
+  - **V1, H completion.** It applies to two signatures that no radical reading fits:
+    - a neutral C with 3 radical electrons and one neighbour (a methyl drawn `[C]`) gets 3 H;
+    - the imidazol-2-yl C of CDI gets 1 H. It is recognized by topology: a neutral C in a
+      5-ring, degree 2, two N neighbours, 1 radical electron. RDKit does not flag it
+      aromatic, so an aromaticity test would match none.
+
+    A C with one radical electron anywhere else is never completed: the three ambiguous
+    ketyls (possibly sodium acetone ketyls), the Birch [CH], a phenyl. Structure cannot tell
+    them from genuine radicals; they stay excluded and go to P3's candidate list.
+  - **A1.** A bare neutral alkali atom (group 1 without H, no neighbour, charge 0) gets +1. The
+    Birch Na, bonded on one side, is not bare.
+  - **The named beta-lactam repair (`BL_NAMED`).** Step `pmechdb-65a6c92b04e820b5` draws the
+    ring N (map 21) without its H on both sides: the N-acyliminium [N+]=C and the
+    beta-lactam amide N each keep one radical electron. One row of the tracked table
+    `src/ksmech/data/repairs_v1.json` (step id, map, change, rule, reason) adds the H on both
+    sides; the step replays its arrows. This is a named per-step repair, not a rule. Any
+    later one needs its own decision here, so the table does not grow into a list.
+- **Not implemented: an explicit H atom with a fresh map number.** The plan also allows adding
+  the H as an explicit atom where a source draws H explicitly. No ingested source draws a
+  spectator's H as atoms: PMechDB draws only moving H as `[H:n]`, and ReactMech writes H counts.
+  So V1 writes the count (NoImplicit). If P8 meets the shape on rmechdb, it adds the variant.
+- **Classes and counts.**
+  - Each repair gives the step a domain class: `REPAIRED_V1`, `REPAIRED_A1` or `REPAIRED_BL`.
+    They are admitted by default, like the P0a classes.
+  - The rules are logged in `charge_repair` and `charge_repairs.csv` as `V1 methyl [C] +3H`,
+    `V1 imidazol-2-yl C +H`, `A1 bare alkali +1` and `BL_NAMED`.
+  - They are counted per rule in `ingest_report.json` and, new, in `stats.json`
+    (`charge_repairs_by_rule`, also printed by `ksmech-data stats`).
+- **Measured.** Every stored step was screened again from the sides the source drew. The per-rule
+  counts equal the P0 survey:
+  - PMechDB:
+    - 9 methyls (8 training steps and the allyl-cation shift, a resonance pair);
+    - 4 bare K/Na;
+    - 1 beta-lactam N.
+
+    RADICAL_DRAWN goes from 44 to 30, and kept steps from 12,911 to 12,925.
+  - The ReactMech pilot: the 62 CDI steps. Kept steps go from 9,936 to 9,998, and only the 2
+    OPEN_SHELL_METAL steps stay excluded.
+  - No other step changes: no code, class or SMILES. The 8 Sn steps stay METAL_PLACEHOLDER
+    (the P0a law), and the Al, nitrone and four-bonded P steps stay RADICAL_DRAWN.
+- **Spec.** v9.1's "Domain coverage" already lists V1, A1 and the named repair, so the text is
+  unchanged.
+- **Rebuild (P1 step 6).** It ran from the clean commit f3d05e9, 02:07 to 04:56, one heavy step
+  at a time. The P0b artifacts the checks compare against were copied first to
+  `data/processed/<source>/p0b_reference/` and `data/models/pmechdb/flex_first/p0b_reference/`.
+  - Times:
+
+    | Step | Time |
+    |---|---|
+    | ingest PMechDB | 1 min |
+    | ingest ReactMech | 22 min |
+    | QM top-up (37 molecules, all already cached, 0 failures) | seconds |
+    | bond-index | 5 min |
+    | tokens | 2 min |
+    | samples PMechDB | 21 min |
+    | samples ReactMech | 40 min |
+    | the two GBDT refits | 15 min each |
+    | the two floors | 1 min each |
+    | flex_first val decode | 45 min |
+
+  - Every artifact is stamped with code f3d05e9, clean, and SAMPLE_VERSION is 18.
+  - **PMechDB samples.** 12,412 samples from 12,455 training steps (P0b: 12,399 from 12,442).
+    The 43 MISSING_TOKENS are the same as before.
+    - The molecule split is 9,991 / 1,238 / 1,183 (P0b: 9,979 / 1,238 / 1,182). The frozen-split
+      hash path put 12 returned steps in train and one in test, the methyl step
+      `pmechdb-9346d5b585fc8087`.
+    - No frozen step changes part. The 22 frozen ids missing from the views are P0a's
+      METAL_PLACEHOLDER steps, as in P0b.
+  - **The 'added' cohort.** `cohort_added.json` holds the 13 returned training steps: 8 V1, 4 A1
+    and 1 BL; 12 in train, 1 in test. The resonance pair `pmechdb-51827a932b07eaa9` is left out.
+    closed_base does not change.
+  - **ReactMech samples.** 9,031 samples from 9,450 training steps (P0b: 9,003 from 9,388).
+    - Against the plan, 28 of the 62 CDI steps already have samples, because all their species
+      were in the token cache. The other 34 are skipped as MISSING_TOKENS (class REPAIRED_V1)
+      until P5.
+    - In the molecule split all 62 are SPLIT_CONFLICT: they are new steps that join molecule
+      groups frozen in two parts. SPLIT_CONFLICT goes from 204 to 266. The same holds for four
+      of the five loco_all splits.
+    - So they are in no molecule view. They will not enter one unless the frozen snapshot is
+      replaced by hand, which P5 decides. The scaffold split places them 50 / 4 / 8, and
+      locoall-anhydride puts 61 in train; the 62nd shares a molecule (acetate) with the
+      held-out class and is excluded as leaky, by design.
+    - No frozen ReactMech step changes part in any strategy.
+  - **GBDT refit, the new reference** (molecule split). Training queries go from 9,432 to 9,443:
+    one returned step has no orbital label.
+
+    | Cells | val top-5, P0b → P1 | test top-1/3/5, P0b → P1 | trees |
+    |---|---|---|---|
+    | valid | 70.7 → 69.8 | 48.1/67.8/75.4 → 47.1/67.2/74.6 | 553 → 307 |
+    | all | 70.8 → 70.8 | 50.4/66.6/74.9 → 47.8/64.9/73.9 | 621 → 568 |
+
+    - The fit is deterministic: negatives are seeded per step, and LightGBM is deterministic at
+      one thread count. The untrained gap kernel's val numbers are unchanged.
+    - So the shift is how much one refit moves with 11 more queries (0.1%): early stopping ends
+      at another round.
+    - P0b's GBDT weights were overwritten in place and are not on Hugging Face. Their reports
+      and ranks are kept in `p0b_reference/`.
+  - **Exit checks, all passed.**
+    - The per-rule counts equal the P0 survey.
+    - On closed_base the per-column digests of all 12,399 samples are identical to the
+      baseline: no column differs, is missing or is added. The 13 'added' samples are the only
+      ones outside it.
+    - The floor ranks per sample are identical:
+      - for valid cells and for every cell;
+      - val 1,238, test 1,182.
+    - flex_first's val decode hits per sample are identical: top-1/3/5 62.9 / 82.6 / 85.4.
+    - No step_id changes, and the ReactMech pilot keeps its 10,000 ids.
+
+## 2026-10-30: Open-shell P2 amendment: every multiplicity derived twice and combined by one rule
+
+- **What (user request, 2026-10-30).** The user asked: "fai le due cose in parallelo fai il calcolo
+  spGFN2 (dove non le fai già) poi con le regole chimiche come Ligand field theory, representation
+  theory etc..". So P2 derives every multiplicity two independent ways and compares them.
+  `docs/open_shell_plan.md` P2 (steps 2-4; old steps 3-5 are now 5-7), P4 step 1 and P8 step 3
+  are amended.
+  - **(A) spGFN2 at every allowed multiplicity.** It is computed where it is not computed
+    already. Each species is optimized in ALPB water at every multiplicity its electron count
+    allows, and the adiabatic energies are recorded:
+    - Fe(III) d5 at S = 5/2, 3/2 and 1/2;
+    - mononuclear Cu(II) d9 at its one state, as a control;
+    - polynuclear species, every total spin enumerated;
+    - the METAL_SUSPECT rows (Cr(IV) d2, Ni(II) d8) at S = 1 and 0, as diagnostics;
+    - FlowER species with u >= 3, every state u, u - 2, ...
+
+    A is conclusive when its lowest state lies below every other by more than the method's
+    error bar. For organic species that is AC12's 0.30 eV. AC12 is organic only, so a published
+    spGFN2 error bar for 3d spin-state energetics must be found and cited here; until then A
+    alone decides no metal species.
+  - **(B) Theory rules, coded as principles.** They go in a separate, versioned, tracked table,
+    spin_theory_v1 (`src/ksmech/data/spin_tables/theory_v1.json`, written by
+    `src/ksmech/data/spin_theory.py`). Each entry gives the point group, d^n, the geometry class,
+    the predicted S and the rule chain, or 'undetermined'. The rules:
+    - d^n from `domain.oxidation_state` / `d_count`;
+    - the ligand field: from the coordination number and geometry, and Delta against the
+      pairing energy on a cited spectrochemical series. In Oh, d1-d3, d8, d9 and d10 have a
+      single outcome; d4-d7 depend on the field, and a mid-series ligand gives 'undetermined'.
+      Td is high spin, and Jahn-Teller is annotated;
+    - the point group at a tolerance and the frontier irreps from the GFN2 MOs;
+    - Hund's rule and the ground term for a degenerate open shell;
+    - Gleiter-Hoffmann for carbenes, with its cited thresholds.
+
+    No rule names a species, and data.spin never reads the table directly.
+  - **(C) The combination rule, chosen by the user.**
+    - Where A and B agree, the multiplicity is assigned.
+    - Where B is 'undetermined', A decides within its error bar.
+    - Every disagreement is MULTIPLICITY_AMBIGUOUS, reported here per species.
+    - The Fe(III) high-spin row of metal_v1 stays only if A and B confirm it.
+
+    The result is spin_table_v1, which records A, B and the case of C that decided.
+- **Why.** No multiplicity should rest on one derivation alone:
+  - GFN2's spin-state energetics for 3d metals have limited reliability (Moradi 2024);
+  - a theory rule is only as good as its reading of the geometry.
+
+  Requiring the two to agree keeps both under the governing principle (a law or a QM-derived
+  input, never a hand clause). Theory enters the model path only through C, so a wrong rule
+  makes a species ambiguous, not wrong.
+- **Reading of 'agree'.** A and B agree when they give the same lowest state. A lowest state of A
+  that differs from B's is a disagreement even when it lies inside A's error bar, so it is
+  MULTIPLICITY_AMBIGUOUS. This is the literal reading of the rule; the user can change it before
+  P2 runs.
+- **Consequence for P4.** If the Fe(III) row is not confirmed, its species are
+  MULTIPLICITY_AMBIGUOUS and leave the open_shell_metal cohort. Whether Cu then enters without
+  Fe (U9 joins them) goes back to the user.
+- **Schedule.** P2's compute grows to about 1 h at 8 workers (estimate). It runs after P1 is
+  closed (7247bcc), never beside a build, within the host's 15 heavy processes.
+
+## 2026-10-31: Open-shell P2: the probe, the spin-state scan, spin_theory_v1 and spin_table_v1
+
+- **What ran.** P2 steps 1-6 of `docs/open_shell_plan.md` ran on branch `claude/open-shell-p2`.
+  - Steps 1 and 5: `scripts/probes/open_shell_probe.py`.
+  - Steps 2-4: `scripts/probes/spin_scan.py`. It covers 156 species: organic 64, Cu/Fe 61,
+    METAL_SUSPECT 31. That is 267 states and 534 optimizations (two starts each, below).
+  - Step 6: `scripts/probes/flower_species_census.py`.
+
+  The scan ran at 2 workers beside the ReactMech full build (12 workers in its own worktree),
+  so the host stayed within 15 heavy processes. The user chose this when the first run was
+  started at 8. The two-start rerun took about 2 h. No build ran from this checkout.
+- **Scratch cache root (the plan's exception).**
+  - Every probe and scan record lives under `data/cache/probe_open_shell/`. That directory is
+    ignored by git and keyed by canonical SMILES and method string, like the production caches.
+  - Its sub-roots: production and theory records, `sp_single`, `scan`, `b_displaced`, `checks`
+    and the IP/EA levels.
+  - No pipeline command reads it. The reports `probe_report.json` and `scan_report.json` stay
+    local.
+- **Step 1, the probe's diagnostics.** Restricted is compared with spGFN2 at the production
+  geometry and the table multiplicity.
+
+  | group | n (failed) | integral / degenerate / smeared | max\|n - aufbau\| median / p90 / max | open MOs occupied / virtual block | split plateaus | max\|dq\| median / p90 / max | arrow non-metal \|dq\| max |
+  |---|---|---|---|---|---|---|---|
+  | fixtures (OPEN_SHELL + ethane) | 20 (0) | 13 / 6 / 1 | 0.000 / 0.500 / 0.667 | 34 / 3 | 3 | 0.003 / 0.027 / 0.286 | 0.071 (n = 1) |
+  | PMechDB Cu(II) / Fe(III) | 61 (7 SCF, 1 OPT) | 46 / 1 / 6 | 0.000 / 0.058 / 0.722 | 127 / 0 | 0 | 0.013 / 0.351 / 0.363 | 0.096 (n = 17, median 0.024) |
+  | METAL_SUSPECT | 31 (2 SCF, 3 OPT) | 26 / 0 / 0 | 0.000 / 0.000 / 0.000 | - | 0 | 0.000 / 0.0001 / 0.0002 | - |
+
+  - **Fixtures.** The six degenerate ones are [Br], [OH], [N]=O, [O][O-], [C]=O and [N]=[N]; the
+    smeared one is [Cl][Cu][Cl]. Three degenerate plateaus are split across the 0.5 block
+    threshold (U16).
+  - **Metals.** Every Fe species is integral (17 of 17). The seven non-integral metal species
+    are all Cu: [Br][Cu][Br] is degenerate; [Cl][Cu][Cl], [I][Cu][I], CC#[N+][Cu-]Br2,
+    C[N+](C)(C)[CuH2-], C[NH2+][Cu-]Br2 and [NH3+][Cu-]I2 are smeared. The p90 max|dq| of 0.35
+    is the Fe species.
+  - **eps_SOMO minus the alpha-HOMO/beta-LUMO midpoint.** Fixtures: median 0.006 eV, p90 0.70,
+    max 0.82. Metals: median 0.069, p90 0.49, max 0.82.
+  - **Time per metal run (first, uncached run).** Median 2.8 s, p90 23 s, max 698 s.
+  - **spGFN2's lowest vertical state against the table.** It is the table's multiplicity for
+    every metal species that ran: Cu u = 1 for 36 of 36 (one state), Fe u = 5 for 17 of 17 (of
+    5, 3 and 1).
+  - **Checks.** These are now tests in `tests/test_open_shell_probe.py`.
+    - [CH3] at the engine's embedding: restricted SOMO -8.9115 eV, spGFN2 alpha HOMO -9.6867 eV
+      and beta LUMO -8.1502 eV. The plan quotes -8.911 / -9.687 / -8.150.
+    - Ethane: spGFN2 minus restricted is 4.8e-14 eV.
+- **Step 6, the FlowER census** (`tests/test_flower_species_census.py`, realdata).
+  - Lines: RS 3,569 and RC 1,519.
+  - Species: 4,284 unique. By u: 0 has 1,841, 1 has 2,387, 2 has 53, 3 has 3.
+  - The 56 species with u >= 2 occur in RC 143 / RS 1,265 lines. This reproduces U19 ("about
+    56").
+  - Named species, lines RC / RS:
+
+    | species | RC | RS |
+    |---|---|---|
+    | [C]=O | 5 | 28 |
+    | [N]=[N] | 5 | 0 |
+    | [O][O] | 89 | 1,210 |
+    | [O]O[O] | 10 | 10 |
+    | [O][O+][O-] | 1 | 2 |
+
+  - Atoms or linear open shells: 18 species, 7 of them atoms with a degenerate fractional
+    subshell. They occur in RC 753 / RS 2,015 lines.
+- **Step 2 (A).** It runs as planned, with two laws the scan made necessary.
+  - **The symmetric saddle, and the two-start law.**
+    - The engine's embedding draws Cl[C]Cl and Br[C]Br exactly linear (180.0°). A gradient
+      optimizer cannot leave a symmetry element, so in the first scan both states ended at the
+      linear saddle. There the triplet is lower (0.69 / 0.64 eV), and B read 3Sigma_g-.
+    - From the production geometry displaced by a fixed Gaussian kick (sigma = 0.02 Angstrom
+      per coordinate, `np.random.default_rng(0)`), the molecules bend. CCl2 goes to 112.9°
+      (u = 0) and 128.7° (u = 2); CBr2 to 113.9° and 129.8°. The singlet then lies lower, by
+      1.01 and 0.76 eV.
+    - So every state is optimized from both starts, and its energy is the lowest converged
+      one. A state fails only when every start fails; the reasons are joined.
+    - Why 0.02: a trial at sigma = 0.05 Angstrom failed one restricted SCF.
+    - The displaced start changed A for 5 species:
+      - CCl2 and CBr2: triplet to singlet.
+      - [F][Cu][F]: its u = 1 SCF failure from production converges from the displaced start.
+      - [Br][Fe-]([Br])([Br])[BrH+]: the gap goes from 0.79 to 0.75 eV, same verdict.
+      - C[C](O[O])C1CC(CC=O)C1(C)C: its production start forms a bond (next point).
+  - **BOND_FORMED.**
+    - `check_connectivity` flags only input bonds that break; it ignores new contacts. The
+      singlet optimization of 17 organic biradical drawings closed a bond the drawing lacks, so
+      A was comparing the drawing's triplet with the singlet of another molecule. Examples:
+      - [O]C1[CH]C2OC2C=CC1 forms an epoxide.
+      - O[C](CC[CH]CBr)c1ccccc1, a Norrish II 1,4-biradical, closes to a cyclobutane.
+      - COC(=O)[C]C(=O)OC: the carbene centre closes on a carbonyl O.
+      - [C]=C(c1ccccc1)c1ccccc1: a phenyl migrates to the carbene carbon, the
+        Fritsch-Buttenberg-Wiechell shift to diphenylacetylene.
+      - [O][N+]([O])=O forms an O-O bond.
+    - The law: a start fails with BOND_FORMED when, at its optimum, two non-metal atoms not
+      bonded in the drawing (graph distance >= 2) lie within `QMConfig.wall_factor` (1.2 x their
+      covalent-radius sum, where the bond walls start). The state then takes the lowest start
+      that kept the drawing (`open_shell_probe.formed_bonds`, `spin_scan.drawing_kept`).
+    - Left out: metal-ligand pairs, and Li, Na, Mg and K as in `bond_stretch_ratios`. The
+      coordination sphere of a ligand-truncated fragment moves freely (kappa-2 triflates,
+      eta-2 aryls).
+    - Distribution over every optimum, non-metal pairs:
+      - the formed bonds lie at 0.92-1.12;
+      - two O-H contacts lie at 1.19-1.20 (flagged; C[C]1C(OO[O])CC2CC1C2(C)C, an H 1.16
+        Angstrom from O);
+      - one lies at 1.22 (not flagged; three nitroxide drawings
+        COC(=O)C(C1C=C[CH]C1)N([O])CCC#N and its two variants, with an H 1.18 Angstrom from the
+        nitroxide O, so their singlets carry a nearly transferred H);
+      - every other contact is at >= 1.29: geminal pairs, such as Br-Br in bent CBr2 (1.29) and
+        1,3 C-C in rings (>= 1.38).
+    - So the margin is clean except for O-H. The factor is the engine's existing constant, not
+      tuned.
+    - Effect:
+      - 16 organic species become A_FAILED and so MULTIPLICITY_AMBIGUOUS.
+      - C[C](O[O])C1CC(CC=O)C1(C)C keeps a singlet from its displaced start, with no new bond: the
+        carbonyl-oxide reading, singlet by 2.36 eV.
+      - 10 METAL_SUSPECT Ni species fail in both states: the two Ni-bound carbons couple, a
+        reductive elimination.
+  - **Error bars.**
+    - **Organic.** 7 kcal/mol = 0.304 eV, spGFN2-xTB on AC12 (Moradi et al. 2024).
+    - **Transition metal.** 17.9 kcal/mol = 0.776 eV: spGFN2-xTB's MAD for spin-state
+      splittings on the 3d subset of TM90S against TPSSh-D4/def2-QZVPP (Neugebauer, Baedorf,
+      Ehlert, Hansen, Grimme, J. Comput. Chem. 44, 2120 (2023), doi 10.1002/jcc.27185).
+    - **Caveats on the metal bar.** Only the abstract was read; the reference is a hybrid DFT,
+      not experiment; and TM90S's complexes are not our ligand-truncated fragments.
+    - **Effect on the amendment.** With a published bar, rule C lets A decide a metal when B is
+      undetermined and the gap exceeds 0.776 eV. This replaces the amendment's "until then A
+      alone decides no metal species". In v1, no metal species is decided that way: the three
+      undetermined Fe species have gaps inside the bar.
+    - A species with one allowed state (Cu(II) d9) is conclusive by count.
+- **Step 3 (B), spin_theory_v1** (`theory_v1.json`, digest `39a0f802dbb1...`). How the rules
+  were implemented:
+  - **Point group.** The detector moved from `serve/workbench/symmetry.py` to
+    `ksmech.qm.point_group`; serve re-imports it, and its symmetry tests are unchanged. The
+    point group is read at 0.1 Angstrom.
+  - **Degeneracy** is read by MO energy within 1e-4 eV (frontier `EXACT_EV`).
+  - **Tolerances.** The AO operators are checked on the overlap matrix to OPERATOR_TOL 1e-3, and
+    characters to CHARACTER_TOL 1e-2.
+  - **Gleiter-Hoffmann** is read on the restricted GFN2 HOMO-LUMO gap when both MOs sit mostly on
+    the carbene centre. It stands in for their extended-Hueckel sigma-p_pi separation.
+  - **Spectrochemical bands, by donor element.** The halides are below water, so high spin in
+    Oh. C and P donors are low spin, and 4d/5d metals are low spin. O, N and S donors, or a
+    mixed set, are undetermined.
+  - **Textbook laws beyond the plan's list:**
+    - d0 and d10 are closed in any geometry; d1 and d9 have one unpaired electron by count;
+    - square-planar d8 is low spin;
+    - a single atom follows Hund's rules (term symbol).
+  - **Limits.** These give undetermined:
+    - a polyhedron with no rule, such as trigonal FeX3;
+    - two open-shell metal centres;
+    - drawn radicals beside a metal.
+- **Step 4 (C), spin_table_v1** (`species_v1.json`, content hash `deb0df542235...`).
+  - **Totals, 156 species.** Agree 59, B undetermined and A conclusive 37, B undetermined and A
+    inconclusive 15, disagree 5, A failed 40.
+  - **Organic, 64.**
+    - Assigned: singlet 34; doublet 3 (CC(CO)(O[O])[C]([O])CO and the two
+      [C]C=C(C)... quartet-or-doublet drawings, A conclusive); triplet 2 ([O] and [O][O], both
+      agree).
+    - MULTIPLICITY_AMBIGUOUS 25: A failed 16 (all BOND_FORMED), A inconclusive 7, disagree 2.
+    - The inconclusive seven, whose gaps lie inside 0.304 eV (A's lower state, then the gap):
+      - CC(C)([O])OOC(C)(C)OOC(C)(C)[O]: triplet, 0.15 eV;
+      - C[C+]=C[Si-](C)(C)(C)[O+](C)[Sn-]: triplet, 0.30 eV;
+      - CC(C)C1([O])CCC(C)([O])C(O)C1O: singlet, 0.13 eV;
+      - CCCCC#CCCc1[c]c(OC)c(OC)c(OC)c1[O]: singlet, 0.15 eV;
+      - the two COc1[c]c(...)c([O])c(OC)c1OC aryl-phenoxyl drawings: singlet, 0.15 eV;
+      - COc1c([O])c2c(c(OC)c1OC)C(=[C]c1ccccc1)CC2: singlet, 0.20 eV.
+  - **Cu/Fe, 61.**
+    - Assigned: u = 1 for 36 (all Cu, all agree); u = 5 for 13 (all Fe, all agree, A's sextet
+      lowest by 0.44-1.18 eV).
+    - MULTIPLICITY_AMBIGUOUS 12, listed below under the metal_v1 rows.
+  - **METAL_SUSPECT, 31** (diagnostics). Singlet 8; MULTIPLICITY_AMBIGUOUS 23:
+    - A failed 15 (10 BOND_FORMED, 5 without a production record);
+    - A inconclusive 5 (four Ni species with gaps of 0.33-0.74 eV, and [O]=[Cr]([OH])[OH] at
+      0.31);
+    - disagree 3.
+  - **Every A-B disagreement:**
+    - **Cl[C]Cl.** A: singlet by 1.01 eV (bent, from the displaced start). B: triplet (3Sigma_g-
+      at the linear production geometry). At A's bent optimum B is undetermined (GH gap 1.83 eV),
+      and C would assign the singlet.
+    - **Br[C]Br.** A: singlet by 0.76 eV. B: triplet at the linear geometry. At the bent optimum
+      B still gives the triplet (GH gap 1.40 eV < 1.5).
+    - **Three Ni(II) d8 aryl diphosphine complexes:**
+      - CN(C)c1ccc[c]([Ni-2]2([Cl])...)c1, A singlet by 0.73 eV;
+      - Cc1cn2...[Ni-2]([c]1ccccc1)([c]1ccccn1)..., 1.44 eV;
+      - [Br][Ni-2]1([c]2ccccc2)..., 0.63 eV.
+
+      In all three, B reads the production polyhedron as tetrahedral (d8 high spin, u = 2) and A
+      puts the singlet lower. These are METAL_SUSPECT rows, so diagnostics only.
+    - **The first run's two other disagreements** are now A_FAILED: COC(=O)[C]C(=O)OC (B triplet
+      by GH 0.10 eV) and [C]=C(c1ccccc1)c1ccccc1 (GH 1.31 eV). Their singlets formed a bond.
+  - **The plan's species.** Cl[C]Cl, Br[C]Br and diphenylvinylidene are MULTIPLICITY_AMBIGUOUS.
+    [C]=CC, [C]=C(C)C and [C]=O are singlets (agree). [O][O] is the triplet (agree).
+    `tests/test_spin_table.py` checks this.
+  - **The metal_v1 rows.**
+    - **Fe(III) high spin (u = 5)** is confirmed by C for 13 of the 20 Fe species and
+      contradicted by none. The 7 ambiguous Fe species:
+      - [Cl][Fe]([Cl])[Cl] and [Br][Fe]([Br])[Br]: trigonal, so B is undetermined; A's gaps,
+        0.48 and 0.64 eV, are inside 0.776.
+      - C[N+](C)(c1cc(Br)ccc1Br)[Fe-]([Br])([Br])[Br]: B is undetermined at its production
+        polyhedron; A's gap is 0.52 eV.
+      - Br[Br+][Fe-]([Br])([Br])[Br]: u = 1 fails the SCF from both starts; u = 3 lies 0.28 eV
+        up.
+      - Three with no production record: the two Fe triflates (SCF) and the [Fe-]Cl3
+        sulfonamide with a [Si-] (OPT).
+    - **The Cu(II) control:** 36 of 41 at u = 1 (agree). Five have no production record (SCF):
+      [NH3+][CuH2-], [NH3+][Cu-]([Br])[Br], [NH3+][Cu-]([F])[F], COC=[NH+][CuH2-] and
+      NC=[NH+][CuH2-].
+    - So the Fe row stands wherever C decides. The 12 ambiguous metal species stay out of the
+      open_shell_metal cohort when P4 builds it. U9 (Cu and Fe together) needs no change from
+      this.
+- **Step 5, IP/EA against the literature.**
+  - **Method.** Vertical gas-phase delta-SCF at each radical's gas-phase production geometry:
+    IE = E(N-1) - E(N) and EA = E(N) - E(N+1). It is compared with adiabatic experiment, so part
+    of the offset is relaxation.
+  - **Sources.** NIST Chemistry WebBook (SRD 69, ion energetics), except as marked. The values
+    and their citations are in `open_shell_probe.IPEA_LITERATURE`.
+
+  | radical | IE lit. | EA lit. | restricted IE / EA | spGFN2 IE / EA |
+  |---|---|---|---|---|
+  | CH3 | 9.843 | 0.080 | 14.85 / 3.47 | 15.23 / 3.09 |
+  | OH | 13.017 | 1.8277 | 20.15 / 6.89 | 19.03 / 6.48 |
+  | HO2 | 11.35 | 1.078 | 16.83 / 6.32 | 17.05 / 6.11 |
+  | NO | 9.2642 | 0.026 (a) | 15.23 / 4.06 | 15.43 / 4.61 |
+  | NO2 | 9.586 | 2.273 | 15.11 / 5.39 | 15.25 / 5.26 |
+  | NO3 | 12.57 | 3.937 | 18.71 / 9.97 | 18.85 / 9.83 |
+  | CH3O | 10.72 (b) | 1.5689 (c) | 15.42 / 6.67 | 15.06 / 6.45 |
+  | Br | 11.8138 | 3.3636 | 18.53 / 7.73 | 18.02 / 7.54 |
+  | Cl | 12.9676 | 3.6127 | 18.37 / 8.23 | 17.77 / 8.02 |
+  | O2 | 12.0697 | 0.448 | 17.40 / 6.60 | 17.97 / 6.03 |
+  | allyl | 8.13 (d) | 0.481 | 12.90 / 4.87 | 13.11 / 4.67 |
+  | phenoxyl | 8.56 | 2.2538 | 13.58 / 7.12 | 13.67 / 7.02 |
+
+  - **Notes on the sources.**
+    - (a) Travers, Cowles and Ellison 1989 (NO- photoelectron spectrum), as quoted by the
+      Wikipedia article on nitric oxide.
+    - (b) NIST also lists a photoelectron value of 7.37 eV.
+    - (c) Weichman et al. 2017 (cryo-SEVI of CH3O-).
+    - (d) NIST also lists a ZEKE value of 8.153 eV.
+
+    The plan names Rienstra-Kiracofe et al. 2002 for the EAs; NIST's EA entries were used
+    instead.
+  - **Errors (eV).**
+
+    | level | mean signed IE / EA | SD IE / EA | MAD after the mean shift IE / EA | Spearman IE / EA |
+    |---|---|---|---|---|
+    | restricted | +5.60 / +4.70 | 0.76 / 0.92 | 0.59 / 0.71 | 0.94 / 0.86 |
+    | spGFN2 | +5.55 / +4.51 | 0.62 / 0.87 | 0.52 / 0.63 | 0.88 / 0.87 |
+
+  - **Reading.** GFN2 puts every cation about 5.6 eV and every anion about 4.6 eV off, in the
+    same direction for all twelve radicals. That is a systematic error of GFN2's charged
+    states, the one xtb's own vertical IP/EA (`--vipea`) corrects with an empirical shift. Once
+    the mean shift is removed, the scatter is 0.5-0.7 eV and the ranking holds (rho
+    0.86-0.94). spGFN2 is no better than restricted on the ranking. Nothing downstream reads
+    these numbers.
+- **Deviations from the plan.**
+  - `combine`, `scan_verdict` and `ERROR_BARS` live in `src/ksmech/data/spin_table.py`, beside
+    the table's `validate` / `load` / `lookup`, not in the scan script. That way the tests
+    import rule C as a pure function.
+  - The two-start law and BOND_FORMED refine "each state optimized" (above).
+  - B reads the production geometry, as the plan says. B at A's displaced optimum is a
+    diagnostic only: it changes B or C for 3 species, and 29 species have no displaced optimum
+    of their lowest state.
+  - The step tests the plan lists as checks (the [CH3] values, ethane dE and the census counts)
+    are pytest tests.
+- **Open for P4 and the user (spin_table_v2 if taken).**
+  - **The carbene saddle.** P4's production geometry for a two-coordinate carbene is the
+    embedding's linear saddle. Featurized there, CCl2 and CBr2 would read degenerate pi
+    orbitals and fractional occupations. The fix belongs to P4's production geometry (the same
+    displaced start, or an embedding that breaks the symmetry); B on the fixed geometry then
+    gives spin_table_v2.
+  - **New bonds in production.** P4's production optimizer ignores new bonds, as the scan did.
+    A biradical drawing featurized at u = 0 would collapse. The table keeps those species
+    ambiguous, but P4 needs the same check.
+  - **A collapsing singlet.** When a drawing's singlet collapses to another molecule, its other
+    state is the drawing's only minimum (Norrish II 1,4-biradicals are triplets in the textbook
+    picture). Should such a species take that state instead of MULTIPLICITY_AMBIGUOUS? That
+    changes A's law, so it is the user's decision.
+- **Evidence for decisions already taken.**
+  - **U7 (restricted with the spin rule).** spGFN2's lowest vertical state at the restricted
+    production geometry is the table's multiplicity for every metal that ran. For closed shells
+    the two energies are equal (ethane 5e-14 eV). On the non-metal atoms the arrows touch, the
+    restricted-versus-spGFN2 |dq| is at most 0.096 e.
+  - **U10 (fermi_smeared kept and sliced).** 7 of 20 fixtures and 7 of 53 metal species (all
+    Cu) are degenerate or smeared under restricted GFN2.
+  - **U16 (degenerate shells in P2b).** Three fixture plateaus are split across the 0.5 block
+    threshold, the case P2b's plateau rule removes.
+
+## 2026-10-31: Open-shell P2b: the plateau reference, the radical frontier, atom_fukui and the stale key
+
+- **What ran.** P2b steps 1-5 of `docs/open_shell_plan.md` on branch `claude/open-shell-p2b`
+  (from p2). Code 83c35e1, spec v9.2 fc7e041 (approved by the user before the build, U3), then
+  `ksmech-orbitals build --source pmechdb` and `--source reactmech` from the clean tree.
+- **Step 1, localization blocks for u > 0.** `localize.reference_occupations`: the MOs in energy
+  order, neighbours with GFN2 occupations equal to `PLATEAU_TOL = 1e-6` e form a plateau, and
+  each MO's reference is the aufbau occupation averaged over its plateau. An MO with reference
+  > 0 is occupied; the sub-blocks are the reference values; an MO further than SMEAR_TOL (0.05)
+  from its reference is its own block, unrotated. `occupation_reference` dispatches on
+  `rec.unpaired`, so `is_fermi_smeared` reads the plateau reference for u > 0 and aufbau
+  otherwise. Closed shells keep OCC_THRESHOLD 0.5, DOUBLE_THRESHOLD 1.5 and one virtual block.
+  - **Tolerance evidence.** On the 44 PMechDB u > 0 records the reference is the same for every
+    tolerance from 1e-13 to 1e-2 e (realdata test, 1e-13..1e-3). Degenerate open levels agree
+    to 4.4e-14 e. Plateaus of doubly occupied levels with Fermi tails spread up to 5.8e-7 e,
+    but a tolerance that splits them changes no reference, since their aufbau values are equal.
+  - **Fixtures.** Restricted gas-phase GFN2 at idealized geometries (`tests/fixtures/
+    open_shell.py`). There the NO and C6H6.- pairs differ by up to 9e-9 e, so the fixture sweep
+    runs 1e-7..1e-4 instead of the plan's 1e-12..1e-4: at an idealized geometry with
+    restricted GFN2 the degenerate pair is split by more than on the production records, and a
+    tolerance below the split is not a numerical equality any more.
+- **Step 2, the radical frontier (U16).** `frontier.record_frontier_blocks`: for u > 0, HOMO =
+  LUMO = the open group (0 < reference < 2), HOMO-1 the 0.05 eV block of the highest MO with
+  reference 2, LUMO+1 that of the lowest with reference 0. Frozen f+ = f- = the open group's
+  population per MO. [CH3]: f+ was a sigma*(C-H) (C 0.436); now the SOMO, f+ = f-. The FD dual
+  and the record fields are unchanged.
+- **Step 3, `ModelConfig.atom_fukui`** = frozen (default) | fd | both. fd puts `f_plus` /
+  `f_minus` in the place of `f_plus_fmo` / `f_minus_fmo`, both appends them. 'frozen' gives a
+  byte-identical atom tensor. P9 ablates it with 3 seeds.
+- **Step 4, stale detection.** Deviation from the plan: there is no `load_tokens_for` helper.
+  `load_tokens` itself adds `open_shell_rule = "occ-plateau-v1"` to whatever config the caller
+  passes, from the file's own `smiles` (`drawn_unpaired`, RDKit's radical count), and
+  `save_tokens` stamps it. So every reader is covered without being changed, and the grep
+  test checks instead that no module other than tokens.py verifies a token header itself
+  (serve's header check goes through `token_config_for`). An unparsable SMILES raises; serve
+  reports it as "unreadable molecule". P4's records tagged with a table multiplicity must
+  revisit `drawn_unpaired` (a metal centre's u is not RDKit's radical count).
+- **Build summary.** `tokens_summary.json` gains `open_shell`: SOMO and open-group counts, the
+  window references at 0.01 / 0.05 / 0.1 eV against the plateau reference, and max|n - aufbau|
+  and max|n - reference| as median / p90 / max. Summaries are written atomically (tmp + replace):
+  this checkout's `data/cache/tokens/summary.json` was a hard link shared with the reactmech-full
+  worktree's, and an in-place write changed both.
+- **Rebuild.** Both builds ran at 2 workers from the clean commit fc7e041, beside the ReactMech
+  full QM batch (12 workers in its own worktree), so the host stayed within 15 heavy processes.
+  - **PMechDB.** 14,362 molecules: 14,215 with tokens (44 built, 14,171 loaded), 147 without a QM
+    record, 0 failed. The 44 built are exactly the u > 0 molecules (u = 1: 24, u = 2: 14,
+    u = 3: 6). They hold 73 open MOs in 58 plateaus, none smeared. The window references
+    differ from the plateau one in 0 / 0 / 0 records (0.01 / 0.05 / 0.1 eV).
+    max|n - aufbau| median / p90 / max 0 / 0.018 / 0.5, max|n - reference| 0 / 0.013 / 0.028.
+  - **What changed in the 44 files.** All 44 have new frontier columns (`f_plus_fmo`,
+    `fmo_weights` and their exact twins; `f_minus_fmo` in 16). The three species the rule makes
+    integral also have new orbital descriptors and fermi_smeared flags.
+  - **Smeared molecules** go 42 -> 39; the three removed are [C]=O, [CuH2] and [O][O-], and none
+    is added. Training steps touching a smeared molecule go 70 -> 59 (62 -> 57 of the fully
+    tokenized ones).
+  - **ReactMech pilot.** 20,183 molecules: 19,515 loaded, 0 built, 668 without a QM record, 0
+    failed, no open shell. Its previous `tokens_summary.json` was written before P1's re-ingest
+    (it still listed the CDI radicals), so the 18 smeared species it loses are the CDI radicals
+    P1 repaired away, not an effect of P2b.
+  - **Hard links.** The 44 rebuilt files were replaced, not written in place: each now has one
+    link, and the other worktrees, which share the token files by hard link, keep their old
+    copies. When a worktree with P2b's code reads them, `load_tokens` refuses them as stale.
+- **Counts against the plan.** PMechDB has 44 u > 0 molecules in accepted steps (plan 61) and
+  the ReactMech pilot 0 (plan 33): P1's repairs removed the rest, the CDI radicals included.
+  So the smeared u > 0 count goes 3 -> 0 ([C]=O, [CuH2], [O][O-]), not 9 -> 6. The window
+  reference differs from the plateau reference in 0 / 0 / 0 records (plan 0/1/1 and 0/2/13).
+  50 older u > 0 token files of molecules no manifest lists stay on disk under the old rule;
+  `load_tokens` refuses them as stale, so nothing reads them.
+- **Exit checks.** All pass.
+  - **Provenance.** No artifact under `data/processed/pmechdb` (10,294 token inputs) or
+    `data/processed/reactmech` (10,898) reads a u > 0 token file. Every sample store, current
+    view, pair-statistics file, split, cohort and the closed_base baseline verifies. The 77 and
+    6 stale artifacts were stale before P2b: built on 2026-10-25 or 10-29, with inputs P1 changed
+    on 10-30. They are the floor and GBDT ranks on the whole molecule split, the
+    `p0b_reference` copies, the archived contact shards, `open_shell_survey.json`,
+    `p0a_changes.json` and `threshold_reach.json`.
+  - **closed_base digests.** 30 samples rebuilt from their tokens through `load_tokens` give the
+    pinned per-column digests (realdata).
+  - **Floor.** Ranks per sample are identical on closed_base for valid cells and for every cell
+    (val 1,238, test 1,182).
+  - **flex_first decode.** Val hits per sample on closed_base are identical: top-1/3/5
+    62.9 / 82.6 / 85.4.
+  - **Closed-shell payloads.** 500 random closed-shell PMechDB molecules rebuilt in memory keep
+    their content hash.
+- **Realdata oracles left behind by P1.** P1's rebuild did not run the realdata suite, so three
+  tests still read pre-P1 states. Corrected here:
+  - `test_data_survey`: the oracle is now P1's. PMechDB RADICAL_DRAWN 44 -> 30 (C3_METHYL 9,
+    BARE_ALKALI 4 and BETA_LACTAM_N 1 returned) and ReactMech CDI_IMIDAZOLYL 62 -> 0. A survey
+    of the P0b copy of steps.parquet shows no other subclass moved.
+  - `test_eval_pin` (closed_base): the molecule views are closed_base plus the 13 'added'
+    samples.
+  - `test_legacy_reproduction` (token files): it read the live `tokens_summary.json` as P0a's
+    rebuild summary. That breaks on any later build (P1's had replaced nothing; ReactMech's
+    P0a summary was overwritten here). It now checks that every replaced file that differs is
+    an open shell. The P0a gate itself passed on 2026-10-29 (above).
+- **Tests** (from d8a3ff8, clean tree, beside the 12-worker ReactMech QM batch):
+  `pytest -n 2 -m "not realdata"` 1938 passed, 12 skipped, 2 xfailed;
+  `KSMECH_TEST_WORKERS=1 pytest -m realdata` 45 passed.
+- **Unscheduled.** The rule is written for every molecule; extending it to closed shells is
+  left unscheduled (U16 keeps it to u > 0). Measured read-only when the plan was written, it
+  changes the reference of 0 PMechDB and 1 ReactMech closed-shell record (O=[C-]Cl) and the
+  blocks only of MOs already flagged smeared (7 and 24 records).
+
+## 2026-10-31: Open-shell P3: open shells in polar PMechDB steps, admitted by three counted laws
+
+- **What ran.** P3 of `docs/open_shell_plan.md` on branch `claude/open-shell-p3` (from p2b):
+  code cbd0338, spec v9.2 (Scope, Domain coverage) d37414f, approved by the user before the
+  build (U3). Then, from the clean tree, the PMechDB re-ingest, `ksmech-arrows samples`, the
+  GBDT refits and textbook, the open_shell cohort and the exit checks, at 2 workers beside the
+  ReactMech full QM batch (12 workers in its own worktree).
+- **Step 1, `data/spin.py`.** `species_u`: RDKit's count when it is 0 or 1; spin_table_v1 when
+  RDKit counts 2 or more, keyed by `chem.unmapped_canonical` (the scan's key), else
+  MULTIPLICITY_UNTABULATED; an ambiguous entry stays MULTIPLICITY_AMBIGUOUS. `spin_config`
+  (SPIN_RULE_VERSION `spin-rule-v1`, the table version and content hash) is stamped in
+  `ingest_report.json` under `spin`: steps.parquet has no header of its own, and every artifact
+  built from the steps records the parquet's hash.
+  - **The singlet oracle fails on spin_table_v1 for three species.** Cl[C]Cl and Br[C]Br are
+    MULTIPLICITY_AMBIGUOUS (case disagree: B read the linear saddle the embedding draws), and
+    Ph2C=C: too (case a_failed). The test marks the three xfail strict: the plan resolves a
+    disagreement in the table, not in code, and that is spin_table_v2, the open P2 question
+    on P4's production geometry for two-coordinate carbenes. [C]=CC, [C]=C(C)C and [C]=O read
+    0.
+- **Step 2, the laws** (`domain.spin_law`, `domain.parity_law`, `validation.admit_open_shell`).
+  `domain.POLICY` holds one `DomainPolicy(open_shell = exclude | admit_by_rule)` per source;
+  PMechDB admits by rule, every other source excludes. On a RADICAL_DRAWN step of such a
+  source, in this order:
+  1. a species without a count: MULTIPLICITY_UNTABULATED, MULTIPLICITY_AMBIGUOUS;
+  2. the total under data.spin not conserved: SPIN_NOT_CONSERVED (a code the plan does not
+     name; the conservation failure is final, so it is read before the pending one);
+  3. a count that differs from RDKit's: SPIN_RULE_PENDING (P4's tagged records);
+  4. an odd atom entry of R_data, the arrows' edit (`delta_be.dataset_matrix`), or no R_data:
+     NOT_ELEMENTARY.
+  A step that passes is RADICAL_SPECTATOR, or RADICAL_REACTIVE when an R entry touches an atom
+  drawn with radical electrons on either side; the curation file
+  (`curation/pmechdb_open_shell.json`, 5 steps: the 3 isopropoxides RADICAL_AMBIGUOUS, the Al
+  and nitrone drawings DRAWING_ERROR_UNREPAIRED) keeps a step RADICAL_DRAWN with its reason as
+  the class.
+  - **Admit sets.** `ADMIT` is now the five P0a/P1 classes for every source, plus the two
+    admitted open-shell classes for a source that admits by rule. It was "every DomainClass";
+    keeping it so would have changed ReactMech's recorded admit config and staled its views.
+  - **The survey** gives a radical drawing its subclass under every outcome (RADICAL_DRAWN, a
+    law code, or KEPT with an admitted class), so it stays the oracle: PMechDB's radical
+    subclasses still total 30, 12 genuine, 10 carbenes.
+  - **Permissiveness, as the plan's risks say.** Drawn as is, without its named repair, the
+    beta-lactam step passes the laws (a conserved N radical the arrows touch); the unit test
+    now says so. A new polar source needs its own curation review before admit_by_rule.
+- **Step 3.** Law (S) in the sample builder: an open-shell reactant fragment (drawn u > 0)
+  whose tokens are Fermi-smeared skips the step as SOMO_NOT_INTEGRAL. `steps.stretched_bonds`:
+  an R entry on a Lewis bond to Li, Na, Mg or K that the record holds beyond 1.3 x the
+  covalent-radius sum; listed in `samples_report.json` under SKIPPED_BOND_STRETCHED and the
+  eval slice `bond_stretched`, never a model input. `curation/multi_radical_exemptions.json`
+  holds 5d007b38 for P8, though the step is not admitted (below).
+- **Step 4.** The two radical resonance steps enter resonance_pairs. `ksmech-eval cohort`
+  pins the training steps of some domain_class values; cohort `open_shell` (RADICAL_SPECTATOR,
+  RADICAL_REACTIVE). The spectator/reactive split has no reactive step, so one cohort.
+- **Against the hand reading (the oracle).** The laws admit 11 of its 12 steps: 9 samples
+  (Birch 1, peroxyl deprotonations 3, peroxyl -> superoxide eliminations 4, superoxide
+  protonation 1) and the 2 resonance pairs. The 12th, 5d007b38 (Et3B + O2), is
+  SPIN_NOT_CONSERVED: spin_table_v1 gives the adduct CC[B-](CC)(CC)[O+][O] u = 0 (A: the
+  singlet 0.48 eV lower, B undetermined), so the step turns triplet O2 into a singlet. The plan
+  admits it only if the table gives u = 2, so the law decides and the difference was reported
+  to the user (2026-10-31). The other 19: MULTIPLICITY_AMBIGUOUS 8 (Cl[C]Cl 6, Br[C]Br 1,
+  Ph2C=C: 1), SPIN_RULE_PENDING 4 ([C]=O 2, the vinylidenes 2), SPIN_NOT_CONSERVED 1
+  (e57aaee9, u 1 -> 0), curated 5. The plan expected 12 carbene/CO steps pending; the table
+  makes 8 of them ambiguous.
+- **Rebuild.** From d37414f, clean tree.
+  - **Re-ingest.** 13,090 accepted steps as before; only the 30 RADICAL_DRAWN steps change, and
+    only in `domain_exclusion` and `domain_class`. Training steps 12,455 -> 12,464, resonance
+    pairs 470 -> 472 (db877060, dcf0a54a). `ingest_report.json`: `open_shell` admitted
+    RADICAL_SPECTATOR 11, none with a u >= 2 species, curated out 3 + 2.
+  - **Samples** (2 workers, about 55 min): 12,412 -> 12,421 samples, MISSING_TOKENS 43 as
+    before, no SOMO_NOT_INTEGRAL. The molecule views gain 6 train and 3 val ids and lose none;
+    test is unchanged. SKIPPED_BOND_STRETCHED lists 2 samples: the Birch step 4bda5440 (Na-C
+    1.349 x the radii sum) and dc6b7866, a closed-shell closed_base step whose R breaks an
+    N+-Li- dative bond drawn as a Lewis bond (the ionic case the plan expected, a slice).
+  - **Cohort** `open_shell`: the 9 samples (6 train, 3 val, 0 test). Floor on its val: ranks
+    78, 120, 60 (0 of 3 in the top 5); reported as counts.
+  - **GBDT refit, the new reference** (molecule split, `--workers 2 --n-jobs 3`; P1 fitted with
+    more threads):
+
+    | Cells | val top-5, P1 -> P3 | test top-1/3/5, P1 -> P3 | trees |
+    |---|---|---|---|
+    | valid | 69.8 -> 68.4 | 47.1/67.2/74.6 -> 47.1/66.5/72.1 | 307 -> 216 |
+    | all | 70.8 -> 69.9 | 47.8/64.9/73.9 -> 45.9/65.6/73.9 | 568 -> 269 |
+
+    Training queries go 9,443 -> 9,449 (valid) and 9,444 -> 9,450 (all). The data do not cause
+    the shift: P1's stored valid model scored on the P3 store gives P1's test numbers exactly
+    (47.1 / 67.2 / 74.6 on 1,121) and val 43.1 / 60.3 / 69.9 on 1,204 (P1: 1,202). So the
+    shift is the refit itself (six more queries and another thread count end early stopping
+    elsewhere), as P1 measured for its own refit. The untrained gap kernel's test numbers are
+    unchanged.
+  - **A file overwritten and restored.** `--score-only --model` names its output after the
+    model file, and P1's model shares the v17 model's file name, so the score of P1's model
+    replaced `gbdt_lgbm_ranks_molecule_geomfree_gbdt_lgbm_molecule_geomfree.json`, which the
+    legacy gate reads as the v17 model's ranks. It was regenerated with the v17 model, the
+    gate's command; the P1-model ranks were kept in the scratchpad only.
+  - **Textbook** (the refit rankers): gap kernel 3/5 held-out expected pairs in the top 3,
+    ranker 2/2 held out (2/3 of the cases seen in training), textbook-held-out ranker 4/5.
+- **Exit checks.** All pass.
+  - **The admitted set** is the hand reading's 12 but 5d007b38 (above): 9 samples and 2
+    resonance pairs. Every other radical drawing carries a counted reason; every curated step
+    passes the laws; no admitted step holds a u >= 2 species; no admitted pool is smeared.
+  - **closed_base.** Its per-column digests reproduce on rebuilt samples (realdata), and every
+    closed_base id is still in the molecule views (the views are closed_base, the 'added'
+    cohort and the 9 open-shell samples; `test_eval_pin` now subtracts both cohorts).
+  - **Floor.** Ranks per sample identical on closed_base, valid cells and every cell (val 1,238,
+    test 1,182).
+  - **flex_first decode.** Val hits per sample on closed_base identical: top-1/3/5 62.9 / 82.6
+    / 85.4.
+  - **GBDT.** Refit recorded above; P1's stored model reproduces its own test numbers on the
+    P3 store.
+- **Tests** (from a2a9c64, clean tree, beside the 12-worker ReactMech QM batch):
+  `pytest -n 2 -m "not realdata"` 1993 passed, 12 skipped, 5 xfailed;
+  `KSMECH_TEST_WORKERS=1 pytest -m realdata` 51 passed.
+- **Against the plan's data effect.** The plan expected 10 samples and 2 resonance pairs and
+  RADICAL_DRAWN 30 -> 18 (12 pending). Measured: 9 samples (5d007b38 held back), 2 resonance
+  pairs, RADICAL_DRAWN 30 -> 5 (the curated ones); the 25 others carry the law codes.
+
+## 2026-11-01: spin_table_v2: the dihalocarbenes and diphenylvinylidene decided in the table
+
+- **What and why.** After P3 the user asked to resolve the three failures of the singlet
+  oracle (`tests/test_data_spin.py`): spin_table_v1 left Cl[C]Cl, Br[C]Br and Ph2C=C:
+  MULTIPLICITY_AMBIGUOUS, where the textbook reads singlets. The plan resolves such a failure in
+  the table, not in code, so this is spin_theory_v2 and spin_table_v2, on branch
+  `claude/open-shell-spin-v2` (from p3), commit 65490c9. The user chose the four changes over a
+  DFT arbiter (asked 2026-11-01); a DFT arbiter for the species C leaves unassigned stays a
+  possible later step (PySCF is not installed).
+- **Diagnosis** (read-only, the scan's scratch caches):
+  - Cl[C]Cl: A is a conclusive singlet (1.01 eV). B read the production geometry, the linear
+    D-inf-h saddle the ETKDG embedding draws, saw a degenerate Pi_u pair and applied Hund
+    (triplet). At the bent singlet optimum (113 degrees) B is undetermined (GFN2 gap 1.83 eV).
+  - Br[C]Br: A is a conclusive singlet (0.76 eV). At the bent singlet optimum (114 degrees)
+    B's Gleiter-Hoffmann proxy still reads a triplet (GFN2 HOMO-LUMO gap 1.40 eV < 1.5): the
+    proxy, with extended-Hueckel thresholds on GFN2 gaps, is wrong for the dihalocarbenes.
+  - Ph2C=C:: the singlet has no minimum at spGFN2. From the production start the terminal C
+    bonds to an ipso carbon (the Fritsch-Buttenberg-Wiechell shift to diphenylacetylene),
+    BOND_FORMED; the displaced start's SCF did not converge. B: Gleiter-Hoffmann 1.31 eV,
+    triplet.
+- **B, spin_theory_v2.**
+  - Geometry: the scan re-optimizes the production geometry (restricted GFN2 at the production
+    multiplicity) from the displaced start, and B reads that optimum when it ends more than
+    1e-5 Ha lower without forming a bond (`SADDLE_TOL_HA`, a numerical equality of two
+    optima). 34 species move: CCl2 and CBr2 by 0.027 and 0.023 Ha (the saddles), NO3 by 0.004
+    Ha, the other 31 by 1e-5 to 2e-4 Ha (median 3e-5, a slightly lower point of the same
+    minimum). B's verdict changes only for the three species.
+  - Rule 4a: a carbene centre whose one neighbour is a carbon doubly bonded to it (R2C=C:, a
+    vinylidene) is a singlet (Stang, Chem. Rev. 78, 383 (1978)).
+  - Rule 4b: a carbene centre with two pi-donor neighbours holding a lone pair (a halogen, or
+    N, O, P, S) is a singlet (Bourissou et al., Chem. Rev. 100, 39 (2000), already cited).
+    One donor stays with Gleiter-Hoffmann. Both rules read the drawing only, as rule 4 did.
+- **A.** A state of a carbene (one centre holding the drawing's two radical electrons) whose
+  every start formed a bond takes its spGFN2 single-point energy at the production geometry:
+  the geometry has the drawing's bonding, so the energy bounds the state's lowest energy there
+  from above. `spin_table.scan_verdict` lets a bounded state decide only as the lowest state.
+  - **Two versions tried and dropped.** Repulsive walls at 1.3 x the radii sum let the singlet
+    sit half-bonded on the wall (C-C 1.96 A, C-O 1.83 A) and gain 1.3-2.3 eV from the forming
+    bond; walls at the start distances still let it stretch other bonds to 1.2 x (C-Br, O-H,
+    C-H: Norrish-type cleavage and H shifts). Both turned 16 organic biradicals (Norrish II
+    1,4-biradicals, peroxyl-alkoxyl biradicals, all FlowER) from AMBIGUOUS into singlets.
+  - **Why carbenes only.** Even the vertical single point at the drawn geometry puts those
+    biradicals' spGFN2 singlet 0.4-0.8 eV below the triplet, which is not chemistry for two
+    distant centres. A's 0.30 eV bar is spGFN2's error on AC12, a set of 12 aryl carbenes
+    (Ghafarian Shirazi, Neese and Pantazis, JCTC 14, 4733 (2018)), so the bound is kept to the
+    species kind the bar was measured on. Other species keep such a state failed, as in v1;
+    the user's P2 question (a collapsing singlet: the other state or AMBIGUOUS) stays open for
+    them.
+- **v1 against v2** (156 species, same species set). Cases: agree 59 -> 63, A decides 37 -> 37,
+  A inconclusive 15 -> 15, disagree 5 -> 3, A failed 40 -> 38. Four verdicts change:
+  Cl[C]Cl, Br[C]Br and Ph2C=C: AMBIGUOUS -> 0 (agree); COC(=O)[C]C(=O)OC AMBIGUOUS -> 2 (agree:
+  its vertical singlet lies 0.54 eV above the triplet, so A alone is inconclusive, and rule C
+  assigns when A's lowest state and B agree, as in v1). No metal or biradical verdict changes.
+- **Files.** `spin_tables/species_v2.json`, `theory_v2.json`; v1's stay as the record of what
+  P3 read. `spin_table.load` reads v2, `data.spin` with it (`spin_config` stamps the new digest
+  in the ingest report). The singlet oracle passes without xfail.
+- **Rebuild.** From 65490c9, clean tree, 2-3 workers beside the ReactMech full QM batch.
+  - **Scan.** The 534 starts of v1 came from the cache; new are the vertical bounds (2 carbene
+    states) and B's displaced re-optimizations (156 species). The dropped wall versions'
+    runs stay in the scratch cache under their own method tags, unused.
+  - **PMechDB re-ingest.** Only the 8 dihalocarbene and diphenylvinylidene steps change, and
+    only in `domain_exclusion`: MULTIPLICITY_AMBIGUOUS -> SPIN_RULE_PENDING (the table assigns
+    0, RDKit counts 2: P4's tagged records). SPIN_RULE_PENDING is now 12, the plan's original
+    expectation for the carbene and CO steps. Admission is unchanged (11; 5d007b38 still
+    SPIN_NOT_CONSERVED, its adduct is 0 in v2 too). `ingest_report.json` stamps spin_table_v2.
+  - **Samples** (steps.parquet is an input of the store, so it is rebuilt): 12,421 samples,
+    MISSING_TOKENS 43, SKIPPED_BOND_STRETCHED the same 2, the molecule views' ids identical.
+  - **GBDT refit** (molecule split, valid and every cell, `--n-jobs 3` as in P3): results and
+    trees identical to P3's refit (216/453 and 269/370), the fit being deterministic at one
+    thread count. The textbook cases are therefore unchanged and were not rerun.
+- **Exit checks.** All pass.
+  - closed_base: floor ranks per sample identical (valid cells and every cell; val 1,238, test
+    1,182); flex_first's val hits per sample identical (62.9 / 82.6 / 85.4); its per-column
+    digests reproduce (realdata).
+  - The singlet oracle reads 0 for all six textbook singlets in `data.spin` and in the table.
+- **Tests** (from 65490c9, clean tree): `pytest -n 2 -m "not realdata"` 2008 passed, 12 skipped,
+  2 xfailed (the singlet oracle's three xfails are gone); `KSMECH_TEST_WORKERS=1 pytest -m
+  realdata` 51 passed.
+
+## 2026-11-03: P4 code: spin from `data.spin.assign`, tagged QM records, the metal table and the open-shell metal cohort
+
+- **What.** Open-shell plan P4 steps 1-5, 7 (the train option) and 8, on branch
+  `claude/open-shell-p4` (from `claude/open-shell-spin-v2`); the build (step 6) waits for the
+  approval of the spec v9.2 QM text (U3), the training (step 7) for the build.
+- **`data.spin.assign`** gives each fragment its count, its source ('rdkit', 'species',
+  'metal'), the count per atom where defined, and for a metal the row and, when it assigns
+  nothing, the reason. SPIN_RULE_VERSION spin-rule-v1 -> v2. Differences from the plan text:
+  - It reads spin_table_v2 (the plan was written against v1).
+  - The metal table `spin_tables/metal_v1.json` has three rows: CU2_REDOX (Cu(II) with an H or
+    I donor, REDOX_INCOMPATIBLE), CU2 (u 1) and FE3_HS (u 5 without a C or P donor; a
+    polypyridyl or porphyrin N cannot be told from an amine N by element, so the species
+    table's confirmation is the gate there). One law confirms every row: rule C has A and B
+    agree on the row's count. Cu(II) d9 is 1 by count either way; the plan's 'scan the control'
+    reads the same.
+  - A ligand-dropped metal (`domain.is_placeholder`, odd or even) is MULTIPLICITY_AMBIGUOUS:
+    it is no species. On PMechDB it changes no count and no tag (METAL_PLACEHOLDER comes first
+    in domain; `C=[O+][Sn-]` is ML1 by the placeholder law, an onium donor its Sn- compensates,
+    so the table's u = 0 tags it).
+- **QM.** `qm.spin` tags a species whose assigned count differs from RDKit's with
+  `+spin-v1-u<u>`, inserted after the optimizer part (`...tblite-lbfgs+spin-v1-u1+metal-geom-v1`
+  for serve, the order fixed for S1). The plan's tag is `+spin-v1`; the count is added so that
+  a later table revision that changes one species re-keys that species only, and no reader can
+  take a record of another count. Tagged species are optimized from the embedding and from it
+  kicked (0.02 Angstrom, seed 0, P2's scan start), an optimum that formed a bond the drawing
+  lacks is dropped (`geometry.formed_bonds`, P2's law, factor 1.2; BOND_FORMED, remembered by
+  the failure memo when every start fails) and the lower energy is kept. These are P2's open
+  questions for P4 (the linear saddle of a 2-coordinate carbene, the BOND_FORMED check in
+  production), answered by the laws the table itself was built with; they apply to tagged
+  species only, so no untagged record's meaning changes.
+- **Keys.** Every engine site that builds a record, tombstone, token or sidecar path from a
+  configured method goes through `qm.spin.method_for` (grep test, tests/test_qm_spin.py); the
+  QM manifest's method is per row (`qm.batch.row_method`). Serve keeps RDKit spin until S1:
+  its pre-screens refuse radicals and SPIN_PARITY before any QM, and a closed-shell metal
+  complex keeps its method and key (tested). A token file's open-shell key reads the count its
+  record was run at from the method tag (`orbitals.tokens.record_unpaired`); law (S) reads the
+  count of fragments drawn with radical electrons only: a smeared Cu(II) fragment stays a
+  flagged sample of the fermi_smeared slice, as the plan says (its d tokens are masked either
+  way). The first version read every open shell, metals included, and would have held back
+  the 7 CuCl2 steps; the user chose the plan's reading on 2026-11-03, and the spec's metal
+  sentence says so.
+- **Index.** INDEX_VERSION 1 -> 2: `unpaired`, `spin_source`, `spin_rule_version` for records
+  and tombstones, and `index stats` lists the tagged ones.
+- **Domain.** `DomainPolicy.open_shell_metal` (PMechDB ADMIT_BY_RULE, every other source
+  EXCLUDE until P8). The laws of P3 re-read an OPEN_SHELL_METAL step; a fragment code they do
+  not re-read keeps the step out under that code. Law (u) loses the SPIN_RULE_PENDING clause
+  (the code stays for old artifacts). Classes: CARBENE_SINGLET (the species table pairs a
+  species drawn with radical electrons), OSM_CU2, OSM_FE3, admitted for PMechDB.
+  RADICAL_SPECTATOR / REACTIVE now count only radical atoms of species that stay open shells.
+- **Dry-run re-ingest** (scratch directory, read-only on data/): 90 steps change class or
+  code, no side changes. OPEN_SHELL_METAL 78 -> OSM_CU2 23 (2 resonance pairs), OSM_FE3 19 (2
+  resonance pairs), MULTIPLICITY_AMBIGUOUS 36: 12 Cu (6 CuH2 and 4 CuI2 adducts,
+  REDOX_INCOMPATIBLE; 2 NH3-CuX2 whose scan failed) and 24 Fe, every one a species rule C does
+  not confirm (14 steps of Br2-FeBr4- `Br[Br+][Fe-]Br4`, A failed; FeCl3 3 and FeBr3 2, B has
+  no trigonal-planar rule; the Fe(OTf)2 oxocarbenium pairs 2; others 3). SPIN_RULE_PENDING 12
+  -> CARBENE_SINGLET 12 (10 steps, the 2 CO drawings resonance pairs), as the plan expected.
+  The plan's 62 metal steps (Fe 39) assumed every Fe species confirmed; 20 Fe steps are not.
+  QM: 49 tagged species (Cu 28, Fe 13, u = 0: the 6 carbene and CO species, the Et3B-O2
+  adduct of 5d007b38 and the ML1 adduct C=[O+][Sn-], which the table pairs).
+- **Train.** `--drop-domain-class` leaves the training samples of the named classes out of
+  training (never out of evaluation), each logged, counted as DROPPED_DOMAIN_CLASS.
+
+## 2026-11-03: P4 build: tagged QM records, the re-ingest, the extended molecule snapshot and the exit checks
+
+- **What.** Open-shell plan P4 step 6 after the user approved the spec v9.2 QM text
+  (2026-11-03), from commit 820412b, then 1dc4f9a (law (S), below), clean tree, 3 workers
+  beside the 12-worker ReactMech full QM batch. Pre-P4 artifacts copied to
+  `data/processed/pmechdb/p4_reference/`. Training (step 7) is not run: it needs a pod.
+- **Two user decisions during the build.**
+  - **Law (S) and metals.** GFN2 smears three Cu(II) species by the plateau rule (CuCl2 and two
+    CuBr2 adducts; 7 CuCl2 steps). The committed code read law (S) on every open shell, metals
+    included; the user chose the plan's reading: (S) reads only fragments drawn with radical
+    electrons that stay open shells, and a smeared Cu(II) fragment is a flagged sample of the
+    fermi_smeared slice (its d tokens are masked either way). Commit 1dc4f9a, with the spec's
+    metal sentence reworded to say so ("Law (S) does not read the metal").
+  - **The frozen molecule split.** The P4 steps bridge molecule groups frozen in two parts, and
+    the frozen rule then sent every new step of those groups to SPLIT_CONFLICT, the 14 samples
+    P1 and P3 had placed among them (12 of the 'added' cohort, 2 radicals). U1 says existing
+    steps keep their part; the snapshot held only P0's steps. The user chose to extend it:
+    `scripts/refreeze_molecule_p4.py` rebuilds the pre-P4 split from `p4_reference/steps.parquet`
+    with the P0 snapshot (it reproduces the pre-P4 views exactly), and the new
+    `split_frozen_molecule.json` is the P0 snapshot plus the 22 steps placed since (18 train, 3
+    val, 1 test), stamped with the P0 snapshot's content hash in its trace; the P0 snapshot is
+    kept as `p4_reference/split_frozen_molecule_p0.json`. The scaffold split had no conflict.
+- **QM** (31 min): 155 molecules computed (the 49 tagged species and the earlier failures, most
+  answered from the failure memo); PMechDB 14,255 of 14,362 ok. Tagged: 48 records (Cu 28,
+  Fe 13, u = 0: 7) and 1 failure, the Et3B-O2 adduct of 5d007b38 (BOND_FORMED from both starts:
+  an O-C contact at 1.17 x r_cov), whose step is SPIN_NOT_CONSERVED anyway. CCl2 and CBr2 come
+  out bent (112.9 and 113.9 degrees: the kicked start leaves the linear saddle). Ph2C=C:
+  converges as a singlet without a new bond, unlike P2's spGFN2 starts, so its step has tokens.
+  No tagged record is dirty. SPIN_PARITY under each species' current method: placeholder 34,
+  Cu 13 (6 CuH2 and 5 CuI2 adducts, REDOX_INCOMPATIBLE; 2 NH3-CuX2), Fe 7, Ti 4, P 1 = 59 (the
+  plan expected 51 with every Fe species confirmed; was 100). The old untagged rows stay in the
+  manifest as history; the survey now counts each species under its own method.
+- **Sidecars and tokens.** 48 Wiberg sidecars built. Tokens: 77 open shells (u 1: 52, 2: 6,
+  3: 6, 5: 13), 3 of them smeared (the 3 Cu); 42 Fermi-smeared molecules in all (P2b 39).
+- **Re-ingest** equals the dry run: CARBENE_SINGLET 12 (10 steps, the 2 CO resonance pairs),
+  OSM_CU2 23 and OSM_FE3 19 (2 resonance pairs each), MULTIPLICITY_AMBIGUOUS 36, no side
+  changed, n_resonance_pairs 472 -> 478.
+- **Samples** (v18, 3 workers): 12,469 (+48: CARBENE_SINGLET 10, OSM_CU2 21, OSM_FE3 17).
+  Molecule split, extended snapshot: train +17 (Cu 15, carbenes 2), test +4 (Cu), val +0; 27
+  SPLIT_CONFLICT (Fe 17, carbenes 8, Cu 2): they share molecules with steps frozen in two
+  parts, so no part can take them without leakage. Every pre-P4 sample keeps its part.
+  Scaffold split: all 48 placed (train Cu 21, carbenes 10, Fe 10; val Fe 1; test Fe 6). So the
+  molecule split's metal ablation (step 7) can only measure Cu: OSM_FE3 has no molecule-split
+  sample. Cohorts pinned: `carbene_singlet` 10, `open_shell_metal` 38 (training steps).
+- **GBDT refit** (molecule split, `--n-jobs 3`), the new reference; test now 1,125 queries (4
+  Cu samples added), val 1,204:
+  - valid cells: trees 687 / 409 (P3 216 / 453); ranker test top-1/3/5 48.8 / 68.2 / 75.6 (P3
+    47.1 / 66.5 / 72.1), val 45.4 / 62.5 / 70.9 (P3 41.2 / 59.4 / 68.4); textbook-held-out
+    ranker test 48.1 / 65.7 / 73.5 (P3 48.2 / 68.2 / 75.6);
+  - every cell: trees 340 / 378 (P3 269 / 370); ranker test 49.1 / 66.6 / 74.7 (P3 45.9 / 65.6 /
+    73.9), val 42.6 / 61.9 / 71.0 (P3 42.0 / 61.1 / 69.9);
+  - the untrained gap kernel's test moves only by the 4 added queries (20.4 -> 20.5 top-1).
+  The refit trains on 17 more queries (15 Cu, 2 carbenes); its early stopping ends elsewhere,
+  as P1 measured for its own refit. closed_base's floor and decode do not move (below).
+- **Textbook**: gap kernel 3/5, ranker 2/2 held out (2/3 seen in training), textbook-held-out
+  ranker 4/5, as P3.
+- **Exit checks.** All pass.
+  - closed_base: floor ranks per sample identical (valid cells and every cell); flex_first's val
+    hits per sample identical (62.9 / 82.6 / 85.4); per-column digests reproduce (realdata).
+  - Every existing record key is unchanged but those of the 8 species the species table pairs
+    (their untagged triplet records stay, unused); a 5,000-species QMugs sample has no tag.
+  - Every tagged record verifies with its tagged method and is found with its sidecar and
+    tokens by the sample builder (realdata, tests/test_p4_spin_records.py).
+  - Cache index v2: `index stats` lists the tagged records by spin source (metal u 1: 28, u 5:
+    13; species u 0: 7; one species tombstone).
+- **Tests updated to the P4 data.** `test_data_domain` (P4_COUNTS), `test_open_shell_admission`
+  (radical classes only; the 6 P4 resonance pairs), `test_eval_pin` (the two P4 cohorts left
+  out of closed_base), `test_data_survey` (metal subclasses summed over every code, SPIN_PARITY
+  under each species' method), `test_open_shell_tokens` (the 3 smeared Cu species, open shells
+  counted under each species' method), new `test_p4_spin_records`.
+- **Tests** (from c6176f7, clean tree, beside the 12-worker ReactMech QM batch):
+  `pytest -n 3 -m "not realdata"` 2066 passed, 12 skipped, 2 xfailed, 5 warnings;
+  `KSMECH_TEST_WORKERS=1 pytest -m realdata` 57 passed.
+
+## 2026-11-04: P5 build: the ReactMech pilot's returns, the dative audit and the re-scores by slice
+
+- **What.** Open-shell plan P5 from commit 01555ac (clean tree; only untracked scripts), 3
+  workers beside the 12-worker ReactMech full QM batch, no re-ingest: the pilot steps P0a's
+  dative and placeholder laws and P1's V1 (CDI) returned to the domain get QM records, tokens
+  and samples; the frozen splits and the pilot's 10,000 ids stay. Pre-P5 copies of every view,
+  report, pair statistics file, split file, token summary and the QM manifest are in
+  `data/processed/reactmech/p5_reference/`, and the column digests of all 9,031 pre-P5 samples
+  are pinned as `baseline_p5_pre.json` (`eval.pin.write_baseline`).
+- **Per-rule counts.**
+  - Pilot (the P0a / P1 ingest): rule D (dative onium -> M) repairs 254 steps, 49 kept steps
+    re-charged (computed in P0a) and 205 returned (96 odd-Pd OPEN_SHELL_METAL, 109 L1Pd
+    METAL_PLACEHOLDER); V1 returns 62 CDI steps (RADICAL_DRAWN); METAL_SUSPECT flags 35; 2 steps
+    stay OPEN_SHELL_METAL (`cfd05e0cae5eee42`, `5e7499636a4c0e94`: Pd already -1 with three X
+    ligands plus P+).
+  - Full set (114,199 unique lines, 114,046 accepted; the reactmech-full build's ingest, made
+    with P0a's laws before P1): rule D repairs 2,866 steps (2,602 REPAIRED_DATIVE, 264 with
+    METAL_SUSPECT), METAL_PLACEHOLDER excludes none (all 1,122 returned by the L1Pd exemption),
+    OPEN_SHELL_METAL keeps 44 (1,207 of 1,251 returned), RADICAL_DRAWN keeps 792 (the CDI steps
+    V1 returns at that build's next ingest). So 3,121 of the 3,165 exclusions are returnable, as
+    the plan measured; their QM belongs to the full build.
+- **QM.** 323 species of the returned steps lacked an ok record (the plan counted 327 before
+  P0a). 86 were reflink copies of the reactmech-full build's records (verified, clean headers);
+  237 were computed: 3 h 15 for the first 82 (the run stopped when the Claude session
+  restarted; records already written were kept), 4 h 24 for the remaining 173 (18 answered
+  from the failure memo), then a retry of the 13 TIMEOUT species with `--retry-reason TIMEOUT
+  --timeout 1800 --steps-from` their 13 steps only (1 h 21; none of those steps holds one of the
+  115 old pilot TIMEOUTs, so no step outside P5 changed). The retry recovered 8: 4 now stop at
+  500 iterations and 1 times out again. Result: 304 ok, 19 counted failures
+  (OPT_NOT_CONVERGED 14, EMBED_FAILED 3, TIMEOUT 1, SCF_NOT_CONVERGED 1); 15.8 CPU-h, inside the
+  plan's 12-19. SPIN_PARITY in the pilot's run view: 291 -> 4, the fragments of the 2 steps that
+  stay excluded; the drawn odd-Pd rows stay in the manifest as history.
+- **Sidecars, tokens.** 304 Wiberg sidecars and 304 token files built, 0 failed; no new
+  Fermi-smeared molecule (220). The 23 "stored AO layout differs" warnings of the sidecar run
+  are records written before 2026-10-20, corrected on load as recorded on that date.
+- **Samples** (v18; default strategies, then `--strategy loco_all --views-only`): 9,031 ->
+  9,256, +225 (REPAIRED_DATIVE 191, REPAIRED_V1 34); MISSING_TOKENS 419 -> 194 (176 old pilot
+  QM failures, 16 REPAIRED_DATIVE steps whose species failed above, 2 METAL_SUSPECT). Every
+  pre-P5 sample keeps its part in all 36 views and its digests on every column. Placement of
+  the 225:
+  - molecule: 1 train; 224 SPLIT_CONFLICT. The returns are Pd and Ni cycle intermediates that
+    join molecule groups the P0 snapshot froze in two parts, so the molecule val holds none;
+    they were SPLIT_CONFLICT already at P0a's ingest (266 such steps, unchanged), before they
+    had samples. Extending the snapshot, as P4 did for PMechDB, is left to the user: it would
+    change the molecule val and test.
+  - scaffold: train 173, val 22, test 30. loco: none (no mechanism class). loco_all:
+    locoall-anhydride train 217, every other class train 1.
+  Cohorts pinned: `p5_returns` (the 225), `p5_b_kekule` (68) and `p5_c_dative` (29), the last
+  two the slices of the molecule val.
+- **The 20-case oxidation-state audit** (`scripts/probes/dative_audit.py`, seed 0) reproduces
+  P0a: the same 20 step ids in the same strata, and every line of P0a's output recovered from
+  its transcript is identical. OS(M) as
+  drawn -> after the dative law, reactants | products, and the pool's net charge:
+
+  | # | stratum | step (reactmech-) | P0 part | reactants | products | pool |
+  |---|---|---|---|---|---|---|
+  | 1 | EVEN | `0f3a2aab50c1729e` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 2 | EVEN | `4afa77281fad754e` | train | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 3 | EVEN | `50626adad90e495a` | train | Ni(II) -> Ni(0) d10 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 4 | EVEN | `8a353a4d5d15ef62` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 5 | EVEN | `aac869091976de41` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 6 | EVEN | `d049dc0eb40459bf` | val | Ni(IV) -> Ni(II) d8 | Ni(IV) -> Ni(II) d8 | +2 -> 0 |
+  | 7 | ODD | `7642a26bd65b4cf7` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 8 | ODD | `8a24432b3e4740e6` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 9 | ODD | `8b0006424bdb01f3` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 10 | ODD | `923f2564531dfaf8` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 11 | ODD | `9b029ce691479b26` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 12 | ODD | `be93f4e0b94e346a` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 13 | ODD | `df3f6706876b480d` | - | Pd(III) -> Pd(II) d8 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 14 | L1PD | `1112cc818883f8b0` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+  | 15 | L1PD | `6bc84b23f5ba38e6` | - | Pd(I) -> Pd(0) d10 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 16 | L1PD | `92a24c87849e51b2` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+  | 17 | L1PD | `ba05509f0dbd4f0a` | - | Pd(I) -> Pd(0) d10 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 18 | L1PD | `bbd094b11209cbac` | - | Pd(I) -> Pd(0) d10 | Pd(III) -> Pd(II) d8 | +1 -> 0 |
+  | 19 | L1PD | `cb3f194cbb381f42` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+  | 20 | L1PD | `d66cc9bb6aef6693` | - | Pd(III) -> Pd(II) d8 | Pd(I) -> Pd(0) d10 | +1 -> 0 |
+
+  The census of all 254 repaired steps is P0a's too (Pd(IV) d6 only in the six palladacycle
+  C-H arylation fragments, the PyOx pool of `4ad9ef86c572981f` staying +1).
+- **Re-scores** (`scripts/p5_rescore.py`; best checkpoints, legacy caps, beam 5; full-R
+  top-1 / 3 / 5, %). Molecule val, 911 samples, the same as P0a's (P5 adds none there):
+
+  | slice | n | stop0 with | stop0 without | joint with | joint without |
+  |---|---|---|---|---|---|
+  | whole val | 911 | 91.1 / 93.0 / 93.2 | | 91.9 / 94.7 / 95.6 | |
+  | (a) unchanged since P0 | 814 | 94.5 / 96.6 / 96.6 | 62.9 / 62.9 / 64.9 | 94.7 / 97.3 / 97.3 | 68.0 / 73.2 / 81.4 |
+  | (b) P0a Kekule-closest | 68 | 89.7 / 89.7 / 89.7 | 91.2 / 93.2 / 93.5 | 89.7 / 94.1 / 94.1 | 92.1 / 94.8 / 95.7 |
+  | (c) P0a dative re-charge | 29 | 0.0 / 0.0 / 6.9 | 94.1 / 96.0 / 96.0 | 17.2 / 24.1 / 51.7 | 94.3 / 97.1 / 97.1 |
+  | (d) P5 returns in val | 0 | | | | |
+
+  stop0 is reactmech/sparse_resonance_stop0; joint is pmechdb+reactmech/sparse_resonance,
+  decoded with `--run-source`. Every P5 decode runs at 4 torch threads (`OMP_NUM_THREADS=4`):
+  the beam is sensitive to the thread count at near-ties. Decoded at 3 threads first, one
+  stop0 val sample (`reactmech-22277ce942143182`) found 4 completions instead of P0's and P0a's
+  5 (rank 0 unchanged; 1-3 threads give 4, 4-16 give 5), which `test_legacy_reproduction`
+  caught; P0 and P0a decoded with 4 or more. The top-k numbers here are the same at both
+  thread counts. Both exit checks hold for both runs: on (a) every sample's rank
+  is P0's (stop0 94.5 / 96.6 / 96.6, joint 94.7 / 97.3 / 97.3), and every pre-P5 sample's rank
+  is P0a's. Slice (d), all 225 returns decoded through the scaffold views (`--split scaffold
+  --cohort p5_returns`; none was a sample when either checkpoint trained, so every part is
+  unseen):
+
+  | (d) returns | n | stop0 | joint |
+  |---|---|---|---|
+  | all | 225 | 0.0 / 4.9 / 4.9 | 16.0 / 16.9 / 17.3 |
+  | scaffold train | 173 | 0.0 / 3.5 / 3.5 | 15.6 / 16.2 / 16.8 |
+  | scaffold val | 22 | 0.0 / 9.1 / 9.1 | 18.2 / 18.2 / 18.2 |
+  | scaffold test | 30 | 0.0 / 10.0 / 10.0 | 16.7 / 20.0 / 20.0 |
+
+  The v17 checkpoints never saw a re-charged Pd(0) / Pd(II) drawing ([Pd-] beside P+ or N+), and
+  they fail on it as on slice (c): this measures what the old models do on the returned
+  chemistry, not a regression. A run trained on the v18 pilot is the comparison that counts.
+- **Tests.** New `tests/test_p5_reactmech_returns.py` (realdata): the pilot keeps its 10,000
+  ids and the 2 excluded steps; every species of a training step has a manifest row under its
+  method and every ok record its Wiberg sidecar; a training step without a sample holds a
+  species without an ok record; every pre-P5 sample keeps its part in every view and its column
+  digests (`baseline_p5_pre.json`).
+- **Tests** (from 437fcff, clean tree, beside the 12-worker ReactMech full QM batch):
+  `pytest -n 3 -m "not realdata"` 2066 passed, 12 skipped, 2 xfailed, 5 warnings;
+  `KSMECH_TEST_WORKERS=2 pytest -m realdata` 62 passed (the first pass, on the 3-thread
+  decodes, failed `test_legacy_reproduction` on the one sample above).
+
+## 2026-11-04: P6 code: electron bookkeeping, the electron-flow law, the per-source elementary rule and the identity key v2
+
+Open-shell plan P6 (Release B, stacked branch 1 of 3, `claude/open-shell-p6` from P5), in its own
+worktree whose data root is a `cp -a --reflink=always` copy of main's `data/` (36 s, about 0
+disk). Code only: the v18 data of main is untouched.
+
+- **N and u from the drawing** (`data.spin.spin_of_drawing`). u is the number of atoms with odd
+  N (B_ii), read on a Kekule copy (an aromatic bond would count 1). The species table raises it,
+  never lowers it: a row whose theory verdict is a degenerate open shell (B's `open_shell`, the
+  Hund case; in spin_table_v2 only `[O]` and `[O][O]`) holds for every drawing with its v1
+  key, so O=O, `[O][O]` and `[O+][O-]` are one triplet; any other row with a higher count holds
+  only for the drawing it was scanned on (the 13 high-spin Fe(III) halides as drawn,
+  `COC(=O)[C]C(=O)OC`), so C=C never inherits a `[CH2][CH2]` row. The raised electrons are
+  placed on the one open d-shell metal centre, else on the one main-group atom short of its
+  octet with a pair to open (the carbene C, the O atom), else spread over heavy atoms of one
+  symmetry class (O=O); any other raised drawing raises SpinTableError (a table row that needs
+  a placement rule). U12 says "data.spin on RDKit only for bare SMILES"; the key reads N from
+  every drawing, bare SMILES included, since a SMILES is a drawing and RDKit's radical
+  perception would split `[C]=O` from `[C-]#[O+]` and give `[Br+]`, `[OH+]` and a singlet
+  `[CH2]` two radicals, all of which P6's own tests require otherwise. `data.spin.assign`
+  stays the QM spin source.
+- **Identity key v2** (`data.resonance.identity_key`): the sigma key when u = 0 (every
+  closed-shell key byte-identical), else `<v1>|<frag sigma SMILES>,<charge>,<u>;...` sorted
+  over every fragment (',' between fields, ';' between fragments, never '.', since serve splits
+  pool keys on it). It replaces `sigma_key` in `is_resonance_step`, `match_products`,
+  `ApplyResult.key`, `product_key`, eval's `lewis_apply` (u from the tracked N, so a pi-homolysis
+  is a step and a homolysis and a heterolysis of one bond are two beams), serve's
+  `species_key_of` and the curation export's round trip.
+- **The electron-flow law** (`resonance.balanced_flow`) replaces enumeration as the resonance
+  test: R's changed bonds joined into components; balanced when every atom whose N changes is on
+  a changed bond and every component has sum dN + 2 sum dB = 0. RDKit's enumeration cannot be
+  the test: from the drawn reactant it reaches the drawn product for only 147 of PMechDB's 471
+  resonance pairs (plan measurement). `classify_step` gives NULL_STEP (identical canonical
+  mapped sides), RESONANCE (one v2 key with the maps kept and a balanced flow, as drawn or
+  between some reactant drawing and product form), NONCONJUGATED_SHIFT (one key, no balanced
+  flow) or a step. NULL_STEP and NONCONJUGATED_SHIFT are ingest exclusions (`DomainCode`, last
+  in PRECEDENCE, set where no other code stands); SET_STEP (R with atom entries only) and
+  DISSOCIATIVE_ET_STEP (bond entries, every class member unbalanced) are label skips
+  (`delta_be.flow_skip`), four separate counted codes.
+- **The label class keeps balanced flows first** (`delta_be.parsimonious_class`), falling back
+  to the old rule only when no candidate balances (then DISSOCIATIVE_ET_STEP). Found by the
+  FlowER dry run: in an O-NO2 homolysis the cheapest product form by charges, NO2. drawn
+  O=N-O. (0 charges), is reached only by an electron jump, so 11 of the first 50 lines were
+  DISSOCIATIVE_ET_STEP; with the law they label as the drawn homolysis. On v18 data it changes
+  no label (below).
+- **Per-source elementary rule** (`DomainPolicy.open_shell_labels`, True for rmechdb only):
+  `ReactionMatrix.is_elementary(open_shell)` accepts atom entries of +-1 and +-2; read by
+  `parsimonious_class`, `check_edit`, `drawing_of` and `drop_undecodable_drawings` through the
+  sample's source. No batch key, ModelConfig field or decoder argument carries the source.
+- **Radical forms through an anion proxy** (`resonance.radical_forms`): each radical centre in
+  turn takes an electron, RDKit enumerates the anion's forms, and in every form whose charges
+  outside the centre's conjugated group (`ResonanceMolSupplier.GetAtomConjGrpIdx`) are the
+  anion's, each negative atom of the group gives the electron back. The plan's stricter
+  reading ("only that site moved") gives NO3. two drawings, not the three one per O that its
+  own test and the 12 FlowER NO3. abstractions (H landing on the drawn O-) need; the
+  conjugated-group rule gives them. The product forms keep every such form (the class cost
+  chooses); the input drawings keep one per radical site (fewest charges, then fewest bond
+  changes). Counts on atom indices: benzyl 4, phenoxyl 4, pentadienyl 3, allyl 2, TEMPO 1;
+  closed shells get exactly today's form lists. Where the drawn reactant gives no class,
+  `drawings.redrawn_label` takes the reactant drawing whose class passes with the fewest
+  entries (the dry run uses it; P8's rmechdb samples will).
+- **Samples (SAMPLE_VERSION 19)**: `nonbonding` and `unpaired` per atom and per drawing
+  (`drawing_nonbonding`, `drawing_unpaired`), `atom_categorical` (A, 3) with u as bookkeeping
+  (the encoder reads columns 0 and 1; the baselines digest `[:, :2]`), `LewisStructure` from
+  `reactant_lewis`, `check_edit` on N + d >= 0, batches with `nonbonding`, `can_lose_pair`
+  (N >= 2, the decoder's -2 mask, identical to lone pairs > 0) and `can_lose_electron`
+  (N >= 1); collate refuses a sample without N. Every live caller sets the structure through
+  `steps.with_lewis`, and `reactant_sample` itself fills N and u.
+- **Serve**: `PoolState.key_version` (2); `from_dict` refuses another version, so a v1 key is
+  never read silently; `ksmech-serve rekey-pools [--dry-run] [--purge]` re-keys the stored
+  states once, at the Release B merge (P8), never earlier. A state whose key does not change
+  only gains the version field (its pool id byte for byte), which is how "unchanged states are
+  not touched" is read; without it `from_dict` would refuse them. Dry run on the reflink copy of
+  `data/serve/pools`: 1,388 states, 1,319 unchanged, 69 re-keyed (68 holding the O atom `[O]`, 2
+  O=O, 1 `[O+][O-]`), 0 unreadable; the plan's RDKit-radical upper bound was about 362.
+- **Exit checks on the v18 data** (`scripts/p6_checks.py`: one dump per source under the P5 code
+  of the main checkout and one under P6, compared by content). PMechDB, 13,090 steps: the
+  12,965 closed-shell ones keep every edit label (12,465 labelled training steps), every
+  resonance flag (474 RESONANCE) and every key; the sha256 over all closed-shell keys is
+  identical (`153d645f...`). The 125 open-shell steps (47 labelled) keep their labels and flags;
+  their keys gain the v2 suffix, as they must. ReactMech pilot, 10,000 steps: the 9,998
+  closed-shell ones keep all 9,450 labels, the 548 resonance flags and every key (`94c2c48e...`);
+  the 2 open-shell ones are the 2 still-excluded Pd steps. The flow law therefore keeps every
+  stored resonance pair as drawn (`tests/test_p6_resonance_pairs.py`: PMechDB 478, 471 in v17
+  plus P1/P3; ReactMech 548), CO flips nowhere (`[C]=O` keys as `[C-]#[O+]`), and the anion
+  proxy and the flow filter change no label of the v18 open-shell steps.
+- **FlowER dry run** (`scripts/probes/flower_label_dryrun.py`, read-only, the 5,088 RS/RC lines
+  as one-electron rmechdb steps): LABEL_OK 4,890, RESONANCE 187, NULL_STEP 1, NOT_ELEMENTARY 9,
+  DISSOCIATIVE_ET_STEP 1, NONCONJUGATED_SHIFT 0, SET_STEP 0, so 99.8% LABEL_OK on the 4,900
+  non-resonance lines (gate 95%); 16 lines label through another reactant drawing
+  (`redrawn_label`: the NO3. abstractions among them). The one DISSOCIATIVE_ET_STEP is the
+  persulfate O-O homolysis the plan named (test:216679): its product draws one sulfate with the
+  radical on O1 and the charge on O5, a swap RDKit's enumeration does not make on hypervalent S,
+  so the anion proxy cannot reach it; left to P8's drawing normalization. The ozone redraw the
+  plan expected as a NONCONJUGATED_SHIFT is a step under key v2 (its two drawings differ in u).
+  Masks and screens (P9), drawn R / label class: (a) closed-pool screen 0 / 0; (b) the optional
+  -1 filter on u = 0 pools 3 / 1 (the Mg + acetone ketyl line among them); (c) atom masks 0 / 0;
+  (d) the 5-class alphabet 15 / 9 (the 9 NOT_ELEMENTARY lines); (e) legacy caps 27 / 431. The
+  drawn numbers match the plan's (8 beyond 8 bonds and 19 beyond 2 atoms). The class number is
+  larger because the dominant-contributor rule picks product forms with fewer charges and more
+  atom entries (NO2. with the radical on N: 0 charges, 3 atom entries); the label maxima are 12
+  bonds and 5 atoms, which `--caps labels` will read from rmechdb's training part. PMechDB and
+  ReactMech, every v18 training label under the P6 code: all 12,465 + 9,450 closed-shell labels
+  and the 47 PMechDB open-shell ones pass (a)-(d); against the legacy caps one ReactMech label
+  exceeds the atom cap (reactmech-7172766faa0ff062, 3 atom entries, P0a's known case; the
+  ReactMech label caps are 8 and 3).
+- **v19 stores in the Release B data root** (not P8's build: the same v18 steps parquet, rebuilt
+  so that the realdata suite reads samples of the current version): `ksmech-arrows samples`
+  for PMechDB (molecule, scaffold) and ReactMech (molecule, scaffold, loco, loco_all), 3 workers
+  beside the 12-worker ReactMech full QM batch, from 8418d9d: PMechDB 12,469 samples (37 min),
+  ReactMech 9,256 (83 min), the v18 counts; the realdata suite reads them (its baselines digest
+  the v18 columns, `atom_categorical[:, :2]` among them, so they compare v19 with v18 as they
+  are).
+- **The identity key's cost**: v1 plus the per-fragment count cost about 5 x the sigma key on a
+  60-atom pool (6.6 vs 1.3 ms), and the decoder keys every applied completion twice. A closed
+  shell no species-table row can raise (`spin.may_raise`, by formula) now skips building its
+  fragments: 1.33 ms with N given (the decoder), 2.0 ms without, against 0.95 ms.
+- **Spec**: the v10 draft is written in place (date line marked as draft): the BE section (N
+  with single electrons, half-headed arrows, the flow law, Eq. flow, the four codes), the task
+  (+-1 atom entries per source), the decoder (masks on N, merging by the identity key), the
+  labels (balanced flows first, the anion proxy, the redrawn reactant) and resonance (identity
+  key v2, Hund rows, the flow law as the membership test with the 147 / 471 measurement). It
+  is not compiled here (the host's LaTeX lacks amsthm). It needs your approval before P8's
+  build (U3).
+- **Tests.** New `tests/test_p6_electron_flow.py` (82: N and u, the flow law and its codes, the
+  8 radical shapes under both rules, key v2, the anion proxy, the per-drawing u),
+  `tests/test_serve_pools_rekey.py` (6), and realdata `tests/test_p6_resonance_pairs.py` and
+  `tests/test_p6_flower_dryrun.py`. `pytest -n 3 -m "not realdata"` (9f352ab's tree, src as
+  2f54d33): 2147 passed, 21 skipped, 2 xfailed, 5 warnings; `KSMECH_TEST_WORKERS=3 pytest -m
+  realdata` (2f54d33, on the v19 stores, beside the 12-worker ReactMech full QM batch): 65
+  passed. The spec is not compiled (no amsthm on this host).

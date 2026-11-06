@@ -28,8 +28,10 @@ donor-acceptor pair) is a sample without ArrowLabels.
 `build_all_samples(source)` writes the sample store (`arrows.store`) and one
 `data/processed/<source>/samples_<split>.json` view per split, with
 `split = "<strategy>_<part>"`: strategy `molecule` (the default), `scaffold`, `loco-<class>`
-(leave one mechanism class out) or, only when named, `random_leaky` (per step), part `train`,
-`val` or `test`.
+(leave one mechanism class out), or, only when named, `locoall-<class>` (the class held out as
+test, every other step, unlabelled ones too, split by molecule into train and an in-distribution
+val) and `random_leaky` (per step), part `train`, `val` or `test`. `write_views_from_store`
+writes the views of more strategies over a store already built.
 `arrows.batches.collate_samples` pads a batch and builds the masks the model needs; it lives
 apart so that this module does not import torch.
 """
@@ -46,6 +48,7 @@ from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
+from rdkit import Chem
 from rich.console import Console
 
 from ksmech.arrows import store
@@ -57,14 +60,19 @@ from ksmech.arrows.delta_be import (
     StepEdit,
     class_shape,
     edit_label,
+    label_counts,
     step_edit,
     to_global,
 )
 from ksmech.arrows.drawings import Drawing, resonance_drawings
+from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.arrows.lewis import (
+    LewisStructure,
     MissingBondIndex,
     check_edit,
     lewis_bonds,
+    lewis_nonbonding,
+    lewis_unpaired,
     pair_bond_orders,
     reactant_lewis,
 )
@@ -76,25 +84,53 @@ from ksmech.arrows.reactants import (
     TokenLoader,
 )
 from ksmech.arrows.symmetry import symmetric_closure
-from ksmech.data import chem, splits
+from ksmech.data import chem, domain, splits
 from ksmech.data import provenance as prov
+from ksmech.data.domain import open_shell_labels
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_training_steps, source_dir, steps_path
-from ksmech.data.resonance import sigma_key
+from ksmech.data.resonance import identity_key
 from ksmech.data.schema import ElementaryStep
-from ksmech.orbitals.tokens import MoleculeTokens
-from ksmech.physics.pairs import PairStats, fit_pair_stats, valid_pairs
+from ksmech.orbitals.tokens import (
+    STORED_ATOM_FEATURES,
+    STORED_ORBITAL_FEATURES,
+    MoleculeTokens,
+    atom_feature_names,
+    drawn_unpaired,
+    feature_names,
+    record_unpaired,
+)
+from ksmech.physics.pairs import (
+    PAIR_CELLS,
+    PairStats,
+    cell_columns,
+    fit_pair_stats,
+    pair_flags,
+    valid_pairs,
+)
 from ksmech.physics.params import REDUCED, KSParams, to_params
-from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+from ksmech.physics.stage_a import (
+    STAGE_A_FEATURES,
+    STORED_PAIR_FEATURES,
+    cell_features,
+    stage_a_block,
+)
 from ksmech.processes import chunked, in_processes
 
 log = logging.getLogger(__name__)
 
-SAMPLE_VERSION = 17  # 17: label classes closed under the pool's symmetry (`arrows.symmetry`)
+SAMPLE_VERSION = 19  # 18: every pair cell with the exclusion flags, the stored token extras,
+#   Kekule-closest labels without arrows, domain_class (open-shell plan P0a); 19: N and u per
+#   atom and drawing, atom_categorical (Z, charge, u), the identity key v2 (P6)
 PARTS = ("train", "val", "test")
-STRATEGIES = ("molecule", "scaffold", "loco", "random_leaky")
+FROZEN_SPLIT_SCHEMA = 1  # `split_frozen_<strategy>.json`, independent of SAMPLE_VERSION
+STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
 # what `ksmech-arrows samples` builds unless told otherwise: never the per-step random split,
 # which leaks molecules across sets on PMechDB (no pathway ids; docs/review_2026-10-21.md, D1)
 DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
+
+
+LEGACY_ATOM_FEATURES = tuple(atom_feature_names())  # the atom columns of a v17 sample
+LEGACY_ORBITAL_FEATURES = tuple(feature_names())  # and its orbital columns
 
 
 class SkipReason(StrEnum):
@@ -107,12 +143,18 @@ class SkipReason(StrEnum):
     NO_ANCHOR = "NO_ANCHOR"
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"
     NOT_ELEMENTARY = "NOT_ELEMENTARY"
+    H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"
+    RADICAL_ARROW = "RADICAL_ARROW"
     NO_BOND_INDEX = "NO_BOND_INDEX"  # a reactant bond (or a fragment) has no Wiberg index
     R_CHECK_FAILED = "R_CHECK_FAILED"  # the label is no valid edit of the reactant (`check_edit`)
+    SOMO_NOT_INTEGRAL = "SOMO_NOT_INTEGRAL"  # an open-shell reactant is Fermi-smeared (law S, P3)
+    SET_STEP = "SET_STEP"  # the flow codes of the label (`delta_be.flow_skip`, P6)
+    DISSOCIATIVE_ET_STEP = "DISSOCIATIVE_ET_STEP"
 
 
 READING_ALIGNED = "aligned"  # every arrow has its ArrowLabel
 READING_FILTERED = "LABEL_FILTERED"  # a label had no pair left that pair_valid allows
+READING_NO_ARROWS = "NO_ARROWS"  # the source has no arrows (ReactMech): R only, no ArrowLabels
 
 
 @dataclass
@@ -120,13 +162,14 @@ class MechanismSample:
     step_id: str
     source: str
     fragment_keys: list[str]  # token-cache key (map-free canonical SMILES) per fragment
-    atom_categorical: np.ndarray  # (A, 2) int64: atomic number, formal charge
-    atom_features: np.ndarray  # (A, Fa) float32, missing values 0
+    atom_categorical: np.ndarray  # (A, 3) int64: atomic number, formal charge (model inputs),
+    #   unpaired count u (bookkeeping, model_input=False: keys, diagnostics, P9's ablation)
+    atom_features: np.ndarray  # (A, Fa) float32 in `atom_columns` order, missing values 0
     atom_missing: np.ndarray  # (A, Fa) bool
     atom_fragment: np.ndarray  # (A,) int64
     atom_map: np.ndarray  # (A,) int64 atom-map number, 0 for unmapped atoms
     atom_positions: np.ndarray  # (A, 3) float32 Angstrom, for distances only
-    orbital_features: np.ndarray  # (O, Fo) float32
+    orbital_features: np.ndarray  # (O, Fo) float32 in `orbital_columns` order
     orbital_spectra: np.ndarray  # (O, 8, 2) float32
     orbital_fragment: np.ndarray  # (O,) int64
     orbital_occupied: np.ndarray  # (O,) bool
@@ -137,15 +180,21 @@ class MechanismSample:
     pair_z: np.ndarray  # (n_occ, n_virt, F) float32 z_rs at K = eps = 1, `pair_features` order
     pair_defined: np.ndarray  # (n_occ, n_virt, F) bool
     pair_gap_sign: np.ndarray  # (n_occ, n_virt) int8 sign of G (bookkeeping, not a feature)
-    pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair
+    pair_valid: np.ndarray  # (n_occ, n_virt) bool: donor, acceptor, not an excluded pair (the
+    #   legacy mask of pair_cells 'valid'; every cell is stored, with `pairs.PAIR_FLAGS`)
     labels: list[ArrowLabel] = field(default_factory=list)  # empty unless `orbital_reading`
     #   is READING_ALIGNED
-    product_key: str = ""  # sigma key of the products (`data.resonance.sigma_key`)
+    labels_all: list[ArrowLabel] = field(default_factory=list)  # the aligned labels on every
+    #   cell (no pair_valid filter; pair_cells 'all'); empty when an arrow does not align
+    product_key: str = ""  # identity key v2 of the products (`data.resonance.identity_key`)
     edit_label: EditLabel | None = None  # the R class and its anchors on the global atoms
     bonds: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.int16))  # (E, 3)
     #   int16 (i, j, order), i < j: the reactant as drawn (Kekulé), implicit H included
     lone_pairs: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))  # (A,)
     wiberg: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float16))  # (E,)
+    nonbonding: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))  # (A,) N,
+    #   the non-bonding electrons (B_ii; lone_pairs = N // 2); collate refuses a sample without
+    unpaired: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))  # (A,) u
     orbital_reading: str = ""  # READING_ALIGNED, READING_FILTERED or the first unaligned reason
     fermi_smeared: bool = False  # a reactant fragment is outside the closed-shell domain
     label_filter: dict[str, int] = field(default_factory=dict)  # labeled (donor, acceptor)
@@ -154,6 +203,9 @@ class MechanismSample:
     #   sample was built from (`file:<path>` -> content sha256)
     pair_features: tuple[str, ...] = STAGE_A_FEATURES  # the columns of pair_z / pair_defined
     drawings: list[Drawing] = field(default_factory=list)  # the pool's other resonance drawings
+    atom_columns: tuple[str, ...] = LEGACY_ATOM_FEATURES  # the columns of atom_features (v18:
+    #   `tokens.STORED_ATOM_FEATURES`, the v17 ones then the stored extras); readers select by name
+    orbital_columns: tuple[str, ...] = LEGACY_ORBITAL_FEATURES  # the columns of orbital_features
     drawing_skips: dict[str, int] = field(default_factory=dict)  # drawings dropped, by reason
 
     @property
@@ -167,18 +219,20 @@ class MechanismSample:
 
     def drawn(self, k: int) -> MechanismSample:
         """The sample in its k-th resonance drawing (0: as the dataset draws it): the formal
-        charges, bond orders, lone pairs, the pair feature `bond_order` and the label class of
-        that drawing; everything else is shared with this sample."""
+        charges, bond orders, lone pairs, N and u, the pair feature `bond_order` and the label
+        class of that drawing; everything else is shared with this sample."""
         if k == 0:
             return self
         d = self.drawings[k - 1]
         cat, bonds = self.atom_categorical.copy(), self.bonds.copy()
-        cat[:, 1], bonds[:, 2] = d.charges, d.orders
+        cat[:, 1], cat[:, 2], bonds[:, 2] = d.charges, d.unpaired, d.orders
         return replace(
             self,
             atom_categorical=cat,
             bonds=bonds,
             lone_pairs=d.lone_pairs,
+            nonbonding=d.nonbonding,
+            unpaired=d.unpaired,
             edit_label=d.edit_label,
             pair_z=with_pair_bond_orders(self, bonds),
             drawings=[],
@@ -225,27 +279,42 @@ def make_sample(
     computed here)."""
     sample = reactant_sample(step.step_id, str(step.source), rt)
     sample.labels = labels
-    sample.product_key = sigma_key(chem.parse_mapped(step.products_smiles))
+    sample.product_key = identity_key(chem.parse_mapped(step.products_smiles))
     return sample
+
+
+def _atom_inputs(t: MoleculeTokens) -> tuple[np.ndarray, np.ndarray]:
+    """(values, missing) of the stored atom columns: the v17 inputs, then the extras (the
+    finite-difference f+ / f-, the exact-degeneracy frontier set), missing values 0."""
+    extra = t.atom_extra()
+    values = np.hstack([t.atom_features(), np.nan_to_num(extra, nan=0.0)])
+    return values, np.hstack([t.atom_missing(), np.isnan(extra)])
 
 
 def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismSample:
     """The model inputs of a reactant side, without labels or products (also used for
-    hand-built reactant sets, e.g. the textbook selectivity checks). The pair feature
-    `bond_order` is read on the side as drawn."""
+    hand-built reactant sets, e.g. the textbook selectivity checks, and by every live
+    caller: serve, the embedding page). The pair feature `bond_order` is read on the side as
+    drawn, and so are N and u (`lewis.lewis_nonbonding`, `lewis.lewis_unpaired`)."""
     tok = [f.tokens for f in rt.fragments]
     block = stage_a_block(tok, REDUCED)
+    flags = pair_flags(tok, rt.candidate)
+    flag_z = np.stack([flags[n] for n in STORED_PAIR_FEATURES[len(STAGE_A_FEATURES) :]], -1)
+    unpaired = lewis_unpaired(rt)
+    categorical = np.concatenate([t.atom_categorical() for t in tok])
     sample = MechanismSample(
         step_id=step_id,
         source=source,
         fragment_keys=[f.key for f in rt.fragments],
-        atom_categorical=np.concatenate([t.atom_categorical() for t in tok]),
-        atom_features=np.concatenate([t.atom_features() for t in tok]).astype(np.float32),
-        atom_missing=np.concatenate([t.atom_missing() for t in tok]),
+        atom_categorical=np.hstack([categorical, unpaired[:, None].astype(categorical.dtype)]),
+        atom_features=np.concatenate([_atom_inputs(t)[0] for t in tok]).astype(np.float32),
+        atom_missing=np.concatenate([_atom_inputs(t)[1] for t in tok]),
         atom_fragment=rt.atom_fragment.astype(np.int64),
         atom_map=_atom_maps(rt),
         atom_positions=rt.atom_positions.astype(np.float32),
-        orbital_features=np.concatenate([t.orbital_features() for t in tok]).astype(np.float32),
+        orbital_features=np.concatenate(
+            [np.hstack([t.orbital_features(), t.orbital_extra()]) for t in tok]
+        ).astype(np.float32),
         orbital_spectra=np.concatenate([t.orbital_spectra() for t in tok]).astype(np.float32),
         orbital_fragment=rt.orbital_fragment.astype(np.int64),
         orbital_occupied=rt.occupied.copy(),
@@ -253,15 +322,37 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
         acceptor_mask=rt.acceptor_ok.copy(),
         orbital_centroids=rt.centroids.astype(np.float32),
         incidence=_incidence(rt),
-        pair_z=block.z.astype(np.float32),
-        pair_defined=block.defined,
+        pair_z=np.concatenate([block.z, flag_z], -1).astype(np.float32),
+        pair_defined=np.concatenate([block.defined, np.ones_like(flag_z)], -1),
         pair_gap_sign=block.gap_sign,
         pair_valid=valid_pairs(tok, rt.candidate),
         fermi_smeared=any(t.fermi_smeared for t in tok),
-        pair_features=STAGE_A_FEATURES,
+        pair_features=STORED_PAIR_FEATURES,
+        atom_columns=STORED_ATOM_FEATURES,
+        orbital_columns=STORED_ORBITAL_FEATURES,
+        nonbonding=lewis_nonbonding(rt),
+        unpaired=unpaired,
     )
+    sample.lone_pairs = sample.nonbonding // 2
     sample.pair_z = with_pair_bond_orders(sample, lewis_bonds(rt))
     return sample
+
+
+def with_lewis(sample: MechanismSample, lewis: LewisStructure) -> MechanismSample:
+    """`sample` with the Lewis structure `lewis` (`lewis.reactant_lewis`): bonds, lone pairs,
+    Wiberg indices, N and u (the atom categorical's u column too). Every live caller (the
+    embedding page, serve) sets its pool's structure through it."""
+    cat = sample.atom_categorical.copy()
+    cat[:, 2] = lewis.unpaired
+    return replace(
+        sample,
+        atom_categorical=cat,
+        bonds=lewis.bonds,
+        lone_pairs=lewis.lone_pairs,
+        wiberg=lewis.wiberg,
+        nonbonding=lewis.nonbonding,
+        unpaired=lewis.unpaired,
+    )
 
 
 def _pair_index(sample: MechanismSample) -> tuple[dict[int, int], dict[int, int]]:
@@ -287,26 +378,18 @@ def _filter_group(rt: ReactantTokens, lab: ArrowLabel, r: int, s: int, w: float)
     return f"{sym}: other"
 
 
-def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabel] | None:
-    """The labels restricted to the pairs `pair_valid` allows (the bonded-site filter and the
-    antibonding-partner rule). A donor (acceptor) with no valid partner in the other set leaves
-    its set and the label is flagged LABEL_FILTERED; every rejected cell is counted by group in
-    `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells, and the
-    leaving bonds are read on the teacher arrows in step order (`leaving_labels`). None when a
-    label has no valid cell left (the sample then keeps no ArrowLabels: READING_FILTERED)."""
-    row, col = _pair_index(sample)
-
-    def valid(r: int, s: int) -> bool:
-        return r in row and s in col and bool(sample.pair_valid[row[r], col[s]])
-
+def _restricted_labels(sample: MechanismSample, rt: ReactantTokens, valid, counts: dict | None):
+    """The labels restricted to the cells `valid(r, s)` allows, their teacher pairs and leaving
+    bonds; rejected cells are counted by group in `counts` (when given). None when a label has
+    no allowed cell left."""
     out = []
     w = rt.candidate.site_weight
     for lab in sample.labels:
         for r in lab.donor_ids:
             for s in lab.acceptor_ids:
-                if not valid(r, s):
+                if counts is not None and not valid(r, s):
                     key = _filter_group(rt, lab, r, s, w)
-                    sample.label_filter[key] = sample.label_filter.get(key, 0) + 1
+                    counts[key] = counts.get(key, 0) + 1
         donors = frozenset(r for r in lab.donor_ids if any(valid(r, s) for s in lab.acceptor_ids))
         acceptors = frozenset(s for s in lab.acceptor_ids if any(valid(r, s) for r in donors))
         if not donors or not acceptors:
@@ -325,6 +408,28 @@ def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabe
     return [with_leaving(x, lab) for x, lab in zip(out, leaving, strict=True)]
 
 
+def filter_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabel] | None:
+    """The labels restricted to the pairs `pair_valid` allows (the bonded-site filter and the
+    antibonding-partner rule). A donor (acceptor) with no valid partner in the other set leaves
+    its set and the label is flagged LABEL_FILTERED; every rejected cell is counted by group in
+    `sample.label_filter`. The teacher pair (r*, s*) is chosen among valid cells, and the
+    leaving bonds are read on the teacher arrows in step order (`leaving_labels`). None when a
+    label has no valid cell left (the sample then keeps no ArrowLabels: READING_FILTERED)."""
+    row, col = _pair_index(sample)
+
+    def valid(r: int, s: int) -> bool:
+        return r in row and s in col and bool(sample.pair_valid[row[r], col[s]])
+
+    return _restricted_labels(sample, rt, valid, sample.label_filter)
+
+
+def unfiltered_labels(sample: MechanismSample, rt: ReactantTokens) -> list[ArrowLabel]:
+    """The labels on every (occupied, virtual) cell (`labels_all`, read with pair_cells
+    'all'): no cell is rejected, the teacher pair is chosen among all of them."""
+    row, col = _pair_index(sample)
+    return _restricted_labels(sample, rt, lambda r, s: r in row and s in col, None) or []
+
+
 @dataclass(frozen=True)
 class EditTarget:
     """A step's target: its edit (`delta_be.StepEdit`), the label on the reactant-mol atoms and
@@ -336,6 +441,8 @@ class EditTarget:
     bonds: np.ndarray
     lone_pairs: np.ndarray
     wiberg: np.ndarray
+    nonbonding: np.ndarray
+    unpaired: np.ndarray
 
 
 def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipReason:
@@ -348,17 +455,17 @@ def edit_target(step: ElementaryStep, rt: ReactantTokens) -> EditTarget | SkipRe
     if isinstance(label, EditSkip):
         return SkipReason(str(label))
     try:
-        bonds, lone_pairs, wiberg = reactant_lewis(rt)
+        lewis = reactant_lewis(rt)
     except MissingBondIndex as exc:
         log.info("%s: %s", step.step_id, exc)
         return SkipReason.NO_BOND_INDEX
     atoms = np.concatenate([f.tokens.atom_categorical() for f in rt.fragments])
-    label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], bonds)
-    problem = check_edit(label, bonds, lone_pairs)
+    label = symmetric_closure(label, atoms[:, 0], atoms[:, 1], lewis.bonds)
+    problem = check_edit(label, lewis.bonds, lewis.nonbonding, open_shell_labels(step.source))
     if problem is not None:
         log.info("%s: the edit label is no valid edit of the reactant (%s)", step.step_id, problem)
         return SkipReason.R_CHECK_FAILED
-    return EditTarget(edit, mol_label, label, bonds, lone_pairs, wiberg)
+    return EditTarget(edit, mol_label, label, *lewis)
 
 
 def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: EditTarget) -> None:
@@ -372,9 +479,13 @@ def _set_drawings(sample: MechanismSample, step: ElementaryStep, rt, target: Edi
 
 def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment) -> None:
     """The ArrowLabels restricted to valid pairs when every arrow aligns, and the reading."""
+    if alignment.n_arrows == 0:
+        sample.labels, sample.orbital_reading = [], READING_NO_ARROWS
+        return
     if not alignment.complete:
         sample.labels, sample.orbital_reading = [], str(alignment.unaligned[0].reason)
         return
+    sample.labels_all = unfiltered_labels(sample, rt)
     labels = filter_labels(sample, rt)
     if labels is None:
         log.info("%s: a label has no valid pair: %s", sample.step_id, sample.label_filter)
@@ -383,10 +494,60 @@ def _set_orbital_reading(sample: MechanismSample, rt: ReactantTokens, alignment)
         sample.labels, sample.orbital_reading = labels, READING_ALIGNED
 
 
+def smeared_open_shells(rt: ReactantTokens) -> list[str]:
+    """Law (S) of the open-shell admission (`data.domain`, open-shell plan P3): the reactant
+    fragments drawn with radical electrons that stay open shells as their record was run
+    (`record_unpaired`; a carbene the species table pairs does not) whose tokens are
+    Fermi-smeared, i.e. whose record has an MO further than SMEAR_TOL from P2b's plateau
+    reference; their SOMO is not integral. An odd metal fragment RDKit counts 0 (Cu(II),
+    Fe(III), P4) is not read: its d singly occupied tokens are neither donors nor acceptors,
+    and a smeared one stays a flagged sample (the fermi_smeared slice, U10; user, 2026-11-03)."""
+    return [
+        f.key
+        for f in rt.fragments
+        if f.tokens.fermi_smeared
+        and drawn_unpaired(f.key)
+        and record_unpaired(f.key, f.tokens.method)
+    ]
+
+
+def stretched_bonds(
+    sample: MechanismSample, factor: float | None = None
+) -> list[tuple[int, int, float]]:
+    """(i, j, d / r_cov sum) of the reactant bonds that R changes, that touch Li, Na, Mg or K
+    (the bonds the QM connectivity check skips, `qm.geometry.SKIP_BOND_ELEMENTS`) and that the
+    record holds further apart than `factor` (`QMConfig.conn_cov_factor`) x the covalent-radius
+    sum: R changes a bond the QM input does not have (SKIPPED_BOND_STRETCHED, open-shell plan
+    P3; the Birch step's Na...benzene complex). A counted flag, never a model input."""
+    from ksmech.qm.geometry import SKIP_BOND_ELEMENTS
+    from ksmech.qm.xtb_calc import QMConfig
+
+    factor = QMConfig().conn_cov_factor if factor is None else factor
+    if sample.edit_label is None:
+        return []
+    z = sample.atom_categorical[:, 0]
+    lewis = {(int(i), int(j)) for i, j, _ in sample.bonds}
+    pairs = {(i, j) for v in sample.edit_label.variants for i, j, _ in v.bonds} & lewis
+    table = Chem.GetPeriodicTable()
+    out = []
+    for i, j in sorted(pairs):
+        if not {int(z[i]), int(z[j])} & SKIP_BOND_ELEMENTS:
+            continue
+        d = float(np.linalg.norm(sample.atom_positions[i] - sample.atom_positions[j]))
+        ratio = d / (table.GetRcovalent(int(z[i])) + table.GetRcovalent(int(z[j])))
+        if ratio > factor:
+            out.append((i, j, round(ratio, 3)))
+    return out
+
+
 def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSample | SkipReason:
     """The sample of a step, or why it has none: the reactant's tokens and Lewis structure,
     the edit label, the other resonance drawings of the pool, and the ArrowLabels when every
-    arrow aligns (`orbital_reading`)."""
+    arrow aligns (`orbital_reading`). A step without arrows first has the hydrogens that move
+    written as atoms (`hydrogens.explicit_moving_hydrogens`)."""
+    step = explicit_moving_hydrogens(step)
+    if step is None:
+        return SkipReason.H_TRANSFER_AMBIGUOUS
     with prov.collecting() as used:
         try:
             rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
@@ -395,6 +556,9 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
             return SkipReason(exc.reason)
         except CorrespondenceError:
             return SkipReason.CORRESPONDENCE
+        if smeared := smeared_open_shells(rt):
+            log.info("%s: open-shell reactant not integral: %s", step.step_id, smeared)
+            return SkipReason.SOMO_NOT_INTEGRAL
         target = edit_target(step, rt)
         if isinstance(target, SkipReason):
             return target
@@ -402,6 +566,7 @@ def sample_for_step(step: ElementaryStep, loader: TokenLoader) -> MechanismSampl
         sample = make_sample(step, rt, alignment.labels if alignment.complete else [])
     sample.edit_label, sample.bonds = target.label, target.bonds
     sample.lone_pairs, sample.wiberg = target.lone_pairs, target.wiberg
+    sample.nonbonding, sample.unpaired = target.nonbonding, target.unpaired
     _set_drawings(sample, step, rt, target)
     _set_orbital_reading(sample, rt, alignment)
     sample.inputs = dict(sorted(used.items()))
@@ -452,26 +617,58 @@ def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9.-]+", "-", name).strip("-")
 
 
-def split_ids(steps: list[ElementaryStep], strategy: str, seed: int = 0) -> dict[str, list[str]]:
+def _frozen_parts(frozen: dict[str, list[str]] | None, name: str) -> dict[str, str] | None:
+    """step id -> part of the split `name` in a frozen snapshot; None without a snapshot, and
+    an empty map for a split the snapshot does not hold (a new class: placed by hash)."""
+    if frozen is None:
+        return None
+    return {sid: part for part in PARTS for sid in frozen.get(f"{name}_{part}", [])}
+
+
+def _loco(steps, seed, frozen, prefix: str, fn) -> dict[str, splits.Split]:
+    if not any(s.mechanism_class is not None for s in steps):
+        raise ValueError("no step has a mechanism_class; leave-one-class-out is impossible")
+    classes = sorted({s.mechanism_class for s in steps if s.mechanism_class is not None})
+    names = {c: f"{prefix}-{_safe(c)}" for c in classes}
+    return {
+        names[c]: fn(steps, c, seed=seed, frozen=_frozen_parts(frozen, names[c])) for c in classes
+    }
+
+
+def _strategy_splits(steps, strategy: str, seed: int, frozen) -> dict[str, splits.Split]:
+    simple = {
+        "molecule": splits.split_by_molecule,
+        "random_leaky": splits.split_by_pathway,
+        "scaffold": splits.split_by_scaffold,
+    }
+    if strategy in simple:
+        pinned = _frozen_parts(frozen, strategy)
+        return {strategy: simple[strategy](steps, seed=seed, frozen=pinned)}
+    if strategy == "loco":
+        return _loco(steps, seed, frozen, "loco", splits.split_leave_one_class_out)
+    if strategy == "loco_all":
+        return _loco(steps, seed, frozen, "locoall", splits.split_leave_one_class_out_all)
+    raise ValueError(f"unknown split strategy {strategy!r}; one of {STRATEGIES}")
+
+
+def split_ids(
+    steps: list[ElementaryStep],
+    strategy: str,
+    seed: int = 0,
+    frozen: dict[str, list[str]] | None = None,
+    conflicts: Counter | None = None,
+) -> dict[str, list[str]]:
     """Split name (`<strategy>_<part>`) -> step ids. Raises ValueError when the strategy
-    cannot run on these steps (leave-one-class-out without class labels)."""
+    cannot run on these steps (leave-one-class-out without class labels). With `frozen` (the
+    ids of a `split_frozen_<strategy>.json` snapshot) existing steps keep their parts
+    (`data.splits`); new steps of a group frozen in two parts are left out and counted per
+    split name in `conflicts` (SPLIT_CONFLICT)."""
     if strategy == "random":
         raise ValueError("the per-step split is now `random_leaky` and must be asked for by name")
-    if strategy == "molecule":
-        per = {"molecule": splits.split_by_molecule(steps, seed=seed)}
-    elif strategy == "random_leaky":
-        per = {"random_leaky": splits.split_by_pathway(steps, seed=seed)}
-    elif strategy == "scaffold":
-        per = {"scaffold": splits.split_by_scaffold(steps, seed=seed)}
-    elif strategy == "loco":
-        if not any(s.mechanism_class is not None for s in steps):
-            raise ValueError("no step has a mechanism_class; leave-one-class-out is impossible")
-        per = {
-            f"loco-{_safe(c)}": sp
-            for c, sp in splits.leave_one_class_out_splits(steps, seed=seed).items()
-        }
-    else:
-        raise ValueError(f"unknown split strategy {strategy!r}; one of {STRATEGIES}")
+    per = _strategy_splits(steps, strategy, seed, frozen)
+    if conflicts is not None:
+        for name, sp in per.items():
+            conflicts[name] += len(sp.conflict)
     return {f"{name}_{part}": getattr(sp, part) for name, sp in per.items() for part in PARTS}
 
 
@@ -504,9 +701,63 @@ def load_split_file(path: Path) -> dict[str, list[str]]:
     return json.loads(Path(path).read_text())["splits"]
 
 
+def frozen_split_path(
+    source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR
+) -> Path:
+    return source_dir(source, processed_dir) / f"split_frozen_{strategy}.json"
+
+
+def freeze_split_file(
+    source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR
+) -> Path:
+    """Snapshot the current split file of `strategy` as `split_frozen_<strategy>.json`: the
+    same ids under kind `split_frozen` and FROZEN_SPLIT_SCHEMA, stamped with no file input (a
+    content hash; the split file's own inputs only in `extra`, for tracing), so re-ingests and
+    SAMPLE_VERSION bumps never make it stale. An existing snapshot is never overwritten: a
+    re-split is an explicit new version (delete the file by hand)."""
+    src = splits_path(source, strategy, processed_dir)
+    ids = load_split_file(src)
+    out = frozen_split_path(source, strategy, processed_dir)
+    if out.exists():
+        raise FileExistsError(f"{out} exists: a frozen split is replaced only by hand")
+    old = prov.read_header(src)
+    config = {"strategy": strategy, "seed": old.config.get("seed")}
+    trace = {"from": src.name, "from_inputs": old.inputs, "from_built_at": old.built_at}
+    content = prov.sha256_text(json.dumps(ids, sort_keys=True))
+    header = prov.stamp("split_frozen", FROZEN_SPLIT_SCHEMA, {}, config, content, trace)
+    return prov.write_json(out, {"splits": ids}, header)
+
+
+def load_frozen_split(
+    source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR
+) -> dict[str, list[str]] | None:
+    """The ids of the strategy's frozen snapshot, None when there is none. Its kind, schema,
+    clean build and content hash are checked; no input can make it stale."""
+    path = frozen_split_path(source, strategy, processed_dir)
+    if not path.exists():
+        return None
+    header = prov.verify_clean(path, "split_frozen", FROZEN_SPLIT_SCHEMA)
+    ids = json.loads(path.read_text())["splits"]
+    if prov.sha256_text(json.dumps(ids, sort_keys=True)) != header.content_sha256:
+        raise prov.StaleArtifact(path, ["its ids differ from its content hash"])
+    return ids
+
+
+def frozen_excluded(frozen: dict[str, list[str]] | None, steps: list[ElementaryStep]) -> dict:
+    """Per split name, the frozen steps no longer among the training steps (a later rule
+    excluded them): counted, never silently dropped."""
+    if frozen is None:
+        return {}
+    have = {s.step_id for s in steps}
+    gone = {name: sum(i not in have for i in ids) for name, ids in frozen.items()}
+    return {name: n for name, n in gone.items() if n}
+
+
 def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> dict:
     """The counts of one split: steps, samples, skip reasons, edit-label class sizes and
-    anchor kinds, resonance drawings, orbital readings, ArrowLabels and filtered ArrowLabels."""
+    anchor kinds, the labels KEKULE_CLOSEST re-made or RESONANCE_CAP cut and the label maxima
+    (`delta_be.label_counts`), resonance drawings, orbital readings, ArrowLabels and filtered
+    ArrowLabels."""
     kept = [samples[i] for i in ids if i in samples]
     reasons = Counter(str(skipped[i]) for i in ids if i in skipped)
     return {
@@ -515,6 +766,7 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         "n_samples": len(kept),
         "skipped": dict(reasons.most_common()),
         **class_shape([s.edit_label for s in kept if s.edit_label]),
+        **label_counts([s.edit_label for s in kept if s.edit_label]),
         "symmetry": symmetry_report(kept),
         "drawings": drawing_report(kept),
         "orbital_reading": dict(Counter(s.orbital_reading for s in kept).most_common()),
@@ -558,8 +810,18 @@ def _config(split: str, seed: int) -> dict:
         "split": split,
         "seed": seed,
         "sample_version": SAMPLE_VERSION,
-        "pair_features": list(STAGE_A_FEATURES),
+        "pair_features": list(STORED_PAIR_FEATURES),
     }
+
+
+def skipped_by_domain_class(steps: list[ElementaryStep], skipped: dict) -> dict:
+    """Skip reason -> the step's `domain_class` value ('none' without one) -> count: the steps
+    the domain laws admitted before their QM exists are counted here, never silently."""
+    classes = {s.step_id: s.domain_class or "none" for s in steps}
+    out: dict[str, Counter] = {}
+    for step_id, reason in skipped.items():
+        out.setdefault(str(reason), Counter())[classes[step_id]] += 1
+    return {r: dict(c.most_common()) for r, c in sorted(out.items())}
 
 
 def build_all_samples(
@@ -584,75 +846,135 @@ def build_all_samples(
         "n_training_steps": len(steps),
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
+        "skipped_by_domain_class": skipped_by_domain_class(steps, skipped),
+        "SKIPPED_BOND_STRETCHED": sorted(i for i, s in samples.items() if stretched_bonds(s)),
         **{
             k: every[k]
             for k in (
                 "class_size",
                 "anchor_kind",
+                "kekule_closest",
+                "resonance_truncated",
+                "label_maxima",
                 "symmetry",
                 "drawings",
                 "orbital_reading",
                 "label_filter",
             )
         },
-        "splits": {},
-        "strategies_not_applicable": {},
     }
+    return report | write_strategy_views(
+        source, strategies, steps, samples, skipped, index, seed, processed_dir
+    )
+
+
+def write_strategy_views(
+    source: str,
+    strategies: Iterable[str],
+    steps: list[ElementaryStep],
+    samples: dict[str, MechanismSample],
+    skipped: dict,
+    index: Path,
+    seed: int = 0,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+) -> dict:
+    """One split file per strategy, one view per split over the store `index`, and the pair
+    statistics of every training part. A strategy that cannot run on the source is reported,
+    not raised."""
+    parquet = steps_path(source, processed_dir)
+    report: dict = {"splits": {}, "strategies_not_applicable": {}, "frozen": {}}
     for strategy in strategies:
+        frozen = load_frozen_split(source, strategy, processed_dir)
+        conflicts: Counter = Counter()
         try:
-            ids = split_ids(steps, strategy, seed)
+            ids = split_ids(steps, strategy, seed, frozen, conflicts)
         except ValueError as exc:
             report["strategies_not_applicable"][strategy] = str(exc)
             continue
+        if frozen is not None:
+            gone = frozen_excluded(frozen, steps)
+            report["frozen"][strategy] = {"SPLIT_CONFLICT": dict(conflicts), "excluded": gone}
         split_file = write_split_file(
             splits_path(source, strategy, processed_dir), strategy, seed, ids, parquet
         )
         for split, members in ids.items():
             counts = split_report(split, members, samples, skipped)
             view = samples_path(source, split, processed_dir)
-            config = _config(split, seed)
+            # the domain classes the training steps admitted (`read_training_steps`)
+            config = _config(split, seed) | {"admit": domain.admit_config(source)}
             store.write_view(view, members, counts, index, split_file, config)
             report["splits"][split] = counts
             if split.endswith("_train"):
                 train = [samples[i] for i in members if i in samples]
-                stats_path = pair_stats_path(source, split[: -len("_train")], processed_dir)
-                write_pair_stats(stats_path, pair_stats(train), view, index)
+                for cells in PAIR_CELLS:
+                    name = split[: -len("_train")]
+                    stats_path = pair_stats_path(source, name, processed_dir, cells)
+                    write_pair_stats(stats_path, pair_stats(train, cells=cells), view, index, cells)
     return report
 
 
-def pair_stats_path(source: str, name: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
-    """`pair_feature_stats_<name>.json`: the standardization statistics of one split
-    strategy, fitted on its training part."""
-    return source_dir(source, processed_dir) / f"pair_feature_stats_{name}.json"
-
-
-def pair_stats(samples: list[MechanismSample], params: KSParams | None = None) -> PairStats:
-    """Statistics of the pair features of `samples` at the physical K and eps, over what a
-    loaded sample holds: the defined entries of the valid cells (`pair_valid`; the store keeps
-    no others), with the values rounded to float16 as stored. The statistics of samples just
-    built therefore equal those refitted from the store."""
-    params = params or KSParams()
-    names = samples[0].pair_features if samples else STAGE_A_FEATURES
-    if any(s.pair_features != names for s in samples):
-        raise ValueError("pair statistics over samples with different pair features")
-    blocks = (
-        (
-            to_params(s.pair_z.astype(np.float16), params, names),
-            s.pair_defined & s.pair_valid[..., None],
-        )
-        for s in samples
+def write_views_from_store(
+    source: str,
+    strategies: Iterable[str],
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    seed: int = 0,
+) -> dict:
+    """`write_strategy_views` over the sample store already built: the store and the views of
+    the other strategies are left as they are."""
+    parquet = steps_path(source, processed_dir)
+    samples, skipped, index = store.load_store(
+        source_dir(source, processed_dir), MechanismSample, SAMPLE_VERSION
     )
-    return fit_pair_stats(blocks, names)
+    steps = read_training_steps(parquet)
+    report = {"n_training_steps": len(steps), "n_samples": len(samples), "views_only": True}
+    return report | write_strategy_views(
+        source, strategies, steps, samples, skipped, index, seed, processed_dir
+    )
 
 
-def write_pair_stats(path: Path, stats: PairStats, view: Path, index: Path) -> Path:
+def pair_stats_path(
+    source: str, name: str, processed_dir: Path = DEFAULT_PROCESSED_DIR, cells: str = "valid"
+) -> Path:
+    """`pair_feature_stats_<name>.json` (`..._<name>_allcells.json` for pair_cells 'all'): the
+    standardization statistics of one split strategy, fitted on its training part."""
+    suffix = "" if cells == "valid" else "_allcells"
+    return source_dir(source, processed_dir) / f"pair_feature_stats_{name}{suffix}.json"
+
+
+def pair_stats(
+    samples: list[MechanismSample], params: KSParams | None = None, cells: str = "valid"
+) -> PairStats:
+    """Statistics of the pair features a reader of `cells` takes (`stage_a.cell_features`) over
+    `samples` at the physical K and eps, on the defined entries of those cells (`valid`: the
+    `pair_valid` cells, the v17 statistics; `all`: every cell), with the values rounded to
+    float16 as stored. The statistics of samples just built therefore equal those refitted
+    from the store."""
+    params = params or KSParams()
+    names = cell_features(cells)
+    stored = samples[0].pair_features if samples else STORED_PAIR_FEATURES
+    if any(s.pair_features != stored for s in samples):
+        raise ValueError("pair statistics over samples with different pair features")
+
+    def block(s: MechanismSample):
+        z, defined = cell_columns(
+            s.pair_z.astype(np.float16), s.pair_defined, s.pair_valid, stored, names, cells
+        )
+        return to_params(z, params, names), defined
+
+    return fit_pair_stats((block(s) for s in samples), names)
+
+
+def write_pair_stats(
+    path: Path, stats: PairStats, view: Path, index: Path, cells: str = "valid"
+) -> Path:
     """The statistics with a provenance header: the training view and the store index they were
-    fitted on are its inputs, the physical K and eps and the features its configuration."""
+    fitted on are its inputs, the physical K and eps, the features and the cells its
+    configuration."""
     params = KSParams()
     config = {
         "sample_version": SAMPLE_VERSION,
         "pair_features": list(stats.names),
-        "cells": "valid",
+        "cells": cells,
         "params": {"K": params.K, "eps": params.eps},
     }
     body = {"features": stats.to_dict()}

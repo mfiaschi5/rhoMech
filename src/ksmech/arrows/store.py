@@ -8,12 +8,13 @@ Layout under `data/processed/<source>/samples/`:
 A split is `samples_<split>.json` next to the store: its ids and counts, with the index and the
 split file as inputs. Nothing is copied per split.
 
-On disk a sample keeps its pair arrays for the valid cells only (`pair_valid`, ~89% of the
-cells): `pair_z` as float16, the 0/1 features (`BINARY_FEATURES` among the sample's
-`pair_features`) and `pair_defined` bit-packed. Its resonance drawings are stacked
-(`drawing_charges`, `drawing_orders`, `drawing_lone_pairs`, one row per drawing) with their
-labels in the JSON. In memory every array is dense float32 again, invalid cells zero /
-undefined.
+On disk a sample keeps its pair arrays on every (occupied, virtual) cell (since v18; v17 kept
+the `pair_valid` cells only, ~89%), flattened cell by cell: `pair_z` as float16, the 0/1
+features (`BINARY_FEATURES` among the sample's `pair_features`, the exclusion flags of
+`physics.pairs.pair_flags` among them) and `pair_defined` bit-packed; `pair_valid` is stored as
+the legacy mask. Its resonance drawings are stacked (`drawing_charges`, `drawing_orders`,
+`drawing_lone_pairs`, and since v19 `drawing_nonbonding` and `drawing_unpaired`, one row per
+drawing) with their labels in the JSON. In memory every array is dense float32 again.
 float16 keeps 3 significant digits: the largest error measured on the pair features was 5e-3
 on log-features spanning ~30 units, below 1e-7 absolute on the tiny ones
 (docs/decisions.md, fix item 8).
@@ -35,14 +36,17 @@ if TYPE_CHECKING:
     from ksmech.arrows.steps import MechanismSample
 
 SHARD_SIZE = 256
-VALID_ONLY = ("pair_z", "pair_defined", "pair_gap_sign")
+CELL_ARRAYS = ("pair_z", "pair_defined", "pair_gap_sign")  # stored flat, one row per cell
 # Drawing field -> the stacked array of a sample's drawings
 DRAWING_ARRAYS = {
     "charges": "drawing_charges",
     "orders": "drawing_orders",
     "lone_pairs": "drawing_lone_pairs",
+    "nonbonding": "drawing_nonbonding",
+    "unpaired": "drawing_unpaired",
 }
-BINARY_FEATURES = ("inter", "clash", "bonded")  # exact 0/1 pair features: bits, not float16
+# exact 0/1 pair features: bits, not float16 (the last three: `physics.pairs.PAIR_FLAGS`)
+BINARY_FEATURES = ("inter", "clash", "bonded", "d_acceptor", "own_antibond", "site_self")
 
 
 def _binary_columns(names) -> list[int]:
@@ -64,14 +68,14 @@ def pack(sample: MechanismSample) -> tuple[dict[str, np.ndarray], dict[str, Any]
             if f.name == "drawings":
                 arrays |= _pack_drawings(sample)
                 value = [d.edit_label.to_dict() for d in value]
-            elif f.name == "labels":
+            elif f.name in ("labels", "labels_all"):
                 value = [lab.to_dict() for lab in value]
             elif f.name == "edit_label" and value is not None:
                 value = value.to_dict()
             meta[f.name] = value
-    valid = sample.pair_valid
-    for name in VALID_ONLY:
-        arrays[name] = arrays[name][valid]
+    n_cells = sample.pair_valid.size
+    for name in CELL_ARRAYS:
+        arrays[name] = arrays[name].reshape(n_cells, *arrays[name].shape[2:])
     binary = _binary_columns(sample.pair_features)
     flags = arrays["pair_z"][:, binary]
     if not np.isin(flags, (0.0, 1.0)).all():
@@ -93,24 +97,23 @@ def unpack(
 
     meta = dict(meta)
     n_feat = meta.pop("n_pair_features")
-    meta["pair_features"] = tuple(meta["pair_features"])
-    valid = arrays["pair_valid"].astype(bool)
-    shape = valid.shape
-    dense = {
-        "pair_z": np.zeros((*shape, n_feat), dtype=np.float32),
-        "pair_defined": np.zeros((*shape, n_feat), dtype=bool),
-        "pair_gap_sign": np.zeros(shape, dtype=np.int8),
-    }
+    for name in ("pair_features", "atom_columns", "orbital_columns"):
+        if name in meta:
+            meta[name] = tuple(meta[name])
+    shape = arrays["pair_valid"].shape
     binary = _binary_columns(meta["pair_features"])
     rest = [k for k in range(n_feat) if k not in binary]
-    z = np.zeros((int(valid.sum()), n_feat), dtype=np.float32)
+    z = np.zeros((shape[0] * shape[1], n_feat), dtype=np.float32)
     z[:, rest] = _from_byte_planes(arrays["pair_z"]).astype(np.float32)
     z[:, binary] = np.unpackbits(arrays["pair_flags"], axis=-1, count=len(binary))
-    dense["pair_z"][valid] = z
     bits = np.unpackbits(arrays["pair_defined"], axis=-1, count=n_feat)
-    dense["pair_defined"][valid] = bits.astype(bool)
-    dense["pair_gap_sign"][valid] = arrays["pair_gap_sign"]
-    skip = (*VALID_ONLY, "pair_flags", *DRAWING_ARRAYS.values())
+    dense = {
+        "pair_z": z.reshape(*shape, n_feat),
+        "pair_defined": bits.astype(bool).reshape(*shape, n_feat),
+        "pair_gap_sign": arrays["pair_gap_sign"].reshape(shape),
+        "pair_valid": arrays["pair_valid"].astype(bool),
+    }
+    skip = (*CELL_ARRAYS, "pair_valid", "pair_flags", *DRAWING_ARRAYS.values())
     out = {k: v for k, v in arrays.items() if k not in skip}
     rows = [
         {f: arrays[name][k] for f, name in DRAWING_ARRAYS.items()}
@@ -121,6 +124,7 @@ def unpack(
         for row, lab in zip(rows, meta["drawings"], strict=True)
     ]
     meta["labels"] = [ArrowLabel.from_dict(x) for x in meta["labels"]]
+    meta["labels_all"] = [ArrowLabel.from_dict(x) for x in meta.get("labels_all", [])]
     if meta.get("edit_label") is not None:
         meta["edit_label"] = EditLabel.from_dict(meta["edit_label"])
     return cls(**out, **dense, **meta)
@@ -128,7 +132,7 @@ def unpack(
 
 def _pack_drawings(sample: MechanismSample) -> dict[str, np.ndarray]:
     """The drawings' arrays stacked, one row per drawing (zero rows without drawings)."""
-    width = {"charges": sample.n_atoms, "orders": len(sample.bonds), "lone_pairs": sample.n_atoms}
+    width = {f: sample.n_atoms for f in DRAWING_ARRAYS} | {"orders": len(sample.bonds)}
     out = {}
     for f, name in DRAWING_ARRAYS.items():
         rows = [getattr(d, f) for d in sample.drawings]
@@ -277,6 +281,21 @@ def _iter_shards(path: Path, by_shard: dict[str, list[int]], cls, version: int, 
     root = store_dir(Path(path).parent)
     for name, members in sorted(by_shard.items()):
         yield from _load_shard(root / name, members, cls, version, allow_stale)
+
+
+def load_store(
+    view_dir: Path, cls: type[MechanismSample], version: int
+) -> tuple[dict[str, MechanismSample], dict[str, str], Path]:
+    """(every stored sample by step id, the skipped steps' reason codes, the index path),
+    verified like a view: the index and every shard."""
+    index_path = store_dir(view_dir) / "index.json"
+    prov.verify_clean(index_path, "sample_index", version)
+    body = json.loads(index_path.read_text())
+    root, samples = store_dir(view_dir), {}
+    for name, ids in sorted(body["shards"].items()):
+        for s in _load_shard(root / name, list(range(len(ids))), cls, version, False):
+            samples[s.step_id] = s
+    return samples, body["skipped"], index_path
 
 
 def load_view(

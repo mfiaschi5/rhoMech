@@ -108,6 +108,9 @@ class SpeciesCount(_Jsonable):
         )
 
 
+KEY_VERSION = 2  # the identity key of species and pool keys: 2 = `data.resonance.identity_key`
+
+
 @dataclass(frozen=True)
 class PoolState(_Jsonable):
     state_id: str  # "s" + sha256(mapped_smiles)[:20]
@@ -117,9 +120,18 @@ class PoolState(_Jsonable):
     species: tuple[SpeciesCount, ...]  # sorted by species_key
     fragment_token_keys: tuple[str, ...]  # per fragment, GetMolFrags order of parse_mapped
     n_atoms: int
+    key_version: int = KEY_VERSION  # the identity key its keys were made with
 
     @classmethod
     def from_dict(cls, d: dict) -> PoolState:
+        """The state of a stored dict. ValueError for keys of another identity key version
+        (none written before v2): a stored key is never read silently under another rule
+        (`ksmech-serve rekey-pools`, open-shell plan P6)."""
+        if d.get("key_version") != KEY_VERSION:
+            raise ValueError(
+                f"pool state {d.get('state_id')} has identity key version "
+                f"{d.get('key_version', 1)}, not {KEY_VERSION}: run `ksmech-serve rekey-pools`"
+            )
         return cls(
             str(d["state_id"]),
             str(d["mapped_smiles"]),

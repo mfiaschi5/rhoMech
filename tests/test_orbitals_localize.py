@@ -68,12 +68,119 @@ def test_localize_record_splits_occupied_and_virtual(sp_record):
 def test_somos_are_never_mixed_with_doubly_occupied_mos(sp_record):
     rec = sp_record("[CH2]")  # triplet methylene: two C-H bonds, two SOMOs
     loc = L.localize_record(rec)
-    single = rec.occupations[loc.occ_index] < L.DOUBLE_THRESHOLD
+    single = L.reference_occupations(rec)[loc.occ_index] < 2
     assert single.sum() == 2 and loc.stats_occ.n_orbitals == 4
     assert not loc.U_occ[np.ix_(single, ~single)].any()
     assert not loc.U_occ[np.ix_(~single, single)].any()
     assert np.allclose(loc.U_occ.T @ loc.U_occ, np.eye(4))
     assert np.allclose(loc.C_occ, rec.C[:, loc.occ_index] @ loc.U_occ)
+
+
+# ---- open shells: blocks from the plateau reference (open-shell plan P2b)
+
+OPEN_GROUPS = {  # fixture -> the reference occupations of its open MOs (0 < reference < 2)
+    "methyl": [1.0],
+    "hydroxyl": [1.5, 1.5],
+    "nitric_oxide": [0.5, 0.5],
+    "triplet_o2": [1.0, 1.0],
+    "superoxide": [1.5, 1.5],
+    "bromine_atom": [5 / 3] * 3,
+    "chlorine_atom": [5 / 3] * 3,
+    "benzene_radical_anion": [0.5, 0.5],
+    "copper_dichloride": [1.5, 1.5],
+}
+
+
+@pytest.fixture(scope="module")
+def open_shell():
+    from tests.fixtures.open_shell import open_shell_record
+
+    memo: dict = {}
+
+    def get(name: str):
+        if name not in memo:
+            memo[name] = open_shell_record(name)
+        return memo[name]
+
+    return get
+
+
+def _open(rec) -> np.ndarray:
+    ref = L.reference_occupations(rec)
+    return np.flatnonzero((ref > 0) & (ref < 2))
+
+
+@pytest.mark.parametrize("name", sorted(OPEN_GROUPS))
+def test_the_plateau_reference_reads_the_open_group_and_clears_the_smeared_flag(open_shell, name):
+    rec = open_shell(name)
+    ref = L.reference_occupations(rec)
+    assert np.allclose(sorted(ref[_open(rec)]), OPEN_GROUPS[name], atol=1e-12)
+    assert np.abs(rec.occupations - ref).max() < 1e-6 and not L.is_fermi_smeared(rec)
+    for tol in (1e-7, 1e-6, 1e-5, 1e-4):  # the same plateaus on either side of PLATEAU_TOL
+        assert np.array_equal(L.reference_occupations(rec, tol), ref)
+
+
+@pytest.mark.parametrize(
+    "name", ["nitric_oxide", "benzene_radical_anion", "triplet_o2", "copper_dichloride"]
+)
+def test_an_open_group_is_one_occupied_sub_block(open_shell, name):
+    """NO's and C6H6.-'s 1/2 pairs, O2's 1/1 pair and CuCl2's 3/2 pair: occupied, rotated among
+    themselves only (today's 0.5 rule split NO's pair by numerical noise)."""
+    rec = open_shell(name)
+    loc = L.localize_record(rec)
+    rows = np.isin(loc.occ_index, _open(rec))
+    assert rows.sum() == len(OPEN_GROUPS[name]) and not np.isin(loc.virt_index, _open(rec)).any()
+    assert not loc.U_occ[np.ix_(rows, ~rows)].any() and not loc.U_occ[np.ix_(~rows, rows)].any()
+    assert np.allclose(loc.U_occ.T @ loc.U_occ, np.eye(len(rows)), atol=1e-12)
+
+
+def test_no_superoxide_token_mixes_pi_with_pi_star(open_shell):
+    """Today's 1.5 rule put the 3/2 pi* pair in the doubly occupied sub-block and gave tokens at
+    occupation 1.75. Now every occupied token is at 2 or at 3/2, its spectral set on one side."""
+    from ksmech.orbitals.tokens import build_molecule_tokens
+
+    rec = open_shell("superoxide")
+    t = build_molecule_tokens(rec)
+    pi_star = rec.orbital_energies_ev[_open(rec)].min()
+    for o in t.occupied():
+        d = o.descriptors
+        assert min(abs(d.occupation - 2), abs(d.occupation - 1.5)) < 1e-6
+        side = d.full_energies[d.full_weights > 1e-12] >= pi_star - 1e-6
+        assert side.all() or not side.any()
+
+
+def test_an_off_reference_mo_stays_unrotated_in_its_own_block(open_shell):
+    """NO's pair pushed to 0.6 / 0.4 (an accidental near-degeneracy): each MO is off its
+    reference (1 and 0), one in each block, alone and unrotated, and the record is smeared."""
+    rec = open_shell("nitric_oxide")
+    a, b = _open(rec)
+    occ = rec.occupations.copy()
+    occ[a], occ[b] = 0.6, 0.4
+    bent = replace(rec, occupations=occ)
+    loc = L.localize_record(bent)
+    assert L.is_fermi_smeared(bent)
+    for idx, U, k in ((loc.occ_index, loc.U_occ, a), (loc.virt_index, loc.U_virt, b)):
+        row = int(np.flatnonzero(idx == k)[0])
+        unit = np.zeros(len(idx))
+        unit[row] = 1.0
+        assert np.array_equal(U[:, row], unit) and np.array_equal(U[row], unit)
+
+
+@pytest.mark.parametrize("smi", ["CC(C)=O", "c1ccccc1", "C=CC=O", "CC#N"])
+def test_closed_shells_keep_the_aufbau_blocks(sp_record, smi):
+    """The closed-shell path is today's: the 0.5 split, the 1.5 sub-block, one virtual block."""
+    rec = sp_record(smi)
+    loc = L.localize_record(rec)
+    occ_idx = np.flatnonzero(rec.occupations >= 0.5)
+    assert np.array_equal(loc.occ_index, occ_idx)
+    double = rec.occupations[occ_idx] >= 1.5
+    U = np.zeros((len(occ_idx),) * 2)
+    for sel in (np.flatnonzero(double), np.flatnonzero(~double)):
+        if len(sel):
+            U[np.ix_(sel, sel)] = L.localize_block(rec.C[:, occ_idx[sel]], rec.S, rec.ao_atom)[1]
+    assert np.array_equal(loc.U_occ, U)
+    virt = np.flatnonzero(rec.occupations < 0.5)
+    assert np.array_equal(loc.C_virt, L.localize_block(rec.C[:, virt], rec.S, rec.ao_atom)[0])
 
 
 def test_valence_only_guard_rejects_core_electrons(sp_record):

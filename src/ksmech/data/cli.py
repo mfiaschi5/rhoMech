@@ -13,7 +13,12 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.data import mech_uspto, pmechdb, provenance, reactmech
-from ksmech.data.ingest import IngestResult, write_outputs
+from ksmech.data.ingest import (
+    IngestResult,
+    freeze_sample,
+    load_frozen_sample,
+    write_outputs,
+)
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, source_dir, steps_path
 from ksmech.data.schema import Source
 from ksmech.data.stats import compute_stats
@@ -34,6 +39,16 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
         if name == "ingest":
             p.add_argument("--raw", type=Path, default=None, help="raw file or dir")
+            p.add_argument(
+                "--sample", type=int, default=0, help="keep N random accepted steps (pilots)"
+            )
+            p.add_argument("--seed", type=int, default=0, help="the --sample generator's seed")
+    o = sub.add_parser("open-shell-survey", help="subclass every excluded step (read-only)")
+    o.add_argument("--source", required=True, choices=[str(s) for s in LOADERS])
+    o.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    f = sub.add_parser("freeze-sample", help="snapshot a pilot's step ids (sample_frozen.json)")
+    f.add_argument("--source", required=True, choices=[str(s) for s in LOADERS])
+    f.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     v = sub.add_parser("provenance", help="print an artifact's provenance chain, or backfill")
     v.add_argument("path", type=Path, nargs="?", help="artifact to describe")
     v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
@@ -47,10 +62,31 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     console = Console()
     if args.command == "ingest":
-        return cmd_ingest(Source(args.source), args.raw, args.processed_dir, console)
+        sample = (args.sample, args.seed) if args.sample else None
+        return cmd_ingest(Source(args.source), args.raw, args.processed_dir, console, sample)
     if args.command == "provenance":
         return cmd_provenance(args, console)
+    if args.command == "open-shell-survey":
+        return cmd_survey(Source(args.source), args.processed_dir, console)
+    if args.command == "freeze-sample":
+        out = freeze_sample(Source(args.source), args.processed_dir)
+        console.print(f"wrote {out}")
+        return 0
     return cmd_stats(Source(args.source), args.processed_dir, console)
+
+
+def cmd_survey(source: Source, processed: Path, console: Console) -> int:
+    """`open_shell_survey.json`: every excluded step's subclass (`data.survey`)."""
+    from ksmech.data.survey import write_survey
+
+    out, result = write_survey(str(source), processed)
+    for code, counts in result["counts"].items():
+        console.print(f"{code}: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
+    if "spin_parity_molecules" in result:
+        kinds = result["spin_parity_molecules"]
+        console.print("SPIN_PARITY molecules: " + ", ".join(f"{k} {v}" for k, v in kinds.items()))
+    console.print(f"wrote {out}")
+    return 0
 
 
 def cmd_provenance(args: argparse.Namespace, console: Console) -> int:
@@ -74,12 +110,21 @@ def cmd_provenance(args: argparse.Namespace, console: Console) -> int:
     return 1 if any(" STALE" in line or "  ! " in line for line in lines) else 0
 
 
-def cmd_ingest(source: Source, raw: Path | None, processed: Path, console: Console) -> int:
+def cmd_ingest(
+    source: Source,
+    raw: Path | None,
+    processed: Path,
+    console: Console,
+    sample: tuple[int, int] | None = None,
+) -> int:
+    """Load, validate and write a source; `sample` (n, seed) keeps n random accepted steps."""
     try:
         result = LOADERS[source](raw)
     except (NotImplementedError, FileNotFoundError) as exc:
         console.print(f"[red]cannot ingest {source}:[/red] {exc}")
         return 2
+    if sample is not None:
+        result.keep_sample(*sample, frozen=load_frozen_sample(source, processed))
     paths = write_outputs(result, processed)
     print_ingest_report(result, console)
     for kind, path in paths.items():
@@ -176,6 +221,9 @@ def print_stats(stats: dict, console: Console) -> None:
     quant = ", ".join(f"{k}={heavy[k]:g}" for k in ("min", "p25", "median", "p75", "max", "mean"))
     console.print(_hist_table(f"Heavy atoms per step ({quant})", heavy["hist"], "heavy atoms"))
     console.print(_hist_table("Removed from the target at ingest", stats["domain"], "reason"))
+    if stats["charge_repairs_by_rule"]:
+        rules = stats["charge_repairs_by_rule"]
+        console.print(_hist_table("Repaired at ingest (steps per rule)", rules, "rule"))
     elems = stats["elements"]
     console.print("Elements (steps containing): " + ", ".join(f"{e}:{n}" for e, n in elems.items()))
 

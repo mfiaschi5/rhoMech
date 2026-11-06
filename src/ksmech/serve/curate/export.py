@@ -56,17 +56,17 @@ def step_rows(session, statuses: Sequence[str]) -> list[tuple]:
 
 
 def roundtrip(doc: dict) -> bool:
-    """The record's arrow code, applied to its reactants, gives its product (sigma key)."""
+    """The record's arrow code, applied to its reactants, gives its product (identity key)."""
     from ksmech.arrows.apply import apply_arrows
     from ksmech.data import chem
     from ksmech.data.pmechdb import parse_arrow_code
-    from ksmech.data.resonance import sigma_key
+    from ksmech.data.resonance import identity_key
     from ksmech.data.validation import StepRejected
 
     try:
         arrows = parse_arrow_code(str(doc["pmechdb_code"]))
         res = apply_arrows(chem.parse_mapped(doc["reactants_mapped"]), arrows)
-        want = sigma_key(chem.parse_mapped(doc["products_mapped"]))
+        want = identity_key(chem.parse_mapped(doc["products_mapped"]))
     except (StepRejected, NotImplementedError, ValueError, KeyError):
         return False
     return res.ok and res.key == want

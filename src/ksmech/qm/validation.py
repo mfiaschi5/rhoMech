@@ -26,6 +26,7 @@ from ksmech.qm.records import (
     load_record,
     save_record,
 )
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import GFN2Calculator, QMConfig
 
 log = logging.getLogger(__name__)
@@ -44,10 +45,11 @@ def compute_fixture_records(
     out = {}
     for name, smi in molecules.items():
         canonical = chem.unmapped_canonical(Chem.MolFromSmiles(smi))
-        path = cache_path(config.cache_dir, canonical, 0, config.method)
+        method = method_for(canonical, config.method)
+        path = cache_path(config.cache_dir, canonical, 0, method)
         if is_valid_cache_file(path):
             try:
-                out[name] = load_record(path, (canonical, 0, config.method))
+                out[name] = load_record(path, (canonical, 0, method))
                 continue
             except StaleArtifact as exc:
                 log.info("recomputing %s: %s", name, exc)

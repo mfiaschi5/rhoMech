@@ -2,7 +2,12 @@
 parsimonious resonance class.
 
 `R_data` is the dataset's arrows applied as one bond-electron edit of the drawn reactants
-(`arrows.apply`), checked against the annotated products modulo resonance. The label is the
+(`arrows.apply`), checked against the annotated products modulo resonance; a source without
+arrows (ReactMech) gives it as the difference of its two mapped sides (`mapped_matrix`), with
+the hydrogens that move written as atoms first (`arrows.hydrogens`) and the product redrawn in
+the Kekule structure closest to the reactant (`mapped_closest`, rule KEKULE_CLOSEST, spec
+v9.1): the two sides are kekulized independently, and an unchanged ring written the other way
+round would enter R as a swap the step does not make. The label is the
 parsimonious class of `R_data`: every R whose product `B_reac + R` is a resonance structure of
 the annotated product, chosen first by the fewest formal charges in that product structure (its
 dominant resonance contributor) and then by the fewest changed entries (`parsimonious_class`).
@@ -44,9 +49,15 @@ from ksmech.arrows.apply import (
     sanitize_product,
 )
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
+from ksmech.arrows.hydrogens import explicit_moving_hydrogens
 from ksmech.data import chem
-from ksmech.data.resonance import frozen_hydrogens, resonance_forms
-from ksmech.data.schema import ElementaryStep
+from ksmech.data.resonance import (
+    balanced_flow,
+    frozen_hydrogens,
+    radical_forms,
+    resonance_forms,
+)
+from ksmech.data.schema import ElementaryStep, SourceKind
 
 RESONANCE_CAP = 256  # product resonance structures enumerated for the label class
 
@@ -58,6 +69,12 @@ class EditSkip(StrEnum):
     NO_ANCHOR = "NO_ANCHOR"  # no bond order changes (never expected)
     ATOM_WITHOUT_TOKEN = "ATOM_WITHOUT_TOKEN"  # an edited atom has no token atom
     NOT_ELEMENTARY = "NOT_ELEMENTARY"  # no candidate is an elementary step (`is_elementary`)
+    H_TRANSFER_AMBIGUOUS = "H_TRANSFER_AMBIGUOUS"  # no unique donor -> acceptor pairing of the
+    #   hydrogens that move (`arrows.hydrogens`; steps without arrows only)
+    RADICAL_ARROW = "RADICAL_ARROW"  # a half-headed arrow: one-electron edits are not built yet
+    SET_STEP = "SET_STEP"  # R has atom entries only: an electron transfer, no bond changes (P6)
+    DISSOCIATIVE_ET_STEP = "DISSOCIATIVE_ET_STEP"  # bond entries, but the electron flow is
+    #   unbalanced in every variant of the class: an electron transfer coupled to a cleavage
 
 
 def _order(mol: Chem.Mol, i: int, j: int) -> int:
@@ -87,10 +104,19 @@ class ReactionMatrix:
         bonds = tuple(sorted((*sorted((index[i], index[j])), d) for i, j, d in self.bonds))
         return ReactionMatrix(bonds, tuple(sorted((index[i], d) for i, d in self.lone)))
 
-    def is_elementary(self) -> bool:
+    def is_elementary(self, open_shell: bool = False) -> bool:
         """Every bond order changes by 1 and every atom's non-bonding electrons by 2: a step of
-        spec v9, and all the decoder can write ({-1, 0, +1} per pair, {-2, 0, +2} per atom)."""
-        return all(abs(d) == 1 for *_, d in self.bonds) and all(abs(d) == 2 for _, d in self.lone)
+        spec v9, and all the decoder can write ({-1, 0, +1} per pair, {-2, 0, +2} per atom).
+        With `open_shell` (the source's label rule, `domain.open_shell_labels`) an atom entry
+        may also be +-1: homolysis, recombination, radical addition and transfer."""
+        atoms = (1, 2) if open_shell else (2,)
+        return all(abs(d) == 1 for *_, d in self.bonds) and all(
+            abs(d) in atoms for _, d in self.lone
+        )
+
+    def balanced(self) -> bool:
+        """The electron-flow law holds (`data.resonance.balanced_flow`)."""
+        return balanced_flow(self.bonds, self.lone)
 
     def anchors(self) -> tuple[tuple[int, int, str], ...]:
         """Admissible anchors: the bond orders that rise, else those that fall."""
@@ -137,6 +163,7 @@ class EditLabel:
     n_rejected: int = 0  # cheaper resonance variants the key check rejected
     n_symmetric: int = 0  # members added as images under the pool's automorphisms
     symmetry_capped: bool = False  # that closure was cut short (`arrows.symmetry`)
+    kekule_closest: int = 0  # entries R_data lost as Kekule swaps (rule KEKULE_CLOSEST)
 
     def atoms(self) -> set[int]:
         return {a for v in self.variants for i, j, _ in v.bonds for a in (i, j)} | {
@@ -162,6 +189,7 @@ class EditLabel:
             "n_rejected": self.n_rejected,
             "n_symmetric": self.n_symmetric,
             "symmetry_capped": self.symmetry_capped,
+            "kekule_closest": self.kekule_closest,
         }
 
     @classmethod
@@ -170,21 +198,79 @@ class EditLabel:
         variants = tuple(ReactionMatrix.from_list(v) for v in d["variants"])
         flags = (d["data_parsimonious"], d["n_structures"], d["truncated"], d.get("n_rejected", 0))
         symmetry = (d.get("n_symmetric", 0), d.get("symmetry_capped", False))
-        return cls(variants, anchors, *flags, *symmetry)
+        return cls(variants, anchors, *flags, *symmetry, d.get("kekule_closest", 0))
 
 
-def dataset_matrix(step: ElementaryStep) -> tuple[Chem.Mol, Chem.Mol, ReactionMatrix] | EditSkip:
-    """(reactants, product, R_data) of an annotated step, or why it has none."""
+def mapped_matrix(reac: Chem.Mol, prod: Chem.Mol) -> ReactionMatrix:
+    """R between the two mapped sides of a step without arrows, on the reactant indices: every
+    mapped atom is read on its product partner (the hydrogens that move must be mapped atoms:
+    `hydrogens.explicit_moving_hydrogens`). Unmapped atoms are taken as unchanged; the product
+    check of `dataset_matrix` rejects a step where they are not."""
+    partner = {a.GetAtomMapNum(): a.GetIdx() for a in prod.GetAtoms() if a.GetAtomMapNum()}
+    index = {
+        a.GetIdx(): partner[a.GetAtomMapNum()]
+        for a in reac.GetAtoms()
+        if a.GetAtomMapNum() in partner
+    }
+    back = {p: i for i, p in index.items()}
+    pairs = {tuple(sorted((b.GetBeginAtomIdx(), b.GetEndAtomIdx()))) for b in reac.GetBonds()}
+    pairs |= {
+        tuple(sorted((back[b.GetBeginAtomIdx()], back[b.GetEndAtomIdx()])))
+        for b in prod.GetBonds()
+        if b.GetBeginAtomIdx() in back and b.GetEndAtomIdx() in back
+    }
+    bonds = [
+        (i, j, _order(prod, index[i], index[j]) - _order(reac, i, j))
+        for i, j in sorted(pairs)
+        if i in index and j in index
+    ]
+    lone = [
+        (
+            i,
+            nonbonding_electrons(prod.GetAtomWithIdx(p))
+            - nonbonding_electrons(reac.GetAtomWithIdx(i)),
+        )
+        for i, p in sorted(index.items())
+    ]
+    return ReactionMatrix(tuple(b for b in bonds if b[2]), tuple(x for x in lone if x[1]))
+
+
+def mapped_closest(reac: Chem.Mol, prod: Chem.Mol) -> tuple[ReactionMatrix, int]:
+    """(`mapped_matrix` with the product in the Kekule structure closest to the reactant, the
+    entries this removed): every alternating cycle of pi-bond changes on bonds that stay bonds
+    is undone (`without_kekule_cycles`, the helper `drawings.kekule_closest` uses), so a ring
+    the step does not change never enters R, however each side was kekulized. Rule
+    KEKULE_CLOSEST (spec v9.1); the product's charges, lone pairs and sigma bonds are kept."""
+    r = mapped_matrix(reac, prod)
+    closest = without_kekule_cycles(r, reac)
+    return closest, r.size - closest.size
+
+
+def dataset_matrix(
+    step: ElementaryStep,
+) -> tuple[Chem.Mol, Chem.Mol, ReactionMatrix, int] | EditSkip:
+    """(reactants, product, R_data, the entries KEKULE_CLOSEST removed) of an annotated step,
+    or why it has none: its arrows applied as one edit, or for a step without arrows the edit
+    between its mapped sides with the product closest to the reactant (`mapped_closest`), so
+    the product applied, checked and enumerated is that Kekule structure."""
+    if any(a.source_kind is SourceKind.RADICAL for a in step.arrows):
+        return EditSkip.RADICAL_ARROW
     mol = chem.parse_mapped(step.reactants_smiles)
+    want = chem.parse_mapped(step.products_smiles)
+    removed = 0
     try:
-        moves = [m for arrow in step.arrows for m in arrow_moves(arrow)]
-        prod = sanitize_product(apply_edit(mol, edit_from_moves(moves, chem.map_to_index(mol))))
+        if step.arrows:
+            moves = [m for arrow in step.arrows for m in arrow_moves(arrow)]
+            edit = edit_from_moves(moves, chem.map_to_index(mol))
+        else:
+            r, removed = mapped_closest(mol, want)
+            edit = r.to_edit()
+        prod = sanitize_product(apply_edit(mol, edit))
     except (ArrowApplyError, NotImplementedError):
         return EditSkip.EDIT_FAILED
-    want = chem.parse_mapped(step.products_smiles)
     if match_products(ApplyResult(prod), want, step.products_smiles)[0] not in MATCH_STATUSES:
         return EditSkip.PRODUCT_MISMATCH
-    return mol, prod, matrix_between(mol, prod)
+    return mol, prod, matrix_between(mol, prod), removed
 
 
 def _charges(mol: Chem.Mol) -> int:
@@ -224,9 +310,10 @@ def without_kekule_cycles(r: ReactionMatrix, reac: Chem.Mol) -> ReactionMatrix:
     so removing it keeps every atom's bond total, charge and lone pairs, and `reac + r` stays a
     valid structure with the same sigma bonds; only entries on bonds of `reac` that stay bonds
     (order >= 1 before and after) take part. Used on the resonance drawings of a reactant
-    (`arrows.drawings.kekule_closest`), not on the label candidates: there it would also make a
-    carbocation form as cheap as the iminium the dataset draws, which the label's cost (formal
-    charges, then entries) cannot tell apart (docs/decisions.md, 2026-10-26)."""
+    (`arrows.drawings.kekule_closest`) and on R_data of a step without arrows
+    (`mapped_closest`), not on the label candidates: there it would also make a carbocation
+    form as cheap as the iminium the dataset draws, which the label's cost (formal charges,
+    then entries) cannot tell apart (docs/decisions.md, 2026-10-26)."""
     pi = {
         (i, j): d
         for i, j, d in r.bonds
@@ -244,10 +331,14 @@ def without_kekule_cycles(r: ReactionMatrix, reac: Chem.Mol) -> ReactionMatrix:
 
 def product_forms(prod: Chem.Mol) -> tuple[list[Chem.Mol], int]:
     """(the resonance forms of the product with its H frozen, Kekule structures as drawn
-    (`resonance.resonance_forms`), the structures RDKit counted); none when the product does
-    not sanitize."""
+    (`resonance.resonance_forms`), then a radical product's forms through the anion proxy
+    (`resonance.radical_forms`, P6), each on the product's atom indices; the structures RDKit
+    counted); none when the product does not sanitize."""
     frozen = frozen_hydrogens(prod)
-    return ([], 0) if frozen is None else resonance_forms(frozen, RESONANCE_CAP)
+    if frozen is None:
+        return [], 0
+    forms, n = resonance_forms(frozen, RESONANCE_CAP)
+    return forms + radical_forms(frozen, RESONANCE_CAP), n
 
 
 def _costs(reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix, structures) -> dict:
@@ -260,6 +351,19 @@ def _costs(reac: Chem.Mol, prod: Chem.Mol, r_data: ReactionMatrix, structures) -
     return cost
 
 
+def _cheapest(cost: dict, ok) -> tuple[tuple[ReactionMatrix, ...], int]:
+    """(the members `ok` keeps at the lowest cost level where it keeps any, the members it
+    dropped up to that level); ((), all dropped) when it keeps none."""
+    rejected = 0
+    for level in sorted(set(cost.values())):
+        members = sorted(r for r, c in cost.items() if c == level)
+        kept = [r for r in members if ok(r)]
+        rejected += len(members) - len(kept)
+        if kept:
+            return tuple(kept), rejected
+    return (), rejected
+
+
 def parsimonious_class(
     reac: Chem.Mol,
     prod: Chem.Mol,
@@ -267,24 +371,32 @@ def parsimonious_class(
     accept=lambda r: True,
     forms: tuple[list[Chem.Mol], int] | None = None,
     extra: tuple[Chem.Mol, ...] = (),
+    open_shell: bool = False,
 ) -> tuple[tuple[ReactionMatrix, ...], int, bool, int]:
     """(the parsimonious class sorted, structures enumerated, truncated, members rejected) of
     `r_data`: the elementary R (`ReactionMatrix.is_elementary`) of lowest cost (fewest formal
-    charges in the product structure, then fewest entries) that `accept` (the key check)
-    accepts; `r_data` is always accepted when it is elementary, and the class is empty when no
-    candidate is. The product structures are `forms` (`product_forms(prod)` unless given) and
-    `extra`, more resonance structures of the product. A drawing of the reactants with a triple
-    bond that the product needs single has only matrices with a -2 entry there."""
+    charges in the product structure, then fewest entries) whose electron flow is balanced
+    (`ReactionMatrix.balanced`, open-shell plan P6) and that `accept` (the key check)
+    accepts; `r_data` is always accepted when it is elementary. Only when no candidate has a
+    balanced flow is the class taken without that law (`flow_skip` then names it); it is empty
+    when no candidate is elementary. The product structures are `forms` (`product_forms(prod)`
+    unless given) and `extra`, more resonance structures of the product. A drawing of the
+    reactants with a triple bond that the product needs single has only matrices with a -2
+    entry there. `open_shell` is the source's elementary rule. The flow law matters where a
+    product form is cheaper by charges but reached only by an electron jump (NO2. as O=N-O.
+    from an O-NO2 homolysis)."""
     structures, n = product_forms(prod) if forms is None else forms
     cost = _costs(reac, prod, r_data, (*structures, *extra))
-    rejected = 0
-    for level in sorted(set(cost.values())):
-        members = sorted(r for r, c in cost.items() if c == level)
-        ok = [r for r in members if r.is_elementary() and (r == r_data or accept(r))]
-        rejected += len(members) - len(ok)
-        if ok:
-            return tuple(ok), n, n >= RESONANCE_CAP, rejected
-    return (), n, n >= RESONANCE_CAP, rejected
+
+    def ok(r: ReactionMatrix, flow: bool) -> bool:
+        if not r.is_elementary(open_shell) or (flow and not r.balanced()):
+            return False
+        return r == r_data or accept(r)
+
+    variants, rejected = _cheapest(cost, lambda r: ok(r, True))
+    if not variants:
+        variants, rejected = _cheapest(cost, lambda r: ok(r, False))
+    return variants, n, n >= RESONANCE_CAP, rejected
 
 
 def reproduces(step: ElementaryStep, mol: Chem.Mol, r: ReactionMatrix) -> bool:
@@ -300,34 +412,52 @@ def reproduces(step: ElementaryStep, mol: Chem.Mol, r: ReactionMatrix) -> bool:
 @dataclass(frozen=True)
 class StepEdit:
     """The dataset's edit of a step: the reactants as drawn, the product, R_data and the
-    product's resonance forms (`product_forms`), enumerated once for every drawing."""
+    product's resonance forms (`product_forms`), enumerated once for every drawing, and the
+    entries KEKULE_CLOSEST removed from R_data (`mapped_closest`)."""
 
     mol: Chem.Mol
     prod: Chem.Mol
     r_data: ReactionMatrix
     forms: tuple[list[Chem.Mol], int]
+    kekule_closest: int = 0
 
 
 def step_edit(step: ElementaryStep) -> StepEdit | EditSkip:
     out = dataset_matrix(step)
     if isinstance(out, EditSkip):
         return out
-    return StepEdit(*out, product_forms(out[1]))
+    mol, prod, r_data, removed = out
+    return StepEdit(mol, prod, r_data, product_forms(prod), removed)
+
+
+def flow_skip(variants: tuple[ReactionMatrix, ...]) -> EditSkip | None:
+    """The flow codes of a non-empty class (open-shell plan P6): SET_STEP when R has atom
+    entries only, DISSOCIATIVE_ET_STEP when every variant breaks the electron-flow law."""
+    if not variants[0].bonds:
+        return EditSkip.SET_STEP
+    if not any(v.balanced() for v in variants):
+        return EditSkip.DISSOCIATIVE_ET_STEP
+    return None
 
 
 def _label(step: ElementaryStep, mol: Chem.Mol, edit: StepEdit, r_data, extra=()):
+    from ksmech.data.domain import open_shell_labels
+
     accept = lambda r: reproduces(step, mol, r)  # noqa: E731
     variants, n, truncated, rejected = parsimonious_class(
-        mol, edit.prod, r_data, accept, edit.forms, extra
+        mol, edit.prod, r_data, accept, edit.forms, extra, open_shell_labels(step.source)
     )
     if not variants:
         return EditSkip.NOT_ELEMENTARY
     if variants[0].size == 0:
         return EditSkip.RESONANCE_STEP
+    if (skip := flow_skip(variants)) is not None:
+        return skip
     anchors = tuple(v.anchors() for v in variants)
     if not all(anchors):
         return EditSkip.NO_ANCHOR
-    return EditLabel(variants, anchors, r_data in variants, n, truncated, rejected)
+    flags = (r_data in variants, n, truncated, rejected)
+    return EditLabel(variants, anchors, *flags, kekule_closest=edit.kekule_closest)
 
 
 def edit_label(step: ElementaryStep, edit: StepEdit | None = None) -> EditLabel | EditSkip:
@@ -370,6 +500,9 @@ def step_label(step: ElementaryStep, loader) -> EditLabel | str:
     NO_BOND_INDEX (`MissingTokens.reason`) or CORRESPONDENCE)."""
     from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
 
+    step = explicit_moving_hydrogens(step)
+    if step is None:
+        return str(EditSkip.H_TRANSFER_AMBIGUOUS)
     label = edit_label(step)
     if isinstance(label, EditSkip):
         return str(label)
@@ -392,6 +525,30 @@ def class_shape(labels: list[EditLabel]) -> dict:
     }
 
 
+def smallest_variant(label: EditLabel) -> ReactionMatrix:
+    """The member with the fewest entries, then the fewest bond entries. The members of a
+    class have one size; where they split it differently between bonds and atoms (280 PMechDB
+    training labels in v17), taking fewer bonds gave the smallest caps that still reach every
+    label (PMechDB 6 bonds and 2 atoms per part, not 7 and 2)."""
+    return min(label.variants, key=lambda v: (v.size, len(v.bonds), v))
+
+
+def label_counts(labels: list[EditLabel]) -> dict:
+    """The rules and the size of `labels`: how many KEKULE_CLOSEST re-made, how many had their
+    product's enumeration cut at RESONANCE_CAP, and the label maxima, the largest bond and
+    atom entry counts of a label's smallest variant (the decoder caps of `ksmech-eval decode
+    --caps labels`, read from a training part)."""
+    smallest = [smallest_variant(x) for x in labels]
+    return {
+        "kekule_closest": sum(x.kekule_closest > 0 for x in labels),
+        "resonance_truncated": sum(x.truncated for x in labels),
+        "label_maxima": {
+            "bonds": max((len(v.bonds) for v in smallest), default=0),
+            "atoms": max((len(v.lone) for v in smallest), default=0),
+        },
+    }
+
+
 def label_report(labels: dict[str, EditLabel | str]) -> dict:
     """Coverage and shape of the edit labels of many steps (step id -> label or reason)."""
     ok = [x for x in labels.values() if isinstance(x, EditLabel)]
@@ -403,7 +560,7 @@ def label_report(labels: dict[str, EditLabel | str]) -> dict:
         "skipped": dict(skipped.most_common()),
         **class_shape(ok),
         "data_parsimonious": sum(x.data_parsimonious for x in ok),
-        "resonance_truncated": sum(x.truncated for x in ok),
+        **label_counts(ok),
         "steps_with_rejected_variants": sum(x.n_rejected > 0 for x in ok),
         "bond_changes": dict(sorted(Counter(len(x.variants[0].bonds) for x in ok).items())),
     }

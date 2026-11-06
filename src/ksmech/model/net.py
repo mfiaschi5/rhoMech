@@ -54,11 +54,12 @@ class KSMech(nn.Module):
         """(token inputs, z_hat, defined, y_ij): what every encoder and the decoder read that is
         not learned, in float32 without gradient."""
         with frozen(batch["token_mask"].device.type):
+            cells = self.cfg.pair_cells
             z_hat, defined = standardized_pair_z(
-                batch, self.pair_stats, self.cfg.drop_pair_features, self.cfg.K
+                batch, self.pair_stats, self.cfg.drop_pair_features, self.cfg.K, cells
             )
             inp = token_inputs(batch, self.feature_stats)
-            y, _ = atom_pair_physics(batch, z_hat, defined)
+            y, _ = atom_pair_physics(batch, z_hat, defined, cells)
         return inp, z_hat, defined, y
 
     def encode(self, batch: dict, dense_warmup: bool = False):

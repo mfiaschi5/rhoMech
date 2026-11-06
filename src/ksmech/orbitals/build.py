@@ -21,18 +21,26 @@ from rich.table import Table
 
 from ksmech.data import chem
 from ksmech.data import provenance as prov
-from ksmech.data.io import DEFAULT_PROCESSED_DIR, steps_path
+from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir, steps_path
 from ksmech.data.provenance import StaleArtifact
 from ksmech.orbitals.classify import UNRESOLVED_TYPES, ClassifyConfig, OrbitalType
-from ksmech.orbitals.descriptors import feature_names
+from ksmech.orbitals.descriptors import degenerate_levels, feature_names
 from ksmech.orbitals.fgroups import NONE_ID, UNK_ID
-from ksmech.orbitals.localize import PMConfig
+from ksmech.orbitals.frontier import DEGENERACY_EV, EXACT_EV, frontier_blocks
+from ksmech.orbitals.localize import (
+    PMConfig,
+    aufbau_occupations,
+    occupation_plateaus,
+    reference_occupations,
+)
 from ksmech.orbitals.tokens import (
     CandidateConfig,
     MoleculeTokens,
     atom_feature_names,
     build_molecule_tokens,
+    legacy_differences,
     load_tokens,
+    record_unpaired,
     save_tokens,
     token_config,
 )
@@ -45,6 +53,7 @@ from ksmech.qm.records import (
     is_valid_cache_file,
     load_record,
 )
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import QMConfig
 
 log = logging.getLogger(__name__)
@@ -93,6 +102,11 @@ class BuildRow:
     spectral_hist: dict[str, int] = field(default_factory=dict)  # spectral entries -> tokens
     masks: dict[str, int] = field(default_factory=dict)  # candidate-mask and d-type counts
     chirality: dict[str, int] = field(default_factory=dict)  # "+1" / "-1" / "0" -> atoms
+    legacy_diff: list[str] | None = None  # payload fields that differ from the token file this
+    #   build replaced (`tokens.legacy_differences`); None when no file was replaced
+    frontier_merged: dict[str, bool] = field(default_factory=dict)  # tolerance -> blocks differ
+    #   from the exact ones (`frontier_merges`); empty for a Fermi-smeared or open-shell molecule
+    open_shell: dict = field(default_factory=dict)  # u > 0: `open_shell_diagnostics`
     # model inputs of every token, float32, for the distributions in the summary
     orbital_inputs: np.ndarray | None = field(default=None, repr=False)
     spectral_inputs: np.ndarray | None = field(default=None, repr=False)  # top p, its E, kept
@@ -100,6 +114,8 @@ class BuildRow:
 
 
 ARRAY_FIELDS = ("orbital_inputs", "spectral_inputs", "atom_inputs")
+FRONTIER_TOLERANCES = (EXACT_EV, 0.01, DEGENERACY_EV, 0.1)  # eV, reported per source
+OPEN_WINDOWS = (0.01, DEGENERACY_EV, 0.1)  # eV: energy-window references beside the plateau one
 SPECTRAL_SUMMARY = ("spectral_top_weight", "spectral_top_energy", "retained_fraction")
 QUANTILES = (0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0)
 
@@ -141,6 +157,27 @@ def _input_arrays(t: MoleculeTokens) -> dict[str, np.ndarray]:
     )
 
 
+def frontier_merges(t: MoleculeTokens) -> dict[str, bool]:
+    """Per tolerance of `FRONTIER_TOLERANCES`, whether the closed-shell frontier blocks
+    (`frontier.frontier_blocks`) over the canonical levels the tokens carry differ from the
+    exact ones (1e-4 eV): the 0.05 eV window of the legacy columns merges distinct levels
+    there. Empty for a Fermi-smeared molecule (outside the closed-shell domain) and for an open
+    shell, whose blocks come from its occupations (`frontier.record_frontier_blocks`)."""
+    if t.fermi_smeared or record_unpaired(t.smiles, t.method) > 0:
+        return {}
+    occ, virt = t.occupied(), t.virtual()
+    e_occ = occ[0].descriptors.full_energies if occ else np.zeros(0)
+    e_virt = virt[0].descriptors.full_energies if virt else np.zeros(0)
+    energies = np.concatenate([e_occ, e_virt]).astype(float)
+    occupations = np.concatenate([np.full(len(e_occ), 2.0), np.zeros(len(e_virt))])
+
+    def blocks(tol: float) -> dict:
+        return {k: tuple(v) for k, v in frontier_blocks(energies, occupations, tol).items()}
+
+    exact = blocks(EXACT_EV)
+    return {f"{tol:g}": blocks(tol) != exact for tol in FRONTIER_TOLERANCES}
+
+
 def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
     occ, virt = t.occupied(), t.virtual()
     heavy = [a for a in t.atoms if a.atomic_number > 1]
@@ -172,8 +209,49 @@ def _row_from_tokens(smiles: str, status: str, t: MoleculeTokens) -> BuildRow:
         spectral_hist=dict(Counter(str(o.descriptors.n_spectral()) for o in t.orbitals)),
         masks=_mask_counts(t),
         chirality=dict(Counter(f"{a.chirality:+.0f}" if a.chirality else "0" for a in t.atoms)),
+        frontier_merged=frontier_merges(t),
         **_input_arrays(t),
     )
+
+
+def window_reference(rec, tol: float) -> np.ndarray:
+    """The aufbau occupations averaged over energy windows of `tol` (the anchor rule of
+    `descriptors.degenerate_levels`): the alternative to the plateau reference, a diagnostic."""
+    levels, auf = degenerate_levels(rec.orbital_energies_ev, tol), aufbau_occupations(rec)
+    ref = np.empty(len(auf))
+    for level in np.unique(levels):
+        ref[levels == level] = auf[levels == level].mean()
+    return ref
+
+
+def open_shell_diagnostics(rec) -> dict:
+    """A u > 0 record in the build summary (open-shell plan P2b): its open MOs (0 < plateau
+    reference < 2) and open plateaus, whether an energy-window reference differs from the
+    plateau one, and the largest deviation of an occupation from the aufbau and from the
+    plateau reference."""
+    ref, auf = reference_occupations(rec), aufbau_occupations(rec)
+    open_mo = (ref > 0) & (ref < 2)
+    return dict(
+        unpaired=int(rec.unpaired),
+        n_open=int(open_mo.sum()),
+        n_open_groups=sum(bool(open_mo[g[0]]) for g in occupation_plateaus(rec)),
+        window_differs={
+            f"{tol:g}": not np.allclose(window_reference(rec, tol), ref, atol=1e-9)
+            for tol in OPEN_WINDOWS
+        },
+        max_dev_aufbau=float(np.abs(rec.occupations - auf).max()),
+        max_dev_reference=float(np.abs(rec.occupations - ref).max()),
+    )
+
+
+def _with_open_shell(row: BuildRow, qm_path: Path, config: BuildConfig, rec=None) -> BuildRow:
+    """`row` with `open_shell_diagnostics` when its molecule is an open shell (the QM record is
+    read for a loaded token file)."""
+    method = method_for(row.smiles, config.method)
+    if row.status in ("built", "loaded") and record_unpaired(row.smiles, method) > 0:
+        rec = rec or load_record(qm_path, (row.smiles, config.conformer_id, method))
+        row.open_shell = open_shell_diagnostics(rec)
+    return row
 
 
 def _cos_bin(o) -> str:
@@ -186,24 +264,29 @@ def process_molecule(smiles: str, config: BuildConfig) -> BuildRow:
     """Build (or load) the tokens of one molecule. Never raises. A token file whose header no
     longer matches (schema, config, or the QM record it was built from) is rebuilt; a QM record
     whose header does not match this molecule and method is `stale_qm` (STALE_ARTIFACT)."""
-    qm_path = cache_path(config.qm_cache_dir, smiles, config.conformer_id, config.method)
+    method = method_for(smiles, config.method)
+    qm_path = cache_path(config.qm_cache_dir, smiles, config.conformer_id, method)
     if not is_valid_cache_file(qm_path):
         return BuildRow(smiles, "missing_qm", str(qm_path))
-    out = tokens_path(config.out_dir, smiles, config.conformer_id, config.method)
+    out = tokens_path(config.out_dir, smiles, config.conformer_id, method)
     tok_config = token_config(config.pm)
     try:
         if out.is_file() and not config.force:
             try:
-                return _row_from_tokens(smiles, "loaded", load_tokens(out, tok_config))
+                row = _row_from_tokens(smiles, "loaded", load_tokens(out, tok_config))
+                return _with_open_shell(row, qm_path, config)
             except StaleArtifact as exc:
                 log.info("rebuilding %s", exc)
         try:
-            record = load_record(qm_path, (smiles, config.conformer_id, config.method))
+            record = load_record(qm_path, (smiles, config.conformer_id, method))
         except StaleArtifact as exc:
             return BuildRow(smiles, "stale_qm", str(exc))
         tokens = build_molecule_tokens(record, pm_config=config.pm, classify_config=config.classify)
+        replaced = legacy_differences(out, tokens) if out.is_file() else None
         save_tokens(tokens, out, prov.file_input(qm_path), tok_config)
-        return _row_from_tokens(smiles, "built", tokens)
+        row = _row_from_tokens(smiles, "built", tokens)
+        row.legacy_diff = replaced
+        return _with_open_shell(row, qm_path, config, record)
     except Exception as exc:  # noqa: BLE001 - one bad molecule must not stop the batch
         log.exception("token build failed for %s", smiles)
         return BuildRow(smiles, "failed", f"{type(exc).__name__}: {exc}")
@@ -285,6 +368,47 @@ def _pm_summary(ok: list[BuildRow]) -> dict:
     )
 
 
+def _replaced_summary(ok: list[BuildRow]) -> dict:
+    """The token files a build replaced and those whose stored fields changed (a schema bump
+    that only adds fields changes none: open-shell plan P0a, the legacy reproduction gate)."""
+    replaced = [r for r in ok if r.legacy_diff is not None]
+    differ = [r for r in replaced if r.legacy_diff]
+    return dict(
+        n_replaced=len(replaced),
+        n_differing=len(differ),
+        fields=dict(Counter(f for r in differ for f in r.legacy_diff).most_common()),
+        smiles=sorted(r.smiles for r in differ)[:50],
+    )
+
+
+def _spread(values: list[float]) -> dict:
+    if not values:
+        return dict(n=0)
+    q = np.quantile(np.asarray(values, dtype=float), [0.5, 0.9, 1.0])
+    return dict(n=len(values), median=round(float(q[0]), 4), p90=round(float(q[1]), 4),
+                max=round(float(q[2]), 4))  # fmt: skip
+
+
+def _open_shell_summary(ok: list[BuildRow]) -> dict:
+    """The u > 0 molecules (open-shell plan P2b): open MOs and plateaus, the molecules whose
+    energy-window reference differs from the plateau one, and both deviation distributions."""
+    rows = [r for r in ok if r.open_shell]
+    diag = [r.open_shell for r in rows]
+    return dict(
+        n_molecules=len(rows),
+        by_unpaired=dict(sorted(Counter(str(d["unpaired"]) for d in diag).items())),
+        n_open_mos=sum(d["n_open"] for d in diag),
+        n_open_groups=sum(d["n_open_groups"] for d in diag),
+        window_differs={
+            f"{tol:g}": sum(d["window_differs"][f"{tol:g}"] for d in diag) for tol in OPEN_WINDOWS
+        },
+        n_fermi_smeared=sum(r.fermi_smeared for r in rows),
+        fermi_smeared=sorted(r.smiles for r in rows if r.fermi_smeared),
+        max_dev_aufbau=_spread([d["max_dev_aufbau"] for d in diag]),
+        max_dev_reference=_spread([d["max_dev_reference"] for d in diag]),
+    )
+
+
 def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> dict:
     ok = [r for r in rows if r.status in ("built", "loaded")]
     status = Counter(r.status for r in rows)
@@ -341,6 +465,15 @@ def summarize(rows: list[BuildRow], config: BuildConfig, source: str = "") -> di
         fermi_smeared=dict(
             n_molecules=sum(r.fermi_smeared for r in ok),
             smiles=sorted(r.smiles for r in ok if r.fermi_smeared),
+        ),
+        replaced=_replaced_summary(ok),
+        open_shell=_open_shell_summary(ok),
+        frontier_blocks=dict(
+            n_closed_shell=sum(bool(r.frontier_merged) for r in ok),
+            differ_from_exact={
+                f"{tol:g}": sum(r.frontier_merged.get(f"{tol:g}", False) for r in ok)
+                for tol in FRONTIER_TOLERANCES
+            },
         ),
     )
 
@@ -449,9 +582,17 @@ def _print_descriptor_distributions(summary: dict, console: Console) -> None:
 def _print_fermi_smeared(summary: dict, console: Console) -> None:
     fs = summary["fermi_smeared"]
     console.print(
-        f"Fermi-smeared molecules (an MO > 0.05 from its aufbau occupation): "
-        f"{fs['n_molecules']} of {summary['n_ok']}"
+        f"Fermi-smeared molecules (an MO > 0.05 from its reference occupation: aufbau, or the "
+        f"plateau reference for u > 0): {fs['n_molecules']} of {summary['n_ok']}"
     )
+    op = summary.get("open_shell")
+    if op and op["n_molecules"]:
+        console.print(
+            f"open shells: {op['n_molecules']} (u {op['by_unpaired']}), {op['n_open_mos']} open "
+            f"MOs in {op['n_open_groups']} plateaus, {op['n_fermi_smeared']} smeared; window "
+            f"references differing from the plateau one: {op['window_differs']}; max|n - aufbau| "
+            f"{op['max_dev_aufbau']}, max|n - reference| {op['max_dev_reference']}"
+        )
     for split, c in fs.get("steps", {}).items():
         console.print(
             f"  {split} steps: {c['touching_smeared']} of {c['steps']} touch one; "
@@ -493,6 +634,20 @@ def print_summary(summary: dict, console: Console, show_worst: bool = False) -> 
     _print_descriptor_distributions(s, console)
     _print_inputs(s, console)
     _print_fermi_smeared(s, console)
+    rep = s.get("replaced")
+    if rep and rep["n_replaced"]:
+        colour = "red" if rep["n_differing"] else "green"
+        console.print(
+            f"[{colour}]{rep['n_differing']} of {rep['n_replaced']} replaced token files changed "
+            f"a stored field[/{colour}]" + (f": {rep['fields']}" if rep["n_differing"] else "")
+        )
+    fb = s.get("frontier_blocks")
+    if fb:
+        diff = ", ".join(f"{tol} eV {n}" for tol, n in fb["differ_from_exact"].items())
+        console.print(
+            f"frontier blocks differing from the exact (1e-4 eV) ones, of "
+            f"{fb['n_closed_shell']} closed-shell molecules: {diff}"
+        )
     if s["failures"]:
         console.print(
             f"[red]{len(s['failures'])} failures[/red]; first: {next(iter(s['failures'].items()))}"
@@ -538,7 +693,11 @@ def build_dataset(
     summary["fermi_smeared"]["steps"] = smeared_steps(source, processed_dir, rows)
     out = Path(config.out_dir) / SUMMARY_NAME
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(summary, indent=1) + "\n")
+    text = (json.dumps(summary, indent=1) + "\n").encode()
+    prov.atomic_write(out, text)  # a new file: never through a hard link another checkout shares
+    per_source = source_dir(source, processed_dir) / "tokens_summary.json"  # kept per source
+    if per_source.parent.is_dir():
+        prov.atomic_write(per_source, text)
     print_summary(summary, console, show_worst=summary["occupied_unresolved_fraction"] > 0.10)
     console.print(f"wrote summary: {out}")
     return summary

@@ -46,12 +46,15 @@ FORM, BREAK = 0, 1  # arrows.batches.ANCHOR_SIDE
 NONMETALS = frozenset({1, 5, 6, 7, 8, 9, 14, 15, 16, 17, 34, 35, 53})  # FORMAL_CHARGE_RANGE
 SIGN = {FORM: "form", BREAK: "break"}
 PAIR_VALUES = np.array([-1, 0, 1])
-ATOM_VALUES = np.array([-2, 0, 2])
+ATOM_VALUES = np.array([-2, 0, 2])  # model.decoder.ATOM_VALUES (no torch import here)
 ZERO = 1  # the class index of 0 in both
 
 
 @dataclass(frozen=True)
 class DecodeConfig:
+    """The defaults of the three caps are the legacy ones (spec v9.1); `ksmech-eval decode
+    --caps labels` sets max_bonds and max_atoms per source (`eval.decode.decode_caps`)."""
+
     anchors: int = 5  # B
     per_anchor: int = 5  # products kept per anchor
     max_bonds: int = 8  # bond changes of one R, the anchor included (C_max)

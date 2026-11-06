@@ -10,7 +10,8 @@ import numpy as np
 from rdkit import Chem
 
 from ksmech.data import chem
-from ksmech.data.domain import PRECEDENCE
+from ksmech.data.domain import PRECEDENCE, admitted, repair_rule_counts
+from ksmech.data.resonance import not_admitted
 from ksmech.data.schema import ElementaryStep
 
 NO_CLASS = "<none>"
@@ -96,8 +97,12 @@ def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
         "sources": sorted({str(s.source) for s in steps}),
         "n_steps": n,
         "n_resonance_steps": sum(s.resonance_step for s in steps),
-        "n_training_steps": sum(not s.resonance_step and s.domain_exclusion is None for s in steps),
+        "n_training_steps": sum(
+            not s.resonance_step and s.domain_exclusion is None and admitted(s) for s in steps
+        ),
         "domain": domain_counts(steps),
+        "charge_repairs_by_rule": dict(sorted(repair_rule_counts(steps).items())),
+        "domain_class": class_counts(steps),
         **pathway_stats(steps),
         "steps_per_class": dict(classes.most_common()),
         "arrows_per_step": {
@@ -127,13 +132,26 @@ def compute_stats(steps: Sequence[ElementaryStep]) -> dict:
 
 def domain_counts(steps: Sequence[ElementaryStep]) -> dict:
     """Steps removed from the training target at ingest, by reason (a step can carry both a
-    resonance flag and a domain code; each is counted), and the steps whose SMILES were
+    resonance flag and a domain code; each is counted): every distinct `domain_exclusion`
+    value, the `PRECEDENCE` codes always listed; then the steps whose SMILES were
     charge-repaired (they stay)."""
     codes = Counter(s.domain_exclusion for s in steps if s.domain_exclusion)
+    listed = [str(c) for c in PRECEDENCE] + sorted(set(codes) - {str(c) for c in PRECEDENCE})
     return {
         "RESONANCE_STEP": sum(s.resonance_step for s in steps),
-        **{str(c): codes.get(str(c), 0) for c in PRECEDENCE},
+        **{c: codes.get(c, 0) for c in listed},
         "CHARGE_REPAIRED (kept)": sum(s.charge_repair is not None for s in steps),
+    }
+
+
+def class_counts(steps: Sequence[ElementaryStep]) -> dict:
+    """Every distinct `domain_class` value over all steps, then over the training candidates
+    (neither resonance nor excluded) those the source's admit set leaves out."""
+    values = Counter(s.domain_class for s in steps if s.domain_class)
+    target = [s for s in steps if not s.resonance_step and s.domain_exclusion is None]
+    return {
+        "all": dict(sorted(values.items())),
+        "not_admitted": dict(sorted(not_admitted(target).items())),
     }
 
 
@@ -151,9 +169,17 @@ DEFINITIONS = {
     "over steps that have arrows",
     "elements": "number of steps whose reactants contain the element (H incl. implicit)",
     "n_training_steps": "steps that are neither resonance steps nor outside the closed-shell "
-    "domain (`domain`)",
-    "domain": "steps removed from the target at ingest, by reason; QM-level reasons (failed "
+    "domain (`domain`), and whose domain_class the source's admit set holds",
+    "domain": "steps removed from the target at ingest, by reason: every distinct "
+    "domain_exclusion value (the PRECEDENCE codes listed even at 0); QM-level reasons (failed "
     "records, Fermi smearing) are in docs/decisions.md, 'Domain exclusions'",
+    "charge_repairs_by_rule": "repaired steps per repair rule of data.domain (V1, A1, "
+    "the named repairs, R1, the dative law), kept or excluded; a step with several rules counts "
+    "under each",
+    "domain_class.all": "steps per distinct domain_class value, kept or excluded: the repairs "
+    "and flags of the domain laws (data.domain.DomainClass), several joined by '+'",
+    "domain_class.not_admitted": "training candidates (neither resonance nor excluded) left out "
+    "because their source's admit set (data.domain.ADMIT) lacks one of their classes",
     "charged.steps_with_charged_reactant": "steps with >=1 reactant fragment of nonzero net charge",
     "charged.unique_reactants_charged": "unique reactant molecules with nonzero net charge",
 }

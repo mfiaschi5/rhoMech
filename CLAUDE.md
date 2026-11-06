@@ -12,27 +12,37 @@ picture of orbital interactions instead of learning it from scratch. Curved arro
 they are a reading of R, reconstructed afterwards with the orbital pairs that drive it.
 
 The prediction target is an autoregressive sequence of elementary steps. A step is one reaction
-matrix (bond-order changes of +-1 on atom pairs, lone-pair changes of +-2 on atoms), decoded
-around an anchor bond that forms. The product is B + R; the intermediate is re-featurized (3D
+matrix (bond-order changes of +-1 on atom pairs, changes of +-2 in an atom's non-bonding
+electrons N, and +-1 for a source of one-electron steps: `DomainPolicy.open_shell_labels`, a
+label rule only), decoded around an anchor bond that forms. The product is B + R; the intermediate is re-featurized (3D
 embedding, xTB, localization, new tokens) and fed back in to predict the next step, until the
 model emits a stop token. Labels come from the dataset arrows applied as one edit, taken
-modulo resonance as the parsimonious class (spec, "Edit labels"). Resonance identity is the
-sigma key (`data.resonance.sigma_key`, spec "Resonance"): the sigma skeleton with every H count
-frozen and the charges zeroed, plus the total charge. Steps whose two sides share it with the
-atom maps kept (no atom changes its sigma bonds or H) leave the training target and are kept as
-resonance pairs; degenerate exchanges (the same molecules, atoms that change partners) are real
-steps and stay. Training draws random valid resonance forms of the reactant pool as inputs, with
+modulo resonance as the parsimonious class (spec, "Edit labels"), whose members must have a
+balanced electron flow when any candidate does (`ReactionMatrix.balanced`). Resonance identity
+is the identity key v2 (`data.resonance.identity_key`, spec v10 "Resonance"): for a closed
+shell the sigma key (`sigma_key`: the sigma skeleton with every H count frozen and the charges
+zeroed, plus the total charge), for an open shell that key plus each fragment's (sigma SMILES,
+charge, unpaired count), u from the drawing's odd-N atoms (`data.spin.spin_of_drawing`, raised
+by the species table's high-spin rows, never RDKit's radical perception). Steps whose two sides
+share it with the atom maps kept and whose electron flow balances (electrons move only between
+bonded atoms, `resonance.balanced_flow`) leave the training target and are kept as resonance
+pairs; identical sides are NULL_STEP and a shared key without a balanced flow
+NONCONJUGATED_SHIFT, both counted exclusions; degenerate exchanges (the same molecules, atoms
+that change partners) are real steps and stay. Training draws random valid resonance forms of the reactant pool as inputs, with
 the labels recomputed.
 
 ## Representation
 
-`docs/ksmech_architecture.tex` (spec v9) is the source of truth for the representation and
-the model; this section summarizes it.
+`docs/ksmech_architecture.tex` (spec v9.2; on the Release B branches the v10 draft of the
+open-shell plan P6, to be approved before its build) is the source of truth for the
+representation and the model; this section summarizes it.
 
 Two token families share one sequence: atom tokens and localized-orbital tokens. Orbitals are
-Pipek-Mezey localized in the occupied and the virtual block separately (the singly occupied
-MOs of a radical apart from the doubly occupied ones), started deterministically from the
-canonical MOs, so one QM record always gives the same tokens.
+localized in the occupied and the virtual block separately (the singly occupied MOs of a
+radical apart from the doubly occupied ones) by IBO, the Pipek-Mezey functional with Lowdin
+populations and exponent 4, started deterministically from a pivoted Cholesky factorization of
+each block's density matrix (`orbitals.localize.PMConfig`; Pipek-Mezey with Mulliken
+populations is only the comparison), so one QM record always gives the same tokens.
 
 An orbital token carries only continuous physical descriptors; they are its whole model
 input:
@@ -48,9 +58,10 @@ input:
 - the spectral set: (energy, weight) over the canonical MOs of the block, weight >= 0.01, at
   most 8 entries, renormalized. It is embedded by a set encoder.
 
-The LMO energy E_r, the full spectrum (which the gap kernel G uses), the centroid, the centre
-atoms and the coefficient vector are bookkeeping. An orbital inherits its atoms' embeddings
-through its centre weights.
+The full spectrum (which the gap kernel G uses), the centroid, the centre atoms and the
+coefficient vector are bookkeeping. The LMO energy E_r and the spectral weight the set keeps
+before renormalizing are stored as inputs a model selects (`ModelConfig.orbital_extra`, off by
+default; spec v9.1). An orbital inherits its atoms' embeddings through its centre weights.
 
 An atom token's model input:
 
@@ -59,7 +70,9 @@ An atom token's model input:
 - frozen-orbital f+ and f-;
 - the finite-difference dual descriptor;
 - the frontier weights for HOMO-1, HOMO, LUMO and LUMO+1, with degenerate blocks within
-  0.05 eV summed;
+  0.05 eV summed (a second set with blocks within 1e-4 eV is stored beside it,
+  `ModelConfig.frontier_blocks = 'exact'`; the finite-difference f+ / f- are stored too,
+  unselected);
 - %Vbur;
 - the chirality sign, set only where the SMILES specifies the stereocentre.
 
@@ -77,7 +90,10 @@ They serve tests (`pytest -m diagnostic`), alignment diagnostics, the interface 
 "added back as input" ablations. They never decide which arrows are legal: the arrow
 candidate masks use descriptors. A donor is a doubly occupied token. An acceptor is an empty
 token that is not a d-type polarization function (unless configured) and not the
-antibonding partner of the donor's own bond. Until the radical extension, a token with
+antibonding partner of the donor's own bond. Since v18 these exclusions are stored as 0/1 pair
+flags on every cell (`physics.pairs.pair_flags`) rather than deleting the cells:
+`ModelConfig.pair_cells = 'valid'` (default) reads only the `pair_valid` cells, as before;
+`'all'` reads every cell with the flags as channels. Until the radical extension, a token with
 0.2 < n < 1.8 (a SOMO, or a Fermi-smeared level) is neither; its fractional occupation stays
 the continuous input. A molecule with an MO more than 0.05 from its aufbau occupation is
 flagged `fermi_smeared`: its GFN2 gap vanishes and it lies outside the closed-shell domain.
@@ -110,9 +126,17 @@ ranked a step's first arrow worse than G alone.
 |---|---|
 | PMechDB | Curated polar mechanistic steps. Development set. |
 | ReactMech | 67 reaction classes. Out-of-distribution splits. |
-| FlowER dataset | About 1.4M steps. Scale-up. |
+| FlowER dataset | About 2.14M numeric-suffix lines (train+val+test). Scale-up. Its RS/RC lines (RMechDB, radical steps) are the open-shell plan's source. |
 | mech-USPTO-31K | Held-out benchmark. Never trained on. |
 | QMugs | QM pretraining. |
+
+Ingest screens every step with one law per domain phenomenon, for every element and parity
+(`data.domain`, spec v9.1): a -1 on a four-bonded group-14 atom is removed; an onium bonded to
+a metal or B is a dative donor and the acceptor is re-charged where that leaves the fragment
+even, the side's net charge >= 0 and both sides' totals equal (rule 'D dative onium->M'); a
+non-s-block metal with exactly one neighbour and charge <= 0 is a ligand-dropped placeholder
+(METAL_PLACEHOLDER) unless it compensates an onium donor (ML1); an even fragment with a 3d
+metal left d1-d9 by the bookkeeping is flagged METAL_SUSPECT (`domain_class`), never excluded.
 
 ## Engineering rules
 
@@ -120,7 +144,10 @@ ranked a step's first arrow worse than G alone.
   schema in `docs/data_schema.md`.
 - Every featurization function has a unit test on the fixed molecule set in
   `tests/fixtures/molecules.py`: ethane, ethanol, acetone, acetaldehyde, methyl acetate,
-  chloromethane, methylamine, acetonitrile, benzene, acrolein.
+  chloromethane, methylamine, acetonitrile, benzene, acrolein. A function an open-shell phase
+  changes is also tested on the hand-written `OPEN_SHELL` list there (radicals, superoxide, the
+  benzene radical anion, triplet O2, Br., .OH, NO, Cl[C]Cl, [C]=O, [N]=[N], ozone, CuCl2,
+  FeBr4-).
 - No silent failures. Every skipped molecule is logged with a reason code and counted, and
   the counts are reported at the end of the run.
 - All QM results are cached on disk, keyed by canonical SMILES plus conformer id.
@@ -144,13 +171,23 @@ uv run pre-commit install     # enable the commit hook: ruff, then the two pytes
 
 Main CLI entry points are added phase by phase and listed here as they land:
 
-- Data: `uv run ksmech-data ingest --source pmechdb` (steps parquet, `resonance_pairs.parquet`,
-  rejections and report under `data/processed/pmechdb/`), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
+- Data: `uv run ksmech-data ingest --source pmechdb|reactmech [--sample N --seed S]` (steps parquet,
+  `resonance_pairs.parquet`, rejections and report under `data/processed/<source>/`; `--sample`
+  keeps N random accepted steps for a pilot; ReactMech reads its ID and OOD split files once each,
+  classes from the OOD mechanism files), `uv run ksmech-data stats --source pmechdb` (writes `stats.json`)
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
-  (STALE_ARTIFACT); only `textbook` takes `--allow-stale`.
-- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
+  (STALE_ARTIFACT); only `textbook` takes `--allow-stale`. `uv run ksmech-data
+  open-shell-survey --source S` (read-only: a subclass for every excluded step and every kept
+  step with a suspicious metal, the SPIN_PARITY failures by kind, `open_shell_survey.json`; the
+  open-shell plan's oracle), `uv run ksmech-data freeze-sample --source reactmech` (the pilot's
+  step ids as `sample_frozen.json`; `ingest --sample` then keeps exactly them),
+  `uv run ksmech-arrows freeze-splits --source S --strategy molecule scaffold ...` (the split
+  files as `split_frozen_<strategy>.json`, FROZEN_SPLIT_SCHEMA, no file inputs: `samples` then
+  keeps every frozen step in its part, places new groups by hash and counts SPLIT_CONFLICT;
+  a snapshot is replaced only by hand). The open-shell plan is `docs/open_shell_plan.md`.
+- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8 [--steps-from FILE]` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`; `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
   codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,
@@ -160,6 +197,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   token cache needs them, so re-run after the QM batch), `uv run ksmech-qm index stats [--root
   data/cache --root data/serve]` (the SQLite index `<root>/index.sqlite` of records, tombstones,
   tokens and Wiberg sidecars, read from the file headers and refreshed incrementally first;
+  the records of species `data.spin` reassigns, under the tagged method `+spin-v1-u<u>`
+  (`qm.spin`), listed by spin source;
   `index refresh [--rebuild]` only refreshes; the files stay the source of truth)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
@@ -177,15 +216,18 @@ Main CLI entry points are added phase by phase and listed here as they land:
   resonance drawings of the pool with their labels (`arrows.drawings`), and the orbital-pair labels
   where every arrow aligns; one `samples_<strategy>_<part>.json` view per
   split of `molecule`, `scaffold` and
-  `loco`; the per-step `random_leaky` split only with `--strategy random_leaky`; `--workers N`
+  `loco`; the per-step `random_leaky` split and `loco_all` (the class held out as test, the
+  unlabelled steps in train and val) only when named with `--strategy`; `--views-only` writes
+  the named strategies' views over the store already built; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`)
 - Physics: `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--workers 8]
-  [--n-jobs 14]` (the fast LightGBM lambdarank reference on the geometry-free pair features over
+  [--n-jobs 14] [--cells valid|all]` (the fast LightGBM lambdarank reference on the geometry-free pair features over
   all training, ranking each step's first arrow: all positives + 20 hard (best by the gap kernel
   G) + 30 random negatives per step, early stopping on val top-5, the untrained gap kernel as the
   floor; `gbdt_lgbm_report_<split>_geomfree.json` with times and peak RSS, the models
-  `gbdt_lgbm_<split>_geomfree[_textbook-held-out].npz`; `--workers` load the samples, `--n-jobs`
+  `gbdt_lgbm_<split>_geomfree[_textbook-held-out].npz`; `--cells all`: every pair a candidate,
+  the exclusion flags as features, files tagged `_allcells`; `--workers` load the samples, `--n-jobs`
   LightGBM threads fit and score, one after the other), `uv run ksmech-physics textbook [--gbdt
   PATH] [--allow-stale]` (five textbook selectivity cases, expected vs top-3, with the untrained
   gap kernel and the two geometry-free LightGBM models of the molecule split, cases seen in a
@@ -202,7 +244,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `uv run ksmech-serve users list | add LOGIN --name N --role admin --generate | set LOGIN
   --role R` (accounts of `serve.accounts`: local passwords, OIDC sign-in through
   `KSMECH_SERVE_AUTH`, sessions, job quotas, admins unlimited; `docs/accounts.md`),
-  `uv run ksmech-serve recheck`, `uv run ksmech-serve export --out FILE` (curated steps as
+  `uv run ksmech-serve recheck`, `uv run ksmech-serve rekey-pools [--dry-run] [--purge]` (the
+  stored pool states under the identity key v2, `PoolState.key_version`; once, at the Release B
+  merge; refuses while a server runs), `uv run ksmech-serve export --out FILE` (curated steps as
   PMechDB raw records, never training data), `uv run ksmech-serve ocr-setup [--relock]
   [--skip-env] [--skip-weights]` (the OCR engine MolScribe 1.1.1: its isolated environment
   `tools/ocr` synced into `data/ocr/venv` and the sha256-checked checkpoint under
@@ -221,7 +265,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
-  [--resume] [--no-resonance-draws]` (the spec-v9 model on one split; each epoch every training
+  [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy]
+  [--drop-domain-class C...]` (the spec-v9 model on one split;
+  `--preset` sets the P0a flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
+  orbital extras, legacy = the v17 inputs; an explicit option wins; `--source pmechdb+reactmech`
+  pools several sources' training parts, validates each and the pool, pair statistics fitted on the pool; each epoch every training
   sample in a random one of its resonance drawings unless `--no-resonance-draws`; `--encoder`: `dense` the pair track of spec v9,
   `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
   learned indexer, dense during the LR warm-up; `--stop-weight` is lambda_stop of the END_MECH head,
@@ -229,16 +277,49 @@ Main CLI entry points are added phase by phase and listed here as they land:
   the views and pair statistics, `train.log` in the `step n / total` format `ksmech-eta` reads,
   `metrics.jsonl` per epoch, `last.pt` and `best.pt` by validation anchor top-1; batches by a
   padded-cell budget, samples over `--max-tokens` skipped as TOO_LARGE and counted; the override is
-  for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); every `ModelConfig` field is an option,
+  for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); `--eval-test` also scores the test part each epoch (`test_*`, never for `best.pt`);
+  `--drop-domain-class OSM_CU2 OSM_FE3` leaves those classes' training samples out (P4's metal
+  ablation; evaluation keeps them; counted as DROPPED_DOMAIN_CLASS);
+  every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
   run)
-- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule]` (the physics floor:
-  anchors ranked by |G^atom| over the valid orbital pairs, no learned parameter, val and test
-  top-1/3/5, `anchor_floor_report_<split>.json`), `uv run ksmech-eval decode --run NAME
-  [--part val|test] [--limit N] [--beam 5] [--scope all|inter]` (the beam decoder of
+- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]` (the physics floor:
+  anchors ranked by |G^atom| over the valid orbital pairs, or every pair, no learned parameter, val and test
+  top-1/3/5, `anchor_floor_report_<split>.json` and per-sample `anchor_floor_ranks_<split>.json`),
+  `uv run ksmech-eval decode --run NAME [--run-source pmechdb+reactmech] [--part val|test]
+  [--limit N] [--beam 5] [--scope all|inter] [--caps legacy|labels] [--max-bonds B --max-atoms A
+  --max-candidates C]` (the beam decoder of
   `model.decode` on the stored samples, B + R checked on the sample's Lewis structure: full-R
-  top-1/3/5, a hit when a completion is a variant of the label class, the drop counts;
-  `decode_report_<split>_<part>[_n<limit>].json` beside the checkpoint), `uv run ksmech-eval embedding --run NAME
+  top-1/3/5, a hit when a completion is a variant of the label class, the drop counts, the
+  checkpoint's and the view's sample versions (a mismatch warns); caps legacy = 8 bonds, 2
+  atoms, 48 candidates, labels = the label maxima of --source's training part, caps other than
+  legacy tag the files `_caps<b>-<a>-<c>`;
+  `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
+  `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
+  it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
+  `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared|bond_stretched` (with and
+  without), and report the covered fraction; `uv run ksmech-eval cohort --source pmechdb --name
+  open_shell --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE` (the training steps of some
+  domain_class values pinned once as a cohort); `uv run ksmech-eval pin --source pmechdb --name closed_base [--workers N]`
+  (open-shell plan P0b: the molecule split's samples as a cohort, its GBDT subsets `<name>_gbdt_valid|all`
+  and `baseline_<name>.json`, per-sample digests of every named column, `eval.pin`; each written once),
+  `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--out FILE]` (two arms of decode runs
+  paired by sample: A fails when its mean top-k is below B's by more than max(2 x pooled SD, 1 point),
+  the exact one-sided McNemar test on majority-of-seeds hits and every seed pair; arms decoded on other
+  samples, cohorts, caps or decode versions refused, `eval.paired`); `uv run ksmech-physics gbdt --score-only [--model PATH
+  --allow-stale]` scores the stored ranker of `--split` (or a reference copy) without a refit
+  (`gbdt_lgbm_ranks_<split>_geomfree[_<model>].json`); P0a: `uv run python scripts/p0a_changes.py
+  --source S` (every step the P0a build changed, removed, returned or flagged, by rule,
+  `p0a_changes.json`, against the v17 copy in `data/processed_v17/`), `uv run python
+  scripts/probes/dative_audit.py` (the 20-case oxidation-state audit of the dative law,
+  read-only); P5: `uv run python scripts/p5_rescore.py [--pin]` (the two ReactMech checkpoints'
+  decode hits by slice: unchanged since P0, P0a's Kekule and dative changes, P5's returns via
+  `cohort_p5_returns.json`; `p5_rescore.json`); P6: `uv run python scripts/p6_checks.py dump
+  --source S --out FILE` under two code versions, then `compare --old A --new B` (edit labels,
+  resonance flags and keys of the v18 steps by content, closed and open shells apart), `uv run
+  python scripts/probes/flower_label_dryrun.py --source flower|pmechdb|reactmech --out DIR`
+  (FlowER's RS/RC lines and the v18 labels through the P6 rules: codes, R shapes, P9's masks and
+  screens; read-only); `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
   under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts

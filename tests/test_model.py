@@ -15,33 +15,44 @@ import torch
 from ksmech.arrows.batches import collate_samples
 from ksmech.arrows.delta_be import ReactionMatrix
 from ksmech.arrows.steps import MechanismSample, pair_stats, sample_for_step
-from ksmech.eval.floor import floor_ranks
+from ksmech.eval.floor import floor_ranks, floor_report
+from ksmech.model import decode
 from ksmech.model.config import ModelConfig
-from ksmech.model.decoder import BREAK, FORM
+from ksmech.model.decoder import ATOM_VALUES, BREAK, FORM
 from ksmech.model.inputs import (
+    FeatureStats,
     fit_feature_stats,
     pair_channels,
     pair_channels_at,
     pair_context,
     pooled_gap,
+    real_cells,
     standardized_pair_z,
+    token_columns,
+    token_inputs,
 )
 from ksmech.model.loss import (
     admissible_rows,
     anchor_log_probs,
     anchor_ranks,
+    atom_classes,
     edit_matches,
     greedy_edit,
     step_loss,
 )
 from ksmech.model.net import KSMech
 from ksmech.orbitals.tokens import atom_feature_names, feature_names
+from ksmech.physics.pairs import PAIR_FLAGS, PAIR_VALID
+from ksmech.physics.stage_a import STAGE_A_FEATURES, cell_features
 from ksmech.train.batching import CellBudgetSampler, cells
 from ksmech.train.loop import (
+    NonFiniteError,
     TrainConfig,
+    better_epoch,
     checkpoint_payload,
     evaluate,
     load_model,
+    sources,
     stop_weight,
     train_epoch,
 )
@@ -58,6 +69,8 @@ ATOM_FIELDS = (
     "atom_map",
     "atom_positions",
     "lone_pairs",
+    "nonbonding",
+    "unpaired",
 )
 ORBITAL_FIELDS = (
     "orbital_features",
@@ -120,6 +133,146 @@ def test_pooled_gap_is_the_weighted_sum_over_valid_pairs(samples):
                 if s.pair_valid[r, c]:
                     expect += s.pair_z[r, c, g_col] * (np.outer(w[o], w[v]) + np.outer(w[v], w[o]))
         np.testing.assert_allclose(g_atom[k, : s.n_atoms, : s.n_atoms], expect, atol=1e-4)
+
+
+def _as_v17(s: MechanismSample) -> MechanismSample:
+    """The sample as a v17 store held it: the v17 pair features only, every cell outside
+    pair_valid zero and undefined."""
+    k, valid = len(STAGE_A_FEATURES), s.pair_valid[..., None]
+    return replace(
+        s,
+        pair_z=np.where(valid, s.pair_z[..., :k], 0.0).astype(np.float32),
+        pair_defined=s.pair_defined[..., :k] & valid,
+        pair_features=STAGE_A_FEATURES,
+    )
+
+
+def test_valid_cells_reproduce_a_v17_batch_bit_for_bit(samples):
+    """pair_cells 'valid' on a v18 batch (every cell, the exclusion flags) gives a model with
+    v17 statistics (a v17 checkpoint's names) exactly the z_hat, G^atom, y_ij and outputs of
+    the v17-shaped batch; the v17 statistics are those of the v18 samples."""
+    old = [_as_v17(s) for s in samples]
+    stats = pair_stats(old)
+    for a in ("mean", "std", "count"):
+        assert np.array_equal(getattr(stats, a), getattr(pair_stats(samples), a)), a
+    torch.manual_seed(0)
+    model = KSMech(TINY, fit_feature_stats(samples), stats).eval()
+    assert model.pair_stats.names == STAGE_A_FEATURES
+    b_new, b_old = collate_samples(samples), collate_samples(old)
+    assert b_new["pair_z"].shape[-1] == len(STAGE_A_FEATURES) + len(PAIR_FLAGS)
+    assert torch.equal(pooled_gap(b_new), pooled_gap(b_old))
+    for x, y in zip(model.prepare(b_new)[1:], model.prepare(b_old)[1:], strict=True):
+        assert torch.equal(x, y)
+    with torch.no_grad():
+        new, ref = model.encode(b_new), model.encode(b_old)
+    for x, y in zip(new[:3], ref[:3], strict=True):
+        assert torch.equal(x, y)
+
+
+def _legacy_columns(s: MechanismSample) -> MechanismSample:
+    """The sample with only the v17 token columns, as a v17 store held it."""
+    k, m = len(atom_feature_names()), len(feature_names())
+    return replace(
+        s,
+        atom_features=s.atom_features[:, :k],
+        atom_missing=s.atom_missing[:, :k],
+        orbital_features=s.orbital_features[:, :m],
+        atom_columns=tuple(atom_feature_names()),
+        orbital_columns=tuple(feature_names()),
+    )
+
+
+def test_default_token_inputs_are_the_v17_ones_bit_for_bit(samples):
+    """With orbital_extra () and frontier_blocks 'window', statistics and standardized token
+    inputs on v18 samples equal those of the v17 columns; statistics without names (a v17
+    checkpoint) read the same columns."""
+    old = [_legacy_columns(s) for s in samples]
+    stats, ref = fit_feature_stats(samples), fit_feature_stats(old)
+    for a in ("atom_mean", "atom_std", "orbital_mean", "orbital_std", "energy_mean"):
+        assert np.array_equal(getattr(stats, a), getattr(ref, a)), a
+    v17 = FeatureStats.from_dict({k: v for k, v in stats.to_dict().items() if "names" not in k})
+    assert v17.names() == stats.names() == (tuple(atom_feature_names()), tuple(feature_names()))
+    new, legacy = (
+        token_inputs(collate_samples(samples), v17),
+        token_inputs(collate_samples(old), v17),
+    )
+    for key in ("atom_x", "orbital_x", "spectra"):
+        assert torch.equal(new[key], legacy[key]), key
+
+
+def test_extra_token_columns_are_selected_by_name(samples):
+    cfg = replace(TINY, orbital_extra=("retained_fraction", "energy_ev"), frontier_blocks="exact")
+    atoms, orbitals = token_columns(cfg)
+    assert orbitals[-2:] == ("retained_fraction", "energy_ev")
+    assert "fmo_exact_homo" in atoms and "fmo_homo" not in atoms and "f_plus_fmo_exact" in atoms
+    stats = fit_feature_stats(samples, atoms, orbitals)
+    assert FeatureStats.from_dict(stats.to_dict()).names() == (atoms, orbitals)
+    inp = token_inputs(collate_samples(samples), stats)
+    assert inp["orbital_x"].shape[-1] == len(feature_names()) + 2
+    assert inp["atom_x"].shape[-1] == 2 * len(atom_feature_names())
+    torch.manual_seed(0)
+    model = KSMech(cfg, stats, pair_stats(samples)).eval()
+    with torch.no_grad():
+        assert torch.isfinite(model.encode(collate_samples(samples))[0]).all()
+    with pytest.raises(ValueError, match="orbital_extra"):
+        token_columns(replace(TINY, orbital_extra=("occupation_squared",)))
+    with pytest.raises(ValueError, match="frontier_blocks"):
+        token_columns(replace(TINY, frontier_blocks="wide"))
+
+
+def test_atom_fukui_selects_the_finite_difference_columns(samples):
+    """'frozen' is today's columns; 'fd' puts the FD f+ / f- in the frozen ones' place, 'both'
+    appends them; a store without them refuses both by name (open-shell plan P2b)."""
+    base = token_columns(TINY)
+    assert token_columns(replace(TINY, atom_fukui="frozen")) == base
+    assert base[0] == tuple(atom_feature_names()) and "f_plus" not in base[0]
+    fd, both = (token_columns(replace(TINY, atom_fukui=k))[0] for k in ("fd", "both"))
+    i, j = base[0].index("f_plus_fmo"), base[0].index("f_minus_fmo")
+    assert (fd[i], fd[j]) == ("f_plus", "f_minus") and len(fd) == len(base[0])
+    assert both == (*base[0], "f_plus", "f_minus")
+    exact_fd = token_columns(replace(TINY, atom_fukui="fd", frontier_blocks="exact"))[0]
+    assert (
+        "f_plus" in exact_fd and "fmo_exact_homo" in exact_fd and "f_plus_fmo_exact" not in exact_fd
+    )
+    stats = fit_feature_stats(samples, both, base[1])
+    inp = token_inputs(collate_samples(samples), stats)
+    assert inp["atom_x"].shape[-1] == 2 * len(both)
+    stripped = [_legacy_columns(s) for s in samples]
+    with pytest.raises(ValueError, match="f_plus"):
+        fit_feature_stats(stripped, fd, base[1])
+    with pytest.raises(ValueError, match="atom_fukui"):
+        token_columns(replace(TINY, atom_fukui="relaxed"))
+    old = {k: v for k, v in TINY.to_dict().items() if k != "atom_fukui"}
+    assert ModelConfig.from_dict(old).atom_fukui == "frozen"
+
+
+def test_all_cells_feed_the_flags_and_pool_every_cell(samples):
+    """pair_cells 'all': the statistics name every stored feature and the legacy mask, every
+    real cell is defined for the flags, G^atom pools every (occupied, virtual) pair."""
+    stats = pair_stats(samples, cells="all")
+    assert stats.names == cell_features("all")
+    b = collate_samples(samples)
+    z_hat, defined = standardized_pair_z(b, stats, (), TINY.K, "all")
+    real = real_cells(b)
+    for name in (*PAIR_FLAGS, PAIR_VALID):
+        assert torch.equal(defined[..., stats.names.index(name)], real), name
+    g_atom = pooled_gap(b, cells="all").numpy()
+    g_col = samples[0].pair_features.index("g")
+    for k, s in enumerate(samples):
+        w = np.zeros((s.n_orbitals, s.n_atoms))
+        rows = s.incidence
+        w[rows[:, 0].astype(int), rows[:, 1].astype(int)] = rows[:, 2]
+        w_occ, w_virt = w[s.orbital_occupied], w[~s.orbital_occupied]
+        g = s.pair_z[..., g_col].astype(np.float64)
+        expect = np.einsum("ra,rc,cb->ab", w_occ, g, w_virt)
+        np.testing.assert_allclose(
+            g_atom[k, : s.n_atoms, : s.n_atoms], expect + expect.T, atol=1e-4
+        )
+    torch.manual_seed(0)
+    model = KSMech(replace(TINY, pair_cells="all"), fit_feature_stats(samples), stats).eval()
+    with torch.no_grad():
+        h, p, y, _ = model.encode(b)
+    assert y.shape[-1] == len(stats.names) + 3 and torch.isfinite(h).all()
 
 
 def _channels(samples, model):
@@ -352,6 +505,8 @@ class _StubDecoder:
     probabilities 1/5, 3/5, 1/5; given (0,1) every entry class has probability 1/3, given
     (1,2) the zero class has 1/2 and the others 1/4; P(END_MECH) is 3/4."""
 
+    atom_values = ATOM_VALUES
+
     def stop_logits(self, h):
         return torch.tensor([math.log(3)])
 
@@ -411,6 +566,31 @@ def test_step_loss_by_hand():
         loss, parts = step_loss(_StubDecoder(), None, None, None, batch, 0.5)
         assert loss.item() == pytest.approx(-t1 + 0.5 * bce, rel=1e-6)
         assert parts["p_stop"].item() == pytest.approx(3 / 4)
+
+
+def test_atom_classes_keep_the_even_mapping_and_refuse_odd_entries():
+    """The class table gives the classes the old floor(r / 2) + 1 gave on {-2, 0, +2}, so the
+    loss of an even batch is unchanged; a real odd entry raises instead of being floored into
+    a class; an entry on a padding atom is ignored. The beam decoder's copy of the alphabet
+    (model.decode, which imports no torch) is the head's."""
+    r = torch.tensor([[-2, 0, 2, 0]], dtype=torch.int8)
+    real = torch.tensor([[True, True, True, False]])
+    old = torch.div(r.long(), 2, rounding_mode="floor") + 1
+    assert atom_classes(r, ATOM_VALUES, real).equal(old)
+    for odd in (1, -1):
+        with pytest.raises(ValueError, match="outside the head's alphabet"):
+            atom_classes(torch.tensor([[odd, 0]], dtype=torch.int8), ATOM_VALUES, real[:, :2])
+    pad = torch.tensor([[0, 1]], dtype=torch.int8)
+    assert atom_classes(pad, ATOM_VALUES, torch.tensor([[True, False]])).tolist() == [[1, 1]]
+    assert tuple(decode.ATOM_VALUES.tolist()) == ATOM_VALUES
+
+
+def test_an_odd_atom_entry_raises_in_the_step_loss():
+    one = ({(0, 1): 1}, {}, [(0, 1, FORM)])
+    batch = _hand_batch([one])
+    batch["r_atoms"][0, 0, 2] = 1
+    with pytest.raises(ValueError, match=r"atom entries \[1\]"):
+        step_loss(_StubDecoder(), None, None, None, batch)
 
 
 def test_anchor_nll_counts_an_anchor_shared_by_variants_once():
@@ -479,6 +659,68 @@ def test_a_tie_with_a_candidate_outside_the_label_counts_against_it():
     assert anchor_ranks(lp, b).tolist() == [0]
 
 
+def test_nan_scores_never_make_a_hit():
+    """NaN logits compare false with everything: a model with NaN weights scored top-1 = 1."""
+    b = _hand_batch([({(0, 1): 1}, {}, [(0, 1, FORM)])])
+    lp = torch.full((1, 3, 3, 2), float("nan"))
+    assert anchor_ranks(lp, b).tolist() == [lp[0].numel()]
+    lp = torch.full((1, 3, 3, 2), -30.0)
+    lp[0, 0, 1, FORM] = -1.0
+    lp[0, 1, 2, FORM] = float("nan")  # a NaN candidate outside the label counts against it
+    assert anchor_ranks(lp, b).tolist() == [1]
+
+
+def test_an_epoch_with_a_non_finite_loss_never_becomes_best():
+    good = {"val_top1": 0.9, "val_loss": 2.2, "train_loss": 2.7}
+    nan = {"val_top1": 1.0, "val_loss": math.nan, "train_loss": math.nan}
+    assert better_epoch(good, None) and not better_epoch(nan, good) and not better_epoch(nan, None)
+    assert better_epoch({**good, "val_top1": 0.91}, good)
+    assert not better_epoch({**good, "train_loss": math.inf}, good)
+
+
+def _one_epoch(model, loader, cfg, scaler=None, state=None):
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 1.0)
+    scaler = scaler or torch.amp.GradScaler("cpu", enabled=False)
+    state = state if state is not None else {"step": 0, "total": 9, "epoch": 0}
+    out = train_epoch(model, loader, opt, sched, scaler, torch.device("cpu"), None, cfg, state)
+    return out, state
+
+
+def test_a_batch_with_a_non_finite_loss_takes_no_step(samples, monkeypatch):
+    import ksmech.train.loop as loop
+
+    model = make(samples, "sparse", topk=8)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    real = loop.step_loss
+
+    def nan_loss(*args):
+        loss, parts = real(*args)
+        return loss * math.nan, parts
+
+    monkeypatch.setattr(loop, "step_loss", nan_loss)
+    cfg = TrainConfig(workers=0, log_every=1)
+    out, state = _one_epoch(model, [collate_samples(samples)], cfg)
+    assert out["nonfinite_batches"] == 1 and state["step"] == 1 and math.isnan(out["train_loss"])
+    assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())
+    monkeypatch.setattr(loop, "MAX_NONFINITE_IN_A_ROW", 2)
+    with pytest.raises(NonFiniteError, match="2 non-finite training losses in a row"):
+        _one_epoch(model, [collate_samples(samples)] * 2, cfg)
+
+
+def test_non_finite_weights_or_a_collapsed_loss_scale_stop_the_run(samples):
+    model = make(samples, "sparse", topk=8)
+    cfg = TrainConfig(workers=0, log_every=1, grad_clip=1e9)
+    loader = [collate_samples(samples)]
+    low = torch.amp.GradScaler("cpu", init_scale=0.25, growth_interval=10**6)
+    with pytest.raises(NonFiniteError, match="loss scale 0.25"):
+        _one_epoch(model, loader, cfg, low)
+    with torch.no_grad():
+        next(model.parameters()).fill_(math.nan)
+    with pytest.raises(NonFiniteError, match="non-finite parameters"):
+        _one_epoch(model, loader, cfg)
+
+
 def test_ranks_and_greedy_edit(samples, model):
     b = collate_samples(samples)
     with torch.no_grad():
@@ -545,6 +787,15 @@ def test_floor_ranks_the_largest_pooled_gap_first(samples):
     assert (ranks == 0).all() and reachable.all()
 
 
+def test_floor_report_per_sample_ranks_reproduce_its_top_k(samples):
+    r = floor_report(samples, batch_size=2)
+    rows = r["per_sample"]
+    assert [row["step_id"] for row in rows] == [s.step_id for s in samples]
+    for k in (1, 3, 5):
+        assert np.mean([row["rank"] < k for row in rows]) == pytest.approx(r[f"top{k}"])
+    assert sum(not row["reachable"] for row in rows) == r["unreachable"]
+
+
 @pytest.mark.parametrize("encoder", ENCODERS)
 def test_a_training_step_lowers_the_loss_and_the_checkpoint_reloads(samples, tmp_path, encoder):
     from ksmech.data import provenance as prov
@@ -589,3 +840,117 @@ def test_rocm_override_only_for_rdna2_cards_without_kernels(tmp_path, monkeypatc
     assert loop.rocm_override(tmp_path) is None
     monkeypatch.setattr(loop.torch.version, "hip", None)
     assert loop.rocm_override(tmp_path) is None
+
+
+def test_a_run_names_its_sources_and_the_smallest_stop_weight():
+    cfg = TrainConfig(source="pmechdb+reactmech")
+    assert sources(cfg) == ("pmechdb", "reactmech")
+    assert stop_weight(cfg) == 0.0  # PMechDB's: neither source has stop labels
+
+
+def _two_source_stores(samples, root, names=("train", "val")) -> None:
+    """The fixture samples as two sources' stores under `root`, split `x`, each sample in
+    every view of `names` (the training and the validation view by default)."""
+    from ksmech.arrows import store
+    from ksmech.arrows.steps import SAMPLE_VERSION, write_split_file
+
+    for source in ("pmechdb", "reactmech"):
+        d = root / source
+        d.mkdir()
+        parquet = d / "steps.parquet"
+        parquet.write_bytes(b"stand-in parquet")
+        by_id = {
+            f"{source}-{s.step_id}": replace(s, step_id=f"{source}-{s.step_id}") for s in samples
+        }
+        ids = sorted(by_id)
+        parts = {f"x_{part}": ids for part in names}
+        split = write_split_file(d / "splits_x.json", "x", 0, parts, parquet)
+        index = store.write_store(d, by_id, {}, parquet, SAMPLE_VERSION)
+        for part in names:
+            config = {"split": f"x_{part}", "sample_version": SAMPLE_VERSION}
+            store.write_view(d / f"samples_x_{part}.json", ids, {}, index, split, config)
+
+
+def test_a_run_on_two_sources_pools_training_and_validates_each(samples, tmp_path):
+    import json
+
+    from ksmech.train.loop import fit
+
+    _two_source_stores(samples, tmp_path)
+    cfg = TrainConfig(
+        source="pmechdb+reactmech", split="x", epochs=1, workers=0, cell_budget=10**7, warmup=1
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    best = fit(cfg, TINY, run_dir, torch.device("cpu"), tmp_path)
+    n = len(samples)
+    assert best["val_n"] == 2 * n and best["val_pmechdb_n"] == best["val_reactmech_n"] == n
+    pooled = (best["val_pmechdb_top1"] + best["val_reactmech_top1"]) / 2
+    assert best["val_top1"] == pytest.approx(pooled)
+    header = json.loads((run_dir / "run.json").read_text())["provenance"]
+    views = [k for k in header["inputs"] if "samples_x_" in k]
+    assert len(views) == 4  # both sources' training and validation views
+    assert not any("pair_feature_stats" in k for k in header["inputs"])  # fitted on the pool
+    train = header["extra"]["parts"]["train"]
+    assert train["used"] == 2 * n and set(train["sources"]) == {"pmechdb", "reactmech"}
+
+
+def test_the_test_part_is_scored_every_epoch_and_never_picks_best(samples, tmp_path):
+    import json
+
+    from ksmech.train.loop import fit
+
+    _two_source_stores(samples, tmp_path, ("train", "val", "test"))
+    cfg = TrainConfig(
+        source="pmechdb+reactmech",
+        split="x",
+        epochs=2,
+        workers=0,
+        cell_budget=10**7,
+        warmup=1,
+        eval_test=True,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    fit(cfg, TINY, run_dir, torch.device("cpu"), tmp_path)
+    lines = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    n = len(samples)
+    for m in lines:
+        assert m["test_n"] == 2 * n and m["test_reactmech_n"] == n
+        assert {"test_top1", "test_r_exact", "test_loss"} <= set(m)
+        assert set(m["skipped"]) == {"train", "val", "test"}
+    header = json.loads((run_dir / "run.json").read_text())["provenance"]
+    assert len([k for k in header["inputs"] if "samples_x_" in k]) == 6
+    assert "test" in header["extra"]["parts"]
+
+
+@pytest.mark.parametrize("preset", ["general", "legacy"])
+def test_a_preset_sets_the_p0a_flags_and_a_smoke_fit_runs(samples, tmp_path, preset):
+    import json
+
+    from ksmech.arrows.steps import SAMPLE_VERSION
+    from ksmech.model.config import PRESETS
+    from ksmech.train.cli import main as train_main
+
+    _two_source_stores(samples, tmp_path)
+    tiny = ["--d", "32", "--d-pair", "16", "--layers", "2", "--heads", "4"]
+    tiny += ["--decoder-hidden", "16", "--physics-hidden", "8", "--no-checkpoint"]
+    argv = ["fit", "--run", "r", "--source", "pmechdb+reactmech", "--split", "x", "--epochs", "1"]
+    argv += ["--workers", "0", "--cell-budget", str(10**7), "--warmup", "1", "--seed", "2"]
+    argv += ["--device", "cpu", "--processed-dir", str(tmp_path)]
+    argv += ["--models-dir", str(tmp_path / "models"), "--preset", preset, *tiny]
+    assert train_main(argv) == 0
+    run = json.loads((tmp_path / "models" / "pmechdb+reactmech" / "r" / "run.json").read_text())
+    config = run["provenance"]["config"]
+    assert config["sample_version"] == SAMPLE_VERSION and config["train"]["seed"] == 2
+    model = ModelConfig.from_dict(config["model"])
+    assert {k: getattr(model, k) for k in PRESETS[preset]} == PRESETS[preset]
+    assert model.frontier_blocks == "window"
+
+
+def test_an_explicit_option_wins_over_the_preset():
+    from ksmech.train.cli import _preset, build_parser
+
+    argv = ["fit", "--run", "r", "--preset", "general", "--pair-cells", "valid"]
+    args = build_parser(_preset(argv)).parse_args(argv)
+    assert args.pair_cells == "valid" and args.orbital_extra == ["retained_fraction", "energy_ev"]

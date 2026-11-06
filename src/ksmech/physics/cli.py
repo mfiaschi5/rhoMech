@@ -46,6 +46,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="spawned processes loading the samples (host total <= 15)",
     )
+    g.add_argument(
+        "--cells",
+        default="valid",
+        choices=["valid", "all"],
+        help="candidates: the pair_valid cells (v17) or every cell, exclusion flags as features",
+    )
+    g.add_argument(
+        "--score-only",
+        action="store_true",
+        help="no fit: score the stored ranker of --split on val and test, per-sample ranks",
+    )
+    g.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="--score-only: this stored ranker instead of the split's (a reference copy)",
+    )
+    g.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="--score-only: score a ranker whose training views changed (logged; a legacy gate)",
+    )
     t = sub.add_parser("textbook", help="textbook selectivity checks (expected vs top-3)")
     t.add_argument("--source", default="pmechdb", help="where the trained ranker lives")
     t.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -78,6 +100,15 @@ def _baseline_table(results: dict, console: Console, title: str) -> None:
     console.print(table)
 
 
+def _cells(args) -> str:
+    return getattr(args, "cells", "valid")
+
+
+def _tag(args) -> str:
+    """The file tag of a ranker: `<split>_geomfree`, `_allcells` appended for --cells all."""
+    return f"{args.split}_{FEATURES}" + ("_allcells" if _cells(args) == "all" else "")
+
+
 def _read_part(
     args, part: str, loader, visit, ids: list[str] | None = None
 ) -> tuple[int, int, int]:
@@ -92,10 +123,10 @@ def _read_part(
     ids = sample_ids(path) if ids is None else ids
     n = no_reading = 0
     for s in iter_samples(path, ids=ids):
-        if not s.labels:
+        if not bl.sample_labels(s, _cells(args)):
             no_reading += 1
             continue
-        visit(s, bl.candidate_set(s, loader))
+        visit(s, bl.candidate_set(s, loader, _cells(args)))
         n += 1
     return len(ids), n, no_reading
 
@@ -213,7 +244,7 @@ def _lgbm_results(parts: dict, models: dict, n_jobs: int = 1) -> dict:
     return results
 
 
-def _fit_two(train: dict, val: dict, cfg, console: Console) -> dict:
+def _fit_two(train: dict, val: dict, cfg, console: Console, cells: str = "valid") -> dict:
     """The ranker on every training step and the one without the textbook pools (validated
     without them too), with fit times."""
     from ksmech.physics import baseline as bl
@@ -223,7 +254,7 @@ def _fit_two(train: dict, val: dict, cfg, console: Console) -> dict:
     models, seconds = {}, {}
     for tag, rows, vsets in (("all", train["all"], val["sets"]), ("held", train["held"], val_held)):
         start = time.perf_counter()
-        models[tag] = fit_lgbm(rows, EvalRows.of(vsets), bl.FEATURE_NAMES, cfg)
+        models[tag] = fit_lgbm(rows, EvalRows.of(vsets), bl.feature_names(cells), cfg)
         seconds[tag] = round(time.perf_counter() - start, 1)
         console.print(
             f"{tag}: {rows.n_rows} rows in {len(rows.groups)} queries, "
@@ -245,7 +276,7 @@ def _save_two(args, fit: dict, cfg, seen: list[str]) -> None:
     from ksmech.physics import lgbm
 
     out_dir = source_dir(args.source, args.processed_dir)
-    tag, inputs = f"{args.split}_{FEATURES}", _lgbm_inputs(args)
+    tag, inputs = _tag(args), _lgbm_inputs(args)
     notes = {
         "all": ("", {"textbook_pools_in_training": seen}),
         "held": (f"_{HELD_OUT}", {"textbook_pools_in_training": [], "held_out": seen}),
@@ -262,6 +293,7 @@ def _lgbm_report(args, train: dict, parts: dict, fit: dict, results: dict, cfg) 
     return {
         "split": args.split,
         "features": FEATURES,
+        "cells": _cells(args),
         "results": results,
         "counts": {
             p: {
@@ -295,16 +327,54 @@ def _read_all(args, loader, cfg, console: Console) -> tuple[dict, dict] | None:
         return None
     for p, d in (("train", train), *parts.items()):
         console.print(
-            f"{args.split}_{FEATURES} {p}: {d['n']} samples read of {d['n_view']}, "
+            f"{_tag(args)} {p}: {d['n']} samples read of {d['n_view']}, "
             f"{d['n_no_orbital_reading']} without an orbital label (NO_ORBITAL_READING)"
         )
     console.print(f"textbook pools in {args.split}_train: {train['seen'] or 'none'}")
     return train, parts
 
 
+def cmd_gbdt_score(args: argparse.Namespace, console: Console) -> int:
+    """The stored ranker of --split (`gbdt_lgbm_<split>_geomfree.npz`) scored on val and test
+    without a fit: the summary and one rank per step (`gbdt_lgbm_ranks_<split>_geomfree.json`),
+    so a later model is compared with it sample by sample, not refitted (a refit samples 80% of
+    the columns and does not reproduce)."""
+    from ksmech.physics import baseline as bl
+    from ksmech.physics import lgbm
+
+    out_dir, tag = source_dir(args.source, args.processed_dir), _tag(args)
+    path = getattr(args, "model", None) or out_dir / f"gbdt_lgbm_{tag}.npz"
+    stale = getattr(args, "allow_stale", False)
+    model = lgbm.load_lgbm(path, bl.feature_names(_cells(args)), allow_stale=stale)
+    loader = TokenCache(args.tokens_dir, maxsize=128)
+    result, inputs = {}, prov.file_input(path)
+    for part in ("val", "test"):
+        sets = _read_kind(args, part, loader, "eval", None)["sets"]
+        ranks = bl.evaluate_scores(sets, model.score_sets([cs.X for cs in sets], args.n_jobs))
+        ranks = ranks["ranks"]
+        rows = [{"step_id": cs.step_id, "rank": r} for cs, r in zip(sets, ranks, strict=True)]
+        result[part] = {"summary": bl.summarize_ranks(ranks), "per_sample": rows}
+        inputs |= prov.file_input(
+            samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
+        )
+    config = {"model": path.name, "split": args.split, "cells": _cells(args)}
+    header = prov.stamp("gbdt_lgbm_ranks", 1, inputs, config)
+    suffix = f"_{Path(path).stem}" if getattr(args, "model", None) else ""
+    out = out_dir / f"gbdt_lgbm_ranks_{tag}{suffix}.json"
+    prov.write_json(out, result, header)
+    for part, r in result.items():
+        tops = " / ".join(f"{r['summary'][f'top{k}']:.1%}" for k in (1, 3, 5))
+        console.print(f"{part}: n {r['summary']['n']}, top-1/3/5 {tops}")
+    console.print(f"wrote {out}")
+    return 0
+
+
 def cmd_gbdt(args: argparse.Namespace, console: Console) -> int:
     """The fast LightGBM ranker (`physics.lgbm`) on the geometry-free features."""
     from ksmech.physics.lgbm import LGBMConfig
+
+    if args.score_only:
+        return cmd_gbdt_score(args, console)
 
     cfg = LGBMConfig(n_hard=args.hard, n_random=args.random, n_jobs=args.n_jobs)
     loader = TokenCache(args.tokens_dir, maxsize=128)  # tokens only for the LMO energies
@@ -314,7 +384,8 @@ def cmd_gbdt(args: argparse.Namespace, console: Console) -> int:
         return 2
     train, parts = read
     load_seconds = round(time.perf_counter() - start, 1)
-    fit = _fit_two(train, parts["val"], cfg, console) | {"load_seconds": load_seconds}
+    fit = _fit_two(train, parts["val"], cfg, console, _cells(args))
+    fit |= {"load_seconds": load_seconds}
     models = {"LightGBM ranker": fit["models"]["all"]}
     models[f"LightGBM ranker ({HELD_OUT})"] = fit["models"]["held"]
     results = _lgbm_results(parts, models, args.n_jobs)
@@ -322,10 +393,7 @@ def cmd_gbdt(args: argparse.Namespace, console: Console) -> int:
     _baseline_table(results, console, f"first-arrow ranking on {args.split}_test (n {n_test})")
     _save_two(args, fit, cfg, sorted(train["seen"]))
     report = _lgbm_report(args, train, parts, fit, results, cfg)
-    out = (
-        source_dir(args.source, args.processed_dir)
-        / f"gbdt_lgbm_report_{args.split}_{FEATURES}.json"
-    )
+    out = source_dir(args.source, args.processed_dir) / f"gbdt_lgbm_report_{_tag(args)}.json"
     out.write_text(json.dumps(report, indent=1, default=str) + "\n")
     console.print(
         f"load {load_seconds} s, fit {fit['fit_seconds']} s, peak RSS {report['peak_rss_mb']} MB"

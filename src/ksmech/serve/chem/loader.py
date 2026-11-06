@@ -53,10 +53,10 @@ def _resolve_input(name: str, root: Path | None) -> Path:
 
 def token_header_problems(path: Path, root: Path | None = None) -> list[str]:
     """What makes the token file at `path` stale (empty when it is current): the checks of
-    `orbitals.tokens.load_tokens` (kind, schema, `token_config()`, every `file:` input re-hashed),
-    with file inputs resolved against `root` (`_resolve_input`)."""
+    `orbitals.tokens.load_tokens` (kind, schema, `token_config_for` the file's molecule, every
+    `file:` input re-hashed), with file inputs resolved against `root` (`_resolve_input`)."""
     from ksmech.data import provenance as prov
-    from ksmech.orbitals.tokens import SCHEMA_VERSION, token_config
+    from ksmech.orbitals.tokens import SCHEMA_VERSION, stored_smiles, token_config_for
 
     header = prov.read_header(path)
     if header is None:
@@ -66,7 +66,11 @@ def token_header_problems(path: Path, root: Path | None = None) -> list[str]:
         out.append(f"kind {header.kind!r}, expected 'tokens'")
     if header.schema_version != SCHEMA_VERSION:
         out.append(f"schema_version {header.schema_version} -> {SCHEMA_VERSION}")
-    want = json.loads(json.dumps(token_config(), sort_keys=True, default=str))
+    try:
+        config = token_config_for(stored_smiles(path))
+    except (KeyError, OSError, ValueError) as exc:
+        return [*out, f"unreadable molecule: {exc}"]
+    want = json.loads(json.dumps(config, sort_keys=True, default=str))
     out += [
         f"config {k}: {header.config.get(k)!r} -> {v!r}"
         for k, v in want.items()

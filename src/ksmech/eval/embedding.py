@@ -31,12 +31,13 @@ import torch
 from ksmech.arrows.batches import ANCHOR_SIDE, collate_samples
 from ksmech.arrows.lewis import reactant_lewis
 from ksmech.arrows.reactants import ReactantTokens, TokenCache
-from ksmech.arrows.steps import MechanismSample, reactant_sample
+from ksmech.arrows.steps import MechanismSample, reactant_sample, with_lewis
 from ksmech.model.encoder import TokenEmbedding
 from ksmech.model.inputs import CHARGE_MAX, MAX_Z, pair_channels, to_device
 from ksmech.model.loss import anchor_log_probs, anchor_ranks, greedy_edit
 from ksmech.model.net import KSMech
 from ksmech.model.sparse import select_keys
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import QMConfig
 
 PARTS = (
@@ -254,6 +255,7 @@ def trace(model: KSMech, sample: MechanismSample, device: str = "cpu", top: int 
         "d_attn": stack("d_attn"),
         "d_ffn": stack("d_ffn"),
         "inputs": {k: inp[k][0].float().cpu().numpy() for k in ("atom_x", "orbital_x")},
+        "input_names": model.feature_stats.names(),
         "readout": anchor_readout(model, h, p, y, batch, top),
         "errors": {
             "embedding": float((h0 - calls[0].args[0]).abs().max()),
@@ -273,10 +275,11 @@ def ensure_pool(keys: list[str], loader: TokenCache, qm: QMConfig | None = None)
     qm = qm or QMConfig()
     built = set(ensure_tokens(keys, loader.tokens_dir, qm))
     for key in keys:
-        if bond_index_path(loader.bond_index_dir, key, 0, qm.method).exists():
+        method = method_for(key, qm.method)
+        if bond_index_path(loader.bond_index_dir, key, 0, method).exists():
             continue
         record = compute_fixture_records({key: key}, qm)[key]
-        record_path = cache_path(qm.cache_dir, key, 0, qm.method)
+        record_path = cache_path(qm.cache_dir, key, 0, method)
         save_bond_indices(record, record_path, loader.bond_index_dir)
         built.add(key)
     return sorted(built)
@@ -286,6 +289,4 @@ def sample_from_smiles(smiles: str, loader: TokenCache) -> MechanismSample:
     """The model inputs of a reactant pool given as SMILES (one molecule or several, '.'
     separated), without a label: tokens and the Lewis structure with its Wiberg indices."""
     rt = ReactantTokens.from_smiles(smiles, loader)
-    sample = reactant_sample("smiles", "smiles", rt)
-    sample.bonds, sample.lone_pairs, sample.wiberg = reactant_lewis(rt)
-    return sample
+    return with_lewis(reactant_sample("smiles", "smiles", rt), reactant_lewis(rt))

@@ -14,9 +14,15 @@ from rich.table import Table
 from ksmech.arrows.delta_be import label_report, step_label
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.roundtrip import evaluate_alignment, run_round_trip
-from ksmech.arrows.steps import DEFAULT_STRATEGIES, STRATEGIES, build_all_samples
+from ksmech.arrows.steps import (
+    DEFAULT_STRATEGIES,
+    STRATEGIES,
+    build_all_samples,
+    write_views_from_store,
+)
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps, source_dir
 from ksmech.data.io import steps_path as _steps_path
+from ksmech.data.provenance import StaleArtifact
 from ksmech.data.schema import Source
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 
@@ -28,7 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("align", help="align arrows to tokens; predicted-arrow round trip")
     s = sub.add_parser("samples", help="sample store (geometry-free pair features) + split views")
     e = sub.add_parser("edit-labels", help="reaction-matrix labels (spec v8) and their coverage")
-    for p in (r, a, s, e):
+    f = sub.add_parser("freeze-splits", help="snapshot the split files as frozen splits")
+    f.add_argument("--strategy", nargs="+", required=True, choices=STRATEGIES)
+    for p in (r, a, s, e, f):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     r.add_argument("--include-resonance", action="store_true", help="also resonance steps")
@@ -43,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="random_leaky (the per-step split) only when named",
     )
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument(
+        "--views-only",
+        action="store_true",
+        help="write the strategies' views over the store already built, without rebuilding it",
+    )
     for p in (a, s):
         p.add_argument(
             "--workers", type=int, default=1, help="spawned processes (host total <= 15)"
@@ -63,8 +76,25 @@ def main(argv: list[str] | None = None) -> int:
         "align": cmd_align,
         "samples": cmd_samples,
         "edit-labels": cmd_edit_labels,
+        "freeze-splits": cmd_freeze_splits,
     }
     return commands[args.command](args, path, console)
+
+
+def cmd_freeze_splits(args: argparse.Namespace, path: Path, console: Console) -> int:
+    """`split_frozen_<strategy>.json` from each named strategy's current split file
+    (`arrows.steps.freeze_split_file`): from then on `samples` keeps every frozen step in its
+    part, places new groups by hash and counts SPLIT_CONFLICT."""
+    from ksmech.arrows.steps import freeze_split_file
+
+    for strategy in args.strategy:
+        try:
+            out = freeze_split_file(args.source, strategy, args.processed_dir)
+        except (FileExistsError, FileNotFoundError, StaleArtifact) as exc:
+            console.print(f"[red]{strategy}: {exc}[/red]")
+            return 1
+        console.print(f"wrote {out}")
+    return 0
 
 
 def _write(report: dict, args: argparse.Namespace, name: str, console: Console) -> Path:
@@ -129,6 +159,8 @@ def cmd_align(args: argparse.Namespace, path: Path, console: Console) -> int:
 
 
 def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
+    if args.views_only:
+        return _views_only(args, console)
     report = build_all_samples(
         args.source,
         args.strategy,
@@ -154,6 +186,16 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
     for strategy, why in report["strategies_not_applicable"].items():
         console.print(f"  [yellow]{strategy}: not applicable ({why})[/yellow]")
     _write(report, args, "samples_report.json", console)
+    return 0 if report["splits"] else 1
+
+
+def _views_only(args: argparse.Namespace, console: Console) -> int:
+    report = write_views_from_store(args.source, args.strategy, args.processed_dir, args.seed)
+    for split, r in report["splits"].items():
+        console.print(f"  {split}: {r['n_samples']}/{r['n_steps']} samples, skipped {r['skipped']}")
+    for strategy, why in report["strategies_not_applicable"].items():
+        console.print(f"  [yellow]{strategy}: not applicable ({why})[/yellow]")
+    _write(report, args, f"samples_report_{'+'.join(args.strategy)}.json", console)
     return 0 if report["splits"] else 1
 
 

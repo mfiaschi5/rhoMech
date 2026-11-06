@@ -351,6 +351,7 @@ def test_tiny_model_steps_apply_with_the_model_logp(tiny_net, synthetic_runtime,
         sums = _entry_sums(
             torch.log_softmax(pair.double(), -1), torch.log_softmax(atom.double(), -1),
             r_pairs, r_atoms, _real_atoms(batch), torch.tensor([a]), torch.tensor([b]),
+            model.decoder.atom_values,
         )  # fmt: skip
     assert best.logp == pytest.approx(float(lp[a, b, sign] + sums[0]), abs=1e-6)
 

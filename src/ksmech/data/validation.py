@@ -5,16 +5,17 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from rdkit import Chem
 
 from ksmech.arrows.apply import apply_arrows
 from ksmech.arrows.compare import MATCH_STATUSES, match_products
-from ksmech.data import chem
-from ksmech.data.domain import Screen, screen_step
-from ksmech.data.resonance import is_resonance_step
+from ksmech.arrows.delta_be import EditSkip, dataset_matrix
+from ksmech.data import chem, domain
+from ksmech.data.domain import DomainCode, OpenShellPolicy, Screen, screen_step
+from ksmech.data.resonance import StepKind, classify_step
 from ksmech.data.schema import Arrow, ElementaryStep, Source, SourceKind
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class RejectReason(StrEnum):
     ARROW_ATOM_UNMAPPED = "ARROW_ATOM_UNMAPPED"  # arrow names a map number absent from reactants
     BOND_NOT_FOUND = "BOND_NOT_FOUND"  # a bond-source arrow names two atoms that are not bonded
     ARROWS_MISMATCH = "ARROWS_MISMATCH"  # the arrows applied to the reactants miss the products
+    RADICAL_ARROW = "RADICAL_ARROW"  # a half-headed arrow: one-electron steps are not replayed yet
     DUPLICATE_STEP = "DUPLICATE_STEP"  # same step_id seen before
 
 
@@ -123,12 +125,12 @@ def check_arrows_reproduce_products(
     """The arrows, applied to the reactants as one bond-electron-matrix edit
     (`ksmech.arrows.apply`), must give the products: the same canonical Kekulé SMILES, or the
     same sigma key. A step without arrows (ReactMech) has nothing to check. Radical arrows
-    are not implemented yet, so a step with one is logged and not checked."""
+    are not replayed yet (one-electron steps, open-shell plan P6), so a step with one is
+    rejected as RADICAL_ARROW and counted, never accepted unchecked."""
     if not arrows:
         return
     if any(a.source_kind is SourceKind.RADICAL for a in arrows):
-        log.info("radical arrows are not replayed yet; arrow check skipped")
-        return
+        raise StepRejected(RejectReason.RADICAL_ARROW, "half-headed arrows are not replayed yet")
     result = apply_arrows(reactants, arrows)
     status, pattern = match_products(result, products)
     if status not in MATCH_STATUSES:
@@ -167,13 +169,13 @@ def build_step(
     r_smi, p_smi = split_reaction(rxn_smiles)
     reactants, products = parse_side(r_smi, "reactants"), parse_side(p_smi, "products")
     validate(reactants, products, arrows, require_arrows)
-    screen = screened(reactants, products, arrows, require_arrows)
+    screen = screened(reactants, products, arrows, require_arrows, step_id)
     note = screen.repair_note(
         chem.canonical_mapped_smiles(reactants), chem.canonical_mapped_smiles(products)
     )
     reactants, products = screen.reactants, screen.products
-    resonance = is_resonance_step(reactants, products)
-    return ElementaryStep(
+    kind = classify_step(reactants, products)
+    step = ElementaryStep(
         step_id=step_id,
         source=source,
         pathway_id=pathway_id,
@@ -183,23 +185,94 @@ def build_step(
         arrows=list(arrows),
         mechanism_class=mechanism_class,
         conditions=conditions,
-        resonance_step=resonance,
+        resonance_step=kind is StepKind.RESONANCE,
         domain_exclusion=None if screen.code is None else str(screen.code),
         charge_repair=note,
+        domain_class=screen.domain_class,
     )
+    return flow_exclusion(admit_open_shell(step), kind)
+
+
+FLOW_CODES = {
+    StepKind.NULL_STEP: DomainCode.NULL_STEP,
+    StepKind.NONCONJUGATED_SHIFT: DomainCode.NONCONJUGATED_SHIFT,
+}
+
+
+def flow_exclusion(step: ElementaryStep, kind: StepKind) -> ElementaryStep:
+    """The flow law's ingest codes (open-shell plan P6): an identity line (NULL_STEP) or a
+    shift that no balanced flow reaches (NONCONJUGATED_SHIFT) is no resonance pair and no
+    training step; the code stands where no other exclusion does."""
+    code = FLOW_CODES.get(kind)
+    if code is None or step.domain_exclusion is not None:
+        return step
+    return replace(step, domain_exclusion=str(code))
+
+
+def _readable(policy: domain.DomainPolicy) -> set[DomainCode]:
+    """The exclusion codes the open-shell laws re-read under a source's policy."""
+    out = set()
+    if policy.open_shell is OpenShellPolicy.ADMIT_BY_RULE:
+        out.add(DomainCode.RADICAL_DRAWN)
+    if policy.open_shell_metal is OpenShellPolicy.ADMIT_BY_RULE:
+        out.add(DomainCode.OPEN_SHELL_METAL)
+    return out
+
+
+def _blocking_code(reactants: Chem.Mol, products: Chem.Mol, readable: set) -> DomainCode | None:
+    """The first code (`PRECEDENCE`) of a fragment of either side that the laws do not re-read:
+    the step's exclusion stays that code."""
+    codes = set(domain.side_codes(reactants)[0] + domain.side_codes(products)[0])
+    return next((c for c in domain.PRECEDENCE if c in codes and c not in readable), None)
+
+
+def admit_open_shell(step: ElementaryStep) -> ElementaryStep:
+    """A RADICAL_DRAWN or OPEN_SHELL_METAL step of a source that admits it by rule
+    (`domain.POLICY`), re-read by the laws (u) and (R) of `data.domain` (its docstring, 3 and 4;
+    open-shell plan P3 and P4): a fragment code the policy does not re-read keeps the step out
+    under that code; a failed law replaces the exclusion by its code; a step that passes is
+    admitted with `domain.open_shell_classes`, or, when the source's curation file names it,
+    keeps its exclusion with the curated reason as its class. R is the dataset arrows' edit
+    (`delta_be.dataset_matrix`); a step whose edit fails is NOT_ELEMENTARY. Law (S) needs the
+    tokens and is the sample builder's (SOMO_NOT_INTEGRAL)."""
+    readable = _readable(domain.POLICY.get(str(step.source), domain.DomainPolicy()))
+    if step.domain_exclusion not in {str(c) for c in readable}:
+        return step
+    reactants = chem.parse_mapped(step.reactants_smiles)
+    products = chem.parse_mapped(step.products_smiles)
+    code = _blocking_code(reactants, products, readable)
+    code = code or domain.spin_law(reactants, products)
+    edit = dataset_matrix(step) if code is None else None
+    if code is None and (isinstance(edit, EditSkip) or not domain.parity_law(edit[2].lone)):
+        code = DomainCode.NOT_ELEMENTARY
+    if code is not None:
+        return replace(step, domain_exclusion=str(code))
+    mol, _, r, _ = edit
+    curated = domain.open_shell_curation(str(step.source)).get(step.step_id)
+    found = {curated} if curated else domain.open_shell_classes(mol, products, r.bonds, r.lone)
+    classes = domain.join_classes(domain.domain_classes(step.domain_class) | found)
+    exclusion = step.domain_exclusion if curated else None
+    return replace(step, domain_exclusion=exclusion, domain_class=classes)
 
 
 def screened(
-    reactants: Chem.Mol, products: Chem.Mol, arrows: list[Arrow], require_arrows: bool
+    reactants: Chem.Mol,
+    products: Chem.Mol,
+    arrows: list[Arrow],
+    require_arrows: bool,
+    step_id: str | None = None,
 ) -> Screen:
-    """`domain.screen_step`, keeping its charge repairs only if the repaired step validates
-    (charge balance, maps, arrow replay); otherwise the step is screened without repairs."""
-    screen = screen_step(reactants, products)
-    if not screen.repairs:
-        return screen
+    """`domain.screen_step`, keeping its repairs (V1, A1, the named repairs of `step_id`, R1,
+    the dative law) only if the repaired sides parse and the repaired step validates (charge
+    balance, maps, arrow replay); otherwise the step is screened as drawn, without repairs."""
     try:
-        validate(screen.reactants, screen.products, arrows, require_arrows)
+        screen = screen_step(reactants, products, step_id=step_id)
+        if screen.repairs:
+            validate(screen.reactants, screen.products, arrows, require_arrows)
     except StepRejected as exc:
-        log.info("charge repair dropped (%s): %s", exc.reason, exc.detail)
+        log.warning("charge repair dropped (%s): %s", exc.reason, exc.detail)
+        return screen_step(reactants, products, repair=False)
+    except (chem.SanitizeError, chem.SmilesParseError) as exc:
+        log.warning("charge repair dropped (%s): %s", RejectReason.SANITIZE_FAILED, exc)
         return screen_step(reactants, products, repair=False)
     return screen

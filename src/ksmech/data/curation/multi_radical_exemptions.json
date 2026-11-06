@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "note": "Counted exemptions of the MULTI_RADICAL_SPECIES policy (open-shell plan P8), written in P3 (U6): a step listed here may hold a species with u >= 2 whose open shell is not one degenerate group. Every admitted step that holds a u >= 2 species must be listed.",
+  "entries": [
+    {
+      "source": "pmechdb",
+      "step_id": "pmechdb-5d007b38296827b6",
+      "species": [
+        "[O][O]",
+        "CC[B-](CC)(CC)[O+][O]"
+      ],
+      "reason": "U6, 2026-10-28"
+    }
+  ]
+}

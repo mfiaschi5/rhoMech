@@ -22,6 +22,9 @@ from ksmech.model.inputs import DIST_BUCKETS, GRAPH_CAP
 
 NEG = float("-inf")
 FORM, BREAK = ANCHOR_SIDE["form"], ANCHOR_SIDE["break"]
+# The value of each class of the atom head, in class order. An odd entry (a one-electron
+# step) is outside this alphabet: the loss raises on it instead of mapping it to a class.
+ATOM_VALUES = (-2, 0, 2)
 
 
 def anchor_buckets(dist: torch.Tensor, b, a, c) -> torch.Tensor:
@@ -49,7 +52,8 @@ class EditDecoder(nn.Module):
         self.n_tok, self.n_anchor = nn.Linear(d, hid), nn.Linear(d, hid, bias=False)
         self.n_join = nn.Linear(dp, hid, bias=False)
         self.n_dist = nn.Embedding(DIST_BUCKETS, hid)
-        self.n_out = nn.Linear(hid, 3)
+        self.atom_values = ATOM_VALUES
+        self.n_out = nn.Linear(hid, len(self.atom_values))
         self.stop = mlp(d, hid, 1)  # END_MECH
 
     def stop_logits(self, h: torch.Tensor) -> torch.Tensor:
@@ -92,5 +96,5 @@ class EditDecoder(nn.Module):
         order = batch["bond_order"][b]
         pair[..., 0] = pair[..., 0].masked_fill(order == 0, NEG)
         pair[..., 2] = pair[..., 2].masked_fill(order >= 3, NEG)
-        atom[..., 0] = atom[..., 0].masked_fill(batch["lone_pairs"][b] == 0, NEG)
+        atom[..., 0] = atom[..., 0].masked_fill(~batch["can_lose_pair"][b], NEG)
         return pair, atom

@@ -23,6 +23,9 @@ from ksmech.arrows.steps import (
     pair_stats_path,
     sample_for_step,
     samples_path,
+    skipped_by_domain_class,
+    smeared_open_shells,
+    stretched_bonds,
     write_split_file,
 )
 from ksmech.data import chem
@@ -98,11 +101,11 @@ def test_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path
         a, b = getattr(back, name), getattr(s, name)
         assert a.dtype == b.dtype and np.array_equal(a, b), name
     assert (back.orbital_features == s.orbital_features).all()
-    valid = s.pair_valid
-    assert np.array_equal(back.pair_valid, valid)
-    assert np.array_equal(back.pair_defined[valid], s.pair_defined[valid])
-    assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-6)  # float16
-    assert not back.pair_defined[~valid].any() and back.pair_z.dtype == np.float32
+    assert np.array_equal(back.pair_valid, s.pair_valid)  # every cell is stored (v18)
+    assert np.array_equal(back.pair_defined, s.pair_defined)
+    assert np.allclose(back.pair_z, s.pair_z, rtol=1e-3, atol=1e-6)  # float16
+    assert np.array_equal(back.pair_gap_sign, s.pair_gap_sign) and back.pair_z.dtype == np.float32
+    assert back.labels_all == s.labels_all
     assert back.drawings == s.drawings == []  # 2-bromopropane and ethoxide: one drawing each
 
 
@@ -175,6 +178,21 @@ def test_the_edit_label_takes_the_reactant_to_the_drawn_product(mini_steps, toke
         assert any(_reproduces(s, prod, r) for r in s.edit_label.variants), name
 
 
+def test_skipped_steps_are_counted_by_domain_class():
+    from types import SimpleNamespace as Step
+
+    steps = [
+        Step(step_id="a", domain_class="REPAIRED_DATIVE"),
+        Step(step_id="b", domain_class=None),
+        Step(step_id="c", domain_class="REPAIRED_DATIVE+METAL_SUSPECT"),
+        Step(step_id="d", domain_class=None),
+    ]
+    skipped = {i: SkipReason.MISSING_TOKENS for i in "abc"}
+    assert skipped_by_domain_class(steps, skipped) == {
+        "MISSING_TOKENS": {"REPAIRED_DATIVE": 1, "REPAIRED_DATIVE+METAL_SUSPECT": 1, "none": 1}
+    }
+
+
 def test_samples_build_for_every_split_strategy(mini_processed, token_loader):
     report = build_all_samples(
         "pmechdb",
@@ -183,15 +201,46 @@ def test_samples_build_for_every_split_strategy(mini_processed, token_loader):
     )
     assert not report["strategies_not_applicable"]
     assert report["skipped"] == {"MISSING_TOKENS": 1}
+    assert report["skipped_by_domain_class"] == {"MISSING_TOKENS": {"none": 1}}
     names = set(report["splits"])
     assert {"molecule_train", "scaffold_test"} <= names
     assert any(n.startswith("loco-substitution_") for n in names)
+    from ksmech.arrows.delta_be import smallest_variant
+
+    assert report["kekule_closest"] == 0 and "resonance_truncated" in report
     for split, r in report["splits"].items():
         path = samples_path("pmechdb", split, mini_processed)
-        assert path.exists() and len(load_samples(path)) == r["n_samples"]
+        samples = load_samples(path)
+        assert path.exists() and len(samples) == r["n_samples"]
         assert r["n_samples"] + sum(r["skipped"].values()) == r["n_steps"]
+        # per part, the label maxima: the largest smallest-variant bond and atom counts
+        smallest = [smallest_variant(s.edit_label) for s in samples]
+        want = {
+            "bonds": max((len(v.bonds) for v in smallest), default=0),
+            "atoms": max((len(v.lone) for v in smallest), default=0),
+        }
+        assert r["label_maxima"] == want, split
+        assert json.loads(path.read_text())["report"]["label_maxima"] == want
     held_out = report["splits"]["loco-substitution_test"]
     assert held_out["n_steps"] == 2 and held_out["skipped"] == {"MISSING_TOKENS": 1}
+
+
+def test_views_of_a_new_strategy_over_the_built_store(mini_processed, token_loader):
+    """`write_views_from_store` adds a strategy's views without touching the store or the
+    views already written."""
+    from ksmech.arrows.steps import write_views_from_store
+
+    build_all_samples("pmechdb", ["molecule"], mini_processed, token_loader)
+    index = mini_processed / "pmechdb" / "samples" / "index.json"
+    before = index.read_bytes(), samples_path("pmechdb", "molecule_train", mini_processed)
+    kept = before[1].read_bytes()
+    report = write_views_from_store("pmechdb", ["loco_all"], mini_processed)
+    assert index.read_bytes() == before[0] and before[1].read_bytes() == kept
+    names = set(report["splits"])
+    assert any(n.startswith("locoall-substitution_") for n in names)
+    for split, r in report["splits"].items():
+        path = samples_path("pmechdb", split, mini_processed)
+        assert len(load_samples(path)) == r["n_samples"]
 
 
 def test_pair_stats_are_those_of_the_stored_valid_cells(mini_processed, token_loader):
@@ -208,11 +257,27 @@ def test_pair_stats_are_those_of_the_stored_valid_cells(mini_processed, token_lo
     for refit in (pair_stats(train), pair_stats(built)):  # as loaded, and as just built
         for a in ("mean", "std", "count"):
             assert np.array_equal(getattr(stats, a), getattr(refit, a)), a
-    valid = sum((s.pair_defined & s.pair_valid[..., None]).sum((0, 1)) for s in built)
+    k = len(STAGE_A_FEATURES)
+    valid = sum((s.pair_defined[..., :k] & s.pair_valid[..., None]).sum((0, 1)) for s in built)
     assert np.array_equal(stats.count, valid)
-    assert (sum(s.pair_defined.sum((0, 1)) for s in built) > valid).any()  # invalid cells exist
+    every = sum(s.pair_defined[..., :k].sum((0, 1)) for s in built)
+    assert (every > valid).any()  # invalid cells exist
     header = prov.read_header(path)
     assert header.kind == "pair_stats" and header.config["cells"] == "valid"
+    from ksmech.physics.stage_a import cell_features
+
+    path_all = pair_stats_path("pmechdb", "molecule", mini_processed, "all")
+    stats_all = load_pair_stats(path_all)  # every cell, the flags and the legacy mask
+    assert path_all.name == "pair_feature_stats_molecule_allcells.json"
+    assert stats_all.names == cell_features("all")
+    assert prov.read_header(path_all).config["cells"] == "all"
+    assert np.array_equal(stats_all.count[:k], every)
+    n_cells = sum(s.pair_valid.size for s in built)
+    assert (stats_all.count[k:] == n_cells).all()
+    n_valid = sum(int(s.pair_valid.sum()) for s in built)
+    assert np.isclose(stats_all.mean[-1], n_valid / n_cells)  # the mean of the legacy mask
+    for a in ("mean", "std", "count"):
+        assert np.array_equal(getattr(stats_all, a), getattr(pair_stats(train, cells="all"), a))
     from ksmech.arrows import store
     from ksmech.arrows.steps import splits_path
 
@@ -323,19 +388,25 @@ def test_loader_and_cli(mini_processed, token_loader, monkeypatch, capsys):
 def test_sample_stores_the_pair_block(mini_steps, token_loader):
     import numpy as np
 
-    from ksmech.physics.pairs import valid_pairs
+    from ksmech.physics.pairs import PAIR_FLAGS, pair_flags, valid_pairs
     from ksmech.physics.params import REDUCED
-    from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+    from ksmech.physics.stage_a import STAGE_A_FEATURES, STORED_PAIR_FEATURES, stage_a_block
 
     step = mini_steps["sn2"]
     s = sample_for_step(step, token_loader)
     n_occ, n_virt = int(s.orbital_occupied.sum()), int((~s.orbital_occupied).sum())
-    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(STAGE_A_FEATURES))
+    assert s.pair_features == STORED_PAIR_FEATURES
+    assert s.pair_z.shape == s.pair_defined.shape == (n_occ, n_virt, len(STORED_PAIR_FEATURES))
     assert s.pair_z.dtype == np.float32 and s.pair_valid.shape == (n_occ, n_virt)
     tokens = s.tokens(token_loader)
     block = stage_a_block(tokens, REDUCED)
-    assert np.allclose(s.pair_z, block.z, rtol=1e-6, atol=1e-6)
-    assert np.array_equal(s.pair_defined, block.defined)
+    k = len(STAGE_A_FEATURES)
+    assert np.allclose(s.pair_z[..., :k], block.z, rtol=1e-6, atol=1e-6)
+    assert np.array_equal(s.pair_defined[..., :k], block.defined)
+    flags = pair_flags(tokens)
+    for c, name in enumerate(PAIR_FLAGS):
+        assert np.array_equal(s.pair_z[..., k + c], flags[name]), name
+    assert s.pair_defined[..., k:].all()
     assert np.array_equal(s.pair_gap_sign, block.gap_sign)
     assert np.array_equal(s.pair_valid, valid_pairs(tokens))
     donors = s.donor_mask[s.orbital_occupied]
@@ -458,20 +529,23 @@ def test_every_label_carries_a_valid_teacher_pair(mini_steps, token_loader):
 
 
 def test_stage_a_samples_round_trip_through_the_store(mini_steps, token_loader, tmp_path):
-    from ksmech.physics.stage_a import STAGE_A_FEATURES, stage_a_block
+    from ksmech.arrows.store import BINARY_FEATURES
+    from ksmech.physics.pairs import PAIR_FLAGS
+    from ksmech.physics.stage_a import STAGE_A_FEATURES, STORED_PAIR_FEATURES, stage_a_block
 
     s = sample_for_step(mini_steps["e2"], token_loader)
-    assert s.pair_features == STAGE_A_FEATURES
-    assert s.pair_z.shape[-1] == len(STAGE_A_FEATURES)
+    assert s.pair_features == STORED_PAIR_FEATURES
+    assert s.pair_z.shape[-1] == len(STORED_PAIR_FEATURES)
     block = stage_a_block(s.tokens(token_loader))
-    assert np.allclose(s.pair_z, block.z, rtol=1e-6, atol=1e-6)
+    assert np.allclose(s.pair_z[..., : len(STAGE_A_FEATURES)], block.z, rtol=1e-6, atol=1e-6)
     (back,) = load_samples(_stored(tmp_path, {s.step_id: s}))
-    assert back.pair_features == STAGE_A_FEATURES
-    valid = s.pair_valid
-    assert np.array_equal(back.pair_defined[valid], s.pair_defined[valid])
-    assert np.allclose(back.pair_z[valid], s.pair_z[valid], rtol=1e-3, atol=1e-3)  # float16
-    k = STAGE_A_FEATURES.index("bonded")
-    assert np.array_equal(back.pair_z[valid][:, k], s.pair_z[valid][:, k])  # bits, exact
+    assert back.pair_features == STORED_PAIR_FEATURES
+    assert np.array_equal(back.pair_defined, s.pair_defined)
+    assert np.allclose(back.pair_z, s.pair_z, rtol=1e-3, atol=1e-3)  # float16
+    assert set(PAIR_FLAGS) <= set(BINARY_FEATURES)
+    for name in ("bonded", *PAIR_FLAGS):  # bits, exact, on every cell
+        k = STORED_PAIR_FEATURES.index(name)
+        assert np.array_equal(back.pair_z[..., k], s.pair_z[..., k]), name
 
 
 def test_the_parallel_build_matches_the_sequential_one(mini_steps, mini_token_cache):
@@ -490,3 +564,86 @@ def test_the_parallel_build_matches_the_sequential_one(mini_steps, mini_token_ca
         assert np.allclose(other.pair_z, s.pair_z, rtol=1e-12, atol=1e-12)
         assert other.edit_label == s.edit_label and np.array_equal(other.bonds, s.bonds)
         assert np.array_equal(other.wiberg, s.wiberg)
+
+
+def test_samples_store_the_extra_token_columns_after_the_v17_ones(mini_steps, token_loader):
+    """v18: the atom columns are the v17 inputs then the finite-difference f+ / f- and the
+    exact-degeneracy frontier set; the orbital columns the v17 inputs then the retained
+    spectral weight and E_r, read from the token files (open-shell plan P0a, items 2-3)."""
+    from ksmech.orbitals.tokens import (
+        STORED_ATOM_FEATURES,
+        STORED_ORBITAL_FEATURES,
+        atom_feature_names,
+        feature_names,
+    )
+
+    s = sample_for_step(mini_steps["sn2"], token_loader)
+    tok = s.tokens(token_loader)
+    assert s.atom_columns == STORED_ATOM_FEATURES and s.orbital_columns == STORED_ORBITAL_FEATURES
+    k, m = len(atom_feature_names()), len(feature_names())
+    legacy = np.concatenate([t.atom_features() for t in tok]).astype(np.float32)
+    assert np.array_equal(s.atom_features[:, :k], legacy)
+    assert np.array_equal(s.atom_missing[:, :k], np.concatenate([t.atom_missing() for t in tok]))
+    extra = np.concatenate([t.atom_extra() for t in tok])
+    assert np.array_equal(s.atom_missing[:, k:], np.isnan(extra))
+    assert np.array_equal(s.atom_features[:, k:], np.nan_to_num(extra).astype(np.float32))
+    orbitals = [o for t in tok for o in t.orbitals]
+    assert np.array_equal(
+        s.orbital_features[:, :m],
+        np.concatenate([t.orbital_features() for t in tok]).astype(np.float32),
+    )
+    expect = [[o.descriptors.retained_fraction, o.descriptors.energy_ev] for o in orbitals]
+    assert np.array_equal(s.orbital_features[:, m:], np.array(expect, dtype=np.float32))
+
+
+# ---- P3: law (S) and the stretched-bond flag
+
+
+def _fragment(key: str, smeared: bool):
+    from types import SimpleNamespace
+
+    from ksmech.qm.spin import method_for
+    from ksmech.qm.xtb_calc import QMConfig
+
+    method = method_for(key, QMConfig().method)  # the token file's method, tagged where reassigned
+    return SimpleNamespace(key=key, tokens=SimpleNamespace(fermi_smeared=smeared, method=method))
+
+
+def test_a_smeared_open_shell_reactant_has_no_integral_somo():
+    from types import SimpleNamespace
+
+    rt = SimpleNamespace(
+        fragments=[_fragment("[O][O-]", True), _fragment("CC=O", True), _fragment("[CH3]", False)]
+    )
+    assert smeared_open_shells(rt) == ["[O][O-]"]  # a smeared closed shell stays a slice (U10)
+
+
+def test_law_s_reads_drawn_radicals_that_stay_open_shells():
+    """A smeared Cu(II) fragment RDKit counts 0 stays a flagged sample (its d tokens are
+    masked), and a carbene the species table pairs (u = 0) is no open shell; a smeared drawn
+    doublet is held back."""
+    from types import SimpleNamespace
+
+    frags = [_fragment("[Cl][Cu][Cl]", True), _fragment("Cl[C]Cl", True), _fragment("[CH3]", True)]
+    assert smeared_open_shells(SimpleNamespace(fragments=frags)) == ["[CH3]"]
+
+
+def _na_sample(distance: float, r_bonds):
+    from types import SimpleNamespace
+
+    from ksmech.arrows.delta_be import ReactionMatrix
+
+    label = SimpleNamespace(variants=(ReactionMatrix(tuple(r_bonds), ()),))
+    return SimpleNamespace(
+        edit_label=label,
+        atom_categorical=np.array([[11, 0], [6, 0], [6, 0]]),  # Na, C, C
+        bonds=np.array([[0, 1, 1], [1, 2, 1]]),
+        atom_positions=np.array([[0.0, 0, 0], [distance, 0, 0], [distance + 1.5, 0, 0]]),
+    )
+
+
+def test_an_r_entry_on_a_stretched_alkali_bond_is_flagged():
+    flagged = stretched_bonds(_na_sample(3.3, [(0, 1, -1)]))
+    assert [(i, j) for i, j, _ in flagged] == [(0, 1)] and flagged[0][2] > 1.3
+    assert stretched_bonds(_na_sample(2.3, [(0, 1, -1)])) == []  # a bond the record holds
+    assert stretched_bonds(_na_sample(3.3, [(1, 2, -1)])) == []  # R elsewhere

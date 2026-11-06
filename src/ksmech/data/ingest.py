@@ -10,11 +10,25 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
+from ksmech.data.domain import (
+    ADMITTED_METAL,
+    ADMITTED_OPEN_SHELL,
+    CURATED_CLASSES,
+    DomainClass,
+    domain_classes,
+    max_species_unpaired,
+    repair_rule_counts,
+)
 from ksmech.data.io import source_dir, write_resonance_pairs, write_steps
 from ksmech.data.schema import ElementaryStep, Source
+from ksmech.data.spin import spin_config
 from ksmech.data.validation import Rejection, RejectReason, StepRejected
 
 log = logging.getLogger(__name__)
+
+FROZEN_SAMPLE_SCHEMA = 1  # `sample_frozen.json`: a pilot's step ids, independent of every version
 
 
 @dataclass
@@ -26,6 +40,7 @@ class IngestResult:
     rejections: list[Rejection] = field(default_factory=list)
     notes: Counter[str] = field(default_factory=Counter)  # non-fatal normalizations, counted
     _seen: set[str] = field(default_factory=set, repr=False)
+    sample: dict | None = None  # (`keep_sample`) n, seed and the accepted steps drawn from
 
     def add(self, step_id: str, raw: str, make: Callable[[], ElementaryStep]) -> None:
         """Run one record through `make` and record either the step or the rejection."""
@@ -44,6 +59,26 @@ class IngestResult:
     def reject(self, step_id: str, raw: str, exc: StepRejected) -> None:
         log.warning("rejected %s [%s] %s", step_id, exc.reason, exc.detail)
         self.rejections.append(Rejection(step_id, exc.reason, exc.detail, raw))
+
+    def keep_sample(self, n: int, seed: int, frozen: set[str] | None = None) -> None:
+        """Keep `n` accepted steps drawn uniformly at random (seeded; independent of file order:
+        the draw is over the sorted step ids); the rest are counted in `sample`, not rejected.
+        Rejections stay those of every record read. With `frozen` (a pilot's
+        `sample_frozen.json`) the kept steps are exactly the frozen ids that are still
+        accepted, so a rule that changes the accepted set never redraws the pilot: accepted
+        steps outside it count as not sampled, frozen ids no longer accepted as missing."""
+        if frozen is not None:
+            have = {s.step_id for s in self.steps}
+            self.sample = {"n": n, "seed": seed, "of_accepted": len(self.steps)}
+            self.sample |= {"frozen": len(frozen), "frozen_missing": len(frozen - have)}
+            self.steps = [s for s in self.steps if s.step_id in frozen]
+            return
+        if n >= len(self.steps):
+            return
+        ids = sorted(s.step_id for s in self.steps)
+        keep = set(np.random.default_rng(seed).choice(ids, size=n, replace=False).tolist())
+        self.sample = {"n": n, "seed": seed, "of_accepted": len(self.steps)}
+        self.steps = [s for s in self.steps if s.step_id in keep]
 
     def reason_counts(self) -> Counter[str]:
         return Counter(str(r.reason) for r in self.rejections)
@@ -66,11 +101,43 @@ class IngestResult:
                 Counter(s.domain_exclusion for s in self.steps if s.domain_exclusion).most_common()
             ),
             "n_charge_repaired": sum(s.charge_repair is not None for s in self.steps),
+            "charge_repairs_by_rule": dict(repair_rule_counts(self.steps).most_common()),
+            "domain_class": dict(
+                Counter(s.domain_class for s in self.steps if s.domain_class).most_common()
+            ),
+            "open_shell": open_shell_report(self.steps),
+            "spin": spin_config(),
             "n_rejected": len(self.rejections),
             "rejected_fraction": self.rejected_fraction,
             "rejections_by_reason": dict(self.reason_counts().most_common()),
             "notes": dict(self.notes.most_common()),
+            "sample": self.sample,
         }
+
+
+def open_shell_report(steps: list[ElementaryStep]) -> dict:
+    """The open-shell admission of the steps (open-shell plan P3, P4): admitted steps by class,
+    the admitted radical steps that hold a species drawn with u >= 2 (each must be a counted
+    exemption of `curation/multi_radical_exemptions.json`) and the curated exclusions by
+    reason."""
+    admitted_classes = {str(c) for c in ADMITTED_OPEN_SHELL | ADMITTED_METAL}
+    radical = {str(DomainClass.RADICAL_SPECTATOR), str(DomainClass.RADICAL_REACTIVE)}
+    curated = {str(c) for c in CURATED_CLASSES}
+    admitted, held = Counter(), Counter()
+    multi = []
+    for s in steps:
+        classes = domain_classes(s.domain_class)
+        if s.domain_exclusion is None and classes & admitted_classes:
+            admitted.update(classes & admitted_classes)
+            if classes & radical and max_species_unpaired(s) >= 2:
+                multi.append(s.step_id)
+        elif s.domain_exclusion is not None:
+            held.update(classes & curated)
+    return {
+        "admitted": dict(sorted(admitted.items())),
+        "admitted_with_u_ge_2": sorted(multi),
+        "curated_out": dict(sorted(held.items())),
+    }
 
 
 def write_outputs(result: IngestResult, processed_dir: Path) -> dict[str, Path]:
@@ -99,3 +166,44 @@ def write_outputs(result: IngestResult, processed_dir: Path) -> dict[str, Path]:
                 writer.writerow([s.step_id, *row])
     paths["report"].write_text(json.dumps(result.report(), indent=2) + "\n")
     return paths
+
+
+def frozen_sample_path(source: Source | str, processed_dir: Path) -> Path:
+    return source_dir(source, processed_dir) / "sample_frozen.json"
+
+
+def freeze_sample(source: Source | str, processed_dir: Path) -> Path:
+    """Snapshot the step ids of a sampled source's steps.parquet (a pilot drawn by
+    `ingest --sample`) as `sample_frozen.json`, stamped with no file input (a content hash),
+    so no later re-ingest makes it stale. From then on `ingest --sample` keeps exactly these
+    ids. An existing snapshot is never overwritten: a new pilot is an explicit new version."""
+    import pandas as pd
+
+    from ksmech.data import provenance as prov
+
+    folder = source_dir(source, processed_dir)
+    out = frozen_sample_path(source, processed_dir)
+    if out.exists():
+        raise FileExistsError(f"{out} exists: a frozen sample is replaced only by hand")
+    sample = json.loads((folder / "ingest_report.json").read_text()).get("sample")
+    if not sample:
+        raise ValueError(f"{source} was not ingested with --sample: nothing to freeze")
+    ids = sorted(pd.read_parquet(folder / "steps.parquet", columns=["step_id"])["step_id"])
+    content = prov.sha256_text(json.dumps(ids))
+    header = prov.stamp("sample_frozen", FROZEN_SAMPLE_SCHEMA, {}, sample, content)
+    return prov.write_json(out, {"ids": ids}, header)
+
+
+def load_frozen_sample(source: Source | str, processed_dir: Path) -> set[str] | None:
+    """The frozen pilot ids, None when the source has no snapshot; kind, schema, clean build
+    and content hash checked."""
+    from ksmech.data import provenance as prov
+
+    path = frozen_sample_path(source, processed_dir)
+    if not path.exists():
+        return None
+    header = prov.verify_clean(path, "sample_frozen", FROZEN_SAMPLE_SCHEMA)
+    ids = json.loads(path.read_text())["ids"]
+    if prov.sha256_text(json.dumps(ids)) != header.content_sha256:
+        raise prov.StaleArtifact(path, ["its ids differ from its content hash"])
+    return set(ids)

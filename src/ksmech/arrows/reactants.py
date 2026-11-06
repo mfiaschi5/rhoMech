@@ -41,6 +41,7 @@ from ksmech.orbitals.tokens import (
 )
 from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, bond_index_path, load_bond_indices
 from ksmech.qm.embed import prepare_mol
+from ksmech.qm.spin import method_for
 from ksmech.qm.xtb_calc import QMConfig
 
 log = logging.getLogger(__name__)
@@ -246,12 +247,13 @@ class TokenCache:
         log.info("%s: %s (%s)", key, code, detail)
 
     def _load(self, key: str) -> MoleculeTokens | None:
-        path = tokens_path(self.tokens_dir, key, self.conformer_id, self.method)
+        method = method_for(key, self.method)
+        path = tokens_path(self.tokens_dir, key, self.conformer_id, method)
         if not path.exists():
             return None
         try:
             tokens = load_tokens(path, verify=not self.allow_stale)
-            side = bond_index_path(self.bond_index_dir, key, self.conformer_id, self.method)
+            side = bond_index_path(self.bond_index_dir, key, self.conformer_id, method)
             if not side.exists():
                 detail = f"{side}: no bond indices (run `ksmech-qm bond-index`)"
                 self._unusable(key, NO_BOND_INDEX, detail)

@@ -2,10 +2,14 @@
 
 - token / QM key: `chem.unmapped_canonical(fragment)`, the cache file name (not resonance
   invariant: an enolate drawn as a carbanion is another key);
-- species key: `data.resonance.sigma_key(Chem.MolFromSmiles(token_key))`, the spec-v8
-  resonance identity (the sigma skeleton with every H frozen and the charges zeroed, then
-  `|<total charge>`): map-free, exact (no enumeration, so never truncated), memoized by token
-  key. The resonance flag is always "OK" (it was the truncation flag of the old enumerated key);
+- species key: `data.resonance.identity_key(Chem.MolFromSmiles(token_key))`, the identity
+  key v2 (open-shell plan U12): for a closed shell the spec-v8 sigma key (the sigma skeleton
+  with every H frozen and the charges zeroed, then `|<total charge>`), for an open shell that
+  key, `|`, and its `<sigma SMILES>,<charge>,<unpaired>` (never a '.', so pool keys still split
+  on it; u from the drawing's N, raised by the species table's high-spin rows): map-free, exact
+  (no enumeration, so never truncated), memoized by token key. The resonance flag is always
+  "OK" (it was the truncation flag of the old enumerated key). Stored states carry KEY_VERSION
+  and are re-keyed once at the Release B merge (`ksmech-serve rekey-pools`);
 - pool key: the sorted species keys joined by "." with repeats (each key is one fragment, so the
   join is unambiguous; it is not a SMILES, since a key ends in `|<charge>`); pool id
   "p" + sha256("pool-v2|" + key)[:20] (v2: the sigma key replaced the enumerated key);
@@ -56,13 +60,13 @@ class SideKeys:
 @lru_cache(maxsize=65536)
 def species_key_of(token_key: str) -> tuple[str, str]:
     """(species key, resonance flag "OK") of a token key. Raises ServeError(SPECIES_KEY_FAILED)."""
-    from ksmech.data.resonance import sigma_key
+    from ksmech.data.resonance import identity_key
 
     with rdBase.BlockLogs():
         mol = Chem.MolFromSmiles(token_key)
     if mol is None or mol.GetNumAtoms() == 0:
         raise ServeError(Code.SPECIES_KEY_FAILED, f"RDKit cannot parse token key {token_key!r}")
-    return sigma_key(mol), RESONANCE_OK
+    return identity_key(mol), RESONANCE_OK
 
 
 def fragment_keys(mol: Chem.Mol) -> list[FragmentKey]:

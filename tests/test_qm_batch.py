@@ -171,3 +171,26 @@ def test_retry_reasons_pick_the_failures_to_retry(tiny, monkeypatch):
     assert calls == []  # BAD failed with SPIN_PARITY
     run(processed, cfg, retry_reasons=["SPIN_PARITY", "TIMEOUT"])
     assert calls == [BAD]
+
+
+def test_steps_from_restricts_the_molecules(tmp_path):
+    """`ksmech-qm run --steps-from`: only the fragments of the listed steps (P0a: the
+    re-charged kept steps of p0a_changes.json), read from 'qm_steps' or 'ids'."""
+    import json
+
+    from ksmech.qm.cli import steps_from
+
+    processed = tmp_path / "processed"
+    path = processed / "pmechdb" / "steps.parquet"
+    path.parent.mkdir(parents=True)
+    table = {"step_id": ["a", "b"], "reactants_smiles": REACTANTS, "products_smiles": PRODUCTS}
+    pq.write_table(pa.table(table), path)
+    smiles, _ = batch.collect_molecules("pmechdb", processed, ["a"])
+    assert smiles == sorted({"CO", "[Cl-]", "CCl", "[OH-]"})
+    assert batch.collect_molecules("pmechdb", processed, [])[0] == []
+    listed = tmp_path / "changes.json"
+    listed.write_text(json.dumps({"qm_steps": ["b"], "ids": ["a"]}))
+    assert steps_from(listed) == ["b"] and steps_from(None) is None
+    listed.write_text(json.dumps({"other": []}))
+    with pytest.raises(ValueError, match="qm_steps"):
+        steps_from(listed)

@@ -26,6 +26,7 @@ Hartree. `C_loc` holds the S-orthonormal AO coefficients of every orbital token 
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
@@ -45,7 +46,12 @@ from ksmech.orbitals.descriptors import (
     feature_names,
 )
 from ksmech.orbitals.fgroups import FGVocab, default_vocab
-from ksmech.orbitals.frontier import LEVELS, frontier_weights, frozen_orbital_fukui_blocks
+from ksmech.orbitals.frontier import (
+    EXACT_EV,
+    LEVELS,
+    frontier_weights,
+    frozen_orbital_fukui_blocks,
+)
 from ksmech.orbitals.localize import (
     LocalizedOrbitals,
     PMConfig,
@@ -56,7 +62,7 @@ from ksmech.qm.bond_index import as_dict, lewis_bond_indices
 from ksmech.qm.embed import prepare_mol
 from ksmech.qm.records import QMRecord
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10  # 10: the exact-degeneracy (1e-4 eV) frontier set beside the 0.05 eV one
 
 
 class OrbitalKind(StrEnum):
@@ -109,7 +115,10 @@ class AtomToken:
 
     Hybridization, the aromatic flag and the functional-group id are chemists' taxonomies:
     stored for tests, the interface and ablations, never model input. So are the
-    finite-difference f+ / f- (relaxation-dominated) and the absolute position.
+    finite-difference f+ / f- (relaxation-dominated) and the absolute position. The frontier
+    weights and frozen-orbital f+ / f- with exactly degenerate blocks (`frontier.EXACT_EV`,
+    schema 10) are stored inputs a model selects by name (`ATOM_EXTRA_FEATURES`), not columns
+    of `atom_features()`.
     """
 
     token_id: int = _atom_diag()
@@ -130,6 +139,9 @@ class AtomToken:
     aromatic: bool = _atom_diag()
     fg_id: int = _atom_diag()  # functional-group vocabulary index (0 none, 1 unk)
     position: np.ndarray = _atom_diag()  # (3,) Angstrom; geometry enters through distances
+    f_plus_fmo_exact: float = _atom_diag()  # f+ / f- / frontier weights of blocks within EXACT_EV
+    f_minus_fmo_exact: float = _atom_diag()
+    fmo_weights_exact: np.ndarray = _atom_diag()  # (4,) as fmo_weights
 
 
 def atom_feature_names() -> list[str]:
@@ -140,6 +152,34 @@ def atom_feature_names() -> list[str]:
             continue
         names += [f"fmo_{lv}" for lv in LEVELS] if f.name == "fmo_weights" else [f.name]
     return names
+
+
+# stored atom inputs beyond `atom_feature_names()`, appended to a sample's atom columns (v18):
+# the finite-difference f+ / f- and the exact-degeneracy frontier set
+ATOM_EXTRA_FEATURES = (
+    "f_plus",
+    "f_minus",
+    "f_plus_fmo_exact",
+    "f_minus_fmo_exact",
+    *(f"fmo_exact_{lv}" for lv in LEVELS),
+)
+# the legacy column -> its exact-degeneracy counterpart (`ModelConfig.frontier_blocks='exact'`)
+EXACT_COLUMNS = {
+    "f_plus_fmo": "f_plus_fmo_exact",
+    "f_minus_fmo": "f_minus_fmo_exact",
+    **{f"fmo_{lv}": f"fmo_exact_{lv}" for lv in LEVELS},
+}
+# stored orbital inputs beyond `feature_names()` (bookkeeping descriptors read as inputs, v18)
+ORBITAL_EXTRA_FEATURES = ("retained_fraction", "energy_ev")
+STORED_ATOM_FEATURES = (*atom_feature_names(), *ATOM_EXTRA_FEATURES)  # a v18 sample's atom columns
+STORED_ORBITAL_FEATURES = (*feature_names(), *ORBITAL_EXTRA_FEATURES)  # and its orbital columns
+
+
+def _atom_extra_row(a: AtomToken) -> np.ndarray:
+    return np.array(
+        [a.f_plus, a.f_minus, a.f_plus_fmo_exact, a.f_minus_fmo_exact, *a.fmo_weights_exact],
+        dtype=float,
+    )
 
 
 def _atom_row(a: AtomToken) -> np.ndarray:
@@ -380,6 +420,17 @@ class MoleculeTokens:
         (finite-difference dual after FUKUI_SCF_FAIL, a frontier level that does not exist)."""
         return np.isnan(self._atom_raw())
 
+    def atom_extra(self) -> np.ndarray:
+        """(n_atoms, len(ATOM_EXTRA_FEATURES)) the stored atom inputs beyond `atom_features()`,
+        NaN where unavailable."""
+        n = len(ATOM_EXTRA_FEATURES)
+        return np.array([_atom_extra_row(a) for a in self.atoms], dtype=float).reshape(-1, n)
+
+    def orbital_extra(self) -> np.ndarray:
+        """(n_orbitals, len(ORBITAL_EXTRA_FEATURES)) the retained spectral weight and E_r."""
+        rows = [[getattr(o.descriptors, f) for f in ORBITAL_EXTRA_FEATURES] for o in self.orbitals]
+        return np.array(rows, dtype=float).reshape(-1, len(ORBITAL_EXTRA_FEATURES))
+
     def atom_categorical(self) -> np.ndarray:
         """(n_atoms, 2) integer inputs that are embedded: atomic number, formal charge."""
         rows = [[getattr(a, f) for f in ATOM_CATEGORICAL] for a in self.atoms]
@@ -441,8 +492,9 @@ def _value(arr: np.ndarray, i: int) -> float:
 
 def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomToken]:
     out = []
-    fmo = frontier_weights(rec)
+    fmo, fmo_exact = frontier_weights(rec), frontier_weights(rec, EXACT_EV)
     f_plus_fmo, f_minus_fmo = frozen_orbital_fukui_blocks(rec)
+    f_plus_exact, f_minus_exact = frozen_orbital_fukui_blocks(rec, EXACT_EV)
     chirality = chirality_signs(mol, rec.coords_ang)
     for i, atom in enumerate(mol.GetAtoms()):
         out.append(
@@ -465,6 +517,9 @@ def atom_tokens(rec: QMRecord, mol: Chem.Mol, fg_ids: np.ndarray) -> list[AtomTo
                 position=rec.coords_ang[i].copy(),
                 fg_id=int(fg_ids[i]),
                 fmo_weights=fmo[i].copy(),
+                f_plus_fmo_exact=float(f_plus_exact[i]),
+                f_minus_fmo_exact=float(f_minus_exact[i]),
+                fmo_weights_exact=fmo_exact[i].copy(),
             )
         )
     return out
@@ -607,6 +662,9 @@ _ATOM_FIELDS = (
     "position",
     "fg_id",
     "fmo_weights",
+    "f_plus_fmo_exact",
+    "f_minus_fmo_exact",
+    "fmo_weights_exact",
 )
 _ORB_DIAG_SCALARS = ("s_share", "p_share", "d_share", "overlap_population")
 _DESC_FIELDS = tuple(f.name for f in fields(OrbitalDescriptors))
@@ -663,6 +721,23 @@ def _payload(t: MoleculeTokens) -> dict[str, np.ndarray]:
     return pay
 
 
+def legacy_differences(path: Path, tokens: MoleculeTokens) -> list[str]:
+    """The payload fields of the token file at `path` (written under an older schema) that
+    `tokens` holds differently, NaN-aware and exact; the fields only `tokens` has and the schema
+    number are not compared. A rebuild that only adds fields returns []."""
+    new = _payload(tokens)
+    with np.load(Path(path), allow_pickle=False) as z:
+        old = {k: z[k] for k in z.files if k not in (prov.HEADER_KEY, "schema_version")}
+    out = []
+    for k, v in old.items():
+        w = new.get(k)
+        nan_aware = v.dtype.kind in "fc"
+        same = w is not None and v.shape == w.shape and np.array_equal(v, w, equal_nan=nan_aware)
+        if not same:
+            out.append(k)
+    return out
+
+
 def token_config(
     pm_config: PMConfig | None = None, descriptor_config: DescriptorConfig | None = None
 ) -> dict:
@@ -676,6 +751,56 @@ def token_config(
         "localization": pm.method,
         "localization_start": pm.start,
     }
+
+
+OPEN_SHELL_RULE = "occ-plateau-v1"  # u > 0: plateau blocks and the radical frontier (P2b)
+
+
+def drawn_unpaired(smiles: str) -> int:
+    """RDKit's unpaired count of a token file's molecule: the u its QM record was run at
+    (`qm.xtb_calc.resolve_charge_spin` on the same SMILES)."""
+    from rdkit import rdBase
+
+    with rdBase.BlockLogs():
+        mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"RDKit cannot parse the token file molecule {smiles!r}")
+    return sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
+
+
+def record_unpaired(smiles: str, method: str | None = None) -> int:
+    """The u the QM record of a token file was run at: the count of its method's spin tag for a
+    species `data.spin` reassigns ('+spin-v1-u<u>', `qm.spin`, open-shell plan P4), else
+    RDKit's (`drawn_unpaired`)."""
+    found = re.search(r"\+spin-v\d+-u(\d+)", method or "")
+    return int(found.group(1)) if found else drawn_unpaired(smiles)
+
+
+def with_open_shell_rule(config: dict, smiles: str, method: str | None = None) -> dict:
+    """`config` plus, for an open shell (u > 0, `record_unpaired`), the key `open_shell_rule`,
+    which only those files carry: a u > 0 file built before the rule lacks it and is stale under
+    every reader, whatever config the reader passes (`load_tokens`, `save_tokens`; open-shell
+    plan P2b)."""
+    if record_unpaired(smiles, method) > 0:
+        return {**config, "open_shell_rule": OPEN_SHELL_RULE}
+    return dict(config)
+
+
+def token_config_for(
+    smiles: str,
+    pm_config: PMConfig | None = None,
+    descriptor_config: DescriptorConfig | None = None,
+    method: str | None = None,
+) -> dict:
+    """The configuration the token file of `smiles` (computed under `method`) is stamped with
+    and checked against."""
+    return with_open_shell_rule(token_config(pm_config, descriptor_config), smiles, method)
+
+
+def stored_smiles(path: Path) -> str:
+    """The molecule a token file holds (its payload's `smiles`)."""
+    with np.load(Path(path), allow_pickle=False) as z:
+        return str(z["smiles"].item())
 
 
 def token_digest(tokens: MoleculeTokens) -> str:
@@ -692,25 +817,31 @@ def save_tokens(
     config: dict | None = None,
 ) -> Path:
     """Write as .npz (no pickle) with its provenance header, atomically. `inputs`: the QM
-    record it was built from (`prov.file_input(qm_path)`); `config`: `token_config(...)`."""
+    record it was built from (`prov.file_input(qm_path)`); `config`: `token_config(...)`,
+    with the open-shell rule added for a u > 0 molecule (`with_open_shell_rule`)."""
     arrays = _payload(tokens)
     tokens.digest = prov.array_digest(arrays)
-    header = prov.stamp(
-        "tokens", SCHEMA_VERSION, inputs or {}, config or token_config(), tokens.digest
-    )
+    config = with_open_shell_rule(config or token_config(), tokens.smiles, tokens.method)
+    header = prov.stamp("tokens", SCHEMA_VERSION, inputs or {}, config, tokens.digest)
     out = prov.save_npz(path, arrays, header)
     tokens.source_path = str(out)
     return out
 
 
+_EXACT_FIELDS = {"f_plus_fmo_exact": (), "f_minus_fmo_exact": (), "fmo_weights_exact": (4,)}
+
+
 def _load_atoms(z: dict) -> list[AtomToken]:
     n = len(z["atom_atom_index"])
+    for f, shape in _EXACT_FIELDS.items():  # a schema-9 file read unverified: NaN, unavailable
+        z.setdefault(f"atom_{f}", np.full((n, *shape), np.nan))
     cols = {f: z[f"atom_{f}"] for f in _ATOM_FIELDS}
     atoms = []
     for i in range(n):
         kw = {f: cols[f][i] for f in _ATOM_FIELDS}
         kw["position"] = np.asarray(kw["position"], dtype=float)
         kw["fmo_weights"] = np.asarray(kw["fmo_weights"], dtype=float)
+        kw["fmo_weights_exact"] = np.asarray(kw["fmo_weights_exact"], dtype=float)
         kw["hybridization"] = str(kw["hybridization"])
         for f in ("atom_index", "map_number", "atomic_number", "formal_charge", "fg_id"):
             kw[f] = int(kw[f])
@@ -724,6 +855,8 @@ def _load_atoms(z: dict) -> list[AtomToken]:
             "f_minus_fmo",
             "vbur",
             "chirality",
+            "f_plus_fmo_exact",
+            "f_minus_fmo_exact",
         ):
             kw[f] = float(kw[f])
         atoms.append(AtomToken(token_id=i, **kw))
@@ -777,15 +910,24 @@ TokenSchemaError = prov.StaleArtifact  # the old name: a stale token file; rebui
 
 def load_tokens(path: Path, config: dict | None = None, verify: bool = True) -> MoleculeTokens:
     """Read a token file. Its header is verified against the current schema, `config`
-    (default `token_config()`) and the QM record it was built from; raises StaleArtifact.
+    (default `token_config()`) with the open-shell rule of the file's own molecule
+    (`with_open_shell_rule`), and the QM record it was built from; raises StaleArtifact.
+    Every token reader goes through here, so none can take an old u > 0 file for current.
     `verify=False` is for diagnostics only."""
+    with np.load(Path(path), allow_pickle=False) as npz:
+        z = {k: npz[k] for k in npz.files if k != prov.HEADER_KEY}
     header = (
-        prov.verify(path, "tokens", SCHEMA_VERSION, config or token_config())
+        prov.verify(
+            path,
+            "tokens",
+            SCHEMA_VERSION,
+            with_open_shell_rule(
+                config or token_config(), str(z["smiles"].item()), str(z["method"].item())
+            ),
+        )
         if verify
         else prov.read_header(path)
     )
-    with np.load(Path(path), allow_pickle=False) as npz:
-        z = {k: npz[k] for k in npz.files if k != prov.HEADER_KEY}
     atoms = _load_atoms(z)
     meta = {k: z[k].item() for k in _META}
     for k in ("conformer_id", "pm_sweeps_occ", "pm_sweeps_virt", "schema_version", "fg_vocab_size"):

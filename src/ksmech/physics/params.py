@@ -43,6 +43,10 @@ SCALING = {
     "cross_coupling": ("K", 1),
     "align_cos": ("K", 0),
     "dihedral_cos": ("K", 0),
+    "d_acceptor": ("K", 0),
+    "own_antibond": ("K", 0),
+    "site_self": ("K", 0),
+    "pair_valid": ("K", 0),
 }
 
 

@@ -54,6 +54,7 @@ def test_build_skips_missing_records_and_writes_summary(dataset):
     assert summary["n_built"] == 3 and summary["n_missing_qm"] == 1 and summary["n_failed"] == 0
     assert len(list(config.out_dir.glob("*.npz"))) == 3
     on_disk = json.loads((config.out_dir / build.SUMMARY_NAME).read_text())
+    assert json.loads((processed / "pmechdb" / "tokens_summary.json").read_text()) == on_disk
     assert on_disk["n_missing_qm"] == 1 and on_disk["method"] == config.method
     assert summary["type_counts"]["occupied"]["delocalized_pi"] == 3  # benzene
     assert summary["type_counts"]["virtual"]["sigma_star"] >= 2
@@ -162,3 +163,55 @@ def test_workers_are_spawned_single_threaded(monkeypatch):
     import os
 
     assert os.environ["OMP_NUM_THREADS"] == "16" and "OPENBLAS_NUM_THREADS" not in os.environ
+
+
+def test_a_rebuild_compares_the_replaced_files_field_by_field(dataset):
+    """A forced rebuild over the same records changes no stored field (deterministic
+    localization: the legacy gate of a token schema bump); a file whose stored values differ is
+    named with its fields. Every closed-shell molecule gets its frontier-block comparison."""
+    import numpy as np
+
+    from ksmech.data import provenance as prov
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.qm.xtb_calc import QMConfig
+
+    processed, config = dataset
+    first = run(processed, config)
+    assert first["replaced"]["n_replaced"] == 0
+    assert first["frontier_blocks"]["n_closed_shell"] == 3
+    assert first["frontier_blocks"]["differ_from_exact"]["0.0001"] == 0
+    path = tokens_path(config.out_dir, "O", 0, QMConfig().method)
+    with np.load(path, allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files if k != prov.HEADER_KEY}
+    arrays["atom_mulliken_charge"] = arrays["atom_mulliken_charge"] + 1.0
+    np.savez(path, **arrays, **{prov.HEADER_KEY: np.array(prov.read_header(path).to_json())})
+    forced = BuildConfig(qm_cache_dir=config.qm_cache_dir, out_dir=config.out_dir, force=True)
+    again = run(processed, forced)["replaced"]
+    assert again["n_replaced"] == 3 and again["n_differing"] == 1
+    assert again["fields"] == {"atom_mulliken_charge": 1} and again["smiles"] == ["O"]
+
+
+def test_open_shell_molecules_get_their_diagnostics_in_the_summary(tmp_path):
+    """A u > 0 molecule's row carries its open MOs and plateaus, the energy-window references
+    beside the plateau one and both deviations, built or loaded; a closed shell carries none
+    and only closed shells enter the frontier-window comparison (open-shell plan P2b)."""
+    from ksmech.orbitals.build import OPEN_WINDOWS, process_molecule, summarize
+    from ksmech.qm.records import cache_path, save_record
+    from tests.fixtures.open_shell import open_shell_record
+
+    config = BuildConfig(qm_cache_dir=tmp_path / "qm", out_dir=tmp_path / "tokens")
+    for name in ("nitric_oxide", "bromine_atom"):
+        rec = open_shell_record(name)
+        save_record(rec, cache_path(config.qm_cache_dir, rec.smiles, 0, config.method))
+    rows = [process_molecule(s, config) for s in ("[N]=O", "[Br]")]
+    rows += [process_molecule(s, config) for s in ("[N]=O", "[Br]")]
+    assert [r.status for r in rows] == ["built", "built", "loaded", "loaded"]
+    no = rows[0].open_shell
+    assert (no["unpaired"], no["n_open"], no["n_open_groups"]) == (1, 2, 1)
+    assert abs(no["max_dev_aufbau"] - 0.5) < 1e-9 and no["max_dev_reference"] < 1e-6
+    assert rows[1].open_shell["n_open"] == 3 and rows[2].open_shell == no
+    assert not any(r.frontier_merged for r in rows) and not any(r.fermi_smeared for r in rows)
+    s = summarize(rows[:2], config)["open_shell"]
+    assert s["n_molecules"] == 2 and s["by_unpaired"] == {"1": 2} and s["n_open_groups"] == 2
+    assert s["window_differs"] == {f"{t:g}": 0 for t in OPEN_WINDOWS} and s["n_fermi_smeared"] == 0
+    assert s["max_dev_aufbau"]["max"] == round(5 / 3 - 1, 4)  # Br: the aufbau SOMO at 1

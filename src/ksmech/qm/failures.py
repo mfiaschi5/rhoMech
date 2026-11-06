@@ -34,6 +34,7 @@ from ksmech.qm.records import (
     record_config,
     record_inputs,
 )
+from ksmech.qm.spin import method_for
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ MEMO_REASONS = frozenset(
         ReasonCode.CONNECTIVITY_CHANGED,
         ReasonCode.TIMEOUT,
         ReasonCode.UNSUPPORTED_ELEMENT,
+        ReasonCode.BOND_FORMED,
     }
 )
 BUDGETS = ("timeout_s", "maxiter", "scf_maxiter")  # a larger value may succeed where one failed
@@ -118,7 +120,7 @@ def lookup(cache_dir: Path, smiles: str, conformer_id: int, config: Any) -> Fail
     """The remembered failure of this molecule that covers `config`'s settings, looked up in
     `cache_dir` (not `config.cache_dir`, so a caller can consult several layers); None when
     there is none or a record exists."""
-    method = config.method
+    method = method_for(smiles, config.method)
     if is_valid_cache_file(cache_path(cache_dir, smiles, conformer_id, method)):
         return None
     hit = read(tombstone_path(cache_dir, smiles, conformer_id, method))
@@ -141,14 +143,15 @@ def remember(
     if reason not in MEMO_REASONS:
         return None
     params = config_params(config)
-    path = tombstone_path(config.cache_dir, smiles, conformer_id, config.method)
+    method = method_for(smiles, config.method)
+    path = tombstone_path(config.cache_dir, smiles, conformer_id, method)
     old = read(path) if path.is_file() else None
     if old is not None and old.reason == reason and covers(old.params, params):
         return path
     body = dict(
         smiles=smiles,
         conformer_id=int(conformer_id),
-        method=config.method,
+        method=method,
         reason=str(reason),
         detail=str(detail),
         seconds=float(seconds),
@@ -158,14 +161,15 @@ def remember(
         KIND,
         SCHEMA_VERSION,
         record_inputs(smiles),
-        record_config(config.method, conformer_id),
+        record_config(method, conformer_id),
         prov.sha256_text(json.dumps(body, sort_keys=True)),
     )
     return prov.write_json(path, body, header)
 
 
 def forget(config: Any, smiles: str, conformer_id: int) -> None:
-    tombstone_path(config.cache_dir, smiles, conformer_id, config.method).unlink(missing_ok=True)
+    method = method_for(smiles, config.method)
+    tombstone_path(config.cache_dir, smiles, conformer_id, method).unlink(missing_ok=True)
 
 
 def record_outcome(rows: Iterable[Mapping[str, Any]], config: Any) -> None:

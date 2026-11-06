@@ -30,7 +30,7 @@ import logging
 import time
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -315,14 +315,15 @@ class _Bound(Predictor):
 
 
 def model_sample(work):
-    """The pool's sample with its Lewis structure and Wiberg indices (the model's inputs)."""
+    """The pool's sample with its Lewis structure (bonds, lone pairs, Wiberg indices, N and u:
+    the model's inputs and the decoder's masks)."""
     from ksmech.arrows.lewis import MissingBondIndex, reactant_lewis
+    from ksmech.arrows.steps import with_lewis
 
     try:
-        bonds, lone, wiberg = reactant_lewis(work.rt)
+        return with_lewis(work.sample, reactant_lewis(work.rt))
     except MissingBondIndex as exc:
         raise ServeError(Code.MISSING_BOND_INDEX, str(exc)) from exc
-    return replace(work.sample, bonds=bonds, lone_pairs=lone, wiberg=wiberg)
 
 
 def candidates(rt, steps: list[NetworkStep], skips: Counter) -> list[Candidate]:

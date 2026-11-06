@@ -95,7 +95,10 @@ Measured facts about the grammar:
 Other notes:
 
 - 55 records write a metal as a bare bracket atom with no H and no charge (`[K]`, `[CuH2]`).
-  RDKit gives these atoms radical electrons. They are spectators and no arrow touches them.
+  RDKit gives these atoms radical electrons. They are not all spectators: since 2026-10-21
+  (odd fragments) and 2026-10-24 (RADICAL_DRAWN) the domain screen excludes them, and the
+  open-shell survey (`ksmech-data open-shell-survey`, `open_shell_survey.json`) gives each one a
+  subclass (BARE_ALKALI, CUH2_LIGAND, SN_PLACEHOLDER, PLACEHOLDER, ...).
 - Explicit `[H]` atoms appear both mapped (`[H:20]`) and unmapped (`[H][C@]...`). Mapped H
   atoms must be kept, because arrows reference them.
 
@@ -121,6 +124,63 @@ We do not ingest this file because it adds nothing beyond `raw/`.
 - `pathway_datasets/ORD_USPTO/raw/ORD_USPTO_transformations.csv` (133 lines). No header; one
   unmapped reaction SMILES per line.
 
+## ReactMech (via the DeepMech data release)
+
+Inspected 2026-10-26.
+
+### Where the files are
+
+Zenodo record 10.5281/zenodo.20305780 (CC BY 4.0), `DeepMech_Dataset_Model.zip` (45 MB, 139 MB
+unpacked), from DeepMech (Das, Hoque, Baranwal, Sunoj, Chem. Sci. 2026, arXiv:2509.15872). Only
+its `data/` folder is unpacked, under `data/raw/reactmech/DeepMech_Dataset_Model/`; the model
+checkpoint `models/DeepMech_Split42.pth` is not.
+
+| Path under `data/` | Content |
+|---|---|
+| `ID_Split42/{train,val,test}.txt` | **Ingested.** 73,474 / 10,497 / 20,993 steps, no line in two parts |
+| `OOD_Split42/{train,val,test}.txt` | **Ingested.** 71,129 / 10,162 / 20,323 steps: the same steps partitioned by class, plus 9,235 not in the ID split |
+| `OOD_Split42/OOD_CRM_dataset/OOD_Set1.csv` | **Read for classes.** 3,340 mechanisms, 5 classes |
+| `OOD_Split42/OOD_CRM_dataset/OOD_Set2.csv` | **Read for classes.** 438 mechanisms, 4 classes; none matches a step |
+| `ID_Split42/ID_CRM_dataset/ID_CRM.csv` | 2,751 mechanisms, no class column. Not read |
+| `PrebioMech/{train,val,test}.txt` | 21,588 / 3,066 / 6,133 prebiotic steps, same line format. Not read |
+
+### Step file format (`*_Split42/*.txt`)
+
+One elementary step per line: an atom-mapped reaction SMILES `reactants>>products`, nothing else
+(no `|`, no space, no header, no arrows). Implicit H on mapped atoms (`[CH3:1]`), aromatic
+lowercase atoms, charges as drawn. Every line of the six files has `>>`.
+
+- The two splits give 114,199 distinct lines (ID 104,964 + 9,235 OOD-only); 92,379 lines repeat
+  one already read. The ingester reads each line once and counts the repeats
+  (`repeat_across_files`); neither split's membership is stored.
+- Ingest of all six files (RDKit 2026.09.1): 114,046 accepted, 153 rejected (0.13%):
+  `CHARGE_UNBALANCED` 70, `MAP_NOT_BIJECTIVE` 48, `UNBALANCED` 35. 6,528 resonance steps.
+  Domain exclusions: `OPEN_SHELL_METAL` 1,251, `METAL_PLACEHOLDER` 1,122, `RADICAL_DRAWN` 792.
+- The reaction matrix comes from the two mapped sides; there are no arrows to apply. A hydrogen
+  that moves is a count on both sides (`[OH+:5]` -> `[O:5]`, `[Cl-:1]` -> `[ClH:1]`): 4,454 of
+  the pilot's 9,183 training steps move one or two. `arrows.hydrogens` writes each as a mapped
+  atom before R is taken (docs/decisions.md, 2026-10-27).
+- d-metal species are drawn with charge-separated dative bonds to a neutral metal, e.g. a Pd(0)
+  phosphine as `CC(C)(C)[P+]([Pd])(C(C)(C)C)C(C)(C)C`: an odd electron count, which the domain
+  screen excludes as `OPEN_SHELL_METAL` (Pd is not among the d0 / d10 acceptors of rule R2).
+  Chromic acid is drawn `[O]=[Cr](=[O])([OH])[OH]` and passes. The most common metals are Pd
+  (1,711 distinct reactant molecules), Cr (223), Ni (138), Ag (`[Ag+]`).
+
+### Mechanism files (`*_CRM_dataset/*.csv`)
+
+CSV with a header: `mechanisms` (ID_CRM) or `mechanistic_class,mechanisms` (OOD sets). A
+`mechanisms` cell is a Python list literal of unmapped SMILES, one species (the whole pool) per
+step boundary: 2-11 species in ID_CRM, 4 in Set1, 5 in Set2.
+
+- **Classes.** A step takes a class when its map-free canonical reactants and products are two
+  consecutive species of a classified mechanism; no pair is claimed by two classes. 9,948 steps
+  get one of Set1's 5 classes: acid_halide 4,365, sul_halide 2,730, anhydride 1,584,
+  haloformate 1,071, carbamic_halide 198. Set2's 4 classes (CO_coupling, bidentate_Ni_bha,
+  bidentate_bha, intramolecular_bha: Buchwald-Hartwig aminations with octylamine, Pd and Ni)
+  match no step: the split files' Ni steps are other couplings (aryl boronic acids). The other
+  58 of the paper's 67 classes are not released.
+- Not used yet: the pathways themselves (step order), ID_CRM's mechanisms.
+
 ## Processed: `data/processed/<source>/steps.parquet`
 
 There is one row per `ksmech.data.schema.ElementaryStep`:
@@ -136,35 +196,71 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 | `arrows` | list<struct<source_kind, source_atoms: list<int32>, sink_kind, sink_atoms: list<int32>>> | in written order |
 | `mechanism_class` | string, nullable | null for PMechDB (not in the release) |
 | `conditions` | string, nullable | null for PMechDB (not in the release) |
-| `resonance_step` | bool | reactants and products are resonance structures; dropped from the training target |
-| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL` or `CHARGE_UNREPAIRED` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). Null otherwise |
-| `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an explicit ingest rule changed a formal charge (`CHARGE_REPAIRED`; the step stays); the SMILES columns hold the repaired sides |
+| `resonance_step` | bool | reactants and products are resonance structures: one identity key v2 with the atom maps kept and a balanced electron flow (`data.resonance.classify_step`, open-shell plan P6); dropped from the training target |
+| `domain_exclusion` | string, nullable | `METAL_PLACEHOLDER`, `OPEN_SHELL_METAL`, `CHARGE_UNREPAIRED` or `RADICAL_DRAWN` (`ksmech.data.domain`): a fragment on either side is outside the closed-shell domain; dropped from the training target and the metric denominators (`read_training_steps`, without renumbering `step_index`). On a source that admits open shells by rule (PMechDB, open-shell plan P3) a RADICAL_DRAWN step is re-read by the open-shell laws, and a failed law puts its own code in place: `MULTIPLICITY_UNTABULATED`, `MULTIPLICITY_AMBIGUOUS` (a u >= 2 species the species table, `data.spin_table` v2, lacks or does not assign), `SPIN_NOT_CONSERVED` or `NOT_ELEMENTARY` (an odd atom entry of the arrows' R); a curated step keeps `RADICAL_DRAWN`. `SPIN_RULE_PENDING` (the table re-assigned a species) is P3's code, which old artifacts carry; since P4 such a count stands. Since P4 the same laws re-read an `OPEN_SHELL_METAL` step of a source that admits open-shell metals by rule (PMechDB): a metal fragment the metal table (`spin_tables/metal_v1.json`) assigns no count is `MULTIPLICITY_AMBIGUOUS` (or `MULTIPLICITY_UNTABULATED` when the species table lacks it), and a fragment code the laws do not re-read (`CHARGE_UNREPAIRED`, `METAL_PLACEHOLDER`) keeps the step out under that code. Since P6 the electron-flow law adds two step codes, set where no other code stands (`data.resonance.classify_step`): `NULL_STEP` (identical sides, R = 0; formerly a resonance pair) and `NONCONJUGATED_SHIFT` (one identity key with the atom maps kept, but no balanced flow between any reactant drawing and product form). Null otherwise |
+| `charge_repair` | string, nullable | JSON `{"repairs": [{"side", "rule", "before", "after"}], "reactants_before", "products_before"}` when an ingest repair of `ksmech.data.domain` changed the drawing (`CHARGE_REPAIRED`; the step stays): a formal charge (R1, the dative law `D dative onium->M`, A1 `A1 bare alkali +1`) or missing H (V1 `V1 methyl [C] +3H` and `V1 imidazol-2-yl C +H`, the named repairs of `src/ksmech/data/repairs_v1.json`, rule `BL_NAMED`); one row per side, fragment and rule; the SMILES columns hold the repaired sides |
+| `domain_class` | string, nullable | the repairs and flags of the domain laws a step carries (`DomainClass`), several joined by `+` in enum order: `REPAIRED_DATIVE`, `REPAIRED_V1`, `REPAIRED_A1`, `REPAIRED_BL`, `METAL_SUSPECT` (R1 gives none); an admitted open shell `RADICAL_SPECTATOR` or `RADICAL_REACTIVE` (an R entry on an atom drawn with radical electrons); a curated open-shell exclusion `RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED` (with `RADICAL_DRAWN`); since P4 `CARBENE_SINGLET` (the species table pairs a species drawn with radical electrons: a carbene, CO drawn `[C]=O`) and `OSM_CU2` / `OSM_FE3` (an admitted Cu(II) or high-spin Fe(III) fragment, the open_shell_metal cohort). A training candidate is kept only when its source's admit set (`domain.ADMIT`: the five P0a/P1 classes for every source, plus `RADICAL_SPECTATOR`, `RADICAL_REACTIVE` and `CARBENE_SINGLET` where the source admits open shells by rule and `OSM_CU2`, `OSM_FE3` where it admits open-shell metals by rule) holds all of its classes. Null otherwise |
 
 Rejected records go to `data/processed/<source>/rejections.csv`, with columns `step_id`,
 `reason`, `detail` and `raw`. Charge repairs are also listed one per row in
 `data/processed/<source>/charge_repairs.csv` (`step_id`, `side`, `rule`, `before`, `after`,
 `domain_exclusion`; fragments as map-free canonical SMILES). `ingest_report.json` counts
-`domain_exclusions` by code and `n_charge_repaired`; `stats.json` has the same counts under
-`domain`, with `RESONANCE_STEP`, and `n_training_steps` excludes both.
+`domain_exclusions` by code, `n_charge_repaired`, `charge_repairs_by_rule` (steps per rule) and
+`domain_class` (steps per value); `stats.json` has the same counts under `domain` (with
+`RESONANCE_STEP`), `charge_repairs_by_rule` and `domain_class`, and `n_training_steps`
+excludes the resonance steps, the excluded ones and those the admit set leaves out.
+`ingest_report.json` also holds `open_shell` (admitted steps by class, the admitted ones that
+hold a species drawn with u >= 2, the curated exclusions by reason) and `spin` (`data.spin`'s
+rule version, the species table and the metal table with their content hashes).
+
+Two tracked spin tables (`src/ksmech/data/spin_tables/`), read by `data.spin.assign`:
+
+- `species_v2.json` (with `theory_v2.json`; v1 kept as P3's record): map-free canonical SMILES ->
+  unpaired count or `MULTIPLICITY_AMBIGUOUS`, each with its spGFN2 states, both verdicts (A, B)
+  and the case of rule C (`data.spin_table`).
+- `metal_v1.json` (open-shell plan P4): `rows` of `id`, `element`, `oxidation_state`,
+  `unpaired` (or `redox_incompatible`), optional `donors_any` / `donors_none` (donor element
+  symbols, `H` for a hydride), `basis` and `citations`; `citations`, `notes`, `version`,
+  `schema`, `content_hash` (over every other field). A row holds for a species only where the
+  species table's rule C has A and B agree on the row's count.
+
+Two tracked curation files (open-shell plan P3), step ids and reasons, no SMILES:
+
+- `src/ksmech/data/curation/pmechdb_open_shell.json`: `entries` of `step_id`, `reason`
+  (`RADICAL_AMBIGUOUS` or `DRAWING_ERROR_UNREPAIRED`), `decided` (date), `why`: steps the
+  open-shell laws admit and the hand reading rejects. Each must pass the laws.
+- `src/ksmech/data/curation/multi_radical_exemptions.json`: `entries` of `source`, `step_id`,
+  `species` (map-free SMILES of its u >= 2 species), `reason`: the counted exemptions of P8's
+  MULTI_RADICAL_SPECIES policy. Every admitted step with a u >= 2 species must be listed.
 
 ## Processed: `data/processed/<source>/samples/` and `samples_<split>.json`
 
+`samples_report.json` lists, under `SKIPPED_BOND_STRETCHED`, the samples whose label changes a
+reactant bond to Li, Na, Mg or K that the QM record holds further apart than 1.3 x the
+covalent-radius sum (`steps.stretched_bonds`; a counted flag and the eval slice
+`bond_stretched`, never a model input).
+
 Written by `ksmech-arrows samples` (`ksmech.arrows.steps`, `ksmech.arrows.store`; schema
-`SAMPLE_VERSION` 15). The store holds every training step's sample once:
+`SAMPLE_VERSION` 19 since open-shell plan P6: N and u per atom and drawing, the atom
+categorical's u column and the identity key v2; 18 on main). The store holds every training
+step's sample once:
 
 - `samples/shard_00000.npz` ...: 256 samples each, members `<i>/<field>` and a JSON `meta`
   member, with a provenance header whose inputs are the steps parquet and every token file its
   samples used;
 - `samples/index.json`: step id -> shard, the shards as provenance inputs, and the skipped steps
-  with their reason codes (such as `MISSING_TOKENS`).
+  with their reason codes (such as `MISSING_TOKENS`; since P6 also the label's flow codes
+  `SET_STEP`, R with atom entries only, and `DISSOCIATIVE_ET_STEP`, bond entries whose
+  electron flow is unbalanced in every member of the class, `arrows.delta_be.flow_skip`).
 
 A split is a view, `samples_<strategy>_<part>.json` next to the store (its ids and counts, with
 the index and the split file as inputs); strategy `molecule` (default), `scaffold`,
 `loco-<class>` or, only when named, `random_leaky`; part `train`, `val`, `test`. Loaders refuse
 another schema version and stale or dirty artifacts (STALE_ARTIFACT). On disk the pair arrays
-keep the valid cells only (`pair_valid`): `pair_z` and `atom_coulomb` as float16, the 0/1
-features (`inter`, `bonded`) and `pair_defined` bit-packed, `atom_coulomb` as its upper
-triangle; in memory every array is dense float32 again.
+keep every (occupied, virtual) cell, flattened cell by cell (since v18; v17 kept the
+`pair_valid` cells only, about 89%): `pair_z` as float16 byte planes, the 0/1 features
+(`inter`, `bonded` and the three exclusion flags) and `pair_defined` bit-packed, `pair_valid`
+as the legacy mask; in memory every array is dense float32 again.
 
 One sample (`MechanismSample`), `A` atoms and `O` orbitals over all reactant fragments; global
 token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
@@ -173,36 +269,41 @@ token ids are atoms `0..A-1`, then orbitals `A..A+O-1`:
 |---|---|---|
 | `step_id`, `source` | str | |
 | `fragment_keys` | list[str] | token-cache key (map-free canonical SMILES) of each fragment, in fragment order |
-| `atom_categorical` | int64, (A, 2) | atomic number, formal charge (record values) |
-| `atom_features`, `atom_missing` | float32 / bool, (A, F_a) | `atom_feature_names()`; missing values are 0 and flagged |
+| `atom_categorical` | int64, (A, 3) | atomic number, formal charge (record values; model inputs), and (v19) the unpaired count u of the atom in the drawing (`data.spin.spin_of_drawing`; bookkeeping, `model_input=False`: keys, diagnostics and P9's categorical-u ablation read it); `drawn(k)` sets the charge and u of drawing k |
+| `atom_features`, `atom_missing` | float32 / bool, (A, F_a) | columns `atom_columns`; missing values are 0 and flagged |
+| `atom_columns` | tuple[str] | `orbitals.tokens.STORED_ATOM_FEATURES` (v18): the v17 inputs `atom_feature_names()`, then the extras `ATOM_EXTRA_FEATURES`: `f_plus`, `f_minus` (finite-difference, NaN -> missing when FUKUI_SCF_FAIL), `f_plus_fmo_exact`, `f_minus_fmo_exact`, `fmo_exact_<level>` (frontier blocks within 1e-4 eV). A model selects its columns by name (`model.inputs.token_columns`) |
 | `atom_fragment`, `orbital_fragment` | int64, (A,) / (O,) | fragment index |
 | `atom_map` | int64, (A,) | atom-map number of the drawn atom, 0 when unmapped or an implicit H |
 | `atom_positions`, `orbital_centroids` | float32, (A, 3) / (O, 3) | Angstrom, record geometries; for distances only |
-| `orbital_features` | float32, (O, F_o) | `feature_names()` |
+| `orbital_features` | float32, (O, F_o) | columns `orbital_columns` |
+| `orbital_columns` | tuple[str] | `orbitals.tokens.STORED_ORBITAL_FEATURES` (v18): `feature_names()`, then `retained_fraction` (the spectral weight kept before renormalization) and `energy_ev` (E_r) |
 | `orbital_spectra` | float32, (O, 8, 2) | (E eV, p) spectral set |
 | `orbital_occupied`, `donor_mask`, `acceptor_mask` | bool, (O,) | candidate masks (`CandidateConfig`); the donor-partner exclusion is in `pair_valid` |
 | `incidence` | float32, (E, 3) | rows (orbital index, atom index, weight) for every centre of every orbital |
-| `pair_z` | float32, (O_occ, O_virt, 11) | geometry-free pair features of every (occupied, virtual) pair, rows and columns in orbital order within each block, computed at K = 1 (`physics.params.REDUCED`; `physics.params.to_params` scales `cross_coupling` to another K). Columns, `pair_features` (`physics.stage_a.STAGE_A_FEATURES`) in order: `g` (the spectral gap factor G, eV^-1), `log_abs_g` (log \|G\|, floored at 1e-12), `inter` (1 between fragments), `bonded`, `bond_order`, `graph_distance` (between the two centre sets on the record's Lewis structure: bonded when some centre of r is bonded to some centre of s, the largest such order, the shortest graph distance, 0 when they share an atom, capped at 6; across fragments 0, 0, 6), `wbi` (the largest Wiberg index over the Lewis bonds joining the centre sets, 0 when not bonded), `centroid_distance` (Angstrom), `cross_coupling` (\|l_r^T B l_s\| over the AO blocks between the centres), `align_cos` (\|cos\| between the p vectors of r and s on their main centres), `dihedral_cos` (site-partner-partner-site dihedral when the two sit on adjacent bonds) |
-| `pair_defined` | bool, (O_occ, O_virt, 11) | where the entry exists: `centroid_distance`, `cross_coupling`, `align_cos` and `dihedral_cos` only within a fragment, `align_cos` only with p character on both main centres, `dihedral_cos` only on adjacent bonds; undefined entries are stored as 0 |
+| `pair_z` | float32, (O_occ, O_virt, 14) | geometry-free pair features of every (occupied, virtual) pair, rows and columns in orbital order within each block, computed at K = 1 (`physics.params.REDUCED`; `physics.params.to_params` scales `cross_coupling` to another K). Columns, `pair_features` (`physics.stage_a.STAGE_A_FEATURES`) in order: `g` (the spectral gap factor G, eV^-1), `log_abs_g` (log \|G\|, floored at 1e-12), `inter` (1 between fragments), `bonded`, `bond_order`, `graph_distance` (between the two centre sets on the record's Lewis structure: bonded when some centre of r is bonded to some centre of s, the largest such order, the shortest graph distance, 0 when they share an atom, capped at 6; across fragments 0, 0, 6), `wbi` (the largest Wiberg index over the Lewis bonds joining the centre sets, 0 when not bonded), `centroid_distance` (Angstrom), `cross_coupling` (\|l_r^T B l_s\| over the AO blocks between the centres), `align_cos` (\|cos\| between the p vectors of r and s on their main centres), `dihedral_cos` (site-partner-partner-site dihedral when the two sit on adjacent bonds); then (v18, `physics.stage_a.STORED_PAIR_FEATURES`) the 0/1 exclusion flags of `physics.pairs.pair_flags`: `d_acceptor` (the virtual token is a d polarization function), `own_antibond` (the donor's own antibond), `site_self` (every site pair is a bond interacting with itself), defined on every cell |
+| `pair_defined` | bool, (O_occ, O_virt, 14) | where the entry exists: `centroid_distance`, `cross_coupling`, `align_cos` and `dihedral_cos` only within a fragment, `align_cos` only with p character on both main centres, `dihedral_cos` only on adjacent bonds; undefined entries are stored as 0 |
 | `pair_gap_sign` | int8, (O_occ, O_virt) | sign of G (-1 for the normal order E_r < E_s); bookkeeping, not a feature |
-| `pair_valid` | bool, (O_occ, O_virt) | arrow candidates: donor and acceptor masks, minus, within a fragment, the donor's own antibond and every pair whose site pairs (donor centre a, acceptor centre b) all have a and b identical or bonded with the acceptor's weight on a or the donor's on b at least 0.20 (`orbitals.tokens.site_excluded_matrix`, `CandidateConfig.site_weight`) |
-| `pair_contact_sites` | int64, (O_occ, O_virt, 2) | always -1. A field of the removed contact model, kept only so that the schema-15 store stays readable; not a model input, and it leaves at the next sample schema bump |
-| `atom_coulomb` | float32, (A, A) | symmetric q q / R between atoms at eps = 1 (geometric distance within a fragment, van der Waals contact across; 0 diagonal). Kept only so that the schema-15 store stays readable; not a model input, and it leaves at the next sample schema bump |
-| `labels` | list[ArrowLabel] | the orbital reading of the arrows (`donor_ids`, `acceptor_ids`, sites, flags, ...); empty unless `orbital_reading` is `aligned` |
-| `product_key` | str | sigma key of the products (`data.resonance.sigma_key`) |
+| `pair_valid` | bool, (O_occ, O_virt) | the legacy mask (`ModelConfig.pair_cells = 'valid'`), = donor x empty non-d acceptor x no exclusion flag: donor and acceptor masks, minus, within a fragment, the donor's own antibond and every pair whose site pairs (donor centre a, acceptor centre b) all have a and b identical or bonded with the acceptor's weight on a or the donor's on b at least 0.20 (`orbitals.tokens.site_excluded_matrix`, `CandidateConfig.site_weight`) |
+| `labels` | list[ArrowLabel] | the orbital reading of the arrows (`donor_ids`, `acceptor_ids`, sites, flags, ...) restricted to `pair_valid`; empty unless `orbital_reading` is `aligned` |
+| `labels_all` | list[ArrowLabel] | (v18) the same labels on every cell, the teacher pair chosen among all of them; empty when an arrow does not align. Read by `--cells all` |
+| `product_key` | str | identity key v2 of the products (`data.resonance.identity_key`: the sigma key for a closed shell, plus `\|<sigma SMILES>,<charge>,<u>;...` per fragment for an open shell) |
 | `edit_label` | EditLabel | the target: the parsimonious reaction-matrix class and its anchors on the global atoms (`arrows.delta_be`) |
-| `bonds`, `lone_pairs`, `wiberg` | int16 (E, 3) / int8 (A,) / float16 (E,) | the reactant's Lewis structure as drawn (Kekulé, implicit H included): (i, j, order) with i < j, lone pairs per atom, the Wiberg index of each bond (`arrows.lewis`) |
-| `orbital_reading` | str | `aligned`, `LABEL_FILTERED` or the first unaligned reason (e.g. `HETEROLYSIS_ONLY`) |
-| `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` |
+| `bonds`, `lone_pairs`, `wiberg` | int16 (E, 3) / int8 (A,) / float16 (E,) | the reactant's Lewis structure as drawn (Kekulé, implicit H included): (i, j, order) with i < j, lone pairs per atom (N // 2), the Wiberg index of each bond (`arrows.lewis`) |
+| `nonbonding`, `unpaired` | int8, (A,) / (A,) | (v19) the non-bonding electrons N of every atom (B_ii: odd on a radical centre; `lewis.lewis_nonbonding`) and its unpaired count u (`lewis.lewis_unpaired`); implicit H atoms 0. Collate refuses a sample without N for every atom |
+| `drawings` | list[Drawing] | the pool's other resonance drawings, stacked on disk as `drawing_charges`, `drawing_orders`, `drawing_lone_pairs` and (v19) `drawing_nonbonding`, `drawing_unpaired` (int8, one row per drawing), their labels in the JSON; a radical's drawings come through the anion proxy (`resonance.radical_forms`, one per radical site) |
+| `orbital_reading` | str | `aligned`, `LABEL_FILTERED`, the first unaligned reason (e.g. `HETEROLYSIS_ONLY`), or `NO_ARROWS` for a source without arrows (ReactMech) |
+| `fermi_smeared` | bool | a reactant fragment is flagged `fermi_smeared` (a closed shell, or an odd Cu(II) / Fe(III) fragment RDKit counts 0: kept and sliced; a fragment drawn u > 0 that stays an open shell under its record's count skips the step as `SOMO_NOT_INTEGRAL`, law (S) of open-shell plan P3) |
 | `label_filter` | dict[str, int] | labeled (donor, acceptor) cells that `pair_valid` rejects, by group |
 | `inputs` | dict[str, str] | provenance: every token file the sample was built from (`file:<path>` -> sha256) |
 | `pair_features` | tuple[str] | the column names of `pair_z` / `pair_defined` |
 
-**`pair_feature_stats_<strategy>.json`** (same directory, one per split strategy, written by
-`ksmech-arrows samples`): a provenance header (kind `pair_stats`, schema `SAMPLE_VERSION`;
-inputs the training view `samples_<strategy>_train.json` and the store index; config the
-feature names, `cells: valid` and the physical constants) and `features`:
-`{feature: {mean, std, count}}` over the defined entries of the valid cells (`pair_valid`) of
+**`pair_feature_stats_<strategy>.json`** and **`pair_feature_stats_<strategy>_allcells.json`**
+(same directory, one pair per split strategy, written by `ksmech-arrows samples`): a provenance
+header (kind `pair_stats`, schema `SAMPLE_VERSION`; inputs the training view
+`samples_<strategy>_train.json` and the store index; config the feature names, `cells` and the
+physical constants) and `features`: `{feature: {mean, std, count}}`. `valid`: the v17 features
+over the defined entries of the `pair_valid` cells; `all`: every stored feature and
+`pair_valid` as a 0/1 feature over every cell (`physics.stage_a.cell_features`). Both over
 the strategy's training part, with the values rounded to float16 as the store keeps them, at
 the physical K (`arrows.steps.pair_stats`, `physics.pairs.PairStats`). A refit on the loaded
 samples gives the same numbers. Read it with `arrows.steps.load_pair_stats`, which refuses a
@@ -216,17 +317,34 @@ lays tokens out as atoms `[0, A_max)` then orbitals `[A_max, A_max + O_max)`, an
 one-hot), `donor_sets` / `acceptor_sets` (B, K, N multi-hot), `donor_site` / `acceptor_site`
 (B, K; -1 padding) and `label_mask`, plus the padded input arrays. The pair inputs keep each
 sample's (occupied, virtual) layout, padded to the batch's largest counts (R, C): `pair_z`
-(B, R, C, F; at K = eps = 1, unstandardized), `pair_defined` (B, R, C, F), `pair_valid` and
+(B, R, C, F; at K = eps = 1, unstandardized; the model selects its features by name), `pair_defined` (B, R, C, F), `pair_valid` and
 `pair_gap_sign` (B, R, C), `pair_row_pos` (B, R) and `pair_col_pos` (B, C), the batch token
 position of each row's occupied and each column's virtual token (-1 padding), for scattering
-into the N x N pair track, and `pair_features` (the column names); `atom_coulomb` and
-`pair_contact_sites` are not collated. The reactant's Lewis structure and the reaction-matrix
+into the N x N pair track, and `pair_features` (the column names), with `atom_columns` and
+`orbital_columns` for the token inputs. The reactant's Lewis structure and the reaction-matrix
 targets are the `_reactant_tensors` and `_edit_tensors` keys.
 
 **`anchor_floor_report_<strategy>.json`** (same directory, `ksmech-eval floor`): a provenance
 header (kind `anchor_floor`; inputs the val and test views; config the split) and, per part,
 `top1`, `top3`, `top5`, `median_rank`, `n` and `unreachable`: the physics floor, anchors
-ranked by |G^atom| over the valid pairs (`eval.floor`).
+ranked by |G^atom| over the valid pairs (`eval.floor`); with `--cells all`,
+`anchor_floor_report_<strategy>_allcells.json`, pooled over every pair.
+
+**`cohort_<name>.json`** (same directory, `eval.cohorts.write_cohort`; written once, replaced
+only by hand): a provenance header (kind `cohort`, schema `COHORT_SCHEMA` 1, no file inputs, the
+content hash of the sorted ids, the name in its config and a free-form note) and `ids`, sorted
+step ids. `ksmech-eval floor|decode --cohort <name>` scores only those steps. **`baseline_<name>.json`**
+(`eval.pin.write_baseline`): kind `cohort_baseline`, schema 1, `columns` (the column names of
+`eval.pin.column_digests`, once) and `digests`, step id -> one 16-hex-digit digest per column
+("" where the sample lacks it); `eval.pin.load_baseline` checks it by its content hash. The
+open-shell plan's cohorts: PMechDB `closed_base` (+ `_gbdt_valid`, `_gbdt_all`, its baseline;
+P0b), `added`, `open_shell`, `carbene_singlet`, `open_shell_metal`; ReactMech (P5)
+`p5_returns` (the 225 samples P5 added to the pilot, every sample outside `baseline_p5_pre`),
+`p5_b_kekule` (68) and `p5_c_dative` (29) (the molecule val's samples P0a re-labelled
+Kekule-closest or re-charged by the dative law, from `p0a_changes.json`), and
+`baseline_p5_pre.json` (the column digests of the 9,031 pre-P5 samples).
+`data/processed/reactmech/p5_rescore.json` (`scripts/p5_rescore.py`, unstamped) holds the
+two ReactMech checkpoints' top-k per slice and the returns' parts per view.
 
 ## Training runs: `data/models/<source>/<run>/` (`ksmech-train fit`)
 
@@ -248,6 +366,38 @@ ranked by |G^atom| over the valid pairs (`eval.floor`).
 
   Read it with `train.loop.load_model`, which refuses a run trained from a dirty tree.
 
+## Token files: `data/cache/tokens/<sha256>.npz` (`ksmech-orbitals build`)
+
+One file per molecule and conformer (`orbitals.tokens.save_tokens`, no pickle), with a
+provenance header (kind `tokens`, schema `orbitals.tokens.SCHEMA_VERSION` 10, config
+`token_config()`: the descriptor thresholds and the localization settings; input the QM
+record). Members: the metadata (`smiles`, `method`, `conformer_id`, PM sweeps, `fermi_smeared`,
+...), one `atom_<field>` array per atom field (`AtomToken`: model inputs and diagnostics), the
+orbital diagnostics `orb_*`, one `desc_<field>` array per orbital descriptor (ragged ones padded
+with their lengths), `C_loc`, `S`, `F`, `ao_atom`, `ao_l`. Schema 10 (2026-10-29) adds
+`atom_f_plus_fmo_exact`, `atom_f_minus_fmo_exact` and `atom_fmo_weights_exact` (4 levels): the
+frozen-orbital f+ / f- and frontier weights with blocks within 1e-4 eV
+(`orbitals.frontier.EXACT_EV`) beside the 0.05 eV ones, whose content is unchanged; every other
+member is schema 9's. A build that replaces a file compares it field by field
+(`tokens.legacy_differences`); the build summary (`summary.json` beside the files, and per
+source `data/processed/<source>/tokens_summary.json`) counts under `replaced` the files whose
+stored fields changed, and under `frontier_blocks` the closed-shell molecules whose blocks at
+0.01, 0.05 and 0.1 eV differ from the exact ones.
+
+Open shells (open-shell plan P2b, 2026-10-31). The file of a molecule with u > 0 (RDKit's radical
+count of its `smiles`, `tokens.drawn_unpaired`, the u its QM record was run at) carries one more
+config key, `open_shell_rule` = `occ-plateau-v1`: its blocks come from the plateau reference
+occupations (`localize.reference_occupations`) and its frontier columns from the radical
+convention (`frontier.record_frontier_blocks`: HOMO = LUMO = the open group, frozen f+ = f-).
+Closed-shell headers do not carry the key and their payloads are unchanged; the schema stays 10.
+`load_tokens` adds the key to whatever config its caller passes when the file's own molecule is
+an open shell, so a u > 0 file built before the rule is STALE_ARTIFACT under every reader, and
+`save_tokens` stamps it. The build summary's `open_shell` block counts the u > 0 molecules (by u),
+their open MOs (0 < reference < 2) and open plateaus, the molecules whose energy-window reference
+(0.01 / 0.05 / 0.1 eV, `build.window_reference`) differs from the plateau one, the smeared ones,
+and the distributions (median, p90, max) of max|n - aufbau| and max|n - reference|; the
+`frontier_blocks` comparison covers closed shells only.
+
 ## QM cache: `data/cache/qm/<sha256>.npz`
 
 Written by `ksmech.qm` (one file per molecule and conformer). Fields were listed from a real
@@ -256,18 +406,27 @@ is a plain `.npz` (no pickle). `ksmech.qm.records.load_record` returns a `QMReco
 
 The key is `sha256(f"{smiles}|{conformer_id}|{method}")`, where `smiles` is the map-free canonical
 SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
-`GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key).
+`GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key). A
+species whose spin `data.spin` reassigns (a singlet carbene or CO drawn with two radical
+electrons, an odd Cu(II) or Fe(III) fragment RDKit counts 0; open-shell plan P4) has the tag
+`+spin-v1-u<u>` right after the optimizer part, before any later suffix:
+`GFN2-xTB/ALPB-water/tblite-lbfgs+spin-v1-u1`, serve's metal path
+`...tblite-lbfgs+spin-v1-u1+metal-geom-v1` (`qm.spin.method_for`). Every other key is unchanged.
+A tagged species is optimized from the embedding and from it kicked (0.02 Angstrom, seed 0), an
+optimum with a bond the drawing lacks is dropped (`BOND_FORMED` when every start is), and the
+lower energy is kept. The untagged records of those species (the old triplet `Cl[C]Cl`) stay in
+the cache, unused by the engine.
 
 | Field | dtype, shape | Notes |
 |---|---|---|
 | `smiles`, `atom_order_smiles` | str, () | the second one defines the atom order: `Chem.AddHs(Chem.MolFromSmiles(atom_order_smiles))` |
-| `conformer_id`, `charge`, `unpaired` | int, () | charge = sum of formal charges, unpaired = sum of radical electrons |
+| `conformer_id`, `charge`, `unpaired` | int, () | charge = sum of formal charges, unpaired = sum of radical electrons, or the count of the method's spin tag |
 | `method`, `schema_version` | str / int, () | |
 | `atomic_numbers` | int32, (n,) | |
 | `coords_ang` | float64, (n, 3) | optimized geometry, Angstrom |
 | `energy_ha` | float64, () | total energy, Hartree (includes the ALPB term) |
 | `orbital_energies_ev` | float64, (nmo,) | eV |
-| `occupations` | float64, (nmo,) | restricted; radicals have a fractional SOMO (1.0) |
+| `occupations` | float64, (nmo,) | restricted (one set of spatial orbitals, no spin polarization); a SOMO has occupation 1.0, a high-spin Fe(III) five of them |
 | `C` | float64, (nao, nmo) | AO x MO, S-orthonormal: `C.T @ S @ C = 1` |
 | `S`, `H_core`, `fock` | float64, (nao, nao) | Hartree for the last two. `H_core` is tblite's core Hamiltonian; `fock = S C diag(eps) C.T S` is rebuilt from the converged MOs |
 | `charges` | float64, (n,) | Mulliken, positive = electron-poor |
@@ -283,6 +442,9 @@ SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
 One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cache_path`,
 `status` (`ok` / `failed`), `reason` (a `ReasonCode`, empty when ok), `detail`, `warnings`,
 `seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`.
+`method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
+row whose method is its own species' method under the run's configuration
+(`qm.batch.row_method`).
 
 ## Serve workbench: `data/serve/workbench/`
 
