@@ -8242,6 +8242,23 @@ approved first (entry above).
   warnings; `KSMECH_TEST_WORKERS=2 pytest -m realdata` (03ac724, on the Release B stores): 67
   passed.
 - **Storage (U18)**: rmechdb's artifacts (steps, records, tokens, stores, audit) are kept as
-  PMechDB's: local, the private rhoMech-data and pods only, never the public repository. The push
-  to the private HF dataset, the migration into main's data/, serve's re-key and the merges of
-  P6, P7 and P8 wait for the user's OK.
+  PMechDB's: local, the private rhoMech-data and pods only, never the public repository. Each
+  outward step waits for the user's OK. Done on 2026-11-06, each after its OK: the push to the private HF
+  dataset (revision accd607: data/processed/rmechdb, the two PMechDB-side overlap cohorts, the
+  rmechdb token and Wiberg tars, SHA256SUMS.rmechdb, verified file by file; the PMechDB and
+  ReactMech v19 stores are not on it), then the migration into main's data/. The migration:
+  main's data/ had not changed since the worktree's copy (2026-11-04 21:09; every file compared,
+  none newer on main's side), so it is a one-way copy of 12,122 new files (records, tombstones,
+  Wiberg sidecars, tokens, data/processed/rmechdb, the P6/P7 build logs, the P7 gate reports) and
+  182 replaced ones (the PMechDB and ReactMech v19 stores, views, pair statistics, GBDT models
+  and reports, steps.parquet, the [Na] token rebuilt under P2b's rule, the token summary);
+  data/ocr/worker.log stays main's. `cp -a --reflink=always --remove-destination`: several of
+  main's files were hard links shared with the HF staging folder, the reactmech worktree and the
+  running reactmech-full build, and an in-place overwrite would have written through to them; they
+  keep their v18 content (checked). Main's v18 copies of the 182 replaced files are kept by
+  reflink in data/processed/v18_reference/ (paths relative to data/, a README) until the
+  post-merge provenance check; deleting that folder is the plan's "delete the v18 stores" step.
+  sha256 of all 12,304 copied files equal to the worktree's. ksmech-serve was not running and was
+  not started. Until P6, P7 and P8 are merged, main's P5 code reads v18 stores and refuses these
+  v19 ones. The QM index (data/cache/index.sqlite) is not refreshed yet. Serve's re-key, the
+  merges, the provenance check, the deletion and serve's restart still wait.
