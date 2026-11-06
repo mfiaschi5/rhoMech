@@ -8275,3 +8275,21 @@ approved first (entry above).
   For the merge (its OK given), the three wiki drafts of P7 and P8 replace the published
   `content/wiki/klopman-salem.md`, `orbital-tokens.md` and `reaction-matrix.md` (the published
   pages were last changed on 2026-10-27, before the drafts); `docs/wiki_drafts/` is removed.
+  Merged into local main as 87d8956 (P6, carrying P0-P5), 840e481 (P7) and 5417210 (P8), --no-ff,
+  tree equal to the P8 branch; not pushed. From main: `pytest -n 2 -m "not realdata"`: 2273
+  passed, 12 skipped, 2 xfailed, 4 warnings; `KSMECH_TEST_WORKERS=2 pytest -m realdata` on the
+  migrated data: 67 passed.
+  The provenance check from main (`data/processed/release_b_provenance_check.{py,json}`) reads
+  every header under data/processed, data/models and data/cache, with v18_reference and the
+  *_reference folders left out. It checks every input, not only the six `ksmech-data provenance`
+  prints, then the dirty flag and whether the code commit is in main's history. The same script
+  ran from the worktree, and the results were compared file by file. 438,802 files: 432,251 ok,
+  211 stale, 6,340 without a header (logs, scripts, checkpoints, two probe caches). 0 files
+  differ between main and the worktree. All 12,304 migrated files are ok (12,247 carry a
+  header), none is dirty, and every code commit is in main's history. The 211 stale artifacts are
+  stale in the worktree too, so the migration did not cause them: they are runs, decodes, floors
+  and baselines built on earlier stores. In 50 the only changed inputs are files whose v18 copies
+  are in v18_reference (the P0b decodes, the ReactMech molecule floors); in 139 inputs had already
+  changed before Release B (run.json of every run, stage-B contact shards, the P0 surveys,
+  p0a_changes, baselines); 22 are mixed. v18_reference is the only copy of the P5-state v18
+  stores (the HF v18 revision 7aef081 predates P1-P5).
