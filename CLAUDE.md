@@ -296,11 +296,17 @@ Main CLI entry points are added phase by phase and listed here as they land:
   section names are hash aliases (`docs/serve_architecture.md`)
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
-  [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy]
-  [--drop-domain-class C...]` (the spec-v9 model on one split;
-  `--preset` sets the P0a flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
-  orbital extras, legacy = the v17 inputs; an explicit option wins; `--source pmechdb+reactmech`
-  pools several sources' training parts, validates each and the pool, pair statistics fitted on the pool; each epoch every training
+  [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy|open_shell]
+  [--drop-domain-class C...] [--val-cohort pmechdb=closed_base]` (the spec-v9 model on one split;
+  `--preset` sets the flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
+  orbital extras, legacy = the v17 inputs, open_shell = general with the atom head over
+  {-2,-1,0,+1,+2}, the pair features of `OPEN_SHELL_BLOCK` (statistics fitted on the run's training
+  samples) and the P7 inputs (P9); an explicit option wins; `--source pmechdb+reactmech`
+  pools several sources' training parts, validates each and the pool, pair statistics fitted on the pool,
+  `--split pmechdb=molecule,rmechdb=rc_molecule` names each source's split, a run with pmechdb and
+  rmechdb leaves `cohort_leak_guard_joint` out of training (LEAK_GUARD, counted), `--val-cohort`
+  restricts a source's validation part to a cohort, and run.json states the selection and the
+  statistics; each epoch every training
   sample in a random one of its resonance drawings unless `--no-resonance-draws`; `--encoder`: `dense` the pair track of spec v9,
   `flex` FlexAttention with a relative bias and no pair state (GPU only), `sparse` top-k keys from a
   learned indexer, dense during the LR warm-up; `--stop-weight` is lambda_stop of the END_MECH head,
@@ -312,8 +318,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `--drop-domain-class OSM_CU2 OSM_FE3` leaves those classes' training samples out (P4's metal
   ablation; evaluation keeps them; counted as DROPPED_DOMAIN_CLASS);
   every `ModelConfig` field is an option,
-  e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
-  run)
+  e.g. `--drop-pair-features g log_abs_g` for the G ablation, `--no-somo-channels`,
+  `--no-own-pair-channel`; metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
+  pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]
   [--floor legacy|own_break] [--kernel g|g2] [--drop-intra-open]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, or every pair, no learned parameter, val and test
@@ -322,12 +329,15 @@ Main CLI entry points are added phase by phase and listed here as they land:
   reachable; files tagged by floor and kernel when not the default),
   `uv run ksmech-eval decode --run NAME [--run-source pmechdb+reactmech] [--part val|test]
   [--limit N] [--beam 5] [--scope all|inter] [--caps legacy|labels] [--max-bonds B --max-atoms A
-  --max-candidates C]` (the beam decoder of
+  --max-candidates C] [--closed-minus1-filter]` (the beam decoder of
   `model.decode` on the stored samples, B + R checked on the sample's Lewis structure: full-R
   top-1/3/5, a hit when a completion is a variant of the label class, the drop counts, the
   checkpoint's and the view's sample versions (a mismatch warns); caps legacy = 8 bonds, 2
   atoms, 48 candidates, labels = the label maxima of --source's training part, caps other than
-  legacy tag the files `_caps<b>-<a>-<c>`;
+  legacy tag the files `_caps<b>-<a>-<c>`; on a pool with no unpaired electron the closed-shell
+  screen drops a +1 atom entry off every broken bond (ODD_OFF_BROKEN_BOND), `--closed-minus1-filter`
+  also any -1 atom entry (CLOSED_MINUS1, files tagged `_minus1filter`, off until P9's ablation sets
+  it); `odd_top1` and per-sample `screened` in the report and the hit file;
   `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
   `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
   it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
