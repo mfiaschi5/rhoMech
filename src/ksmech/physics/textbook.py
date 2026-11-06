@@ -288,11 +288,32 @@ def radical_scorer(kernel: str = "g", drop_intra_open: bool = False):
     return scorer
 
 
-def run_radical_suite(loader, kernel: str = "g", drop_intra_open: bool = False) -> dict:
-    """The radical cases with the untrained kernel (`radical_scorer`): each expected pair's rank
-    against the top 3 (`run_case`), and whether the Me3Sn. halogen abstractions order I > Br >
-    Cl by their expected pair's score. Diagnostics: no count of passes triggers anything."""
-    scorer = radical_scorer(kernel, drop_intra_open)
+def network_scorer(model):
+    """`scorer(sample, loader)` of a trained model: a cell scores the forming anchor on its two
+    main centres, log P(e) with the atoms in either order (the suite's expected pair is a
+    site pair; a model has no orbital-level head)."""
+    from ksmech.model.decode import FORM, encode_pool
+    from ksmech.physics.baseline import main_centres
+
+    def scorer(sample: MechanismSample, loader) -> np.ndarray:
+        model.eval()
+        lp = encode_pool(model, sample)[3][..., FORM]
+        form = np.maximum(lp, lp.T)
+        main = main_centres(sample)
+        occ, virt = main[sample.orbital_occupied], main[~sample.orbital_occupied]
+        return form[occ[:, None], virt[None, :]]
+
+    return scorer
+
+
+def run_radical_suite(
+    loader, kernel: str = "g", drop_intra_open: bool = False, scorer=None
+) -> dict:
+    """The radical cases with the untrained kernel (`radical_scorer`) or `scorer`: each expected
+    pair's rank against the top 3 (`run_case`), and whether the Me3Sn. halogen abstractions
+    order I > Br > Cl by their expected pair's score. Diagnostics: no count of passes triggers
+    anything."""
+    scorer = scorer or radical_scorer(kernel, drop_intra_open)
     results = []
     for case in RADICAL_CASES:
         sample, rt = case_sample(case, loader)

@@ -9,7 +9,8 @@ on a stored sample's Lewis structure, `serve.science.stepapply.apply_matrix` on 
    "inter" keeps the anchors whose atoms lie in two molecules.
 2. For each of the `cfg.anchors` most probable anchors e = (a, b, sign), the entry
    log-probabilities given e (`EditDecoder.entry_logits`, log-softmax over {-1, 0, +1} for a
-   pair i < j, {-2, 0, +2} for an atom; the anchor's own entry is +1 for form, -1 for break).
+   pair i < j and over the head's `atom_values` for an atom, kept as two arrays because their
+   widths differ on a 5-class head; the anchor's own entry is +1 for form, -1 for break).
 3. log P(R) = log P(e) + sum over every other entry x of log P(R_x | e), zeros included:
    the background (every entry 0) plus, per changed entry, its gain log P(v) - log P(0). The
    candidate changes are the `max_candidates` non-zero classes with the largest gains. A
@@ -20,10 +21,17 @@ on a stored sample's Lewis structure, `serve.science.stepapply.apply_matrix` on 
    in exact order of decreasing log P(R).
 4. Each completion is checked in that order, and each drop is counted
    (`DECODE_DROPPED:<code>`): CHARGE_NOT_CONSERVED (sum R_ii + 2 sum_{i<j} R_ij != 0), then
-   B + R by `apply(R)`, its first issue code
+   on a pool with no unpaired electron (u = 0, from the drawing's N) the closed-shell screen,
+   then B + R by `apply(R)`, its first issue code
    (VALENCE_EXCEEDED, RESONANCE_ONLY_STEP, ...). `screen` also refuses TOO_MANY_CHANGES and
    ANCHOR_NOT_ADMISSIBLE (a breaking anchor with a +1 entry: such an R's anchors are its +1
    entries), which the search never proposes: a breaking anchor's candidates have no +1.
+   The screen is bookkeeping under the domain's exclusion of electron transfer (SET_STEP,
+   DISSOCIATIVE_ET_STEP): with no unpaired electron and no electron hop, an atom's N turns odd
+   only by keeping one electron of a bond it loses, so a +1 entry off every broken bond is
+   ODD_OFF_BROKEN_BOND. `cfg.closed_minus1_filter` adds CLOSED_MINUS1 (any -1 entry on such a
+   pool): an inference, not a law, so it stays outside the head and the loss, off by default
+   until P9's ablation sets it.
 5. The `cfg.per_anchor` best distinct products of each anchor are kept; over all anchors the
    products are merged by their pool key (the sorted sigma keys of the product), the best
    log P kept (`DECODE_MERGED` counts the others); best first. An anchor with no valid
@@ -47,7 +55,9 @@ NONMETALS = frozenset({1, 5, 6, 7, 8, 9, 14, 15, 16, 17, 34, 35, 53})  # FORMAL_
 SIGN = {FORM: "form", BREAK: "break"}
 PAIR_VALUES = np.array([-1, 0, 1])
 ATOM_VALUES = np.array([-2, 0, 2])  # model.decoder.ATOM_VALUES (no torch import here)
-ZERO = 1  # the class index of 0 in both
+ZERO = 1  # the class index of 0 among the pair classes
+ODD_OFF_BROKEN_BOND, CLOSED_MINUS1 = "ODD_OFF_BROKEN_BOND", "CLOSED_MINUS1"
+SCREEN_CODES = (ODD_OFF_BROKEN_BOND, CLOSED_MINUS1)
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,7 @@ class DecodeConfig:
     max_candidates: int = 48  # non-zero classes searched per anchor, by gain
     max_pops: int = 20_000  # search nodes per anchor
     max_applied: int = 64  # completions applied (B + R) per anchor
+    closed_minus1_filter: bool = False  # refuse any -1 atom entry on a pool with u = 0
 
 
 @dataclass(frozen=True)
@@ -71,7 +82,9 @@ class EntryTable:
     anchor: tuple[int, int, int]  # (a, b, sign), a < b, sign FORM | BREAK
     anchor_logp: float
     pair_lp: np.ndarray  # (A, A, 3) over (-1, 0, +1); only i < j is read
-    atom_lp: np.ndarray  # (A, 3) over (-2, 0, +2)
+    atom_lp: np.ndarray  # (A, len(atom_values))
+    atom_values: tuple[int, ...] = tuple(ATOM_VALUES.tolist())  # the head's atom classes
+    closed: bool = False  # the pool has no unpaired electron (the closed-shell screen applies)
 
 
 @dataclass(frozen=True)
@@ -92,12 +105,21 @@ class Problem:
 
     pi: np.ndarray  # (P,) first atom of each pair entry
     pj: np.ndarray  # (P,) second atom
-    lp: np.ndarray  # (P + A, 3)
+    pair_lp: np.ndarray  # (P, 3)
+    atom_lp: np.ndarray  # (A, len(atom_values))
+    atom_values: tuple[int, ...]
     base: float  # log P(e) + sum of every entry's log P(0)
-    entry: np.ndarray  # (M,) the candidates' entries
-    cls: np.ndarray  # (M,) their classes (0 or 2)
+    entry: np.ndarray  # (M,) the candidates' entries: pairs, then atoms from P
+    cls: np.ndarray  # (M,) their classes, in the entry's own alphabet
     gain: np.ndarray  # (M,) log P(class) - log P(0), descending
     is_bond: np.ndarray  # (M,) bool
+
+
+def _gains(lp: np.ndarray, zero: int) -> np.ndarray:
+    """log P(class) - log P(0) of each entry; -inf on the zero class itself."""
+    gain = lp - lp[:, zero : zero + 1]
+    gain[:, zero] = -np.inf
+    return gain
 
 
 def problem(t: EntryTable, max_candidates: int) -> Problem:
@@ -106,16 +128,22 @@ def problem(t: EntryTable, max_candidates: int) -> Problem:
     pi, pj = np.triu_indices(n, 1)
     keep = ~((pi == a) & (pj == b))
     pi, pj = pi[keep], pj[keep]
-    lp = np.concatenate([t.pair_lp[pi, pj], t.atom_lp], 0).astype(np.float64)
-    gain = lp - lp[:, ZERO : ZERO + 1]
-    gain[:, ZERO] = -np.inf
+    pair_lp = t.pair_lp[pi, pj].astype(np.float64)
+    atom_lp = t.atom_lp.astype(np.float64)
+    zero = t.atom_values.index(0)
+    pair_gain, atom_gain = _gains(pair_lp, ZERO), _gains(atom_lp, zero)
     if t.anchor[2] == BREAK:  # a breaking anchor's R has no +1 entry (ANCHOR_NOT_ADMISSIBLE)
-        gain[: len(pi), 2] = -np.inf
-    entry, cls = np.nonzero(np.isfinite(gain))
-    g = gain[entry, cls]
+        pair_gain[:, 2] = -np.inf
+    pe, pc = np.nonzero(np.isfinite(pair_gain))
+    ae, ac = np.nonzero(np.isfinite(atom_gain))
+    entry, cls = np.concatenate([pe, ae + len(pi)]), np.concatenate([pc, ac])
+    g = np.concatenate([pair_gain[pe, pc], atom_gain[ae, ac]])
     order = np.lexsort((cls, entry, -g))[: max(0, int(max_candidates))]
-    base = float(t.anchor_logp + lp[:, ZERO].sum())
-    return Problem(pi, pj, lp, base, entry[order], cls[order], g[order], entry[order] < len(pi))
+    base = float(t.anchor_logp + np.concatenate([pair_lp[:, ZERO], atom_lp[:, zero]]).sum())
+    return Problem(
+        pi, pj, pair_lp, atom_lp, t.atom_values, base,
+        entry[order], cls[order], g[order], entry[order] < len(pi),
+    )  # fmt: skip
 
 
 class _Bound:
@@ -170,8 +198,10 @@ def ranked_completions(pb: Problem, n_bonds: int, n_atoms: int, max_pops: int) -
 
 
 def classes(pb: Problem, chosen: tuple[int, ...]) -> np.ndarray:
-    """The class of every entry: 0 but on the chosen candidates."""
-    cls = np.full(len(pb.lp), ZERO)
+    """The class of every entry, pairs then atoms: the entry's zero class but on the chosen
+    candidates."""
+    zero = pb.atom_values.index(0)
+    cls = np.concatenate([np.full(len(pb.pi), ZERO), np.full(len(pb.atom_lp), zero)])
     cls[pb.entry[list(chosen)]] = pb.cls[list(chosen)]
     return cls
 
@@ -180,29 +210,42 @@ def _matrix(pb: Problem, cls: np.ndarray, anchor) -> tuple[tuple, tuple]:
     a, b, sign = anchor
     n_pairs = len(pb.pi)
     bonds = [(a, b, 1 if sign == FORM else -1)]
-    lone = []
-    for e in np.flatnonzero(cls != ZERO).tolist():
-        if e < n_pairs:
-            bonds.append((int(pb.pi[e]), int(pb.pj[e]), int(PAIR_VALUES[cls[e]])))
-        else:
-            lone.append((e - n_pairs, int(ATOM_VALUES[cls[e]])))
+    for e in np.flatnonzero(cls[:n_pairs] != ZERO).tolist():
+        bonds.append((int(pb.pi[e]), int(pb.pj[e]), int(PAIR_VALUES[cls[e]])))
+    values = pb.atom_values
+    atoms = cls[n_pairs:]
+    lone = [(i, values[c]) for i, c in enumerate(atoms.tolist()) if values[c] != 0]
     return tuple(sorted(bonds)), tuple(sorted(lone))
 
 
-def screen(bonds, lone, anchor, cfg: DecodeConfig) -> str | None:
-    """The first rule a completion breaks before B + R (module docstring), or None."""
+def closed_screen(bonds, lone, cfg: DecodeConfig) -> str | None:
+    """The rule a completion on a pool with u = 0 breaks (module docstring, step 4), or None."""
+    if cfg.closed_minus1_filter and any(d == -1 for _, d in lone):
+        return CLOSED_MINUS1
+    broken = {a for i, j, d in bonds if d < 0 for a in (i, j)}
+    if any(d == 1 and i not in broken for i, d in lone):
+        return ODD_OFF_BROKEN_BOND
+    return None
+
+
+def screen(bonds, lone, anchor, cfg: DecodeConfig, closed: bool = False) -> str | None:
+    """The first rule a completion breaks before B + R (module docstring), or None; `closed`:
+    the pool has no unpaired electron."""
     if len(bonds) > cfg.max_bonds or len(lone) > cfg.max_atoms:
         return "TOO_MANY_CHANGES"
     if anchor[2] == BREAK and any(d > 0 for *_, d in bonds):
         return "ANCHOR_NOT_ADMISSIBLE"
     if sum(d for _, d in lone) + 2 * sum(d for *_, d in bonds) != 0:
         return "CHARGE_NOT_CONSERVED"
-    return None
+    return closed_screen(bonds, lone, cfg) if closed else None
 
 
 def exact_logp(pb: Problem, cls: np.ndarray, anchor_logp: float) -> float:
     """log P(e) + sum over every other entry of log P(its class), summed afresh."""
-    return float(anchor_logp + pb.lp[np.arange(len(cls)), cls].sum())
+    p = len(pb.pi)
+    pairs = pb.pair_lp[np.arange(p), cls[:p]]
+    atoms = pb.atom_lp[np.arange(len(cls) - p), cls[p:]]
+    return float(anchor_logp + np.concatenate([pairs, atoms]).sum())
 
 
 Apply = Callable[[tuple, tuple], tuple[str | None, str | None]]  # -> (product key, issue)
@@ -217,7 +260,7 @@ def complete_anchor(t: EntryTable, apply: Apply, cfg: DecodeConfig, skips: Count
     for _, chosen in ranked_completions(pb, cfg.max_bonds - 1, cfg.max_atoms, cfg.max_pops):
         cls = classes(pb, chosen)
         bonds, lone = _matrix(pb, cls, t.anchor)
-        why = screen(bonds, lone, t.anchor, cfg)
+        why = screen(bonds, lone, t.anchor, cfg, t.closed)
         if why is None:
             key, why = apply(bonds, lone)
             applied += 1
@@ -260,7 +303,11 @@ def top_anchors(lp: np.ndarray, k: int, allowed: np.ndarray | None = None) -> li
     finite = np.flatnonzero(np.isfinite(flat))
     order = finite[np.lexsort((finite, -flat[finite]))][: max(0, int(k))]
     n = lp.shape[1]
-    return [(float(flat[f]), int(f // (2 * n)), int((f % (2 * n)) // 2), int(f % 2)) for f in order]
+    sides = len(SIGN)
+    return [
+        (float(flat[f]), int(f // (sides * n)), int((f % (sides * n)) // sides), int(f % sides))
+        for f in order
+    ]
 
 
 def encode_pool(model, sample):
@@ -279,7 +326,8 @@ def encode_pool(model, sample):
 
 
 def entry_table(model, batch, h, p, anchor: tuple[float, int, int, int]) -> EntryTable:
-    """The entry log-probabilities of sample 0 given one anchor (log P, a, b, sign)."""
+    """The entry log-probabilities of sample 0 given one anchor (log P, a, b, sign), with the
+    head's atom alphabet and whether the pool has no unpaired electron (no odd N)."""
     import torch
 
     logp, a, b, sign = anchor
@@ -288,7 +336,9 @@ def entry_table(model, batch, h, p, anchor: tuple[float, int, int, int]) -> Entr
         pair, atom = model.decoder.entry_logits(h, p, batch, rows)
         pair_lp = torch.log_softmax(pair[0].double(), -1).numpy()
         atom_lp = torch.log_softmax(atom[0].double(), -1).numpy()
-    return EntryTable((a, b, sign), float(logp), pair_lp, atom_lp)
+    closed = not bool((batch["nonbonding"][0] % 2).any())
+    values = tuple(int(v) for v in model.decoder.atom_values)
+    return EntryTable((a, b, sign), float(logp), pair_lp, atom_lp, values, closed)
 
 
 def decode_pool(model, sample, cfg: DecodeConfig, apply: Apply, scope: str, skips: Counter):

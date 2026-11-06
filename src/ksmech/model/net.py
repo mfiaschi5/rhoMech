@@ -20,9 +20,11 @@ from ksmech.model.inputs import (
     Y_EXTRA,
     FeatureStats,
     atom_pair_physics,
+    dropped_features,
     frozen,
     standardized_pair_z,
     token_inputs,
+    without_open_cells,
 )
 from ksmech.model.sparse import SparseEncoder
 from ksmech.physics.pairs import PairStats
@@ -54,10 +56,10 @@ class KSMech(nn.Module):
         """(token inputs, z_hat, defined, y_ij): what every encoder and the decoder read that is
         not learned, in float32 without gradient."""
         with frozen(batch["token_mask"].device.type):
-            cells = self.cfg.pair_cells
-            z_hat, defined = standardized_pair_z(
-                batch, self.pair_stats, self.cfg.drop_pair_features, self.cfg.K, cells
-            )
+            cfg, cells = self.cfg, self.cfg.pair_cells
+            batch = batch if cfg.somo_channels else without_open_cells(batch)
+            dropped = dropped_features(cfg, self.pair_stats.names)
+            z_hat, defined = standardized_pair_z(batch, self.pair_stats, dropped, cfg.K, cells)
             inp = token_inputs(batch, self.feature_stats)
             y, _ = atom_pair_physics(batch, z_hat, defined, cells)
         return inp, z_hat, defined, y

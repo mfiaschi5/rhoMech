@@ -46,7 +46,7 @@
 
 \title{\textbf{ksmech}: a localized-orbital transformer\\for elementary-step reaction mechanism prediction\\[4pt]\large Theoretical framework and architecture specification}
 \author{Project design document}
-\date{5 November 2026 (v10: electron bookkeeping and open-shell tokens and physics, open-shell plan P6 and P7; approved 5 November 2026)}
+\date{6 November 2026 (v10: electron bookkeeping and open-shell tokens and physics, open-shell plan P6 and P7, approved 5 November 2026; the open-shell head and decode screen of P9, approved 6 November 2026)}
 
 \begin{document}
 \maketitle
@@ -657,11 +657,13 @@ where the last term is the learned use of the atom-pair physics. A forming ancho
 \paragraph{Remaining entries.} Given the anchor $e^\star$ on atoms $(a,b)$, every other pair entry and every atom entry is classified:
 \begin{align}
 P(R_{ij}\mid e^\star,\cdot)&=\softmax_{v\in\{-1,0,+1\}}\MLP_R\big([\vb{p}^{(L)}_{ij},\ \vb{h}^{(L)}_i+\vb{h}^{(L)}_j,\ \vb{c}_{ij}]\big)_v,\\
-P(R_{ii}\mid e^\star,\cdot)&=\softmax_{v\in\{-2,0,+2\}}\MLP_N\big([\vb{h}^{(L)}_i,\ \vb{c}_{ii}]\big)_v,
+P(R_{ii}\mid e^\star,\cdot)&=\softmax_{v\in\mathcal{V}}\MLP_N\big([\vb{h}^{(L)}_i,\ \vb{c}_{ii}]\big)_v,
 \end{align}
-where $\vb{c}$ carries the anchor: $\vb{h}^{(L)}_a+\vb{h}^{(L)}_b$, the pair vectors that join the entry's atoms to $a$ and $b$, and their graph distances to $a$ and $b$. Masks remove $-1$ on a pair without a bond, $+1$ on a triple bond, and $-2$ on an atom with $N_i<2$. The batch carries $N$ for every atom, and also the mask $N_i\ge1$ of a $-1$ atom entry, which the one-electron head of a later version reads; a sample without $N$ is refused.
+where $\mathcal{V}=\{-2,-1,0,+1,+2\}$ on the open-shell head (a polar model keeps $\{-2,0,+2\}$; the restriction is a label rule of a polar source, never a flag the model sees at inference) and $\vb{c}$ carries the anchor: $\vb{h}^{(L)}_a+\vb{h}^{(L)}_b$, the pair vectors that join the entry's atoms to $a$ and $b$, and their graph distances to $a$ and $b$. Masks remove $-1$ on a pair without a bond, $+1$ on a triple bond, $-2$ on an atom with $N_i<2$ and $-1$ on an atom with $N_i<1$. They are electron bookkeeping, non-negative electron counts and bond orders; no rule on the pool enters the head or the loss, so a $-1$ entry on a pool with no unpaired electron keeps its probability. A sample without $N$ is refused.
 
 \paragraph{Joint probability.} $P(\vb{R}\mid\cdot)=P(e^\star\mid\cdot)\prod_{x\ne e^\star}P(R_x\mid e^\star,\cdot)$. Decoding is the constrained beam search of Section~\ref{sec:decode}. For each of the $B$ best anchors, completions are built from the most probable non-zero entries, at most as many bond and atom changes as the largest label of the training part of the source decoded (its smallest member: $6$ bonds and $2$ atoms on PMechDB; the fixed caps of version~9, $8$ and $2$, remain the legacy setting), recorded with the evaluation and set per source; those that violate charge conservation or an atom's valence are discarded; the rest are ranked by $\log P(\vb{R})$ and merged by the identity key of their product, its unpaired electrons counted from the tracked $N$ (a homolysis and a heterolysis of one bond stay two beams).
+
+\paragraph{Closed-shell decode screen.} On a pool with no unpaired electron ($u=0$ from the drawing's $N$), every $+1$ atom entry must sit on an endpoint of some bond with a $-1$ entry. This is bookkeeping under the domain's exclusion of electron transfer (\texttt{SET\_STEP} and the dissociative code): with no unpaired electron and no electron hop, an atom's $N$ turns odd only by keeping one electron of a bond it loses. It admits a homolysis, an azo fragmentation and Cl$_2$ with RH, and it is always on. Refusing every $-1$ atom entry on such a pool is not a law but an inference about which steps exist, so it is an optional decode filter outside the head and the loss, whose default an ablation sets. Both drops are counted.
 
 \paragraph{Stop head.} A step is one matrix, so there is no per-step stop. After each step a Bernoulli head on $\vb{h}^{(L)}_{\mathrm{MECH}}$ of the re-featurized pool decides \texttt{END\_MECH}. It needs a source with pathways; on PMechDB, whose steps are isolated, it is not trained ($\lambda_{\mathrm{stop}}=0$).
 

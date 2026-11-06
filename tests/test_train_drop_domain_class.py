@@ -17,7 +17,7 @@ STEPS = [
 ]
 
 
-def _samples(path):
+def _samples(path, ids=None):
     return [SimpleNamespace(step_id=s.step_id, n_atoms=3, n_orbitals=4, drawings=[]) for s in STEPS]
 
 

@@ -16,6 +16,11 @@ the pooled means run over the valid pairs only, so the donor's own antibond is n
 (decisions.md, 2026-10-25); with 'all' every cell enters, and the three exclusion flags and the
 legacy mask are pair features (`pairs.PAIR_FLAGS`, `pairs.PAIR_VALID`). The features are
 selected by the names of the pair statistics, so a checkpoint reads a store with more features.
+
+Every ablation of the open-shell plan (P9, step 4) is a batch-time selection out of the v19
+superset: a pair feature leaves by name (`dropped_features`), the open-shell rows and hole
+columns leave with `without_open_cells`, the token inputs by `token_columns`. The dense, flex
+and sparse encoders all read `KSMech.prepare`, so they read the same switches.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from ksmech.orbitals.tokens import (
 )
 from ksmech.physics.pairs import PAIR_CELLS, PAIR_VALID, PairStats
 from ksmech.physics.params import SCALING
+from ksmech.physics.stage_a import OPEN_SHELL_PAIR_FEATURES, OWN_PAIR_FEATURES
 
 MAX_Z = 118
 CHARGE_MAX = 4  # formal charges are clipped to [-4, 4]
@@ -204,10 +210,54 @@ def real_cells(batch: dict) -> torch.Tensor:
 
 
 def cell_mask(batch: dict, cells: str = "valid") -> torch.Tensor:
-    """(B, R, C) the cells a reader of `cells` sees: `pair_valid`, or every real cell."""
+    """(B, R, C) the cells a reader of `cells` sees: `pair_valid`, or every real cell, without
+    the cells `without_open_cells` took away."""
     if cells not in PAIR_CELLS:
         raise ValueError(f"pair cells {cells!r}, expected one of {PAIR_CELLS}")
-    return batch["pair_valid"] if cells == "valid" else real_cells(batch)
+    mask = batch["pair_valid"] if cells == "valid" else real_cells(batch)
+    off = batch.get("cells_off")
+    return mask if off is None else mask & ~off
+
+
+def open_cells(batch: dict) -> torch.Tensor:
+    """(B, R, C) the cells of an open-shell row or a hole column (`spin_role` != 0); none in a
+    batch without that column."""
+    cols = tuple(batch["orbital_columns"])
+    if "spin_role" not in cols:
+        return torch.zeros_like(batch["pair_valid"])
+    role = batch["orbital_features"][..., cols.index("spin_role")]
+    n_atoms = batch["atom_features"].shape[1]
+
+    def at(pos):
+        idx = (pos - n_atoms).clamp(min=0)
+        return torch.gather(role, 1, idx) * (pos >= 0)
+
+    rows, columns = at(batch["pair_row_pos"]), at(batch["pair_col_pos"])
+    return (rows[:, :, None] != 0) | (columns[:, None, :] != 0)
+
+
+def without_open_cells(batch: dict) -> dict:
+    """The batch of `ModelConfig.somo_channels=False`: `pair_valid` cleared on the open-shell
+    rows and hole columns, every pair feature undefined there, and `cell_mask` leaving them out
+    on every cell set, so they reach neither the pair track nor the pooled physics."""
+    off = open_cells(batch)
+    return batch | {
+        "pair_valid": batch["pair_valid"] & ~off,
+        "pair_defined": batch["pair_defined"] & ~off[..., None],
+        "cells_off": off,
+    }
+
+
+def dropped_features(cfg, names: Iterable[str]) -> tuple[str, ...]:
+    """The pair features of `names` a `ModelConfig` leaves undefined: `drop_pair_features` and
+    the channels `own_pair_channel` and `somo_channels` turn off."""
+    off = list(cfg.drop_pair_features)
+    if not getattr(cfg, "own_pair_channel", True):
+        off += OWN_PAIR_FEATURES
+    if not getattr(cfg, "somo_channels", True):
+        off += OPEN_SHELL_PAIR_FEATURES
+    names = tuple(names)
+    return tuple(n for n in dict.fromkeys(off) if n in names)
 
 
 def named_pair_z(batch: dict, names, cells: str = "valid"):

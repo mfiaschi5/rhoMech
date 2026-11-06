@@ -17,9 +17,13 @@ compared with.
 full reaction matrix: a hit at k when one of the k best completions is a variant of the label
 class (`eval.decode`). It writes `decode_report_<split>_<part>[_n<limit>].json` next to the
 checkpoint. `--caps legacy` (the default: at most 8 bond and 2 atom changes, 48 candidates)
-or `--caps labels` (the label maxima of the training part of --source, never val or test),
-then `--max-bonds`, `--max-atoms`, `--max-candidates`; the header records the caps, and caps
-other than the legacy ones add `_caps<bonds>-<atoms>-<candidates>` to the file names.
+or `--caps labels` (the label maxima of the training part of --source, never val or test, so
+each cohort of a joint run decodes with its own source's caps), then `--max-bonds`,
+`--max-atoms`, `--max-candidates`; the header records the caps, and caps other than the legacy
+ones add `_caps<bonds>-<atoms>-<candidates>` to the file names. `--closed-minus1-filter`
+refuses any -1 atom entry on a pool with no unpaired electron (`model.decode`, an option whose
+default P9's ablation sets) and adds `_minus1filter` to the file names; the closed-shell screen
+is always on. A run's selection note (`train.loop.run_notes`) is copied into the report.
 
 `pin` pins every sample of a split's three parts as a cohort, its two GBDT subsets (the
 samples with ArrowLabels on the valid cells and on every cell) and `baseline_<name>.json`, the
@@ -71,7 +75,8 @@ from ksmech.train.loop import DEFAULT_MODELS_DIR
 
 FLOOR_VERSION = 4  # 3: --cells valid|all (pooling over the pair_valid cells or every cell);
 #   4: --floor legacy|own_break, --kernel g|g2, --drop-intra-open (open-shell plan P7)
-DECODE_VERSION = 3  # 3: decoder caps legacy | labels, recorded in the header
+DECODE_VERSION = 4  # 3: decoder caps legacy | labels, recorded in the header; 4: the closed-shell
+#   screen, --closed-minus1-filter, odd_top1 and the screened counts per sample (open-shell P9)
 
 
 def _floor_options(f) -> None:
@@ -161,6 +166,8 @@ def _decode_parser(sub) -> None:
                    "changes; labels: the label maxima of --source's training part")  # fmt: skip
     for name in CAP_FIELDS:
         d.add_argument(f"--{name.replace('_', '-')}", type=int, help="overrides --caps")
+    d.add_argument("--closed-minus1-filter", action="store_true",
+                   help="refuse any -1 atom entry on a pool with no unpaired electron")  # fmt: skip
     d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     _cohort_args(d)
@@ -182,6 +189,13 @@ def _extras(args, rows: list[dict], samples: list, view: Path) -> dict:
     if args.slice:
         out["slice"] = sliced(rows, {s.step_id: s for s in samples}, args.slice)
     return out
+
+
+def _run_notes(payload: dict) -> dict:
+    """How the checkpoint's run was selected and standardized (`train.loop.run_notes`), for a
+    report that quotes one model's numbers; nothing for a run older than the notes."""
+    extra = payload.get("provenance", {}).get("extra", {})
+    return {k: extra[k] for k in ("selection", "pair_statistics") if k in extra}
 
 
 def _sample_versions(path: Path, payload: dict, console: Console) -> dict:
@@ -220,12 +234,14 @@ def cmd_decode(args, console: Console) -> int:
     path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
     ids = _cohort_ids(args, path)
     ids = ids[: args.limit] if args.limit is not None else ids
-    cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam, **caps)
+    minus1 = args.closed_minus1_filter
+    cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam, closed_minus1_filter=minus1, **caps)
     samples = load_samples(path, ids=ids)
     report = decode_report(samples, sample_decoder(model, cfg, args.scope))
     hits = report.pop("per_sample")
-    report |= _extras(args, hits, samples, path)
+    report |= _extras(args, hits, samples, path) | _run_notes(payload)
     keys = ("source", "split", "part", "limit", "beam", "scope", "cohort", "slice")
+    keys = (*keys, "closed_minus1_filter")
     config = {k: getattr(args, k) for k in keys}
     config |= {"run_source": run_source, "checkpoint": _checkpoint_text(args.checkpoint, payload)}
     config |= _sample_versions(path, payload, console) | {"caps": args.caps, **caps}
@@ -234,6 +250,7 @@ def cmd_decode(args, console: Console) -> int:
     suffix = f"_{args.source}" if args.source != run_source else ""
     suffix += f"_{args.cohort}" if args.cohort != "all" else ""
     suffix += f"_n{args.limit}" if args.limit is not None else ""
+    suffix += "_minus1filter" if minus1 else ""
     if caps != {k: getattr(DecodeConfig(), k) for k in caps}:  # the legacy files stay as they are
         suffix += "_caps{max_bonds}-{max_atoms}-{max_candidates}".format(**caps)
     out = ckpt.parent / f"decode_report_{args.split}_{args.part}{suffix}.json"

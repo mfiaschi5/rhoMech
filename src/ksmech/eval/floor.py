@@ -24,7 +24,7 @@ import torch
 
 from ksmech.arrows.batches import collate_samples
 from ksmech.model.decoder import BREAK, FORM
-from ksmech.model.inputs import _pool, cell_mask, centre_weights
+from ksmech.model.inputs import _pool, cell_mask, centre_weights, open_cells
 
 FLOORS = ("legacy", "own_break")
 KERNELS = {"g": ("g", "own_g"), "g2": ("g2", "own_g2")}  # kernel -> (pooled, own) columns
@@ -32,19 +32,8 @@ KERNELS = {"g": ("g", "own_g"), "g2": ("g2", "own_g2")}  # kernel -> (pooled, ow
 
 def intra_open_cells(batch: dict) -> torch.Tensor:
     """(B, R, C) the cells of an open-shell row or a hole column within one fragment."""
-    cols = tuple(batch["orbital_columns"])
-    if "spin_role" not in cols:
-        return torch.zeros_like(batch["pair_valid"])
-    role = batch["orbital_features"][..., cols.index("spin_role")]
-    n_atoms = batch["atom_features"].shape[1]
-
-    def at(pos):
-        idx = (pos - n_atoms).clamp(min=0)
-        return torch.gather(role, 1, idx) * (pos >= 0)
-
-    rows, cols_ = at(batch["pair_row_pos"]), at(batch["pair_col_pos"])
     inter = batch["pair_z"][..., tuple(batch["pair_features"]).index("inter")] > 0
-    return ((rows[:, :, None] != 0) | (cols_[:, None, :] != 0)) & ~inter
+    return open_cells(batch) & ~inter
 
 
 def pooled_column(batch: dict, name: str, cells: torch.Tensor) -> torch.Tensor:
