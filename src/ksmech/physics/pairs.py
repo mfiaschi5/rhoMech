@@ -107,14 +107,31 @@ def pair_flags(
     return {"d_acceptor": d_acc, "own_antibond": own, "site_self": site}
 
 
+def open_self_cells(fragments: list[MoleculeTokens]) -> np.ndarray:
+    """(n_occ, n_virt) the open-shell rows x hole columns of one fragment (`tokens.open_self`):
+    an excitation inside the open shell, a token with its own hole among them. Across
+    fragments the same kind of cell is a recombination (`somo_pair`), not masked."""
+
+    def roles(tokens, value):
+        return np.array([o.spin_role == value for o in tokens], dtype=bool)
+
+    occ_f = np.repeat(np.arange(len(fragments)), [len(t.occupied()) for t in fragments])
+    virt_f = np.repeat(np.arange(len(fragments)), [len(t.virtual()) for t in fragments])
+    rows = roles([o for t in fragments for o in t.occupied()], 1)
+    cols = roles([o for t in fragments for o in t.virtual()], -1)
+    return rows[:, None] & cols[None, :] & (occ_f[:, None] == virt_f[None, :])
+
+
 def valid_pairs(fragments: list[MoleculeTokens], config: CandidateConfig | None = None):
-    """(n_occ, n_virt) arrow-candidate filter: a doubly occupied donor, an empty acceptor that
-    is not d-type (unless allowed), and, within one fragment, not the donor's own antibond and
-    not a pair whose every site pair is a bond interacting with itself (sites identical or
-    bonded, and the acceptor carries >= `config.site_weight` on the donor's site or the donor
-    on the acceptor's: `tokens.site_excluded_matrix`). Every criterion is read from descriptors
-    and the record geometry (`ksmech.orbitals.tokens`). Since v18 it is the legacy mask of
-    `ModelConfig.pair_cells = 'valid'`: the store keeps every cell and `pair_flags`."""
+    """(n_occ, n_virt) arrow-candidate filter: a donor (doubly occupied, or an open-shell token
+    in its donor role), an acceptor (empty and not d-type unless allowed, or a hole), and,
+    within one fragment, not the donor's own antibond, not a pair whose every site pair is a
+    bond interacting with itself (sites identical or bonded, and the acceptor carries >=
+    `config.site_weight` on the donor's site or the donor on the acceptor's:
+    `tokens.site_excluded_matrix`) and not an open-shell row with a hole column
+    (`open_self_cells`). Every criterion is read from descriptors and the record geometry
+    (`ksmech.orbitals.tokens`). Since v18 it is the legacy mask of `ModelConfig.pair_cells =
+    'valid'`: the store keeps every cell and `pair_flags`."""
     config = config or CandidateConfig()
     donors = {id(o) for t in fragments for o in t.donor_candidates(config)}
     acceptors = {id(o) for t in fragments for o in t.acceptor_candidates(config)}
@@ -123,7 +140,7 @@ def valid_pairs(fragments: list[MoleculeTokens], config: CandidateConfig | None 
     ok_d = np.array([id(o) in donors for o in occ], dtype=bool)
     ok_a = np.array([id(o) in acceptors for o in virt], dtype=bool)
     own, site = _fragment_blocks(fragments, config)
-    return ok_d[:, None] & ok_a[None, :] & ~(own | site)
+    return ok_d[:, None] & ok_a[None, :] & ~(own | site | open_self_cells(fragments))
 
 
 def atom_coulomb_matrix(fragments: list[MoleculeTokens], params: KSParams | None = None):

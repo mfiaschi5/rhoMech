@@ -27,7 +27,7 @@ Hartree. `C_loc` holds the S-orthonormal AO coefficients of every orbital token 
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -86,6 +86,9 @@ class OrbitalToken:
     overlap_population: float = float("nan")
     metal_bound: bool = False
     metal_atom: int = -1
+    # in memory only, never in a token file: +1 on an open-shell token in its donor role, -1 on
+    # its hole (the VIRTUAL twin `with_holes` builds), 0 elsewhere (open-shell plan P7, U15)
+    spin_role: int = 0
 
     @property
     def energy_ev(self) -> float:
@@ -197,11 +200,13 @@ class CandidateConfig:
 
     Donor: a doubly occupied token. Acceptor: an empty token that is not a d-type polarization
     function (unless `allow_d_acceptors`) and, for a given donor of the same molecule, not a
-    token excluded with it (`excluded_pair`, threshold `site_weight`). Until the radical
-    extension, a token
-    whose occupation lies in `fractional_band` (a SOMO at 1, a Fermi-smeared level of a
-    small-gap molecule) is neither (`exclude_fractional`); its occupation stays the continuous
-    model input either way.
+    token excluded with it (`excluded_pair`, threshold `site_weight`). A token whose occupation
+    lies in `fractional_band` (a SOMO at 1, a Fermi-smeared level of a small-gap molecule) is
+    neither (`exclude_fractional`), except an open-shell token of an open-shell record (P2b's
+    plateau group, `open_shell_tokens`) under `somo_roles` (open-shell plan P7): it is a donor
+    and its hole, a VIRTUAL twin built at sample assembly (`with_holes`), an acceptor. An
+    open-shell token whose main centre is a metal d shell (Cu(II), Fe(III)) takes no role unless
+    `metal_d_open_shell`. Its occupation stays the continuous model input either way.
     """
 
     allow_d_acceptors: bool = False  # GFN2 d polarization functions are basis artefacts
@@ -210,6 +215,8 @@ class CandidateConfig:
     exclude_fractional: bool = True
     fractional_band: tuple[float, float] = (0.2, 1.8)  # open interval
     site_weight: float = 0.20  # `site_pairs_excluded`: weight that makes a near site a self-pair
+    somo_roles: bool = True  # P7: an open-shell token is a donor and its hole an acceptor
+    metal_d_open_shell: bool = False  # P7: metal-d open-shell tokens take roles (P9's ablation)
 
     def is_fractional(self, occupation: float) -> bool:
         lo, hi = self.fractional_band
@@ -360,6 +367,7 @@ class MoleculeTokens:
     schema_version: int = SCHEMA_VERSION
     fg_vocab_size: int = 0
     fermi_smeared: bool = False  # an MO is > 0.05 from its aufbau occupation (`is_fermi_smeared`)
+    holes: int = field(default=0, repr=False, compare=False)  # hole twins `with_holes` appended
     digest: str = field(default="", repr=False, compare=False)  # content sha256 (provenance)
     source_path: str = field(default="", repr=False, compare=False)  # file it was loaded from
     # Lewis bond (i < j) -> Wiberg bond index, from the QM record (`qm.bond_index`): attached at
@@ -443,13 +451,17 @@ class MoleculeTokens:
         )
 
     def donor_candidates(self, config: CandidateConfig | None = None) -> list[OrbitalToken]:
-        """Doubly occupied tokens: where an arrow may start."""
+        """Doubly occupied tokens, and the open-shell tokens in their donor role (`spin_role`
+        +1, under `somo_roles`): where an arrow may start."""
         config = config or CandidateConfig()
         return [
             o
             for o in self.occupied()
-            if o.descriptors.occupation > config.full
-            and not config.is_fractional(o.descriptors.occupation)
+            if (
+                o.descriptors.occupation > config.full
+                and not config.is_fractional(o.descriptors.occupation)
+            )
+            or (config.somo_roles and o.spin_role == 1)
         ]
 
     def acceptor_candidates(
@@ -461,10 +473,16 @@ class MoleculeTokens:
         return [
             o
             for o in self.virtual()
-            if o.descriptors.occupation < config.empty
-            and not config.is_fractional(o.descriptors.occupation)
-            and (config.allow_d_acceptors or not self.is_d_type(o))
+            if (
+                (
+                    o.descriptors.occupation < config.empty
+                    and not config.is_fractional(o.descriptors.occupation)
+                    and (config.allow_d_acceptors or not self.is_d_type(o))
+                )
+                or (config.somo_roles and o.spin_role == -1)
+            )
             and (donor is None or not excluded_pair(donor, o, self, config.site_weight))
+            and (donor is None or not open_self(donor, o))
         ]
 
     def atoms_with_only_d_virtuals(self) -> list[int]:
@@ -478,6 +496,60 @@ class MoleculeTokens:
             for a in o.descriptors.all_center_atoms:
                 d_type.setdefault(int(a), set()).add(self.is_d_type(o))
         return sorted(a for a, flags in d_type.items() if flags == {True})
+
+
+def open_self(donor: OrbitalToken, acceptor: OrbitalToken) -> bool:
+    """An open-shell row and a hole column of one molecule: an excitation inside its open shell
+    (a token with its own hole among them), never an arrow; only compare tokens of one
+    molecule (open-shell plan P7)."""
+    return donor.spin_role == 1 and acceptor.spin_role == -1
+
+
+def is_metal_d(t: MoleculeTokens, o: OrbitalToken) -> bool:
+    """The token's main centre is a metal with a valence d shell and it is mostly d there."""
+    d = o.descriptors
+    z = t.atoms[int(d.center_atoms[0])].atomic_number
+    return int(z) in VALENCE_D and int(np.argmax(d.center_spd[0])) == 2
+
+
+def open_shell_tokens(t: MoleculeTokens, config: CandidateConfig | None = None):
+    """The open-shell tokens of `t`: occupied tokens with a fractional occupation in a record
+    run as an open shell (`record_unpaired` > 0) that is not Fermi-smeared, i.e. P2b's plateau
+    group (a SOMO at 1, Br's 4p at 5/3, NO's pi* pair at 1/2). With a `config` the metal-d ones
+    are left out unless `metal_d_open_shell` (their roles; the SOMO population counts them)."""
+    if t.fermi_smeared or record_unpaired(t.smiles, t.method) <= 0:
+        return []
+    band = CandidateConfig().fractional_band
+    out = [o for o in t.occupied() if band[0] < o.descriptors.occupation < band[1]]
+    if config is not None and not config.metal_d_open_shell:
+        out = [o for o in out if not is_metal_d(t, o)]
+    return out
+
+
+def with_holes(t: MoleculeTokens, config: CandidateConfig | None = None) -> MoleculeTokens:
+    """`t` with its open-shell tokens in their donor role and one hole each (open-shell plan P7,
+    U15), under `config.somo_roles`: a copy whose open-shell tokens have `spin_role` +1 (type
+    SOMO) and whose virtual block ends with their VIRTUAL twins (`spin_role` -1, type
+    SOMO_HOLE: the same coefficients, centres, descriptors, occupation and spectral set). Built
+    at sample assembly, never stored: a token file keeps its orbitals. `t` itself when there is
+    nothing to add (a closed shell, or roles off)."""
+    config = config or CandidateConfig()
+    if not config.somo_roles or t.holes:
+        return t
+    opened = {id(o) for o in open_shell_tokens(t, config)}
+    if not opened:
+        return t
+    orbitals = [
+        replace(o, spin_role=1, type=OrbitalType.SOMO) if id(o) in opened else o for o in t.orbitals
+    ]
+    first = (orbitals[-1].token_id + 1) if orbitals else len(t.atoms)
+    somos = [o for o in orbitals if o.spin_role == 1]
+    holes = [
+        replace(o, token_id=first + k, kind=OrbitalKind.VIRTUAL, spin_role=-1,
+                type=OrbitalType.SOMO_HOLE)
+        for k, o in enumerate(somos)
+    ]  # fmt: skip
+    return replace(t, orbitals=orbitals + holes, holes=len(holes))
 
 
 def _check_mol_matches(mol: Chem.Mol, rec: QMRecord) -> None:
@@ -818,7 +890,10 @@ def save_tokens(
 ) -> Path:
     """Write as .npz (no pickle) with its provenance header, atomically. `inputs`: the QM
     record it was built from (`prov.file_input(qm_path)`); `config`: `token_config(...)`,
-    with the open-shell rule added for a u > 0 molecule (`with_open_shell_rule`)."""
+    with the open-shell rule added for a u > 0 molecule (`with_open_shell_rule`). Tokens with
+    hole twins (`with_holes`) are a sample's, never a file's: ValueError."""
+    if tokens.holes:
+        raise ValueError(f"{tokens.smiles}: hole twins are built at sample assembly, not stored")
     arrays = _payload(tokens)
     tokens.digest = prov.array_digest(arrays)
     config = with_open_shell_rule(config or token_config(), tokens.smiles, tokens.method)

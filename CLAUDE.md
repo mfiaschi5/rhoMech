@@ -93,10 +93,17 @@ token that is not a d-type polarization function (unless configured) and not the
 antibonding partner of the donor's own bond. Since v18 these exclusions are stored as 0/1 pair
 flags on every cell (`physics.pairs.pair_flags`) rather than deleting the cells:
 `ModelConfig.pair_cells = 'valid'` (default) reads only the `pair_valid` cells, as before;
-`'all'` reads every cell with the flags as channels. Until the radical extension, a token with
-0.2 < n < 1.8 (a SOMO, or a Fermi-smeared level) is neither; its fractional occupation stays
-the continuous input. A molecule with an MO more than 0.05 from its aufbau occupation is
-flagged `fermi_smeared`: its GFN2 gap vanishes and it lies outside the closed-shell domain.
+`'all'` reads every cell with the flags as channels. A token with 0.2 < n < 1.8 is neither,
+except an open-shell token of a record run as an open shell (P2b's plateau group, not a
+Fermi-smeared level; `tokens.open_shell_tokens`): under `CandidateConfig.somo_roles` it is a
+donor and its hole, a VIRTUAL twin built at sample assembly (`tokens.with_holes`, never in a
+token file), an acceptor; within a fragment an open-shell row and a hole column are never valid;
+metal-d open shells take no role unless `metal_d_open_shell` (open-shell plan P7). Its
+fractional occupation stays the continuous input; the sample adds the orbital column
+`spin_role` (+1 donor role, -1 hole) and the atom column `somo_population` (rho_A, restricted
+SOMO population), which a model selects (`ModelConfig.spin_role`, `atom_spin_input`). A
+molecule with an MO more than 0.05 from its aufbau occupation is flagged `fermi_smeared`: its
+GFN2 gap vanishes and it lies outside the closed-shell domain.
 
 The reason is that orbital character must generalize across elements: sigma*(C-Cl),
 sigma*(C-Br) and sigma*(C-I) should look to the model like the same kind of acceptor at
@@ -108,7 +115,13 @@ The physics enters as geometry-free pair features between an occupied and a virt
 token (spec, "Geometry-free pair features"):
 
 1. the spectral gap factor G and log|G|: the energy denominator of the Klopman-Salem
-   filled-empty term over the canonical spectra, for every pair;
+   filled-empty term over the canonical spectra, for every pair, weighted by the occupation
+   difference (2 on every closed-shell pair, bit for bit as before; 1 for a SOMO or a hole; 0,
+   undefined, for an open-shell row with a hole); since v19 beside it the two-level column g2
+   (`ks_terms.gap_kernel_two_level`, beta the cross-centre coupling within a molecule and
+   `params.BETA_INTER` = 0.40 eV between molecules), the own-pair channel (own_g, own_g2 of a
+   bond with its own antibond, pooled into B^own outside G^atom) and the recombination channel
+   (somo_pair, somo_level_diff), each selected by name (`stage_a.SAMPLE_PAIR_FEATURES`);
 2. within a molecule, in the reactant pose: the Wolfsberg-Helmholz cross-centre coupling, the
    centroid distance and the stereoelectronic alignment (lobe-axis and dihedral cosines);
 3. the fragment flag and, on the Lewis structure, the bonded flag, bond order, Wiberg index and
@@ -231,7 +244,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   LightGBM threads fit and score, one after the other), `uv run ksmech-physics textbook [--gbdt
   PATH] [--allow-stale]` (five textbook selectivity cases, expected vs top-3, with the untrained
   gap kernel and the two geometry-free LightGBM models of the molecule split, cases seen in a
-  model's training marked; builds missing QM records and tokens). After a token rebuild:
+  model's training marked; builds missing QM records and tokens; `--radical`: the radical
+  selectivity suite of open-shell plan P7, untrained kernel, g and g2, diagnostics). After a
+  token rebuild:
   `ksmech-arrows samples` (geometry-free pair features and `pair_feature_stats_<strategy>.json`
   from each training part), then `ksmech-physics gbdt`, then `textbook`.
 - Serve (an optional add-on: the engine never imports `ksmech.serve`; its web packages are the
@@ -283,9 +298,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation; `--limit 64 --epochs 1` for a smoke
   run)
-- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]` (the physics floor:
+- Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]
+  [--floor legacy|own_break] [--kernel g|g2] [--drop-intra-open]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, or every pair, no learned parameter, val and test
-  top-1/3/5, `anchor_floor_report_<split>.json` and per-sample `anchor_floor_ranks_<split>.json`),
+  top-1/3/5, `anchor_floor_report_<split>.json` and per-sample `anchor_floor_ranks_<split>.json`;
+  `own_break` adds a break anchor on every bonded pair scored by |B^own|, so a homolysis is
+  reachable; files tagged by floor and kernel when not the default),
   `uv run ksmech-eval decode --run NAME [--run-source pmechdb+reactmech] [--part val|test]
   [--limit N] [--beam 5] [--scope all|inter] [--caps legacy|labels] [--max-bonds B --max-atoms A
   --max-candidates C]` (the beam decoder of
@@ -319,7 +337,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   resonance flags and keys of the v18 steps by content, closed and open shells apart), `uv run
   python scripts/probes/flower_label_dryrun.py --source flower|pmechdb|reactmech --out DIR`
   (FlowER's RS/RC lines and the v18 labels through the P6 rules: codes, R shapes, P9's masks and
-  screens; read-only); `uv run ksmech-eval embedding --run NAME
+  screens; read-only); P7: `uv run python scripts/probes/open_shell_g_table.py --out DIR`
+  (|g| and |g2| by cell kind and the intramolecular |beta| by graph distance, from which
+  BETA_INTER is stated; read-only); `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
   under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts

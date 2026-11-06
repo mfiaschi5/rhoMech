@@ -43,7 +43,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -93,6 +93,7 @@ from ksmech.data.schema import ElementaryStep
 from ksmech.orbitals.tokens import (
     STORED_ATOM_FEATURES,
     STORED_ORBITAL_FEATURES,
+    CandidateConfig,
     MoleculeTokens,
     atom_feature_names,
     drawn_unpaired,
@@ -107,11 +108,13 @@ from ksmech.physics.pairs import (
     pair_flags,
     valid_pairs,
 )
-from ksmech.physics.params import REDUCED, KSParams, to_params
+from ksmech.physics.params import BETA_INTER, REDUCED, KSParams, to_params
 from ksmech.physics.stage_a import (
+    SAMPLE_PAIR_FEATURES,
     STAGE_A_FEATURES,
     STORED_PAIR_FEATURES,
     cell_features,
+    open_shell_block,
     stage_a_block,
 )
 from ksmech.processes import chunked, in_processes
@@ -120,7 +123,8 @@ log = logging.getLogger(__name__)
 
 SAMPLE_VERSION = 19  # 18: every pair cell with the exclusion flags, the stored token extras,
 #   Kekule-closest labels without arrows, domain_class (open-shell plan P0a); 19: N and u per
-#   atom and drawing, atom_categorical (Z, charge, u), the identity key v2 (P6)
+#   atom and drawing, atom_categorical (Z, charge, u), the identity key v2 (P6); hole tokens,
+#   spin_role, somo_population, g2, the own-pair and open-shell pair channels (P7)
 PARTS = ("train", "val", "test")
 FROZEN_SPLIT_SCHEMA = 1  # `split_frozen_<strategy>.json`, independent of SAMPLE_VERSION
 STRATEGIES = ("molecule", "scaffold", "loco", "loco_all", "random_leaky")
@@ -131,6 +135,10 @@ DEFAULT_STRATEGIES = ("molecule", "scaffold", "loco")
 
 LEGACY_ATOM_FEATURES = tuple(atom_feature_names())  # the atom columns of a v17 sample
 LEGACY_ORBITAL_FEATURES = tuple(feature_names())  # and its orbital columns
+# a v19 sample's: the v18 columns, then the open-shell columns of P7 (sample-level, never in a
+# token file): the restricted SOMO population per atom and the spin role per orbital
+SAMPLE_ATOM_COLUMNS = (*STORED_ATOM_FEATURES, "somo_population")
+SAMPLE_ORBITAL_COLUMNS = (*STORED_ORBITAL_FEATURES, "spin_role")
 
 
 class SkipReason(StrEnum):
@@ -300,21 +308,23 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
     block = stage_a_block(tok, REDUCED)
     flags = pair_flags(tok, rt.candidate)
     flag_z = np.stack([flags[n] for n in STORED_PAIR_FEATURES[len(STAGE_A_FEATURES) :]], -1)
+    open_z, open_d = open_shell_block(tok, block, flags["own_antibond"])
     unpaired = lewis_unpaired(rt)
     categorical = np.concatenate([t.atom_categorical() for t in tok])
+    atom_x = np.concatenate([_atom_inputs(t)[0] for t in tok])
+    atom_missing = np.concatenate([_atom_inputs(t)[1] for t in tok])
+    orbital_x = np.concatenate([np.hstack([t.orbital_features(), t.orbital_extra()]) for t in tok])
     sample = MechanismSample(
         step_id=step_id,
         source=source,
         fragment_keys=[f.key for f in rt.fragments],
         atom_categorical=np.hstack([categorical, unpaired[:, None].astype(categorical.dtype)]),
-        atom_features=np.concatenate([_atom_inputs(t)[0] for t in tok]).astype(np.float32),
-        atom_missing=np.concatenate([_atom_inputs(t)[1] for t in tok]),
+        atom_features=np.hstack([atom_x, rt.somo_population[:, None]]).astype(np.float32),
+        atom_missing=np.hstack([atom_missing, np.zeros((rt.n_atoms, 1), dtype=bool)]),
         atom_fragment=rt.atom_fragment.astype(np.int64),
         atom_map=_atom_maps(rt),
         atom_positions=rt.atom_positions.astype(np.float32),
-        orbital_features=np.concatenate(
-            [np.hstack([t.orbital_features(), t.orbital_extra()]) for t in tok]
-        ).astype(np.float32),
+        orbital_features=np.hstack([orbital_x, rt.spin_role[:, None]]).astype(np.float32),
         orbital_spectra=np.concatenate([t.orbital_spectra() for t in tok]).astype(np.float32),
         orbital_fragment=rt.orbital_fragment.astype(np.int64),
         orbital_occupied=rt.occupied.copy(),
@@ -322,14 +332,14 @@ def reactant_sample(step_id: str, source: str, rt: ReactantTokens) -> MechanismS
         acceptor_mask=rt.acceptor_ok.copy(),
         orbital_centroids=rt.centroids.astype(np.float32),
         incidence=_incidence(rt),
-        pair_z=np.concatenate([block.z, flag_z], -1).astype(np.float32),
-        pair_defined=np.concatenate([block.defined, np.ones_like(flag_z)], -1),
+        pair_z=np.concatenate([block.z, flag_z, open_z], -1).astype(np.float32),
+        pair_defined=np.concatenate([block.defined, np.ones_like(flag_z), open_d], -1),
         pair_gap_sign=block.gap_sign,
         pair_valid=valid_pairs(tok, rt.candidate),
         fermi_smeared=any(t.fermi_smeared for t in tok),
-        pair_features=STORED_PAIR_FEATURES,
-        atom_columns=STORED_ATOM_FEATURES,
-        orbital_columns=STORED_ORBITAL_FEATURES,
+        pair_features=SAMPLE_PAIR_FEATURES,
+        atom_columns=SAMPLE_ATOM_COLUMNS,
+        orbital_columns=SAMPLE_ORBITAL_COLUMNS,
         nonbonding=lewis_nonbonding(rt),
         unpaired=unpaired,
     )
@@ -776,6 +786,25 @@ def split_report(split: str, ids: list[str], samples: dict, skipped: dict) -> di
         ),
         "label_filter": dict(sum((Counter(s.label_filter) for s in kept), Counter()).most_common()),
         "n_fermi_smeared": sum(s.fermi_smeared for s in kept),
+        **hole_counts(kept),
+    }
+
+
+def hole_counts(samples: list[MechanismSample]) -> dict:
+    """The open-shell tokens in their donor role and their holes (open-shell plan P7, the
+    `spin_role` column), and the samples that hold any."""
+
+    def role(s: MechanismSample) -> np.ndarray:
+        cols = s.orbital_columns
+        if "spin_role" not in cols:
+            return np.zeros(0)
+        return s.orbital_features[:, cols.index("spin_role")]
+
+    roles = [role(s) for s in samples]
+    return {
+        "n_somo_donors": int(sum((r == 1).sum() for r in roles)),
+        "n_holes": int(sum((r == -1).sum() for r in roles)),
+        "n_samples_with_holes": int(sum((r == -1).any() for r in roles)),
     }
 
 
@@ -810,7 +839,9 @@ def _config(split: str, seed: int) -> dict:
         "split": split,
         "seed": seed,
         "sample_version": SAMPLE_VERSION,
-        "pair_features": list(STORED_PAIR_FEATURES),
+        "pair_features": list(SAMPLE_PAIR_FEATURES),
+        "candidate": asdict(CandidateConfig()),
+        "beta_inter": BETA_INTER,
     }
 
 

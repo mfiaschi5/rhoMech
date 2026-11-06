@@ -62,8 +62,24 @@ from ksmech.eval.floor import floor_report
 from ksmech.orbitals.build import DEFAULT_TOKENS_DIR
 from ksmech.train.loop import DEFAULT_MODELS_DIR
 
-FLOOR_VERSION = 3  # 3: --cells valid|all (pooling over the pair_valid cells or every cell)
+FLOOR_VERSION = 4  # 3: --cells valid|all (pooling over the pair_valid cells or every cell);
+#   4: --floor legacy|own_break, --kernel g|g2, --drop-intra-open (open-shell plan P7)
 DECODE_VERSION = 3  # 3: decoder caps legacy | labels, recorded in the header
+
+
+def _floor_options(f) -> None:
+    f.add_argument(
+        "--floor",
+        default="legacy",
+        choices=["legacy", "own_break"],
+        help="legacy (each pair once by |G^atom|) or own_break (break anchors by |B^own|, P7)",
+    )
+    f.add_argument("--kernel", default="g", choices=["g", "g2"], help="the pooled gap column")
+    f.add_argument(
+        "--drop-intra-open",
+        action="store_true",
+        help="leave the open-shell rows and hole columns within one fragment out of the pooling",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["valid", "all"],
         help="pool G^atom over the pair_valid cells (v17) or over every (occupied, virtual) cell",
     )
+    _floor_options(f)
     _cohort_args(f)
     _decode_parser(sub)
     c = sub.add_parser("compare", help="two arms of decode runs, paired: tolerance and McNemar")
@@ -294,16 +311,24 @@ def cmd_floor(args, console: Console) -> int:
         path = samples_path(args.source, f"{args.split}_{part}", args.processed_dir)
         inputs |= prov.file_input(path)
         samples = load_samples(path, ids=_cohort_ids(args, path))
-        results[part] = floor_report(samples, cells=args.cells)
+        options = {"floor": args.floor, "kernel": args.kernel}
+        results[part] = floor_report(
+            samples, cells=args.cells, drop_intra_open=args.drop_intra_open, **options
+        )
         ranks[part] = results[part].pop("per_sample")
         results[part] |= _extras(args, ranks[part], samples, path)
     config = {"split": args.split, "cohort": args.cohort, "slice": args.slice, "cells": args.cells}
+    config |= {"floor": args.floor, "kernel": args.kernel, "drop_intra_open": args.drop_intra_open}
     header = prov.stamp("anchor_floor", FLOOR_VERSION, inputs, config)
     out_dir = source_dir(args.source, args.processed_dir)
     tag = args.split + (f"_{args.cohort}" if args.cohort != "all" else "")
     tag += "_allcells" if args.cells == "all" else ""
+    tag += "" if args.floor == "legacy" else f"_{args.floor}"
+    tag += "" if args.kernel == "g" else f"_{args.kernel}"
+    tag += "_nointraopen" if args.drop_intra_open else ""
     out = out_dir / f"anchor_floor_report_{tag}.json"
     scorer = f"|G^atom| over {'valid' if args.cells == 'valid' else 'all'} pairs"
+    scorer += f", |B^own| on bonded pairs ({args.kernel})" if args.floor == "own_break" else ""
     prov.write_json(out, {"scorer": scorer, **results}, header)
     ranks_header = prov.stamp("anchor_floor_ranks", FLOOR_VERSION, inputs, config)
     prov.write_json(out_dir / f"anchor_floor_ranks_{tag}.json", ranks, ranks_header)

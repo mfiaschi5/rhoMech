@@ -121,4 +121,5 @@ def test_every_pre_p5_sample_keeps_its_column_digests(realdata_workers):
     got = pin.compare_digests(base, now)
     assert got["n_shared"] == len(base) and not got["samples_only_in_baseline"]
     assert not got["differ"], {c: ids[:3] for c, ids in got["differ"].items()}
-    assert not got["columns_only_in_baseline"] and not got["columns_only_in_current"]
+    assert not got["columns_only_in_baseline"]
+    assert set(got["columns_only_in_current"]) <= pin.V19_COLUMNS  # P7's new columns

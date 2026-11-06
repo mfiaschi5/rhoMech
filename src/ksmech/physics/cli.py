@@ -74,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
     t.add_argument("--gbdt", type=Path, default=None, help="ranker model (default: molecule split)")
     t.add_argument("--allow-stale", action="store_true", help="read stale artifacts (warns)")
+    t.add_argument(
+        "--radical",
+        action="store_true",
+        help="the radical selectivity suite instead (untrained kernel, P7 diagnostics)",
+    )
     return parser
 
 
@@ -460,10 +465,36 @@ def _gbdt_scorer(path: Path, allow_stale: bool):
     return trained, seen
 
 
+def cmd_radical(args: argparse.Namespace, console: Console) -> int:
+    """The radical selectivity suite (open-shell plan P7 step 11) with the untrained kernel,
+    g and g2, with and without the intramolecular open-shell cells. Diagnostics: exit 0."""
+    from ksmech.physics.textbook import (
+        RADICAL_CASES,
+        ensure_tokens,
+        fragment_keys,
+        run_radical_suite,
+    )
+
+    keys = sorted({k for case in RADICAL_CASES for k in fragment_keys(case.smiles)})
+    if built := ensure_tokens(keys, args.tokens_dir):
+        console.print(f"built tokens for {built}")
+    loader = TokenCache(args.tokens_dir)
+    for kernel in ("g", "g2"):
+        for drop in (False, True):
+            out = run_radical_suite(loader, kernel, drop)
+            title = f"radical suite, |{kernel}|" + (", no intra open-shell cells" if drop else "")
+            print_textbook(out["results"], console, title)
+            console.print(f"Me3Sn. abstraction order I > Br > Cl: {out['snap_order_i_br_cl']}")
+    return 0
+
+
 def cmd_textbook(args: argparse.Namespace, console: Console) -> int:
     """The selectivity suite with the untrained gap kernel and both rankers. Only results on
     cases the model never trained on count towards the exit code."""
     from ksmech.physics.textbook import CASES, ensure_tokens, fragment_keys, run_suite
+
+    if args.radical:
+        return cmd_radical(args, console)
 
     keys = sorted({k for case in CASES for k in fragment_keys(case.smiles)})
     built = ensure_tokens(keys, args.tokens_dir)

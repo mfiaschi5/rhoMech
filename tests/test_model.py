@@ -43,7 +43,7 @@ from ksmech.model.loss import (
 from ksmech.model.net import KSMech
 from ksmech.orbitals.tokens import atom_feature_names, feature_names
 from ksmech.physics.pairs import PAIR_FLAGS, PAIR_VALID
-from ksmech.physics.stage_a import STAGE_A_FEATURES, cell_features
+from ksmech.physics.stage_a import SAMPLE_PAIR_FEATURES, STAGE_A_FEATURES, cell_features
 from ksmech.train.batching import CellBudgetSampler, cells
 from ksmech.train.loop import (
     NonFiniteError,
@@ -159,7 +159,7 @@ def test_valid_cells_reproduce_a_v17_batch_bit_for_bit(samples):
     model = KSMech(TINY, fit_feature_stats(samples), stats).eval()
     assert model.pair_stats.names == STAGE_A_FEATURES
     b_new, b_old = collate_samples(samples), collate_samples(old)
-    assert b_new["pair_z"].shape[-1] == len(STAGE_A_FEATURES) + len(PAIR_FLAGS)
+    assert b_new["pair_z"].shape[-1] == len(SAMPLE_PAIR_FEATURES)  # v19: the P7 columns after
     assert torch.equal(pooled_gap(b_new), pooled_gap(b_old))
     for x, y in zip(model.prepare(b_new)[1:], model.prepare(b_old)[1:], strict=True):
         assert torch.equal(x, y)
