@@ -8345,8 +8345,9 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   differently from the kernel's; diagnostics, as the suite always was.
 - **Spec.** The v10 approved on 2026-11-05 covers P6-P8 and still gave the atom alphabet as
   {-2,0,+2} with no screen, although the plan's table lists that text under v10 "P6 and P9". Drafted
-  now in the tex (`Remaining entries`, `Closed-shell decode screen`), marked draft in the date line.
-  It must be approved before P9's training runs (U3).
+  now in the tex (`Remaining entries`, `Closed-shell decode screen`), and approved by the user on
+  2026-11-06 ("Approvo"), as U3 requires before P9's training runs; the date line no longer says
+  draft.
 - **Smoke run** (step 7), code 7828d48, on the RX 6600 XT: `--preset open_shell --source
   pmechdb+rmechdb --split pmechdb=molecule,rmechdb=rc_molecule --val-cohort pmechdb=closed_base
   --limit 64 --epochs 1`: 128 train, 128 val (51 open pools), 6 steps, no non-finite batch. The four
