@@ -214,7 +214,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   files as `split_frozen_<strategy>.json`, FROZEN_SPLIT_SCHEMA, no file inputs: `samples` then
   keeps every frozen step in its part, places new groups by hash and counts SPLIT_CONFLICT;
   a snapshot is replaced only by hand). The open-shell plan is `docs/open_shell_plan.md`.
-- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8 [--steps-from FILE]` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`; `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
+- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8 [--steps-from FILE]` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
+  the spawned workers run tblite on the system's LP64 OpenBLAS instead of the wheel's netlib copy
+  (`qm.blas`, `KSMECH_BLAS=auto|bundled|PATH`; `--workers 1` and the web app keep the netlib copy;
+  a pod needs `libopenblas0-serial`); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
   codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,

@@ -8391,3 +8391,56 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   inherits; the pair features (G, the coupling, the Lewis channels) are never touched.
 - **Reproducible.** The batches are the training cell-budget batches in a fixed order and each pass
   seeds its own generator (`seed + 1000 r`), so a seed gives the same permutations.
+
+## 2026-11-09: tblite on OpenBLAS in the QM workers; %Vbur on one shared grid
+
+- **Profile.** `ksmech-qm run`'s path on six ReactMech molecules (21-120 atoms, one process each):
+  the geometry optimization takes 60-97% of a molecule's time and the Python around tblite under
+  0.2% (L-BFGS-B bookkeeping, the record assembly); inside a GFN2 singlepoint the generalized
+  eigensolver `dsygvd_` takes 63% and BLAS level 3 about 60% of the self time (py-spy, native
+  frames). The manifests agree: time grows as n^3.1, molecules over 60 atoms are 17% of the
+  molecules and 75% of the CPU time. The computation is Fortran already, so no rewrite in another
+  language would gain anything; the library it runs on would.
+- **The bundled BLAS.** The PyPI wheel of tblite 0.7.0 bundles the netlib reference BLAS and LAPACK
+  3.8.0 (`tblite.libs/libblas-*.so`, 353 KB), unblocked code. tblite looks those symbols up in the
+  global scope first, so a library in `LD_PRELOAD` takes their place: the system's serial
+  OpenBLAS 0.3.29 gives per singlepoint 30 -> 20 ms (21 atoms), 103 -> 54 (48), 315 -> 129 (70),
+  576 -> 244 (93), 739 -> 268 (120), and per molecule, with the %Vbur change below, 1.5x (21
+  atoms) to 2.7x (120 atoms).
+- **Only in the spawned workers (`qm.blas`).** `batch.execute` (and through it the QMugs path,
+  `qm.given`) puts the library in its workers' `LD_PRELOAD`, beside one BLAS / OpenMP thread each
+  (`processes.single_threaded_children`, which also sets `OPENBLAS_NUM_THREADS`); the calling
+  process, a run with `--workers 1` and the web app keep tblite's own copy. A global OpenBLAS in
+  the calling process was rejected: libtorch_cpu exports `sgemm_` and `dgemm_` (GLOBAL DEFAULT,
+  called through the PLT), so a process that imports torch after it would run torch's CPU GEMM on
+  the serial OpenBLAS.
+- **Which library.** `KSMECH_BLAS`: unset or `auto`, `ctypes.util.find_library("openblas")`
+  (Fedora `openblas-serial`, Debian / Ubuntu `libopenblas0-serial`); `bundled`; or a library's
+  name or path. A library without `dgemm_` and `dsygvd_`, or whose `openblas_get_config` reports
+  `USE64BITINT`, is refused with a warning (Fedora's `libopenblaso64` exports plain `dgemm_` with
+  64-bit integers: tblite's LP64 calls would read garbage). The run's banner names the library.
+- **Same results within the convergence threshold, same method string.** At a given geometry the
+  ten fixture molecules give the same energies, orbital energies, charges and gradients to 1e-9
+  (`tests/test_qm_blas.py`). A whole record differs by rounding on a stiff molecule (48 atoms:
+  1e-7 kcal/mol, 1e-7 A; 70 atoms: 1e-5 kcal/mol, 7e-6 A) but more where L-BFGS-B crosses a flat
+  surface and the different rounding moves its path: 93 atoms 0.013 kcal/mol, 0.018 A RMSD,
+  orbital energies 0.03 eV, %Vbur 0.2 points; the restrained 44-atom molecule 0.038 kcal/mol,
+  0.052 A, 0.033 eV, %Vbur 0.5 points. Both ends meet the same `fmax`, so they are optimizations
+  of equal standing and the method string, hence the cache key, stays. OpenBLAS picks its kernels
+  by CPU, so records are no longer bit-identical across hosts either. Every record's provenance
+  header notes `blas` and `lapack` (`qm.blas.provider`, in `extra`, never compared), and
+  `KSMECH_BLAS=bundled` gives back the bit-identical netlib path.
+- **The failure memo.** A TIMEOUT tombstone written on the netlib copy still covers the same
+  settings; `--retry-reason TIMEOUT` runs those molecules again on the faster library.
+- **%Vbur (`qm.sterics`).** morfeus' `BuriedVolume` builds its sphere grid (about 45,000 points at
+  density 0.004) and a KD-tree over it for every centre atom. The grid depends only on the radius
+  and the density, so `sphere_tree` builds it once per process and every centre queries it with
+  the coordinates relative to itself, as morfeus centres them, `return_sorted=False`. Values equal
+  to morfeus' with `np.array_equal` on the fixture set and four open-shell / metal fixtures
+  (`tests/test_qm_sterics.py`); 0.25 -> 0.07 s at 21 atoms, 1.44 -> 0.44 s at 120.
+- **Not done here (each changes the records, so each needs a method tag):** restarting each
+  optimization step's SCF from the previous wavefunction (`geometry.optimize_tblite` starts every
+  step from the SAD guess; tblite's own ASE calculator restarts), a preconditioned or ANC
+  optimizer (xtb's ANCopt needs 6-73 cycles where L-BFGS-B needs 23-326), and stopping a free
+  optimization once a bond has clearly broken (the restrained 11% of the molecules take 46% of
+  the time).

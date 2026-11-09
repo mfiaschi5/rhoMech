@@ -106,3 +106,13 @@ def test_warning_codes_deduplicate():
 @pytest.mark.parametrize("code", list(ReasonCode))
 def test_reason_codes_are_their_names(code):
     assert str(code) == code.name
+
+
+def test_header_notes_the_blas_tblite_found(tmp_path):
+    from ksmech.data import provenance as prov
+    from ksmech.qm import blas
+
+    path = save_record(make_record(), tmp_path / "rec.npz")
+    extra = prov.read_header(path).extra
+    assert extra == {"blas": blas.provider("dgemm_"), "lapack": blas.provider("dsygvd_")}
+    load_record(path)  # a note, never compared: the record still verifies

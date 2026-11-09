@@ -10,7 +10,6 @@ the manifest's method is per row and every view compares a row with its own spec
 from __future__ import annotations
 
 import logging
-import os
 import random
 import signal
 import time
@@ -32,7 +31,8 @@ from tqdm import tqdm
 
 from ksmech.data import chem
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, source_dir, steps_path
-from ksmech.qm import failures
+from ksmech.processes import single_threaded_children
+from ksmech.qm import blas, failures
 from ksmech.qm.embed import embed, prepare_mol
 from ksmech.qm.records import (
     QMError,
@@ -431,23 +431,23 @@ def execute(
     tasks: list, n_workers: int, on_rows: OnRows, worker: Worker | None = None, crash=None
 ) -> None:
     """Run `worker` (`process_molecule` by default, looked up at call time) on every task, in
-    `n_workers` spawned processes of one thread each; a task whose process crashes is re-run
-    alone and reported by `crash(task)`."""
+    `n_workers` spawned processes of one thread each, tblite on the library `qm.blas` chooses;
+    a task whose process crashes is re-run alone and reported by `crash(task)`. With one worker
+    the tasks run in this process, on the BLAS it already has."""
     worker, crash = worker or process_molecule, crash or _crash_row
     if n_workers <= 1:
         _init_worker()
         for task in tasks:
             on_rows(worker(task))
         return
-    prev_omp = os.environ.get("OMP_NUM_THREADS")
-    os.environ["OMP_NUM_THREADS"] = "1"  # one thread per worker; children inherit this
-    try:
+    with single_threaded_children(), blas.preloaded_children():  # children inherit both
         _run_pool(tasks, n_workers, on_rows, worker, crash)
-    finally:
-        if prev_omp is None:
-            os.environ.pop("OMP_NUM_THREADS", None)
-        else:
-            os.environ["OMP_NUM_THREADS"] = prev_omp
+
+
+def blas_note(n_workers: int) -> str:
+    """The BLAS the calculations of a run use, for its banner."""
+    lib = blas.choose() if n_workers > 1 else blas.provider()
+    return f"tblite BLAS {lib or blas.BUNDLED}"
 
 
 def featurize_dataset(
@@ -481,7 +481,7 @@ def featurize_dataset(
     todo = [t for t in tasks if not _is_done(t, prev, retry_failed, retry_reasons)]
     console.print(
         f"{len(smiles_list)} unique molecules, {len(smiles_list) - len(todo)} done already, "
-        f"{len(todo)} to compute ({n_workers} workers, {config.method})"
+        f"{len(todo)} to compute ({n_workers} workers, {config.method}, {blas_note(n_workers)})"
     )
     rows: list[dict] = list(canon_failures)
     bar = tqdm(total=len(todo), unit="mol", disable=not todo)

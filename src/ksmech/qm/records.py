@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from ksmech.data import provenance as prov
+from ksmech.qm import blas
 
 log = logging.getLogger(__name__)
 
@@ -148,7 +149,9 @@ def _record_arrays(record: QMRecord) -> dict[str, np.ndarray]:
 
 
 def save_record(record: QMRecord, path: Path) -> Path:
-    """Write the record as .npz (no pickle) with its provenance header, atomically."""
+    """Write the record as .npz (no pickle) with its provenance header, atomically. The header
+    notes the BLAS and LAPACK libraries tblite found in this process (`qm.blas`), never
+    compared."""
     arrays = _record_arrays(record)
     header = prov.stamp(
         "qm_record",
@@ -156,6 +159,7 @@ def save_record(record: QMRecord, path: Path) -> Path:
         record_inputs(record.smiles),
         record_config(record.method, record.conformer_id),
         prov.array_digest(arrays),
+        extra={"blas": blas.provider("dgemm_"), "lapack": blas.provider("dsygvd_")},
     )
     return prov.save_npz(path, arrays, header)
 
