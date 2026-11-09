@@ -366,7 +366,13 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (FlowER's RS/RC lines and the v18 labels through the P6 rules: codes, R shapes, P9's masks and
   screens; read-only); P7: `uv run python scripts/probes/open_shell_g_table.py --out DIR`
   (|g| and |g2| by cell kind and the intramolecular |beta| by graph distance, from which
-  BETA_INTER is stated; read-only); `uv run ksmech-eval embedding --run NAME
+  BETA_INTER is stated; read-only); `uv run ksmech-eval importance --run NAME [--part val]
+  [--scope columns|blocks|both] [--repeats 3] [--limit N] [--cohort C]` (permutation importance
+  of the token inputs: each column, and each block of related columns, permuted across the
+  part's tokens of its kind and the part scored again; the rise of the anchor NLL and the fall of
+  top-1/3 and greedy R against the baseline; pair features untouched, `spin_role` left out;
+  `token_importance_<split>_<part>[...].json` beside the checkpoint, `eval.importance`);
+  `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page
   under `data/models/<source>/<run>/embedding/`: the tokens on the Lewis structure, the parts

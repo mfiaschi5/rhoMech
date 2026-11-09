@@ -8364,3 +8364,30 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
 - **Suites** on ac4b18d, with the reactmech-full QM batch holding 12 processes, at 2 workers:
   `pytest -n 2 -m "not realdata"`: 2338 passed, 21 skipped, 2 xfailed, 4 warnings;
   `KSMECH_TEST_WORKERS=2 pytest -m realdata`: 67 passed.
+
+## 2026-11-09: permutation importance of the token inputs (`ksmech-eval importance`)
+
+- **Question.** Which part of an atom or orbital token a trained model uses. The embedding page
+  splits h(0) into additive blocks for one sample, but `atom_inputs` and `orbital_inputs` are one
+  MLP each, so it cannot name a column, and a large part need not matter to the prediction.
+- **Method: permutation, not zeroing or retraining.** A group of columns is permuted across the
+  real tokens of its kind in each batch (atoms with atoms, orbitals with orbitals, molecules
+  mixed), and the part is scored again with `train.loop.evaluate`: importance = the rise of the
+  anchor NLL and the fall of top-1 / top-3 / the greedy-R match, mean and SD over `--repeats`
+  permutations. Permuting keeps each input inside its training distribution (zeroing a
+  standardized column puts every token at the mean, a value the model may never have seen on
+  that element), and no run is trained. A retrained ablation is still the stronger evidence; it
+  exists only for the pair features (`--drop-pair-features`).
+- **Groups.** Each column alone, plus blocks of related columns permuted with one permutation so
+  the block keeps its joint distribution (`eval.importance.BLOCKS`: Fukui, frontier weights,
+  centre weights, s/p/d shares, the two-centre descriptors, the orbital energy extras). Correlated
+  columns hide each other when permuted alone (f+ and the LUMO weight say much the same), which is
+  why the blocks exist. The atomic number and the formal charge are the categorical groups
+  `element` and `formal_charge`; the spectral set moves as whole sets between orbitals. An atom
+  column moves with its missing flag. `spin_role` is left out: it is also the mask of the
+  open-shell cells (`model.inputs.open_cells`), so permuting it would change which pair cells
+  exist, not only an input.
+- **Reach.** An atom group also changes, through the centre weights, the embedding every orbital
+  inherits; the pair features (G, the coupling, the Lewis channels) are never touched.
+- **Reproducible.** The batches are the training cell-budget batches in a fixed order and each pass
+  seeds its own generator (`seed + 1000 r`), so a seed gives the same permutations.

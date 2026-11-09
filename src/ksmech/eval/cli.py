@@ -4,6 +4,7 @@
     ksmech-eval embedding --run flex_first --step-id pmechdb-018a36c64ec74e5e
     ksmech-eval embedding --run flex_first --smiles 'CC(=O)C.[OH-]'
     ksmech-eval decode --run flex_first --part val --limit 200
+    ksmech-eval importance --run pm_v19_s0 --part val
     ksmech-eval pin --source pmechdb --name closed_base --workers 4
     ksmech-eval cohort --source pmechdb --name open_shell \
         --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE
@@ -24,6 +25,11 @@ ones add `_caps<bonds>-<atoms>-<candidates>` to the file names. `--closed-minus1
 refuses any -1 atom entry on a pool with no unpaired electron (`model.decode`, an option whose
 default P9's ablation sets) and adds `_minus1filter` to the file names; the closed-shell screen
 is always on. A run's selection note (`train.loop.run_notes`) is copied into the report.
+
+`importance` permutes each token input column, and each block of related columns, across the
+tokens of a part and scores the part again with the training metrics (`eval.importance`): how
+much the anchor NLL rises and top-1 / top-3 / the greedy R fall without that input. It writes
+`token_importance_<split>_<part>[_n<limit>].json` next to the checkpoint.
 
 `pin` pins every sample of a split's three parts as a cohort, its two GBDT subsets (the
 samples with ArrowLabels on the valid cells and on every cell) and `baseline_<name>.json`, the
@@ -110,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     _floor_options(f)
     _cohort_args(f)
     _decode_parser(sub)
+    _importance_parser(sub)
     c = sub.add_parser("compare", help="two arms of decode runs, paired: tolerance and McNemar")
     c.add_argument("--a", nargs="+", type=Path, required=True, help="arm A's hit files (GENERAL)")
     c.add_argument("--b", nargs="+", type=Path, required=True, help="arm B's hit files (LEGACY)")
@@ -171,6 +178,28 @@ def _decode_parser(sub) -> None:
     d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     _cohort_args(d)
+
+
+def _importance_parser(sub) -> None:
+    i = sub.add_parser("importance", help="permutation importance of the token inputs")
+    i.add_argument("--run", required=True, help="training run under <models-dir>/<run-source>/")
+    i.add_argument("--checkpoint", default="best", choices=["best", "last"])
+    i.add_argument("--source", default="pmechdb", choices=[str(x) for x in Source])
+    i.add_argument("--run-source", help="the models directory of the run (default --source)")
+    i.add_argument("--split", default="molecule", help="split strategy of the sample files")
+    i.add_argument("--part", default="val", choices=["train", "val", "test"])
+    i.add_argument("--limit", type=int, help="the first N samples of the part")
+    i.add_argument("--scope", default="both", choices=["columns", "blocks", "both"],
+                   help="each column alone, the blocks of related columns, or both")  # fmt: skip
+    i.add_argument("--repeats", type=int, default=3, help="permutations per group")
+    i.add_argument("--seed", type=int, default=0)
+    i.add_argument("--device", default="auto", help="auto | cpu | cuda")
+    i.add_argument("--amp", default="auto", choices=["auto", "fp16", "bf16", "off"])
+    i.add_argument("--cell-budget", type=int, default=1_100_000)
+    i.add_argument("--max-tokens", type=int, default=1024, help="larger samples skipped")
+    i.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
+    i.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    i.add_argument("--cohort", default="all", help="score only cohort_<name>.json's steps")
 
 
 def _cohort_args(p) -> None:
@@ -270,6 +299,76 @@ def cmd_decode(args, console: Console) -> int:
         console.print(f"  {code}: {count}")
     console.print(f"wrote {out} and {hits_out.name}")
     return 0
+
+
+def _importance_samples(args, path: Path, console: Console) -> tuple[list, dict]:
+    """The part's samples (cohort, limit), without those over --max-tokens (TOO_LARGE) and
+    the drawings the decoder cannot write, with the skip counts."""
+    from ksmech.train.loop import TOO_LARGE, drop_undecodable_drawings
+
+    ids = _cohort_ids(args, path)
+    ids = ids[: args.limit] if args.limit is not None else ids
+    samples = load_samples(path, ids=ids)
+    keep = [s for s in samples if s.n_atoms + s.n_orbitals + 1 <= args.max_tokens]
+    skipped = {TOO_LARGE: len(samples) - len(keep)} if len(keep) < len(samples) else {}
+    if n := drop_undecodable_drawings(keep, args.part):
+        skipped["drawings NOT_ELEMENTARY"] = n
+    for code, count in skipped.items():
+        console.print(f"  skipped {code}: {count}")
+    return keep, skipped
+
+
+def cmd_importance(args, console: Console) -> int:
+    from ksmech.eval.importance import IMPORTANCE_VERSION, groups, importance
+    from ksmech.train.loop import TrainConfig, amp_dtype, load_model, make_loader, select_device
+
+    run_source = args.run_source or args.source
+    ckpt = args.models_dir / run_source / args.run / f"{args.checkpoint}.pt"
+    device = select_device(args.device)
+    model, payload = load_model(ckpt, device)
+    path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
+    samples, skipped = _importance_samples(args, path, console)
+    cfg = TrainConfig(cell_budget=args.cell_budget, max_tokens=args.max_tokens, workers=0)
+    loader = make_loader(samples, cfg, shuffle=False)
+    found = groups(*model.feature_stats.names(), args.scope)
+    console.print(f"{len(samples)} samples, {len(found)} groups x {args.repeats} on {device}")
+
+    def log(i, n, row):
+        console.print(f"  {i}/{n} {row['group']}: dNLL {row['d_anchor_nll']:+.4f}, "
+                      f"dtop1 {row['d_top1']:+.2%}")  # fmt: skip
+
+    report = importance(model, loader, found, args.repeats, args.seed, device,
+                        amp_dtype(device, args.amp), log)  # fmt: skip
+    report |= {"skipped": skipped} | _run_notes(payload)
+    keys = ("source", "split", "part", "limit", "scope", "repeats", "seed", "cohort")
+    config = {k: getattr(args, k) for k in keys} | {"run_source": run_source}
+    config |= {"checkpoint": _checkpoint_text(args.checkpoint, payload)}
+    config |= _sample_versions(path, payload, console)
+    header = prov.stamp("token_importance", IMPORTANCE_VERSION,
+                        prov.file_input(path) | prov.file_input(ckpt), config)  # fmt: skip
+    suffix = f"_{args.source}" if args.source != run_source else ""
+    suffix += f"_{args.cohort}" if args.cohort != "all" else ""
+    suffix += f"_n{args.limit}" if args.limit is not None else ""
+    out = ckpt.parent / f"token_importance_{args.split}_{args.part}{suffix}.json"
+    prov.write_json(out, report, header)
+    _print_importance(console, report, f"{args.run} {args.checkpoint}, {args.split} {args.part}")
+    console.print(f"wrote {out}")
+    return 0
+
+
+def _print_importance(console: Console, report: dict, title: str) -> None:
+    base = report["baseline"]
+    console.print(f"baseline: n {base['n']}, anchor NLL {base['anchor_nll']:.4f}, "
+                  f"top-1 {base['top1']:.1%}, top-3 {base['top3']:.1%}, "
+                  f"R exact {base['r_exact']:.1%}")  # fmt: skip
+    table = Table(title=f"token input importance (permuted), {title}")
+    for col in ("group", "kind", "dNLL", "sd", "dtop-1", "dtop-3", "dR exact"):
+        table.add_column(col)
+    for r in report["groups"]:
+        pct = (f"{r[k]:+.1%}" for k in ("d_top1", "d_top3", "d_r_exact"))
+        table.add_row(r["group"], r["kind"], f"{r['d_anchor_nll']:+.4f}",
+                      f"{r['d_anchor_nll_sd']:.4f}", *pct)  # fmt: skip
+    console.print(table)
 
 
 def cmd_compare(args, console: Console) -> int:
@@ -485,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = {
         "floor": cmd_floor,
         "decode": cmd_decode,
+        "importance": cmd_importance,
         "embedding": cmd_embedding,
         "pin": cmd_pin,
         "cohort": cmd_cohort,
