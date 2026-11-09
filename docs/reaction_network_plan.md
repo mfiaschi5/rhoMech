@@ -2,11 +2,10 @@
 
 Status: proposed 2026-10-29, extended the same day with the previous-step model (item H), the
 graph search (item I), joining branches on a species graph (item J) and the search from a
-product alone (item K); nothing implemented. To start after P0b of `docs/open_shell_plan.md`.
-Nothing here changes the forward model's loss or the training presets, so the P0b comparison
-(GENERAL against LEGACY) stays paired. Written on branch `claude/reaction-network-plan` from main f6aa758: the
-open-shell plan, `eval/paired.py`, the closed_base cohort and the v18 store it cites are on
-`claude/open-shell-p0b` until that branch is merged.
+product alone (item K); nothing implemented. Listed in `docs/todo.md` on 2026-11-09, when it
+came to main. Nothing here changes the forward model's loss or the training presets. The
+measurements of section 1 were taken on the v18 stores (2026-10-29); main now holds Release B
+(v19), the open-shell plan, `eval/paired.py` and the closed_base cohort.
 
 ## Contents
 
@@ -149,8 +148,10 @@ channel counts as a negative.
 ### D. Search towards a product (medium)
 
 - `NetParams`: a target (SMILES) and the mode.
-- Arrival test on two levels: the exact sigma key, or the heavy-atom skeleton without H and
-  charges (up to proton transfers, since datasets often draw the worked-up neutral product).
+- Arrival test on two levels: the exact identity key (`data.resonance.identity_key`: the sigma
+  key for a closed shell, with the unpaired counts for an open shell), or the heavy-atom
+  skeleton without H and charges (up to proton transfers, since datasets often draw the
+  worked-up neutral product).
   Terminal reason TARGET_REACHED with its level.
 - The atom map reactants -> target (an atom mapper) gives dB = B_target - B_current, the change
   still to make. Detours (protonate to activate, then deprotonate) cost but are allowed; this is
