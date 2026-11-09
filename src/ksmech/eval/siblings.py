@@ -6,11 +6,12 @@ as separate steps (PMechDB: ethyl acetate + ethoxide both as the enolate and as 
 adduct). A decode then scores a completion against the sample's own label (`rank`) and against
 every product the source records for the same reactant pool (`rank_any`).
 
-Pools and products are compared by the map-free identity key v2 (`data.resonance.identity_key`)
-of each side's drawing, never by matrix: sibling steps number their atoms differently. The
-product key is the one the sample store writes (`MechanismSample.product_key`), which equals
-the key `eval.decode.lewis_apply` gives B + R of the label (checked on 400 PMechDB val samples,
-decisions.md 2026-11-09). Siblings come from the whole source, i.e. its training steps
+Pools and products are compared by the pool key (`data.resonance.pool_key`: the map-free
+identity key v2 of every fragment) of each side's drawing, never by matrix: sibling steps number
+their atoms differently. It is the key `eval.decode.lewis_apply` gives B + R (checked against
+the labels of the PMechDB val samples, decisions.md 2026-11-09). For the backward direction
+(`arrows.backward`) the sides swap: a pool is the drawn products, its outcomes the reactant
+pools the source records for them. Siblings come from the whole source, i.e. its training steps
 (`data.io.read_training_steps`: resonance steps and excluded steps left out), whatever part of
 the split they fall in; the report counts the siblings of another part. A step whose side RDKit
 cannot read is counted as SIBLING_KEY_FAILED and has no siblings.
@@ -25,7 +26,7 @@ from dataclasses import dataclass
 from rdkit import rdBase
 
 from ksmech.data.chem import parse_mapped
-from ksmech.data.resonance import identity_key
+from ksmech.data.resonance import pool_key
 
 SIBLING_KEY_FAILED = "SIBLING_KEY_FAILED"
 
@@ -45,13 +46,13 @@ class Outcomes:
 
 
 def side_keys(steps: Iterable, skips: Counter) -> dict[str, tuple[str, str]]:
-    """step id -> (map-free identity key of the reactants, of the products)."""
+    """step id -> (pool key of the reactants, of the products)."""
     out: dict[str, tuple[str, str]] = {}
     for step in steps:
         try:
             with rdBase.BlockLogs():
-                pool = identity_key(parse_mapped(step.reactants_smiles))
-                product = identity_key(parse_mapped(step.products_smiles))
+                pool = pool_key(parse_mapped(step.reactants_smiles))
+                product = pool_key(parse_mapped(step.products_smiles))
         except Exception:  # noqa: BLE001 - counted, the step gets no siblings
             skips[SIBLING_KEY_FAILED] += 1
             continue

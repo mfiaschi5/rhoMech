@@ -8509,15 +8509,21 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   gets `top{k}_any`, the same top-k over the samples of multi-outcome pools (`multi_outcome`), and
   a `siblings` section. `ksmech-eval compare --metric own|any` pairs on either rank; a hit file
   without `rank_any` is refused for `any`. DECODE_VERSION 5.
-- **Pools and products by identity key, never by matrix.** Sibling samples number their atoms
+- **Pools and products by pool key, never by matrix.** Sibling samples number their atoms
   differently, so `eval.siblings` groups the source's training steps (`read_training_steps`:
-  resonance and excluded steps out) by the map-free identity key of the drawn reactants and
-  collects the identity keys of the drawn products, the key the sample store writes as
-  `product_key`. Checked on the first 400 PMechDB molecule-val samples: B + R of each label's
-  first variant through `lewis_apply` gives exactly the stored `product_key` on 400 of 400, so
-  the completions' keys and the recorded ones are comparable. An own hit whose key differs is
-  counted (OWN_KEY_MISMATCH); a step RDKit cannot read is counted (SIBLING_KEY_FAILED) and has no
-  siblings. `rank_any` is never above `rank`: the own label always counts.
+  resonance and excluded steps out) by the pool key of the drawn reactants and collects the pool
+  keys of the drawn products. The pool key (`data.resonance.pool_key`) is the identity key v2 of
+  every fragment, sorted and joined by '.', the key the web app and `ksmech.network` merge pools
+  by. The decoder now keys its completions by it too (`lewis_apply`): decode version 4 used the
+  identity key of the whole pool, whose charges are zeroed over every fragment before the total
+  is appended, so the two heterolyses of one bond (CH3+ + Br- and CH3- + Br+) shared a key and
+  the decoder kept only the likelier of them; the backward model's pilot (item H) found it. With
+  the pool key B + R of each label's first variant gives exactly the recorded products' key on
+  all 1,241 labelled PMechDB molecule-val samples. An own hit whose key differs is counted
+  (OWN_KEY_MISMATCH); a step RDKit cannot read is counted (SIBLING_KEY_FAILED), has no
+  siblings, and its `rank_any` is its `rank`. `rank_any` is never above `rank`. For
+  `--direction backward` the sides swap: a pool is the drawn products, its outcomes the
+  recorded reactant pools.
 - **Siblings come from the whole source.** They are taken from every training step, whatever part
   of the split they fall in, and the report counts the siblings from another part. With the
   molecule split a pool's steps share their molecules and fall in one part, so the count is a

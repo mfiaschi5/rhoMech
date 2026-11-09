@@ -10,9 +10,11 @@ over 8 valence electrons, N + 2 x its bond orders; H and He over 2), FORMAL_CHAR
 non-metal it touches left at |formal charge| >= 2 that it did not carry), PRODUCT_INVALID
 (RDKit cannot write the product), RESONANCE_ONLY_STEP (the identity keys with the atom maps
 agree: no atom changes its sigma bonds or H, and no fragment its charge or spin). The product
-key is the map-free identity key v2 of the pool (`data.resonance.identity_key`, u from the
-tracked N), so completions that draw the same products differently merge, as serve's pool key
-merges them, while homolysis and heterolysis of one bond stay apart.
+key is the pool key (`data.resonance.pool_key`: the map-free identity key v2 of every fragment,
+u from the tracked N), so completions that draw the same products differently merge, as serve's
+pool key merges them, while homolysis and heterolysis of one bond, and the two heterolyses
+(CH3+ + Br- against CH3- + Br+), stay apart. Decode version 4 keyed by the identity key of the
+whole pool, whose charges are zeroed over every fragment, and merged the two heterolyses.
 
 The caps of the search (`decode_caps`): `legacy` keeps DecodeConfig's fixed 8 bond and 2 atom
 changes; `labels` takes the label maxima of the training part of the source decoded (the
@@ -36,7 +38,7 @@ from ksmech.arrows.delta_be import EditLabel
 from ksmech.arrows.lewis import MAX_ORDER
 from ksmech.arrows.symmetry import lewis_mol
 from ksmech.data import provenance as prov
-from ksmech.data.resonance import identity_key
+from ksmech.data.resonance import identity_key, pool_key
 from ksmech.model.decode import (
     NONMETALS,
     SCREEN_CODES,
@@ -152,7 +154,7 @@ def lewis_apply(sample) -> Apply:
             with rdBase.BlockLogs():
                 mol = _pool_mol(z, q, order, n)
                 mapped = identity_key(mol, keep_maps=True, nonbonding=n)
-                key = identity_key(mol, nonbonding=n)
+                key = pool_key(mol, nonbonding=n)
         except Exception:  # noqa: BLE001 - counted as PRODUCT_INVALID
             return None, "PRODUCT_INVALID"
         return (None, "RESONANCE_ONLY_STEP") if mapped == before else (key, None)
@@ -199,14 +201,14 @@ def any_rank(found: list[Completion], rank: int | None, products: frozenset[str]
 
 def _row(sample, found: list[Completion], outcomes: Mapping, skips: Counter) -> dict:
     """One sample's row: the own rank and `rank_any` against its pool's recorded outcomes (the
-    own product alone when the pool has no entry), and how many outcomes the pool records. An
-    own hit whose product key is not the recorded one is counted as OWN_KEY_MISMATCH."""
+    own label alone when the step has no entry: `rank_any` = `rank`, `n_outcomes` 0), and how
+    many outcomes the pool records. An own hit whose product key is not the recorded one is
+    counted as OWN_KEY_MISMATCH."""
     step_id = getattr(sample, "step_id", None)
     rank = hit_rank(found, sample.edit_label)
     pool = outcomes.get(step_id)
-    own = pool.own if pool is not None else getattr(sample, "product_key", "")
-    products = pool.products if pool is not None else frozenset({own})
-    if rank is not None and found[rank].key is not None and found[rank].key != own:
+    products = pool.products if pool is not None else frozenset()
+    if pool is not None and rank is not None and found[rank].key not in (None, pool.own):
         skips["OWN_KEY_MISMATCH"] += 1
     row = {"step_id": step_id, "rank": rank, "rank_any": any_rank(found, rank, products)}
     return row | {"n_outcomes": len(products), "n_found": len(found), "odd_top1": _odd_top1(found)}

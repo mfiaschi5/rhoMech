@@ -48,7 +48,7 @@ from ksmech.arrows.steps import (
 from ksmech.data import chem
 from ksmech.data import provenance as prov
 from ksmech.data.io import read_training_steps, steps_path, write_steps
-from ksmech.data.resonance import identity_key
+from ksmech.data.resonance import identity_key, pool_key
 from ksmech.data.schema import Arrow, ElementaryStep, SinkKind, SourceKind
 from ksmech.eval.decode import hit_rank, lewis_apply
 
@@ -105,7 +105,7 @@ def test_the_backward_step_swaps_the_sides_and_drops_the_arrows(mini_steps):
 def test_minus_r_on_the_child_gives_the_parent_back(kind, mini_steps, backward_samples):
     """Every member of the backward class takes the child, as drawn, to the parent: the
     identity key v2 with the atom maps kept; and on the sample's own Lewis structure
-    (`eval.decode.lewis_apply`, as decode checks it) to the parent's map-free key."""
+    (`eval.decode.lewis_apply`, as decode checks it) to the parent's pool key."""
     step = _step(mini_steps, kind)
     child, label = mol_label(backward_step(step))
     parent = identity_key(chem.parse_mapped(step.reactants_smiles), keep_maps=True)
@@ -115,8 +115,9 @@ def test_minus_r_on_the_child_gives_the_parent_back(kind, mini_steps, backward_s
     sample = backward_samples[kind]
     assert sample.product_key == identity_key(chem.parse_mapped(step.reactants_smiles))
     apply = lewis_apply(sample)
+    parent_pool = pool_key(chem.parse_mapped(step.reactants_smiles))  # the decoder's key
     for v in sample.edit_label.variants:
-        assert apply(v.bonds, v.lone) == (sample.product_key, None)
+        assert apply(v.bonds, v.lone) == (parent_pool, None)
 
 
 @pytest.mark.parametrize("kind", KINDS)

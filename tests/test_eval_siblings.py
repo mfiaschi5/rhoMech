@@ -110,7 +110,7 @@ def test_report_scores_rank_any_and_the_multi_outcome_subset():
     r = decode_report(samples, lambda s, skips: [sibling, own], outcomes=outcomes)
     rows = {row["step_id"]: row for row in r["per_sample"]}
     assert (rows["a"]["rank"], rows["a"]["rank_any"], rows["a"]["n_outcomes"]) == (1, 0, 2)
-    assert (rows["x"]["rank"], rows["x"]["rank_any"], rows["x"]["n_outcomes"]) == (1, 1, 1)
+    assert (rows["x"]["rank"], rows["x"]["rank_any"], rows["x"]["n_outcomes"]) == (1, 1, 0)
     assert (r["top1"], r["top1_any"]) == (0.0, pytest.approx(1 / 3))
     assert r["multi_outcome"] == {"n": 1, "top1": 0.0, "top3": 1.0, "top5": 1.0,
                                   "top1_any": 1.0, "top3_any": 1.0, "top5_any": 1.0}  # fmt: skip
@@ -142,3 +142,17 @@ def test_a_hits_file_without_rank_any_is_refused_for_metric_any(tmp_path):
         paired.compare_arms([a], [a], metric="any")
     with pytest.raises(ValueError, match="metric"):
         paired.read_hits(a, metric="best")
+
+
+def test_the_pool_key_keeps_each_fragments_charge():
+    from rdkit import Chem
+
+    from ksmech.data.resonance import identity_key, pool_key
+
+    plus, minus = Chem.MolFromSmiles("[CH3+].[Br-]"), Chem.MolFromSmiles("[CH3-].[Br+]")
+    assert identity_key(plus) == identity_key(minus)  # charges zeroed over the whole drawing
+    assert pool_key(plus) != pool_key(minus)
+    assert pool_key(plus) == ".".join(sorted(identity_key(Chem.MolFromSmiles(x))
+                                            for x in ("[CH3+]", "[Br-]")))  # fmt: skip
+    keys = side_keys([_step("h", "[CH3:1][Br:2]", "[CH3+:1].[Br-:2]")], Counter())
+    assert keys["h"][1] == pool_key(plus)
