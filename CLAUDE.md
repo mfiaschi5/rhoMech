@@ -219,16 +219,30 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (`qm.blas`, `KSMECH_BLAS=auto|bundled|PATH`; `--workers 1` and the web app keep the netlib copy;
   a pod needs `libopenblas0-serial`); `--optimizer tblite-anc` optimizes in approximate normal
   coordinates with RFO steps and restarted SCFs (`qm.anc`, method `.../tblite-anc`, 2-4x fewer
-  energies than the default L-BFGS-B `.../tblite-lbfgs`; its `--maxiter` counts energies); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
+  energies than the default L-BFGS-B `.../tblite-lbfgs`; its `--maxiter` counts energies);
+  `--solvent S` another ALPB solvent of `xtb_calc.ALPB_SOLVENTS` (one name each: methanol, dmso,
+  thf, ...) or `gas`, a method of its own (`GFN2-xTB/ALPB-S/...`) whose records sit beside the
+  water ones (the token build and serve still read water only); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
   codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,
   and a later run of any source, or the web app, with the same settings and no larger budget
   answers from it instead of rerunning xTB), `uv run ksmech-qm bond-index`
   (Wiberg bond indices of the Lewis bonds of every cached record, `data/cache/bond_index/`; the
-  token cache needs them, so re-run after the QM batch), `uv run ksmech-qm index stats [--root
+  token cache needs them, so re-run after the QM batch), `uv run ksmech-qm thermo --source S...
+  [--steps-from FILE] | --smiles SMILES... [--workers 4] [--solvent water] [--limit N]
+  [--report FILE --temperatures T...] [--retry-failed]` (reaction-network plan item B: the
+  thermochemistry sidecar of every cached record, `data/cache/thermo/<key>.npz` stamped with its
+  record: a central-difference Hessian of tblite's GFN2 gradients at the record's geometry with
+  its solvent, charge and spin (`qm.hessian`, 6N+1 gradients, xtb's 0.005 Bohr step), the
+  frequencies, moments, symmetry number and multiplicity; G(T) at any T from `qm.thermo`
+  (quasi-RRHO, xtb's imaginary-mode rule, 1 M standard state), the pool's G from
+  `qm.thermo.pool_free_energy`, one species' from `qm.thermo_cache.free_energy_of`; NO_RECORD,
+  RECORD_STALE, UNKNOWN_METHOD skipped and counted, SCF_NOT_CONVERGED and TIMEOUT leave
+  `thermo/<key>.failed.json`; t ~ 1.8e-4 N^2.93 s per molecule, the whole cache about 208
+  CPU-hours, so run over it only with the user's OK), `uv run ksmech-qm index stats [--root
   data/cache --root data/serve]` (the SQLite index `<root>/index.sqlite` of records, tombstones,
-  tokens and Wiberg sidecars, read from the file headers and refreshed incrementally first;
+  tokens, Wiberg and thermo sidecars, read from the file headers and refreshed incrementally first;
   the records of species `data.spin` reassigns, under the tagged method `+spin-v1-u<u>`
   (`qm.spin`), listed by spin source;
   `index refresh [--rebuild]` only refreshes; the files stay the source of truth)

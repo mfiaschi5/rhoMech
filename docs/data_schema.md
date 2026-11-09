@@ -493,7 +493,8 @@ is a plain `.npz` (no pickle). `ksmech.qm.records.load_record` returns a `QMReco
 The key is `sha256(f"{smiles}|{conformer_id}|{method}")`, where `smiles` is the map-free canonical
 SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
 `GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key;
-`--optimizer tblite-anc` writes `.../tblite-anc`, `xtb` writes `.../xtb-opt`). A
+`--optimizer tblite-anc` writes `.../tblite-anc`, `xtb` writes `.../xtb-opt`; `--solvent dmso`
+writes `GFN2-xTB/ALPB-dmso/...`, `--solvent gas` `GFN2-xTB/gas/...`). A
 species whose spin `data.spin` reassigns (a singlet carbene or CO drawn with two radical
 electrons, an odd Cu(II) or Fe(III) fragment RDKit counts 0; open-shell plan P4) has the tag
 `+spin-v1-u<u>` right after the optimizer part, before any later suffix:
@@ -534,6 +535,33 @@ non-metal with u >= 2 that is not a Hund case or has no count, unless a counted 
 `method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
 row whose method is its own species' method under the run's configuration
 (`qm.batch.row_method`).
+
+### Thermo sidecars: `data/cache/thermo/<sha256>.npz` (`ksmech-qm thermo`)
+
+One file per QM record, under the record's own cache key (map-free SMILES, conformer, method
+with its spin tag), written by `ksmech.qm.thermo_cache`: the semi-numerical GFN2 Hessian at the
+record's geometry with the record's solvent, charge and unpaired count (`qm.hessian`), reduced
+to what G(T) needs. Provenance header kind `thermo`, version 1, input the record file, config
+the record's `method` and `conformer_id` and the Hessian's `fd_step_bohr`, `accuracy`, `masses`
+and `symmetry_tolerance`; `extra` holds the seconds spent and the BLAS. `load_thermo` returns a
+`qm.thermo.MolecularThermo`; `qm.thermo.thermo_at(data, T)` gives ZPE, H, S and G.
+
+| Field | dtype, shape | Notes |
+|---|---|---|
+| `smiles`, `method`, `point_group`, `warnings` | str, () | the record's identity; the Schoenflies symbol (`qm.point_group`, 0.1 A); comma-separated `ThermoCode` warnings: `IMAGINARY_INVERTED`, `IMAGINARY_DROPPED`, `NOT_STATIONARY`, `RESTRAINED_GEOM`, `HESSIAN_ASYMMETRIC`, `SYMMETRY_FAILED` |
+| `conformer_id`, `charge`, `unpaired`, `multiplicity` | int, () | multiplicity = unpaired + 1 |
+| `atomic_numbers` | int32, (n,) | |
+| `energy_ha` | float64, () | the record's energy (GFN2 with its ALPB solvation, 'gsolv' state) |
+| `frequencies_cm` | float64, (3n-6,), (3n-5,) or (0,) | harmonic, cm^-1, ascending; negative = imaginary; unscaled, every mode kept (the thermochemistry's mode rule is applied when G is evaluated) |
+| `moments_amu_ang2` | float64, (3,) | principal moments of inertia, amu A^2, ascending |
+| `mass_amu` | float64, () | sum of the average atomic masses |
+| `symmetry_number`, `linear` | int / bool, () | proper rotations of the point group; C∞v 1, D∞h 2 |
+| `grad_max`, `hessian_asymmetry` | float64, () | max \|gradient\| at the geometry (Hartree/Bohr); max \|H - H^T\| before symmetrizing (Hartree/Bohr^2) |
+| `n_gradients`, `fresh_starts` | int, () | gradients evaluated (6n + 1); displaced SCFs that had to start from the guess |
+
+A failure that recurs (SCF_NOT_CONVERGED, TIMEOUT) leaves `data/cache/thermo/<sha256>.failed.json`,
+the QM failure memo's format under the header kind `thermo_failure` (`smiles`, `conformer_id`,
+`method`, `reason`, `detail`, `seconds`, `params`: the `ThermoConfig` settings).
 
 ## Serve workbench: `data/serve/workbench/`
 

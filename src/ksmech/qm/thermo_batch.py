@@ -188,7 +188,10 @@ def run_thermo(
     rows, todo = [], []
     for task in tasks:
         pre = precheck(task)
-        (todo.append(task) if pre is None else rows.append(pre))
+        if pre is None:
+            todo.append(task)
+        else:
+            rows.append(pre)
     console.print(
         f"{len(tasks)} species, {len(tasks) - len(todo)} answered without a calculation, "
         f"{len(todo)} Hessians to compute ({n_workers} workers, {batch.blas_note(n_workers)})"

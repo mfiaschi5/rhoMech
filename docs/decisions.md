@@ -8498,3 +8498,115 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   `QMConfig().method`, so switching the default means recomputing every source's records and
   everything built on them, a decision of its own. Serve's metal path (`MetalGFN2Calculator`)
   goes through the same `_optimize`, so it follows the option too.
+
+## 2026-11-09: the free energy of a species and of a pool (`ksmech-qm thermo`, reaction-network plan item B)
+
+Every cached record gets a sidecar with its harmonic frequencies, principal moments, symmetry
+number and multiplicity, so G(T) is evaluated at any temperature without the Hessian; a pure
+function sums the species' G into the G of a pool (`qm.hessian`, `qm.thermo`, `qm.thermo_cache`,
+`qm.thermo_batch`).
+
+- **The Hessian comes from tblite, not from the xtb program** (decided with the user before the
+  build; the plan's D3 had named the xtb program). Central differences of tblite's analytic GFN2
+  gradients, H[k] = (g(x + h e_k) - g(x - h e_k)) / 2h, as xtb's `--hess` does: h = 0.005 Bohr
+  (xtb's `step_hess`), SCC accuracy 0.2 (xtb's `--hess`), the result symmetrized (xtb too; the
+  largest |H - H^T| is stored, HESSIAN_ASYMMETRIC above xtb's 1e-2 warning). 6N + 1 gradients
+  per molecule; every displaced SCF starts from the reference point's converged wavefunction
+  (`singlepoint(ref, copy=True)`), from the guess when that start fails (counted,
+  `fresh_starts`). No new program, no new dependency.
+- **The record's own calculator.** GFN2, the ALPB solvent of the record's method (read back by
+  `xtb_calc.solvent_of`; a method with no medium part, the 245 early `GFN2-xTB/tblite-lbfgs`
+  records, is UNKNOWN_METHOD), the record's charge and unpaired count: a species `qm.spin`
+  reassigns carries its assigned count in its record, so the Hessian runs at it; tblite's
+  restricted open shell with fractional occupations and its 300 K electronic temperature, as for
+  the record. So the Hessian is the solvated surface's, as `xtb --alpb --hess`.
+- **Translations and rotations** are removed by transforming the mass-weighted Hessian to the
+  orthogonal complement of the six (five for a linear molecule, three for an atom) mass-weighted
+  rigid-body vectors and diagonalizing there: what xtb's `projectHessian` says it is equivalent
+  to, with the mode count exact by construction (xtb picks its zero modes by |freq| < 0.01).
+  Masses: RDKit's average atomic weights, as `qm.point_group`. Linear means the point group is
+  C∞v or D∞h at 0.1 A; an atom has no Hessian at all.
+- **Symmetry number**: the number of proper rotations in the group `qm.point_group` finds at
+  its 0.1 A tolerance (xtb's `desy` is 0.1 too); 1 for C∞v and an atom, 2 for D∞h. The fixture
+  records give benzene D6h 12, ethane D3d 6, chloromethane C3v 3, acetonitrile C3v 3,
+  acetaldehyde Cs 1. A point-group failure keeps the Hessian with sigma 1 (SYMMETRY_FAILED).
+- **Thermochemistry in numpy, xtb's conventions** (checked against xtb's `thermo.f90` and
+  `property.F90`): ideal-gas translation at p0 = 1 atm (xtb), rigid rotor, harmonic vibrations
+  with Grimme's quasi-RRHO for the entropy only, S = w S_HO + (1 - w) S_free-rotor with
+  w = 1 / (1 + (nu0 / nu)^4) and nu0 = 50 cm^-1 (xtb's `sthr`; the 2012 paper used 100), the
+  free rotor's moment mu' = mu B_av / (mu + B_av) with B_av the mean principal moment of the
+  molecule (xtb's `avmom`, not the paper's fixed 1e-44 kg m^2); ZPE and vibrational enthalpy
+  harmonic over every kept mode (xtb does not interpolate them). Added to xtb's: the electronic
+  entropy R ln(2S + 1), 2S + 1 = unpaired + 1 (spin only: an atom's orbital degeneracy, 4 for
+  Br 2P3/2, is not counted). Checked: water at its experimental geometry and fundamentals gives
+  S = 188.7 J/(mol K) and H(298) - H(0) = 9.92 kJ/mol (188.83 at 1 bar and 9.904); the GFN2
+  frequencies of the fixture records give S = 54.4, 64.7, 56.1 cal/(mol K) for ethane, benzene
+  and chloromethane (54.85, 64.34, 56.04 measured).
+- **Imaginary modes, as xtb's `print_thermo`**: |nu| <= 1 cm^-1 is dropped, -20 < nu < 0 is
+  inverted (made real), nu <= -20 is dropped and counted; the sidecar flags IMAGINARY_INVERTED and
+  IMAGINARY_DROPPED. The rule is applied when G is evaluated (`ThermoSettings.imag_cutoff_cm`),
+  so a caller can change it without a recomputation. Its cost: a soft mode that crosses -20
+  cm^-1 changes G by its whole free-rotor entropy, 0.6 kcal/mol for methyl acetate's torsion
+  (below). The records are L-BFGS minima at fmax 3e-4 Hartree/Bohr: some are saddles of a methyl
+  torsion (acetone, -76 cm^-1). The sidecar flags them; nothing re-optimizes along the mode
+  (xtb's `--ohess` would), since that would change the record.
+- **Standard state: 1 M in solution.** tblite's ALPB, like xtb's, defaults to the 'gsolv' state
+  (1 L of gas to 1 L of solution, no shift), so the record's energy already holds the 1 M -> 1 M
+  solvation free energy. G = E_el + ZPE + H_thermal - T S(ideal gas, 1 atm) + RT ln(V_m / 1 L),
+  V_m = RT / p0: 24.465 L/mol and +1.894 kcal/mol at 298.15 K, the molar volume taken at T
+  (xtb's 'bar1M' shift also scales its 24.79 L by T / 298.15). S and H are reported for the gas;
+  only G carries the shift (`ThermoSettings(standard_state="1atm")` leaves it out).
+- **ALPB is not rotation invariant.** Its surface grid is fixed in the frame, not on the
+  molecule: over six random orientations G - E_el spreads by 0.15 kcal/mol for ethanol, 0.02 for
+  benzene, 0.10 for TEMPO and 0.05 for acetone, and stiff modes by up to 6 cm^-1, whatever the
+  step (0.005, 0.01, 0.02 Bohr give the same spread); the gas-phase Hessian of the same
+  geometries spreads by 0.002. Methyl acetate spreads by 0.75 kcal/mol because a torsion at
+  -30 to +45 cm^-1 falls on either side of the -20 cutoff; inverting every imaginary mode brings
+  it to 0.14. The solvated Hessian is kept (the record's own surface, and what xtb computes): a
+  record has one orientation, so its G is reproducible, and 0.1-0.2 kcal/mol is far below GFN2's
+  error on reaction energies.
+- **The sidecar**: `data/cache/thermo/<cache key of the record>.npz`, kind `thermo`, version 1,
+  stamped with the record as its input (a new record makes it stale) and with the Hessian's
+  settings (step, accuracy, masses, symmetry tolerance) and the record's method and conformer as
+  its config; the time spent and the BLAS are tracing notes in `extra`, outside the content
+  hash. The thermochemistry settings are not part of it. `thermo_cache.free_energy_of(smiles, T)`
+  reads one species' G.
+- **Failures**: an SCF that fails from both starts at a displaced geometry (SCF_NOT_CONVERGED)
+  and a timeout (TIMEOUT, 3600 s by default) leave a tombstone `thermo/<key>.failed.json` in
+  the QM memo's format (kind `thermo_failure`), covered while the settings are the same and no
+  budget (`timeout_s`, `scf_maxiter`) is larger; a success removes it. NO_RECORD, RECORD_STALE
+  and UNKNOWN_METHOD are skips, counted but not remembered (a record may come later);
+  UNEXPECTED and WORKER_CRASH are not remembered either.
+- **The cache index goes to version 3**: kinds `thermo` (the identity columns of a record) and
+  `thermo_failure`, the view's `has_thermo` and `thermo_failure_reason`, and in `stats` the
+  thermo failures by reason, the thermo warnings and the records without a sidecar. A version
+  change drops and rebuilds a root's index the first time a checkout of the other version opens
+  it, so the shared `data/cache/index.sqlite` should be refreshed once after the merge and not
+  from a v2 checkout afterwards.
+- **The solvent is a parameter of the QM run.** The method string always carried the medium
+  (`ALPB-<solvent>` or `gas`), so a second solvent writes records beside the water ones under
+  other cache keys. `ksmech-qm run --solvent` and `ksmech-qm thermo --solvent` take one of the 25
+  GFN2 ALPB solvents of tblite, by one name each (`xtb_calc.ALPB_SOLVENTS`; every one runs):
+  tblite also accepts aliases and any case (`h2o`, `DMSO`, `dichloromethane`), which would give
+  one solvent two method strings, so `QMConfig` refuses any other name. The default keys are
+  unchanged. Not done: the readers downstream of QM (the token build, `TokenCache`, the samples,
+  serve) look records up under `QMConfig().method`, i.e. water; a model on another solvent's
+  tokens needs that method passed through those builders.
+- **G of a pool** (`qm.thermo.pool_free_energy`, pure, no I/O, no `ksmech.serve` import): G =
+  sum_i n_i mu_i, mu_i = G_i(T) + RT ln(c_i / c0) with c0 = 1 M (the standard state of G_i) and
+  c_i from the caller (c0 when absent, the data have none); a reservoir species (solvent,
+  reagent in excess) has a fixed mu instead, for every copy (`chemical_potential(G, T, c)`
+  gives one at a concentration: water as solvent, 55.3 M). A negative count is a species owed
+  to a reservoir, so pools that differ by a reservoir molecule compare: A + H2O(reservoir) -> B
+  is `reaction_free_energy({A: 1, H2O: 1}, {B: 1}, ...)`. Energies in Hartree, T in K.
+- **Pilot** (4 workers of one thread each on OpenBLAS, beside other jobs): the 29 fixture species
+  (`MOLECULES` and `OPEN_SHELL`) and 20 cached records of 5-180 atoms. 46 computed, 3 skipped
+  as NO_RECORD (the N2 and two ozone drawings, whose records sit under their redrawn SMILES), no
+  failure. Time per Hessian: under 0.3 s up to 9 atoms, 0.4 s at 10-19, 3.4 s at 20-39, 16 s at
+  40-59, 54 s at 60-79, 138 s at 80-119, 513 s at 158 and 932 s at 180 atoms; a fit gives
+  t = 1.8e-4 N^2.93 s. Over the 33,532 water records of the index (its atom counts of
+  2026-11-03): about 208 CPU-hours, 52 h on 4 workers, 26 h on 8, the records of 40-119 atoms
+  taking 177 of them. SCC accuracy 1.0 instead of 0.2 saves 10-17% and moves G by 0.15-0.33
+  kcal/mol, so 0.2 stays. `--workers 1` runs in the calling process on tblite's bundled netlib
+  BLAS (`qm.blas`), about 25% slower at 48 atoms. Warnings: IMAGINARY_INVERTED on 11 of the 46,
+  IMAGINARY_DROPPED on 6 (acetone, methyl acetate and 4 of the 20 dataset records).
