@@ -11,6 +11,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+from ksmech.arrows.backward import BACKWARD, DIRECTIONS, FORWARD, direction_dir
 from ksmech.arrows.delta_be import label_report, step_label
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.roundtrip import evaluate_alignment, run_round_trip
@@ -21,7 +22,7 @@ from ksmech.arrows.steps import (
     default_strategies,
     write_views_from_store,
 )
-from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps, source_dir
+from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, read_training_steps
 from ksmech.data.io import steps_path as _steps_path
 from ksmech.data.provenance import StaleArtifact
 from ksmech.data.schema import Source
@@ -37,12 +38,19 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("edit-labels", help="reaction-matrix labels (spec v8) and their coverage")
     f = sub.add_parser("freeze-splits", help="snapshot the split files as frozen splits")
     f.add_argument("--strategy", nargs="+", required=True, choices=STRATEGIES)
-    for p in (r, a, s, e, f):
+    c = sub.add_parser("coverage", help="token and QM coverage of both sides' species (read-only)")
+    for p in (r, a, s, e, f, c):
         p.add_argument("--source", required=True, choices=[str(x) for x in Source])
         p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     r.add_argument("--include-resonance", action="store_true", help="also resonance steps")
-    for p in (a, s, e):
+    for p in (a, s, e, c):
         p.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    for p in (s, e):
+        p.add_argument("--direction", default=FORWARD, choices=DIRECTIONS,
+                       help="backward: each step seen from its child, in backward/")  # fmt: skip
+        p.add_argument("--limit", type=int, default=0, help="backward only: that many training "
+                       "steps drawn at random (--seed), a pilot")  # fmt: skip
+    e.add_argument("--seed", type=int, default=0)
     a.add_argument("--no-member-check", action="store_true", help="skip the set-member swap")
     s.add_argument(
         "--strategy",
@@ -58,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write the strategies' views over the store already built, without rebuilding it",
     )
-    for p in (a, s):
+    for p in (a, s, c):
         p.add_argument(
             "--workers", type=int, default=1, help="spawned processes (host total <= 15)"
         )
@@ -79,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
         "samples": cmd_samples,
         "edit-labels": cmd_edit_labels,
         "freeze-splits": cmd_freeze_splits,
+        "coverage": cmd_coverage,
     }
+    if getattr(args, "limit", 0) and args.direction == FORWARD:
+        console.print("[red]--limit builds a partial store or report: --direction backward only")
+        return 2
     return commands[args.command](args, path, console)
 
 
@@ -100,7 +112,10 @@ def cmd_freeze_splits(args: argparse.Namespace, path: Path, console: Console) ->
 
 
 def _write(report: dict, args: argparse.Namespace, name: str, console: Console) -> Path:
-    out = source_dir(args.source, args.processed_dir) / name
+    """`name` in the directory of the command's direction (`backward.direction_dir`)."""
+    out = direction_dir(args.source, args.processed_dir, getattr(args, "direction", FORWARD))
+    out.mkdir(parents=True, exist_ok=True)
+    out = out / name
     out.write_text(json.dumps(report, indent=1) + "\n")
     console.print(f"wrote {out}")
     return out
@@ -171,10 +186,13 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
         TokenCache(args.tokens_dir),
         args.seed,
         n_workers=args.workers,
+        direction=args.direction,
+        limit=args.limit,
     )
+    built = f" (a pilot of {report['n_built']})" if args.limit else ""
     console.print(
-        f"{report['n_samples']} samples from {report['n_training_steps']} training steps; "
-        f"skipped {report['skipped']}"
+        f"{args.direction} samples: {report['n_samples']} from {report['n_training_steps']} "
+        f"training steps{built}; skipped {report['skipped']}"
     )
     console.print(
         f"edit-label classes {report['class_size']}, anchors {report['anchor_kind']}; "
@@ -188,12 +206,23 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
         console.print(f"  {split}: {r['n_samples']}/{r['n_steps']} samples, skipped {r['skipped']}")
     for strategy, why in report["strategies_not_applicable"].items():
         console.print(f"  [yellow]{strategy}: not applicable ({why})[/yellow]")
+    _print_leakage(report, console)
     _write(report, args, "samples_report.json", console)
     return 0 if report["splits"] else 1
 
 
+def _print_leakage(report: dict, console: Console) -> None:
+    """The backward inputs of each held-out part that share a molecule with training."""
+    for strategy, parts in report.get("leakage", {}).items():
+        text = ", ".join(f"{p} {r['n_leaking']}/{r['n_steps']}" for p, r in parts.items())
+        console.print(f"  leakage of the backward inputs, {strategy}: {text}")
+
+
 def _views_only(args: argparse.Namespace, console: Console) -> int:
-    report = write_views_from_store(args.source, args.strategy, args.processed_dir, args.seed)
+    report = write_views_from_store(
+        args.source, args.strategy, args.processed_dir, args.seed, args.direction
+    )
+    _print_leakage(report, console)
     for split, r in report["splits"].items():
         console.print(f"  {split}: {r['n_samples']}/{r['n_steps']} samples, skipped {r['skipped']}")
     for strategy, why in report["strategies_not_applicable"].items():
@@ -208,10 +237,18 @@ EDIT_LABEL_GATE = 0.95  # labeled fraction of the training steps
 def cmd_edit_labels(args: argparse.Namespace, path: Path, console: Console) -> int:
     """Label every training step with its reaction matrix (spec v8) on the token atoms; the
     data gate is the labeled fraction. Every class member reproduces its step by construction:
-    one that does not is dropped and counted (`steps_with_rejected_variants`)."""
+    one that does not is dropped and counted (`steps_with_rejected_variants`). Backward: the
+    steps seen from their child (`backward.backward_step`), with how each class compares with
+    the negated forward class (`backward.label_agreement`), written to backward/."""
+    from ksmech.arrows.backward import backward_agreement, oriented, pilot_steps
+
     loader = TokenCache(args.tokens_dir)
-    labels = {step.step_id: step_label(step, loader) for step in read_training_steps(path)}
+    steps = pilot_steps(read_training_steps(path), args.limit, args.seed)
+    labels = {s.step_id: step_label(s, loader) for s in oriented(steps, args.direction)}
     report = label_report(labels)
+    if args.direction == BACKWARD:
+        report |= {"direction": BACKWARD, "limit": args.limit, **backward_agreement(steps)}
+        console.print(f"backward class vs negated forward class: {report['agreement']}")
     console.print(
         f"{report['n_labeled']} / {report['n_steps']} training steps labeled "
         f"({report['labeled_fraction']:.2%}); skipped {report['skipped']}"
@@ -223,6 +260,30 @@ def cmd_edit_labels(args: argparse.Namespace, path: Path, console: Console) -> i
     )
     _write(report, args, "edit_labels_report.json", console)
     return 0 if report["labeled_fraction"] >= EDIT_LABEL_GATE else 1
+
+
+def cmd_coverage(args: argparse.Namespace, path: Path, console: Console) -> int:
+    """Token and QM coverage of the species of both sides of the training steps (the product
+    species are the backward samples' inputs; reaction-network plan, item H), read through the
+    token loader and the QM manifest; written to backward/species_coverage.json."""
+    from ksmech.arrows.backward import species_coverage
+    from ksmech.data.io import source_dir
+
+    manifest = source_dir(args.source, args.processed_dir) / "qm_manifest.parquet"
+    steps = read_training_steps(path)
+    loader = TokenCache(args.tokens_dir)
+    report = species_coverage(steps, loader, manifest, args.workers)
+    for side in ("reactants", "products", "products_only"):
+        r = report[side]
+        served = f"; steps fully served {r['n_steps_served']}" if "n_steps_served" in r else ""
+        console.print(
+            f"{side}: {r['n_with_tokens']} / {r['n_species']} species with tokens (missing "
+            f"{r['missing_tokens']}), {r['n_without_qm']} without a QM record "
+            f"{r['without_qm']}{served}"
+        )
+    args.direction = BACKWARD
+    _write(report, args, "species_coverage.json", console)
+    return 0
 
 
 if __name__ == "__main__":

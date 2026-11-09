@@ -165,7 +165,7 @@ def _from_byte_planes(planes: np.ndarray) -> np.ndarray:
     return zt.T
 
 
-def _write_shard(path: Path, samples: list, inputs: dict, version: int) -> str:
+def _write_shard(path: Path, samples: list, inputs: dict, version: int, extra: dict) -> str:
     arrays, metas = {}, []
     used = dict(inputs)
     for i, s in enumerate(samples):
@@ -174,18 +174,24 @@ def _write_shard(path: Path, samples: list, inputs: dict, version: int) -> str:
         metas.append(m)
         used |= s.inputs
     arrays["meta"] = np.array(json.dumps(metas))
-    header = prov.stamp(
-        "sample_shard", version, used, {"sample_version": version}, prov.array_digest(arrays)
-    )
+    config = {"sample_version": version} | extra
+    header = prov.stamp("sample_shard", version, used, config, prov.array_digest(arrays))
     prov.save_npz(path, arrays, header)
     return header.content_sha256
 
 
 def write_store(
-    view_dir: Path, samples: dict[str, MechanismSample], skipped: dict, parquet: Path, version: int
+    view_dir: Path,
+    samples: dict[str, MechanismSample],
+    skipped: dict,
+    parquet: Path,
+    version: int,
+    config: dict | None = None,
 ) -> Path:
     """Write every sample once (sorted by step id) into shards and the index. Returns the
-    index path."""
+    index path. `config` joins the provenance config of every shard and of the index (the
+    backward samples' direction, `arrows.backward.direction_config`)."""
+    extra = dict(config or {})
     root = store_dir(view_dir)
     root.mkdir(parents=True, exist_ok=True)
     for old in root.glob("shard_*.npz"):
@@ -195,7 +201,8 @@ def write_store(
     for k in range(0, len(ids), SHARD_SIZE):
         name = f"shard_{k // SHARD_SIZE:05d}.npz"
         chunk = ids[k : k + SHARD_SIZE]
-        _write_shard(root / name, [samples[i] for i in chunk], prov.file_input(parquet), version)
+        shard = [samples[i] for i in chunk]
+        _write_shard(root / name, shard, prov.file_input(parquet), version, extra)
         shards[name] = chunk
     inputs = {}
     for name in shards:
@@ -205,7 +212,7 @@ def write_store(
         "sample_index",
         version,
         inputs,
-        {"sample_version": version, "shard_size": SHARD_SIZE},
+        {"sample_version": version, "shard_size": SHARD_SIZE} | extra,
         prov.sha256_text(json.dumps(body, sort_keys=True)),
     )
     return prov.write_json(root / "index.json", body, header)

@@ -254,7 +254,17 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `--strategy`; `--views-only` writes
   the named strategies' views over the store already built; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
-  labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`)
+  labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`).
+  The previous step (reaction-network plan, item H; `arrows.backward`): `samples --direction
+  backward [--limit N --seed S]` and `edit-labels --direction backward [--limit N]` build the
+  same artifacts for each step seen from its child (the sides swapped, the arrows dropped, so
+  the label is the class of -R on the child pool by the same code) under
+  `data/processed/<source>/backward/`, never touching a forward file; the parts are the forward
+  parts step by step, the samples report holds the molecule `leakage` of the backward inputs,
+  edit-labels the `agreement` of each class with the negated forward class; `--limit` (backward
+  only) is a pilot of N random training steps, views kept to them; `uv run ksmech-arrows
+  coverage --source S [--workers N]` (read-only: token and QM coverage of both sides' species
+  and of the product-only ones, `backward/species_coverage.json`)
 - Physics: `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--workers 8]
   [--n-jobs 14] [--cells valid|all]` (the fast LightGBM lambdarank reference on the geometry-free pair features over
   all training, ranking each step's first arrow: all positives + 20 hard (best by the gap kernel
@@ -326,7 +336,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation, `--no-somo-channels`,
   `--no-own-pair-channel`; metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
-  pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run)
+  pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run; `--direction
+  backward` trains the previous-step model on the backward store, views and pair statistics
+  checked to be backward, the direction in run.json, which a forward run leaves out)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]
   [--floor legacy|own_break] [--kernel g|g2] [--drop-intra-open]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, or every pair, no learned parameter, val and test
@@ -346,7 +358,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   it); `odd_top1` and per-sample `screened` in the report and the hit file;
   `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
   `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
-  it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
+  it differs from `--source`, the samples decoded; `--direction backward` decodes the backward
+  samples, B_parent = B_child + R by the same laws, `direction` and `checkpoint_direction` in the
+  config, files tagged `_backward`, never paired with forward hits by `compare`); both take `--cohort NAME` (only the steps of
   `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared|bond_stretched` (with and
   without), and report the covered fraction; `uv run ksmech-eval cohort --source pmechdb --name
   open_shell --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE` (the training steps of some

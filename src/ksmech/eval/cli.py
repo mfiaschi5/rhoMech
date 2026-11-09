@@ -25,6 +25,9 @@ ones add `_caps<bonds>-<atoms>-<candidates>` to the file names. `--closed-minus1
 refuses any -1 atom entry on a pool with no unpaired electron (`model.decode`, an option whose
 default P9's ablation sets) and adds `_minus1filter` to the file names; the closed-shell screen
 is always on. A run's selection note (`train.loop.run_notes`) is copied into the report.
+`--direction backward` decodes the previous-step samples (`arrows.backward`): B_parent =
+B_child + R on the child's Lewis structure, the same laws; the config records the direction and
+the file names carry `_backward`.
 
 `importance` permutes each token input column, and each block of related columns, across the
 tokens of a part and scores the part again with the training metrics (`eval.importance`): how
@@ -62,6 +65,7 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
+from ksmech.arrows.backward import BACKWARD, DIRECTIONS, FORWARD, require_direction
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.steps import MechanismSample, load_samples, sample_ids, samples_path
 from ksmech.data import provenance as prov
@@ -175,6 +179,8 @@ def _decode_parser(sub) -> None:
         d.add_argument(f"--{name.replace('_', '-')}", type=int, help="overrides --caps")
     d.add_argument("--closed-minus1-filter", action="store_true",
                    help="refuse any -1 atom entry on a pool with no unpaired electron")  # fmt: skip
+    d.add_argument("--direction", default=FORWARD, choices=DIRECTIONS,
+                   help="backward: the previous-step samples (<source>/backward/)")  # fmt: skip
     d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     _cohort_args(d)
@@ -239,13 +245,26 @@ def _sample_versions(path: Path, payload: dict, console: Console) -> dict:
     return {"checkpoint_sample_version": trained, "view_sample_version": view}
 
 
+def _directions(direction: str, payload: dict, console: Console) -> dict:
+    """The decoded samples' direction and the checkpoint's (`arrows.backward`), for the decode
+    config: nothing when both are forward (a forward header as before), else both; a mismatch
+    warns. With "direction" in `eval.paired.PAIRED_KEYS`, hits of two directions never pair."""
+    train = payload.get("provenance", {}).get("config", {}).get("train", {})
+    trained = train.get("direction", FORWARD)
+    if trained != direction:
+        console.print(f"[yellow]checkpoint trained on {trained} samples, decoding {direction}")
+    if direction == trained == FORWARD:
+        return {}
+    return {"direction": direction, "checkpoint_direction": trained}
+
+
 def _decode_caps(args) -> tuple[dict[str, int], dict[str, str]]:
     """The caps of a decode (`eval.decode.decode_caps`: --caps, then the overrides) and, with
     --caps labels, the training view of --source they are read from, an input of the report."""
     from ksmech.arrows.steps import SAMPLE_VERSION
     from ksmech.eval.decode import CAP_FIELDS, decode_caps
 
-    train = samples_path(args.source, f"{args.split}_train", args.processed_dir)
+    train = samples_path(args.source, f"{args.split}_train", args.processed_dir, args.direction)
     overrides = {name: getattr(args, name) for name in CAP_FIELDS}
     caps = decode_caps(args.caps, train, SAMPLE_VERSION, overrides)
     return caps, prov.file_input(train) if args.caps == "labels" else {}
@@ -260,7 +279,10 @@ def cmd_decode(args, console: Console) -> int:
     run_source = args.run_source or args.source
     ckpt = args.models_dir / run_source / args.run / f"{args.checkpoint}.pt"
     model, payload = load_model(ckpt, "cpu")
-    path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
+    path = samples_path(
+        args.source, f"{args.split}_{args.part}", args.processed_dir, args.direction
+    )
+    require_direction(path, args.direction)
     ids = _cohort_ids(args, path)
     ids = ids[: args.limit] if args.limit is not None else ids
     minus1 = args.closed_minus1_filter
@@ -274,9 +296,11 @@ def cmd_decode(args, console: Console) -> int:
     config = {k: getattr(args, k) for k in keys}
     config |= {"run_source": run_source, "checkpoint": _checkpoint_text(args.checkpoint, payload)}
     config |= _sample_versions(path, payload, console) | {"caps": args.caps, **caps}
+    config |= _directions(args.direction, payload, console)
     inputs = prov.file_input(path) | prov.file_input(ckpt) | caps_input
     header = prov.stamp("decode", DECODE_VERSION, inputs, config)
-    suffix = f"_{args.source}" if args.source != run_source else ""
+    suffix = "_backward" if args.direction == BACKWARD else ""
+    suffix += f"_{args.source}" if args.source != run_source else ""
     suffix += f"_{args.cohort}" if args.cohort != "all" else ""
     suffix += f"_n{args.limit}" if args.limit is not None else ""
     suffix += "_minus1filter" if minus1 else ""

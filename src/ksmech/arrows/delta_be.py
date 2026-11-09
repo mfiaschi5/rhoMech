@@ -494,21 +494,29 @@ def to_global(label: EditLabel, global_atom: dict[int, int]) -> EditLabel | Edit
     return label.mapped(global_atom)
 
 
-def step_label(step: ElementaryStep, loader) -> EditLabel | str:
-    """The edit label of a step on the global atoms of its reactant tokens, or the reason code
-    it has none (an EditSkip, or from the tokens MISSING_TOKENS / STALE_ARTIFACT /
-    NO_BOND_INDEX (`MissingTokens.reason`) or CORRESPONDENCE)."""
+def mol_label(step: ElementaryStep) -> tuple[ElementaryStep, EditLabel] | str:
+    """(the step with the hydrogens that move written as atoms, its edit label on the
+    reactant-mol atoms under its source's rule), or the reason code it has none (an EditSkip)."""
     from ksmech.arrows.drawings import source_label
-    from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
 
     step = explicit_moving_hydrogens(step)
     if step is None:
         return str(EditSkip.H_TRANSFER_AMBIGUOUS)
     edit = step_edit(step)
     found = edit if isinstance(edit, EditSkip) else source_label(step, edit)
-    if isinstance(found, EditSkip):
-        return str(found)
-    label = found[2]
+    return str(found) if isinstance(found, EditSkip) else (step, found[2])
+
+
+def step_label(step: ElementaryStep, loader) -> EditLabel | str:
+    """The edit label of a step on the global atoms of its reactant tokens, or the reason code
+    it has none (an EditSkip, or from the tokens MISSING_TOKENS / STALE_ARTIFACT /
+    NO_BOND_INDEX (`MissingTokens.reason`) or CORRESPONDENCE)."""
+    from ksmech.arrows.reactants import CorrespondenceError, MissingTokens, ReactantTokens
+
+    found = mol_label(step)
+    if isinstance(found, str):
+        return found
+    step, label = found
     try:
         rt = ReactantTokens.from_smiles(step.reactants_smiles, loader)
     except MissingTokens as exc:
