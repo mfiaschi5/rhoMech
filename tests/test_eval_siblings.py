@@ -75,7 +75,10 @@ def test_outcome_summary_counts_siblings_by_part():
     s = outcome_summary(table, ["add", "other", "missing"], "val")
     assert (s["n_with_key"], s["n_multi"], s["max_outcomes"]) == (2, 1, 2)
     assert (s["siblings_same_part"], s["siblings_other_part"]) == (0, 2)
-    assert parts_of({"train": ["a"], "val": ["b"]}) == {"a": "train", "b": "val"}
+    split = {"molecule_train": ["a"], "molecule_val": ["b"], "rc_molecule_test": ["c"]}
+    assert parts_of(split) == {"a": "train", "b": "val", "c": "test"}  # split-file keys
+    with pytest.raises(ValueError, match="names no part"):
+        parts_of({"molecule": ["a"]})
 
 
 SN2 = (((0, 5, 1), (0, 1, -1)), ((1, 2), (5, -2)))
@@ -156,3 +159,13 @@ def test_the_pool_key_keeps_each_fragments_charge():
                                             for x in ("[CH3+]", "[Br-]")))  # fmt: skip
     keys = side_keys([_step("h", "[CH3:1][Br:2]", "[CH3+:1].[Br-:2]")], Counter())
     assert keys["h"][1] == pool_key(plus)
+
+
+def test_the_decoded_part_matches_the_split_file_parts():
+    """The decode report's same/other-part counts read the split file's keys as parts."""
+    split = {"molecule_train": ["dep", "dep_o", "other"], "molecule_val": ["add", "add2"]}
+    table = outcome_table(side_keys(STEPS, Counter()), parts_of(split))
+    s = outcome_summary(table, ["add", "add2"], "val")
+    assert (s["siblings_same_part"], s["siblings_other_part"]) == (0, 4)  # dep, dep_o for each
+    s = outcome_summary(table, ["dep"], "train")
+    assert (s["siblings_same_part"], s["siblings_other_part"]) == (0, 2)  # add, add2 in val

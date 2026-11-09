@@ -204,7 +204,7 @@ def _cases(args, counts):
     if args.set == "reactmech":
         cases = reactmech_cases(args.processed_dir, args.split, counts)
     else:
-        cases = human_benchmark_cases(None, counts)
+        cases = human_benchmark_cases(args.processed_dir, counts)
     cases = [c for c in cases if args.part == "all" or c.part == args.part]
     return cases[: args.limit] if args.limit is not None else cases
 

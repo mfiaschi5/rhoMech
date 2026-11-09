@@ -9186,3 +9186,20 @@ and `network.pools` are unchanged; `network.cli` gains the subcommand.
   metric own and any. Arm a is retrained with the others: pm_v19_s0 ran on a 3090 with cu126,
   and an ablation's reference must train on the same GPU and torch (P9 step 9). Not run yet:
   12 runs are about 4-5 h on a 5090 pod (three side by side) or several days on the RX 6600 XT.
+
+## 2026-11-10: fixes from the review of claude/network before the merge
+
+- **Parts by name.** `eval.siblings.parts_of` returns a step's bare part (train, val, test) from
+  the split file's `<strategy>_<part>` keys. The decode report's same/other-part sibling counts
+  compared `molecule_val` with `val` and counted every sibling as from another part, and
+  `ksmech-network evaluate --part val` selected no chain.
+- **`--resume` compares what a run is** (`train.loop.comparable_config`): both headers with every
+  `ModelConfig` and `TrainConfig` field present, the fields a run predates at their defaults
+  (which keep its behaviour bit for bit); a key `TrainConfig` no longer has is still compared.
+  The ablation fields of 2026-11-09 had made every earlier run unresumable, as each new field
+  would.
+- `ksmech-network evaluate --set human_benchmark` reads `<processed-dir>/human_benchmark/`; the
+  heuristic of the search towards a product is computed once per state, so MAPPING_FAILED:STATE
+  counts states; `retro_search` expands a species once and reuses its steps on every branch
+  (`max_expansions` counts distinct species); the pool expander's sample cache keeps the states
+  used last (LRU, it was first in, first out).

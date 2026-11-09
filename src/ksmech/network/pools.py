@@ -15,7 +15,7 @@ mapped molecule (`arrows.apply.apply_edit`; a product RDKit cannot sanitize is P
 The decoder merges completions by the child's pool key. The END_MECH head is not read.
 `ModelExpander.step_logp` scores a step given on map numbers at a state, `reverse_logp` the
 reverse -R of a proposal at its child (microscopic reversibility, item E), both with
-`model.decode.matrix_logp`. The last `SAMPLE_CACHE` states' samples are kept.
+`model.decode.matrix_logp`. The samples of the `SAMPLE_CACHE` states used last are kept.
 """
 
 from __future__ import annotations
@@ -131,12 +131,15 @@ class ModelExpander:
         return state.key
 
     def _sample(self, state: PoolState):
-        """(ReactantTokens, sample) of a state, or (None, the failure code); cached."""
-        if state.smiles not in self._samples:
+        """(ReactantTokens, sample) of a state, or (None, the failure code); the last
+        `SAMPLE_CACHE` states used are kept (least recently used out first)."""
+        hit = self._samples.pop(state.smiles, None)
+        if hit is None:
             if len(self._samples) >= SAMPLE_CACHE:
                 self._samples.pop(next(iter(self._samples)))
-            self._samples[state.smiles] = self._featurize(state)
-        return self._samples[state.smiles]
+            hit = self._featurize(state)
+        self._samples[state.smiles] = hit  # most recent last
+        return hit
 
     def _featurize(self, state: PoolState):
         from ksmech.arrows.lewis import MissingBondIndex, reactant_lewis

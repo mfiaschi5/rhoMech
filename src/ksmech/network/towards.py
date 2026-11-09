@@ -48,13 +48,15 @@ def heuristic_of(target: Target, params: SearchParams, caps: tuple[int, int], sk
         skips[MAPPING_FAILED] += 1
         return None
     max_bonds, max_atoms = caps
+    memo: dict[str, float] = {}  # by pool state SMILES: each state bounded (and counted) once
 
     def h(state) -> float:
-        bound = steps_lower_bound(target, state.orders, state.nonbonding, max_bonds, max_atoms)
-        if bound is None:
-            skips[f"{MAPPING_FAILED}:STATE"] += 1
-            return 0.0
-        return params.step_cost * bound
+        if state.smiles not in memo:
+            bound = steps_lower_bound(target, state.orders, state.nonbonding, max_bonds, max_atoms)
+            if bound is None:
+                skips[f"{MAPPING_FAILED}:STATE"] += 1
+            memo[state.smiles] = 0.0 if bound is None else params.step_cost * bound
+        return memo[state.smiles]
 
     return h
 

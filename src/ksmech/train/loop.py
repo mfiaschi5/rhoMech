@@ -42,7 +42,7 @@ import math
 import os
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import numpy as np
@@ -574,12 +574,27 @@ def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_pat
     return prov.stamp("train_run", TRAIN_VERSION, inputs, config, extra=extra)
 
 
+def comparable_config(config: dict) -> dict:
+    """A run header's config with every `ModelConfig` and `TrainConfig` field present, the
+    fields a run predates at their defaults (the defaults keep a run's behaviour bit for bit),
+    so `--resume` compares what the run is, not which fields existed when it started."""
+    out = dict(config)
+    out["model"] = ModelConfig.from_dict(dict(config.get("model", {}))).to_dict()
+    names = {f.name for f in fields(TrainConfig)}
+    train = dict(config.get("train", {}))
+    known = {k: v for k, v in train.items() if k in names}
+    removed = {k: v for k, v in train.items() if k not in names}  # still compared
+    out["train"] = train_config(TrainConfig(**known)) | removed
+    return prov.normalized(out)
+
+
 def _resume(path: Path, header, model, opt, sched, scaler) -> dict:
     """Restore a run from its `last.pt`; refused when the run's inputs or configuration
-    differ from the checkpoint's."""
+    differ from the checkpoint's (`comparable_config`: a field added since is at its default)."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     old = prov.Provenance.from_dict(ckpt["provenance"])
-    if old.inputs != header.inputs or old.config != header.config:
+    same = comparable_config(old.config) == comparable_config(header.config)
+    if old.inputs != header.inputs or not same:
         raise prov.StaleArtifact(path, ["the run's inputs or configuration changed"])
     model.load_state_dict(ckpt["state_dict"])
     opt.load_state_dict(ckpt["optimizer"])

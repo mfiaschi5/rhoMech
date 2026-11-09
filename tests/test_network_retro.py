@@ -166,3 +166,13 @@ def test_combinations_are_deterministic():
     assert list(itertools.islice(route_rows(a.route), 3)) == list(
         itertools.islice(route_rows(b.route), 3)
     )
+
+
+def test_a_species_on_two_branches_is_expanded_once():
+    """T comes from A + B or from A + C; A is met on both branches and costs one call."""
+    rows = {"T": [(("A", "B"), -0.1), (("A", "C"), -0.2)], "A": [(("a",), -0.3)],
+            "B": [(("b",), -5.0)], "C": [(("c",), -0.1)]}  # fmt: skip
+    table = Table(rows)
+    res = retro_search(table, "T", Leaves(catalogue=frozenset({"a", "b", "c"})))
+    assert res.reason == "SOLVED" and res.route.cost == pytest.approx(0.6)
+    assert table.calls["A"] == 1 and res.expanded == len(table.calls)

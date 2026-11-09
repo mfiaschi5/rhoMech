@@ -90,13 +90,16 @@ def reactmech_cases(
     return out
 
 
-def human_benchmark_cases(out_dir: Path | None = None, counts: Counter | None = None) -> list[Case]:
-    """The human benchmark's pathways as cases (module docstring)."""
+def human_benchmark_cases(
+    processed_dir: Path = DEFAULT_PROCESSED_DIR, counts: Counter | None = None
+) -> list[Case]:
+    """The human benchmark's pathways as cases (module docstring), read from
+    `<processed_dir>/human_benchmark/` (`data.human_benchmark`)."""
     from ksmech.data import human_benchmark as hb
 
     counts = Counter() if counts is None else counts
     out = []
-    for p in hb.load_pathways(out_dir or hb.OUT_DIR):
+    for p in hb.load_pathways(Path(processed_dir) / hb.NAME):
         target = unmapped(p.final_product)
         if target is None or unmapped(p.reactants) is None:
             counts[BENCHMARK_UNPARSED] += 1

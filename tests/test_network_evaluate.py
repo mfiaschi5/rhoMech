@@ -76,3 +76,28 @@ def test_the_reactmech_chains_ingested_whole_are_cases():
     assert cases and counts[CHAIN_NOT_INGESTED] > 0
     for c in cases:
         assert c.recorded[0] == pool_state(c.start).key and len(c.recorded) >= 2
+        assert c.part in ("train", "val", "test", "mixed", "none")
+
+
+def test_the_part_option_selects_the_cases_of_that_part(monkeypatch):
+    from types import SimpleNamespace
+
+    from ksmech.network import benchmarks
+    from ksmech.network.cli import _cases
+
+    cases = [Case("a", START, "CO", part="val"), Case("b", START, "CO", part="train"),
+             Case("c", START, "CO", part="mixed")]  # fmt: skip
+    monkeypatch.setattr(benchmarks, "reactmech_cases", lambda *a, **k: cases)
+    args = SimpleNamespace(set="reactmech", processed_dir=None, split="molecule", part="val",
+                           limit=None)  # fmt: skip
+    assert [c.case_id for c in _cases(args, Counter())] == ["a"]
+    assert len(_cases(SimpleNamespace(**{**vars(args), "part": "all"}), Counter())) == 3
+
+
+def test_the_human_benchmark_is_read_under_processed_dir(monkeypatch, tmp_path):
+    from ksmech.data import human_benchmark as hb
+    from ksmech.network.benchmarks import human_benchmark_cases
+
+    seen = []
+    monkeypatch.setattr(hb, "load_pathways", lambda out_dir: seen.append(out_dir) or [])
+    assert human_benchmark_cases(tmp_path) == [] and seen == [tmp_path / hb.NAME]

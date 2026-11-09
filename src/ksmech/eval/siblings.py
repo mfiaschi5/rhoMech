@@ -79,9 +79,19 @@ def outcome_table(
     return out
 
 
+SPLIT_PARTS = ("train", "val", "test")
+
+
 def parts_of(split: Mapping[str, list[str]]) -> dict[str, str]:
-    """step id -> part from a split file's {part: [step ids]}."""
-    return {step_id: part for part, ids in split.items() for step_id in ids}
+    """step id -> its part (train, val or test) from a split file's {split: [step ids]}, whose
+    keys are `<strategy>_<part>` (`arrows.steps.split_ids`: molecule_val, rc_molecule_test)."""
+    out = {}
+    for name, ids in split.items():
+        part = name.rsplit("_", 1)[-1]
+        if part not in SPLIT_PARTS:
+            raise ValueError(f"split {name!r} names no part of {SPLIT_PARTS}")
+        out |= {step_id: part for step_id in ids}
+    return out
 
 
 def outcome_summary(table: Mapping[str, Outcomes], ids: Iterable[str], part: str) -> dict:

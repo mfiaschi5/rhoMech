@@ -165,3 +165,30 @@ def test_the_fragment_order_follows_the_species_keys_not_the_map_numbers():
     for state in (a, b):
         frags = Chem.GetMolFrags(parse_mapped(state.smiles), asMols=True, sanitizeFrags=False)
         assert [identity_key(f) for f in frags] == list(state.species)
+
+
+def test_a_state_without_the_target_maps_is_counted_once():
+    from ksmech.network.towards import heuristic_of
+
+    target = target_from_smiles("[CH3:1][OH:9]")
+    skips = Counter()
+    h = heuristic_of(target, SearchParams(step_cost=0.5), (8, 2), skips)
+    state = pool_state(MECL_OH)
+    assert [h(state) for _ in range(5)] == [0.0] * 5
+    assert skips == {f"{MAPPING_FAILED}:STATE": 1}
+    mapped = heuristic_of(target_from_smiles("[CH3:1][OH:3].[Cl-:2]"), SearchParams(step_cost=0.5),
+                          (8, 2), Counter())  # fmt: skip
+    assert mapped(state) == pytest.approx(0.5)
+
+
+def test_the_sample_cache_keeps_the_states_used_last(monkeypatch):
+    from ksmech.network import pools
+
+    monkeypatch.setattr(pools, "SAMPLE_CACHE", 2)
+    ex = ModelExpander(None, None)
+    built = []
+    monkeypatch.setattr(ex, "_featurize", lambda state: built.append(state.smiles) or ("rt", 1))
+    a, b, c = (pool_state(x) for x in ("C", "CC", "CCC"))
+    for state in (a, b, a, c, a):  # a is used again before c comes: b goes, a stays
+        ex._sample(state)
+    assert built == [a.smiles, b.smiles, c.smiles]

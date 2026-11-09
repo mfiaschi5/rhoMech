@@ -21,7 +21,8 @@ The start is the target molecule only; the reactants and the by-products are unk
   (0 by default, so the cost of a route is exact: the sum of -log p of its steps): from the root,
   at each OR node the AND child of lowest lower bound is followed, at each AND node its first
   unsolved parent, until an unexpanded OR node is reached and expanded; the bounds are revised up
-  the tree. A species already on the path from the root is not expanded again (CYCLE). The search
+  the tree. A species already on the path from the root is not expanded again (CYCLE); a species
+  met on another branch reuses its steps (one model call per species). The search
   stops when the root's best route is solved and no lower bound is below it (the optimum), or at
   `max_expansions` / `max_depth` (counted).
 - **Forward verification** (`verify_forward`): from the route's leaves taken as one pool, the
@@ -100,7 +101,7 @@ class AndNode:
 
 @dataclass(frozen=True)
 class RetroParams:
-    max_expansions: int = 100  # species expanded (each one a model call per pool)
+    max_expansions: int = 100  # distinct species expanded (a species met again reuses its steps)
     max_depth: int = 7  # backward steps on a branch (the human benchmark goes to 7)
 
 
@@ -159,13 +160,15 @@ def _select(root: OrNode) -> list[OrNode]:
     return path
 
 
-def _expand(node: OrNode, path: list[OrNode], expander, leaves, params, cuts, value) -> None:
+def _expand(node: OrNode, path: list[OrNode], memo: dict, leaves, params, cuts, value) -> None:
+    """Expand one OR node from the species' steps (`memo`, filled by the caller), dropping the
+    steps back onto its branch (CYCLE)."""
     node.expanded = True
     if node.depth >= params.max_depth:
         cuts[DEPTH_CUT] += 1
         return
     on_path = {o.species for o in path}
-    for step in expander.expand(node.species):
+    for step in memo[node.species]:
         if any(s in on_path for s in step.parents):
             cuts[CYCLE] += 1
             continue
@@ -185,18 +188,20 @@ def retro_search(
     root, cuts, expanded = OrNode(target, 0, leaves.reason(target)), Counter(), 0
     if root.leaf is not None:
         return RetroResult(root, Route([], Counter({target: 1}), 0.0), 0, "ROOT_IS_LEAF", cuts)
-    reason = "EXHAUSTED"
+    reason, memo = "EXHAUSTED", {}  # species -> its backward steps: one model call per species
     while not root.solved and math.isfinite(root.bound):
         path = _select(root)
         node = path[-1]
         if node.expanded:  # the best route cannot go on: its bounds are final
             break
-        if expanded >= params.max_expansions:
-            cuts[EXPANSION_BUDGET] += 1
-            reason = "EXPANSION_BUDGET"
-            break
-        _expand(node, path, expander, leaves, params, cuts, value)
-        expanded += 1
+        if node.species not in memo and node.depth < params.max_depth:
+            if expanded >= params.max_expansions:
+                cuts[EXPANSION_BUDGET] += 1
+                reason = "EXPANSION_BUDGET"
+                break
+            memo[node.species] = list(expander.expand(node.species))
+            expanded += 1
+        _expand(node, path, memo, leaves, params, cuts, value)
         for o in reversed(path):
             _revise_or(o)
     if root.solved:

@@ -116,3 +116,23 @@ def test_every_encoder_reads_the_switches(samples, encoder):
     with torch.no_grad():
         h, *_ = model.encode(collate_samples(samples))
     assert torch.isfinite(h).all()
+
+
+def test_a_run_that_predates_the_ablation_fields_still_resumes():
+    """`train.loop.comparable_config`: a header written before `drop_token_features`,
+    `spectral_set` and `inherit_atoms` (or `direction`) existed compares equal to today's header
+    of the same run, and a run with another value of one of them does not."""
+    from dataclasses import asdict
+
+    from ksmech.data import provenance as prov
+    from ksmech.train.loop import TrainConfig, comparable_config, train_config
+
+    train = TrainConfig(seed=1, epochs=3)
+    now = prov.normalized({"train": train_config(train), "model": GENERAL.to_dict(),
+                           "sample_version": 19})  # fmt: skip
+    model_old = {k: v for k, v in now["model"].items() if k not in ARMS["d"]}
+    train_old = {k: v for k, v in asdict(train).items() if k != "direction"}
+    old = prov.normalized({"train": train_old, "model": model_old, "sample_version": 19})
+    assert old != now and comparable_config(old) == comparable_config(now)
+    ablated = prov.normalized(now | {"model": replace(GENERAL, **ARMS["b"]).to_dict()})
+    assert comparable_config(ablated) != comparable_config(now)
