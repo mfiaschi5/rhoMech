@@ -49,6 +49,16 @@ from ksmech.qm.sterics import buried_volume_per_atom
 log = logging.getLogger(__name__)
 _OPTIMIZERS = ("tblite", "tblite-anc", "xtb")
 _OPT_TAGS = {"tblite": "tblite-lbfgs", "tblite-anc": "tblite-anc", "xtb": "xtb-opt"}
+# The ALPB solvents of GFN2 in tblite (and xtb), by the one name each the method string carries:
+# tblite also takes aliases and any case ('h2o', 'DMSO', 'dichloromethane'), which would give one
+# solvent two method strings and two cache keys (docs/decisions.md, 2026-11-09).
+ALPB_SOLVENTS = (
+    "acetone", "acetonitrile", "aniline", "benzaldehyde", "benzene", "ch2cl2", "chcl3", "cs2",
+    "dioxane", "dmf", "dmso", "ether", "ethanol", "ethylacetate", "furane", "hexadecane",
+    "hexane", "methanol", "nitromethane", "octanol", "phenol", "thf", "toluene", "water",
+    "woctanol",
+)  # fmt: skip
+GAS = "gas"  # the medium part of a gas-phase method; `--solvent gas` on the command line
 
 
 @dataclass(frozen=True)
@@ -70,14 +80,35 @@ class QMConfig:
     def __post_init__(self) -> None:
         if self.optimizer not in _OPTIMIZERS:
             raise ValueError(f"optimizer must be one of {_OPTIMIZERS}, got {self.optimizer!r}")
+        if self.solvent and self.solvent not in ALPB_SOLVENTS:
+            raise ValueError(f"solvent must be None or in {ALPB_SOLVENTS}, got {self.solvent!r}")
 
     @property
     def method(self) -> str:
         """Part of the cache key: results from different backends must not collide."""
-        medium = f"ALPB-{self.solvent}" if self.solvent else "gas"
+        medium = f"ALPB-{self.solvent}" if self.solvent else GAS
         opt = "given" if self.given_geometry else _OPT_TAGS[self.optimizer]
         base = f"GFN2-xTB/{medium}/{opt}"
         return qm_spin.tagged(base, self.spin_tag)
+
+
+def solvent_of(method: str) -> str | None:
+    """The ALPB solvent of a method string (`QMConfig.method`), None for the gas phase.
+    ValueError for a method whose medium part is neither (an early record's
+    'GFN2-xTB/tblite-lbfgs')."""
+    parts = method.split("/")
+    medium = parts[1] if len(parts) >= 3 else ""
+    if medium == GAS:
+        return None
+    solvent = medium.removeprefix("ALPB-")
+    if medium.startswith("ALPB-") and solvent in ALPB_SOLVENTS:
+        return solvent
+    raise ValueError(f"method {method!r} names no known medium (ALPB-<solvent> or {GAS})")
+
+
+def solvent_option(name: str) -> str | None:
+    """A `--solvent` value: an ALPB solvent, or 'gas' for None."""
+    return None if name == GAS else name
 
 
 @dataclass

@@ -1,12 +1,14 @@
 """`ksmech-qm`: GFN2-xTB featurization of the molecules in a processed dataset, the Wiberg bond
-indices of the cached records, single points at the QMugs geometries (`qm.given`), and the
-SQLite index of a cache root (`qm.index`)."""
+indices of the cached records, single points at the QMugs geometries (`qm.given`), the
+thermochemistry sidecars of the cached records (`qm.thermo_batch`), and the SQLite index of a
+cache root (`qm.index`)."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import random
 import sys
 from collections import Counter
 from pathlib import Path
@@ -18,23 +20,62 @@ from ksmech.data import qmugs
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.data.schema import Source
 from ksmech.qm import index
-from ksmech.qm.batch import featurize_dataset, summarize
+from ksmech.qm.batch import collect_molecules, featurize_dataset, summarize
 from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, build_bond_indices
 from ksmech.qm.given import featurize_qmugs
 from ksmech.qm.records import DEFAULT_CACHE_DIR, ReasonCode
-from ksmech.qm.xtb_calc import QMConfig
+from ksmech.qm.thermo_batch import make_tasks, print_summary, run_thermo, write_report
+from ksmech.qm.thermo_cache import DEFAULT_THERMO_DIR, ThermoConfig
+from ksmech.qm.xtb_calc import ALPB_SOLVENTS, GAS, QMConfig, solvent_option
 
-DEFAULT_ROOT = DEFAULT_CACHE_DIR.parent  # data/cache: qm/, tokens/, bond_index/
+DEFAULT_ROOT = DEFAULT_CACHE_DIR.parent  # data/cache: qm/, tokens/, bond_index/, thermo/
+SOLVENT_CHOICES = (*ALPB_SOLVENTS, GAS)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ksmech-qm", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    _add_run_parser(sub)
+    qm = sub.add_parser("qmugs", help="GFN2 single points at the QMugs geometries")
+    qm.add_argument("--tar", type=Path, default=qmugs.DEFAULT_TAR)
+    qm.add_argument("--conformers", type=int, nargs="+", default=[0], help="QMugs conformers")
+    qm.add_argument("--workers", type=int, default=1)
+    qm.add_argument("--limit", type=int, default=None, help="the first N conformers")
+    qm.add_argument("--chunk", type=int, default=2000, help="conformers read per pass")
+    qm.add_argument("--timeout", type=int, default=900, help="seconds per conformer")
+    qm.add_argument("--retry-failed", action="store_true")
+    qm.add_argument("--cache-dir", type=Path, default=qmugs.CACHE_DIR)
+    qm.add_argument("--out-dir", type=Path, default=qmugs.PROCESSED_DIR)
+    wbi = sub.add_parser("bond-index", help="Wiberg bond indices of every cached QM record")
+    wbi.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    wbi.add_argument("--out-dir", type=Path, default=DEFAULT_BOND_INDEX_DIR)
+    _add_thermo_parser(sub)
+    idx = sub.add_parser("index", help="the SQLite index of a cache root, read from file headers")
+    idx.add_argument("action", choices=["refresh", "stats"])
+    idx.add_argument(
+        "--root",
+        type=Path,
+        action="append",
+        help=f"a root holding qm/, tokens/, bond_index/, thermo/ (repeatable; default "
+        f"{DEFAULT_ROOT})",
+    )
+    idx.add_argument("--rebuild", action="store_true", help="refresh: empty the index first")
+    idx.add_argument("--no-refresh", action="store_true", help="stats: read the index as it is")
+    return parser
+
+
+def _add_run_parser(sub) -> None:
     run = sub.add_parser("run", help="embed, optimize and featurize every unique molecule")
     run.add_argument("--source", required=True, choices=[str(s) for s in Source])
     run.add_argument("--workers", type=int, default=1)
     run.add_argument("--n-conformers", type=int, default=1)
     run.add_argument("--optimizer", choices=["tblite", "tblite-anc", "xtb"], default="tblite")
+    run.add_argument(
+        "--solvent",
+        choices=SOLVENT_CHOICES,
+        default="water",
+        help="ALPB solvent of every calculation, or gas; part of the method and the cache key",
+    )
     run.add_argument("--limit", type=int, default=None, help="random subset, for pilots")
     run.add_argument("--timeout", type=int, default=900, help="seconds per molecule")
     run.add_argument("--maxiter", type=int, default=500, help="geometry optimizer iterations")
@@ -58,30 +99,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="only the molecules of the steps a JSON file lists (its 'qm_steps', else 'ids')",
     )
     run.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
-    qm = sub.add_parser("qmugs", help="GFN2 single points at the QMugs geometries")
-    qm.add_argument("--tar", type=Path, default=qmugs.DEFAULT_TAR)
-    qm.add_argument("--conformers", type=int, nargs="+", default=[0], help="QMugs conformers")
-    qm.add_argument("--workers", type=int, default=1)
-    qm.add_argument("--limit", type=int, default=None, help="the first N conformers")
-    qm.add_argument("--chunk", type=int, default=2000, help="conformers read per pass")
-    qm.add_argument("--timeout", type=int, default=900, help="seconds per conformer")
-    qm.add_argument("--retry-failed", action="store_true")
-    qm.add_argument("--cache-dir", type=Path, default=qmugs.CACHE_DIR)
-    qm.add_argument("--out-dir", type=Path, default=qmugs.PROCESSED_DIR)
-    wbi = sub.add_parser("bond-index", help="Wiberg bond indices of every cached QM record")
-    wbi.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
-    wbi.add_argument("--out-dir", type=Path, default=DEFAULT_BOND_INDEX_DIR)
-    idx = sub.add_parser("index", help="the SQLite index of a cache root, read from file headers")
-    idx.add_argument("action", choices=["refresh", "stats"])
-    idx.add_argument(
-        "--root",
-        type=Path,
-        action="append",
-        help=f"a root holding qm/, tokens/, bond_index/ (repeatable; default {DEFAULT_ROOT})",
-    )
-    idx.add_argument("--rebuild", action="store_true", help="refresh: empty the index first")
-    idx.add_argument("--no-refresh", action="store_true", help="stats: read the index as it is")
-    return parser
+
+
+def _add_thermo_parser(sub) -> None:
+    th = sub.add_parser("thermo", help="frequencies and qRRHO thermochemistry of cached records")
+    pick = th.add_mutually_exclusive_group(required=True)
+    pick.add_argument("--source", nargs="+", choices=[str(s) for s in Source])
+    pick.add_argument("--smiles", nargs="+", help="species, canonicalized map-free")
+    th.add_argument("--steps-from", type=Path, default=None, help="with one --source: its steps")
+    th.add_argument("--workers", type=int, default=1)
+    th.add_argument("--limit", type=int, default=None, help="random subset (seed 0), for pilots")
+    th.add_argument("--optimizer", choices=["tblite", "tblite-anc", "xtb"], default="tblite")
+    th.add_argument("--solvent", choices=SOLVENT_CHOICES, default="water")
+    th.add_argument("--timeout", type=int, default=3600, help="seconds per molecule")
+    th.add_argument("--scf-maxiter", type=int, default=250, help="SCF cycles per gradient")
+    th.add_argument("--retry-failed", action="store_true", help="ignore the tombstones")
+    th.add_argument("--temperatures", type=float, nargs="+", default=[298.15], help="K, report")
+    th.add_argument("--report", type=Path, default=None, help="every row as JSON")
+    th.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    th.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR, help="the QM records")
+    th.add_argument("--out-dir", type=Path, default=DEFAULT_THERMO_DIR)
 
 
 def steps_from(path: Path | None) -> list[str] | None:
@@ -93,6 +130,51 @@ def steps_from(path: Path | None) -> list[str] | None:
     if "qm_steps" not in body and "ids" not in body:
         raise ValueError(f"{path} has neither 'qm_steps' nor 'ids'")
     return list(body.get("qm_steps", body.get("ids")))
+
+
+def thermo_species(args: argparse.Namespace) -> list[str]:
+    """The map-free canonical SMILES `ksmech-qm thermo` runs on: `--smiles`, or every species of
+    the `--source` datasets (of the `--steps-from` steps with one source), `--limit` of them at
+    random (seed 0)."""
+    from rdkit import Chem
+
+    from ksmech.data import chem
+
+    if args.smiles:
+        species = sorted({chem.unmapped_canonical(Chem.MolFromSmiles(s)) for s in args.smiles})
+    else:
+        if args.steps_from is not None and len(args.source) != 1:
+            raise ValueError("--steps-from needs exactly one --source")
+        ids = steps_from(args.steps_from)
+        found = set()
+        for source in args.source:
+            found |= set(collect_molecules(source, args.processed_dir, ids)[0])
+        species = sorted(found)
+    if args.limit is not None and args.limit < len(species):
+        species = sorted(random.Random(0).sample(species, args.limit))
+    return species
+
+
+def cmd_thermo(args: argparse.Namespace, console: Console) -> int:
+    try:
+        species = thermo_species(args)
+    except (ValueError, FileNotFoundError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+    qm = QMConfig(optimizer=args.optimizer, solvent=solvent_option(args.solvent))
+    config = ThermoConfig(
+        scf_maxiter=args.scf_maxiter,
+        timeout_s=args.timeout,
+        qm_dir=args.cache_dir,
+        out_dir=args.out_dir,
+    )
+    tasks = make_tasks(species, qm.method, config, memo=not args.retry_failed)
+    console.print(f"records {qm.method} under {args.cache_dir}, sidecars under {args.out_dir}")
+    rows = run_thermo(tasks, args.workers, console)
+    print_summary(rows, console)
+    if args.report is not None:
+        console.print(f"wrote {write_report(rows, args.report, args.temperatures)}")
+    return 1 if any(r["status"] == "failed" for r in rows) else 0
 
 
 def cmd_bond_index(args: argparse.Namespace, console: Console) -> int:
@@ -149,12 +231,22 @@ def _print_stats(root: Path, s: dict, console: Console) -> None:
         for reason, n, example in s["reasons"]:
             reasons.add_row(reason, str(n), str(example)[:60])
         console.print(reasons)
+    if s["thermo_reasons"]:
+        reasons = Table(title="remembered thermo failures")
+        for col in ("reason", "count", "example"):
+            reasons.add_column(col)
+        for reason, n, example in s["thermo_reasons"]:
+            reasons.add_row(reason, str(n), str(example)[:60])
+        console.print(reasons)
+    for warning, n in s["thermo_warnings"]:
+        console.print(f"  thermo warning {warning}: {n}")
     for kind, problem, n in s["problems"]:
         console.print(f"[red]{kind} {problem}: {n}[/red]")
     console.print(
         f"records without tokens {s['records_without_tokens']}, tokens without a Wiberg sidecar "
         f"{s['tokens_without_bond_index']}, tombstones next to a record "
-        f"{s['failures_with_a_record']}"
+        f"{s['failures_with_a_record']}, records without a thermo sidecar "
+        f"{s['records_without_thermo']}"
     )
 
 
@@ -182,8 +274,11 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_index(args, console)
     if args.command == "qmugs":
         return cmd_qmugs(args, console)
+    if args.command == "thermo":
+        return cmd_thermo(args, console)
     config = QMConfig(
         optimizer=args.optimizer,
+        solvent=solvent_option(args.solvent),
         timeout_s=args.timeout,
         maxiter=args.maxiter,
         scf_maxiter=args.scf_maxiter,
