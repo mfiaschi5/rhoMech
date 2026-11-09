@@ -455,6 +455,17 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (SINK_AT_T only after a rescan with `--rescan-factor` x the candidates, TURNOVER,
   NO_OUTGOING_STEP, EQUILIBRIUM), the unexplored mass, NO_NET_REACTION, every edge's dG, K and T*,
   the dominant pathways to the top end states by transition path theory, `network.tpt`)
+
+  `uv run ksmech-network species --run NAME --start SMILES [--target SMILES] [--reservoir SMILES]
+  [--tolerance 0.05] [--max-species 10] [--max-expansions 60] [--partner-weight 1] [--k 3]
+  [--levels EXACT SKELETON] [--beam 5] [--build-missing] [--out FILE]` (item J, the species graph:
+  OR nodes species by identity key v2, AND nodes elementary steps with their atom maps
+  (`network.species`, `network.lift`); grown species by species, the frontier species of largest
+  mass joining the core while it has `--tolerance`, each reacting alone, with itself and with the
+  core, the reservoir in every pool, partners at fixed concentration; the species by mass, the
+  end species' shares and the unexplored mass; with `--target` the k shortest hyperpaths (SBT
+  and Nielsen-Andersen-Pretolani, `network.hyperpaths`, additive -log p, one per class) as
+  linearized events, and the atom flux of each target species (`network.flux`); every cut counted)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]

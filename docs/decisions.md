@@ -8992,3 +8992,113 @@ function sums the species' G into the G of a pool (`qm.hessian`, `qm.thermo`, `q
   G and equilibrium share, the end states with p and T*, the sinks with the steps examined, every
   edge with log p forward and back, dG, K, dH, dS and T*, the pathways with their flux shares,
   and every count.
+
+## 2026-11-09: branches that join, the species graph and its hyperpaths (reaction-network plan, item J)
+
+`network.species` (the graph and its expansion), `network.lift` (pool states and species),
+`network.hyperpaths` (SBT, the k shortest hyperpaths, linearization), `network.flux` (masses,
+step fluxes, atom flux) and `ksmech-network species` (`network.species_cli`). `network.search`
+and `network.pools` are unchanged; `network.cli` gains the subcommand.
+
+- **OR nodes are identity keys v2, AND nodes are merged by (reactants, products).** A pool step's
+  reactants are the fragments it touches (the pool's others are spectators), its products the
+  fragments their atoms end in. Two proposals with the same reactant and product multisets are one
+  AND node, the best log P of their pools kept (DUPLICATE_STEP): symmetry-equivalent steps (two H
+  of one methyl) fall together, and the step's change and atom map are those of the first found.
+  A step whose two sides are the same multiset (a degenerate exchange) changes no species, so it
+  is no AND node (SELF_LOOP): its weight goes back to the carrier, whose other channels are
+  renormalized by 1 / (1 - that weight).
+- **A species' atoms are numbered by the canonical ranks of its sigma skeleton with every H an
+  atom** (`lift.local_ranks`: every bond single, no charge, radical, aromatic flag, stereo or map,
+  ties broken). One identity key means one sigma skeleton with the same H, so every drawing of a
+  species (any resonance form, any atom order) gets the same labelled graph up to its
+  automorphisms; tested on the fixture set and the open-shell list under random atom orders and on
+  three pairs of resonance forms. A species' drawing carries these indices + 1 as map numbers,
+  and every step's change and atom map are written on them. Which of two symmetric atoms a
+  drawing names first is not canonical (the benzene radical anion's charge lands on either C), so
+  steps are compared by species, never by atom numbers alone.
+- **A pool's species are drawn in key order.** The model's output depends on the order of the
+  fragments in a pool's SMILES: with the tiny test model, CH3Cl + OH- gave a best log P of -24.58
+  drawn chloromethane first and -28.11 drawn hydroxide first, and the same order with other map
+  numbers gave identical values. `lift.pool_of` sorts the species by key, so one multiset is
+  always one pool; the pool graph keeps RDKit's canonical order of its own SMILES, so the two
+  graphs can score the same pool differently.
+- **The expansion is pseudo-first order in the species that joins** (the carrier). When a species
+  joins the core it reacts alone, with itself and with each species already there, the reservoir
+  in every pool; each pair is one pool, expanded when the later of the two joins. Its partners are
+  at fixed concentration: a step of its pools is its channel, with weight w x p, w the pool's
+  share of the carrier's pools (alone 1, each partner pool `partner_weight`, normalized; no rate
+  exists to weigh them otherwise) and p the model's probability on that pool; a partner consumed
+  by a step comes from its supply, so the partner's own mass is not consumed. A step that touches
+  only the partners is theirs (PARTNER_ONLY, counted and dropped), one that touches only the
+  reservoir RESERVOIR_ONLY. The mass of a species is m = amount + sum of the fluxes of the steps
+  making it, F(s) = m(carrier) beta(s | carrier): a linear system over the core, with the
+  expected number of formations as the unit (a reversible pair counts each return). A loop gain
+  of at least 1 (chain branching at fixed partner concentration) has no finite mass: the series
+  is cut after 64 terms and counted (MASS_DIVERGED). The frontier species of largest mass joins
+  the core while that mass is at least the tolerance; budgets on core species and on pools
+  (model calls), and every species left on the frontier is counted below or above the tolerance.
+  What no channel of a carrier took (the decoder's dropped or unproposed mass, failed pools,
+  pools cut by the budget) is its leftover, reported as the unexplored mass.
+- **The species graph is read as a B-hypergraph with the additive weighting.** A step with
+  several products is one B-arc per distinct product species, so SBT (Gallo, Longo, Pallottino
+  and Nguyen 1993) and the k shortest hyperpaths (Nielsen, Andersen and Pretolani 2005) apply as
+  published: W(v) = w(arc) + sum over the tail of multiplicity x W(u), w = -log p. A species
+  needed twice is paid for twice (two molecules, two derivations: B + B -> C costs w + 2 W(B)).
+  A step whose two products are both used is also paid for once per product, although one event
+  makes both: the additive cost is an upper bound there, and the hyperpath's events (`unfold`)
+  fire it once, their summed log P reported beside the cost. The exact cost of such shared
+  events is an integer hyperflow problem (Andersen, Flamm, Merkle and Stadler), not a hyperpath
+  one; left open.
+- **The target is a virtual GOAL node.** One node per distinct target slot (identity key,
+  skeleton key), entered by a zero-weight arc from every species that is the slot EXACT, or at
+  SKELETON when allowed, and the GOAL arc needs every slot with its multiplicity, so a target of
+  several species is one hyperpath. A slot a starting species already is (at SKELETON, a
+  deprotonated reactant, say) costs 0, as the pool graph's arrival.
+- **The k shortest hyperpaths branch target first.** For the hyperpath found, its nodes in
+  reverse valid order (the order in which SBT made them final, reversed: each node before the
+  nodes its arc needs), subproblem i removes node i's arc and fixes the arcs of the nodes before
+  it, which are then in every hyperpath of the subproblem: the subproblems partition the
+  hyperpaths not yet found (Lawler), so they come in non-decreasing cost, each once. A hyperpath
+  is a set of steps, so the enumeration yields mechanisms up to the order of independent steps,
+  never their interleavings; hyperpaths with one species class (the multiset of steps by
+  reactants and products) are reported once (SAME_CLASS). Tested against exhaustive enumeration
+  on 30 random hypergraphs with joins, cycles and a species needed twice.
+- **A hyperpath unfolds into events whose atoms are numbered once.** Each step fires as often as
+  the needs above it require (the target once; ceil(need / copies made)), each event consuming
+  instances its species' own arc made (or the start's), and map numbers flow from the start
+  instances (a start pool's, `lift.start_numbering`, or 1, 2, ...) through the atom maps. All of
+  it is fixed before an order is chosen, so every order the event DAG allows is a pool-graph
+  pathway with the same steps on the same atoms, and `search.mechanism_class` is the same for all
+  (tested on 20 random valid orders of a six-event hyperpath). The join A -> B, C -> D,
+  B + D -> E is one hyperpath here and two pathways, one class, in the pool graph.
+- **A hyperpath and a pool-graph pathway compare on two levels** (`lift.compare`): the species
+  class (the pathway's steps split into species steps against the hyperpath's events), robust;
+  and `search.mechanism_class` once the hyperpath is linearized on the start pool's map numbers,
+  which differs where the graphs chose different atoms among symmetry-equivalent ones.
+  `search.mechanism_class` orders by the atoms a step changes, so a step that uses a molecule an
+  earlier one made without touching the atoms it changed counts as independent of it: the class
+  is a canonical key, and its order is not always one the reaction can run in.
+- **Atom flux traces each target atom back through a well-mixed pool per species.** Going back
+  from an atom of x, the share of a step s that made x is F(s) / (produced(x) + supplied(x)),
+  and the share of x's supply ends the path: START (a starting species), RESERVOIR, or PARTNER
+  (an intermediate held at fixed concentration, the approximation's artefact, reported). The
+  balance produced + supplied = consumed + terminal holds at every species and every atom
+  (tested on random graphs with splits, joins and cycles). A target atom's dominant pathways are
+  its most probable simple backward paths (`graph.best_simple_paths`); the dominant path of each
+  heavy atom (every atom when the species has none, H+) is merged into one set of steps, whose
+  share is the smallest atom share. These weights are the fixed-concentration approximation:
+  not products of step probabilities once bimolecular steps compete for partners, until a
+  microkinetic simulation with rates replaces them; the end state is item F's.
+- **What forms is reported as the frontier's shares.** Without a stop (item F) nothing is an end
+  species: the shares are those of the mass held by the species not expanded, and the core's
+  leftover is the unexplored mass.
+- **Not done:** AO* with an admissible heuristic (optional in the plan: SBT on the explored graph
+  needs none); a target-directed expansion (the expansion is by mass, the hyperpaths are read
+  afterwards); the comparison of nodes expanded against the pool graph on the same pathways
+  (plan section 5, item 9).
+- **Smoke run** (`pm_control_s0`, CPU, acetone + methoxide, target the hemiketal):
+  `--max-species 2`: 5 pools, 23 s with the model load, the alkoxide of the hemiketal at
+  SKELETON in one event (cost 2.89); `--max-species 4 --tolerance 0.1`: 14 pools, and two joins
+  among the three hyperpaths (methanol made by a proton transfer to methoxide, then added to
+  acetone).

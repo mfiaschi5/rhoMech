@@ -1,4 +1,4 @@
-"""The reaction network in the engine (reaction-network plan, items C, D, E, F, I1-I4).
+"""The reaction network in the engine (reaction-network plan, items C, D, E, F, I1-I4, J).
 
 A network is an implicit graph that the models generate on demand: nodes are pool states,
 merged by pool key (the multiset of species identity keys, so up to resonance), and edges are
@@ -25,6 +25,17 @@ molecules, tokens, the model), so every algorithm here is measured by the nodes 
 - `tpt`: transition path theory: committors, reactive flux, dominant pathways by bottleneck;
 - `explore`: what forms without a product, best-first by probability mass, with the unexplored
   mass as the uncertainty.
+
+The species graph (item J) keeps branches that join apart: OR nodes are species, AND nodes
+elementary steps with their atom maps.
+
+- `species`: the graph and its expansion species by species without a product, partners at
+  fixed concentration;
+- `lift`: between pool states and species (canonical local atoms, pools built from species,
+  pool steps split into species steps, a pool-graph pathway compared with a hyperpath);
+- `hyperpaths`: SBT, the k shortest hyperpaths, and their linearization into pool-graph
+  pathways;
+- `flux`: masses, step fluxes and atom-flux analysis (the fixed-concentration approximation).
 
 The engine never imports `ksmech.serve`; the web app builds its own network on `graph`.
 """

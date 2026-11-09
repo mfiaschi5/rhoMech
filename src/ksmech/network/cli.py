@@ -37,6 +37,9 @@ species always available (solvent, reagents in excess), kept in every pool. Free
 from `--free-energy` (`network.free_energy.load_thermo_model`, the adapter point of item B;
 'none' until item B's provider is wired there: the chain then runs on the model's own
 probabilities, no sink can be declared, and every state counts as NO_FREE_ENERGY).
+
+`species` (item J) grows the species graph of the start pool and reports its hyperpaths and atom
+flux (`network.species_cli`).
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.data import provenance as prov
+from ksmech.network import species_cli
 
 SEARCH_VERSION = 1
 SEARCH_KEYS = ("k", "max_expansions", "max_depth", "step_cost", "levels", "beam", "build_missing")
@@ -68,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", type=Path, help="the result (JSON)")
     _evaluate_parser(sub)
     _predict_parser(sub, DEFAULT_MODELS_DIR, DEFAULT_TOKENS_DIR)
+    species_cli.add_parser(sub)  # item J: `ksmech-network species`
     return p
 
 
@@ -305,7 +310,12 @@ def cmd_predict(args, console: Console) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    commands = {"search": cmd_search, "evaluate": cmd_evaluate, "predict": cmd_predict}
+    commands = {
+        "search": cmd_search,
+        "evaluate": cmd_evaluate,
+        "predict": cmd_predict,
+        "species": species_cli.cmd_species,
+    }
     return commands[args.command](args, Console())
 
 
