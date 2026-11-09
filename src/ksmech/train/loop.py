@@ -26,6 +26,11 @@ leak_guard_joint out (LEAK_GUARD, counted). run.json states how the run is selec
 pair statistics were fitted. An open-shell run reads the pair features of
 `stage_a.OPEN_SHELL_BLOCK`, which no stored statistics file holds, so its statistics are fitted
 here on its training samples, one source or several.
+
+`--direction backward` trains the previous-step model (reaction-network plan, item H) on the
+backward store (`arrows.backward`: views and pair statistics under `<source>/backward/`, each
+checked to be backward); run.json records the direction, which a forward run's header leaves
+out, bit for bit as before.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from ksmech.arrows.backward import BACKWARD, FORWARD, check_direction, require_direction
 from ksmech.arrows.batches import collate_samples
 from ksmech.arrows.steps import (
     SAMPLE_VERSION,
@@ -95,6 +101,7 @@ class TrainConfig:
     eval_test: bool = False  # also score the split's test part each epoch (test_*), never for best
     drop_domain_class: tuple[str, ...] = ()  # training samples of these classes left out (P4)
     val_cohort: str = ""  # validation restricted to a cohort, per source: pmechdb=closed_base
+    direction: str = "forward"  # backward: the previous-step samples (`arrows.backward`)
 
 
 # PMechDB and rmechdb: isolated steps, no stop labels; the minimum over a joint run's sources is
@@ -284,7 +291,9 @@ def load_source_part(
     """The samples of one source's part that fit the token cap, and the skip counts (samples
     too large, drawings the decoder cannot write, and in the training part the samples of the
     domain classes `cfg.drop_domain_class` names and the leak guard's)."""
-    path = samples_path(source, f"{split_of(cfg, source)}_{part}", processed_dir)
+    split = f"{split_of(cfg, source)}_{part}"
+    path = samples_path(source, split, processed_dir, cfg.direction)
+    require_direction(path, cfg.direction)
     samples = load_samples(path, ids=_part_ids(cfg, source, part, path, processed_dir))
     if cfg.limit:
         samples = samples[: cfg.limit]
@@ -523,8 +532,8 @@ def run_pair_stats(
     samples` fits one source's on its own."""
     if len(sources(cfg)) == 1 and not extra:
         split = split_of(cfg, cfg.source)
-        path = pair_stats_path(cfg.source, split, processed_dir, cells)
-        return path, load_pair_stats(path)
+        path = pair_stats_path(cfg.source, split, processed_dir, cells, cfg.direction)
+        return path, load_pair_stats(require_direction(path, cfg.direction))
     return None, pair_stats(train, cells=cells, extra=extra)
 
 
@@ -536,10 +545,20 @@ def run_notes(cfg: TrainConfig, stats_path: Path | None) -> dict:
         cohort = f", cohort {cohorts[s]}" if s in cohorts else ""
         parts.append(f"{s} {split_of(cfg, s)} val{cohort}")
     pool = "pooled over " if len(parts) > 1 else "on "
+    samples = " (backward samples)" if cfg.direction == BACKWARD else ""
     return {
-        "selection": f"best.pt: the highest anchor top-1 {pool}{' and '.join(parts)}",
+        "selection": f"best.pt: the highest anchor top-1 {pool}{' and '.join(parts)}{samples}",
         "pair_statistics": str(stats_path) if stats_path else "fitted on the training samples",
     }
+
+
+def train_config(cfg: TrainConfig) -> dict:
+    """The run's training configuration as run.json records it: `direction` only for a backward
+    run, so a forward run's header (and its --resume check) is bit for bit as before."""
+    out = asdict(cfg)
+    if out["direction"] == FORWARD:
+        del out["direction"]
+    return out
 
 
 def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_path: Path | None):
@@ -549,7 +568,8 @@ def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_pat
             inputs |= prov.file_input(path)
     if stats_path is not None:
         inputs |= prov.file_input(stats_path)
-    config = {"train": asdict(cfg), "model": model_cfg.to_dict(), "sample_version": SAMPLE_VERSION}
+    config = {"train": train_config(cfg), "model": model_cfg.to_dict()}
+    config["sample_version"] = SAMPLE_VERSION
     extra = {"parts": parts} | run_notes(cfg, stats_path)
     return prov.stamp("train_run", TRAIN_VERSION, inputs, config, extra=extra)
 
@@ -628,6 +648,7 @@ def fit(
     resume: bool = False,
 ) -> dict:
     """Train one run; returns the best validation metrics."""
+    check_direction(cfg.direction)
     torch.manual_seed(cfg.seed)
     dtype = amp_dtype(device, cfg.amp)
     by_source, train_info = load_part(cfg, "train", processed_dir)

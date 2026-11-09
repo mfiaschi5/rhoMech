@@ -54,6 +54,14 @@ from rich.console import Console
 from ksmech.arrows import store
 from ksmech.arrows.align import AlignFlag, ArrowLabel, align_step, representatives
 from ksmech.arrows.apply_predicted import PredictedArrow, leaving_labels, with_leaving
+from ksmech.arrows.backward import (
+    FORWARD,
+    direction_config,
+    direction_dir,
+    molecule_leakage,
+    oriented,
+    pilot_steps,
+)
 from ksmech.arrows.delta_be import (
     EditLabel,
     EditSkip,
@@ -732,13 +740,24 @@ def split_ids(
     return {f"{name}_{part}": getattr(sp, part) for name, sp in per.items() for part in PARTS}
 
 
-def samples_path(source: str, split: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
-    """`samples_<split>.json`: the split's view over the sample store (`arrows.store`)."""
-    return source_dir(source, processed_dir) / f"samples_{split}.json"
+def samples_path(
+    source: str,
+    split: str,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    direction: str = FORWARD,
+) -> Path:
+    """`samples_<split>.json`: the split's view over the sample store (`arrows.store`) of
+    `direction` (the backward samples live in `backward/`, `arrows.backward.direction_dir`)."""
+    return direction_dir(source, processed_dir, direction) / f"samples_{split}.json"
 
 
-def splits_path(source: str, strategy: str, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> Path:
-    return source_dir(source, processed_dir) / f"splits_{strategy}.json"
+def splits_path(
+    source: str,
+    strategy: str,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    direction: str = FORWARD,
+) -> Path:
+    return direction_dir(source, processed_dir, direction) / f"splits_{strategy}.json"
 
 
 def write_split_file(
@@ -913,17 +932,41 @@ def build_all_samples(
     seed: int = 0,
     console: Console | None = None,
     n_workers: int = 1,
+    direction: str = FORWARD,
+    limit: int = 0,
 ) -> dict:
     """Build every step's sample once into the store, then one split file per strategy and one
-    view per split. A strategy that cannot run on the source is reported, not raised."""
+    view per split. A strategy that cannot run on the source is reported, not raised. With
+    `direction` backward each step is seen from its child (`arrows.backward.backward_step`) and
+    everything is written to `backward/` (`direction_dir`); `limit` (backward only, a pilot)
+    builds that many training steps drawn at random (`pilot_steps`, never the split seed) and keeps
+    the views to them."""
+    if limit and direction == FORWARD:
+        raise ValueError("a step limit builds a partial store: backward only (a partial forward "
+                         "store would replace the full one)")  # fmt: skip
     console = console or Console()
     parquet = steps_path(source, processed_dir)
     steps = read_training_steps(parquet)
-    samples, skipped = build_step_samples_parallel(steps, loader or TokenCache(), n_workers)
-    out_dir = source_dir(source, processed_dir)
-    index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION)
+    built = pilot_steps(steps, limit)
+    loader = loader or TokenCache()
+    samples, skipped = build_step_samples_parallel(oriented(built, direction), loader, n_workers)
+    config = direction_config(direction, limit)
+    out_dir = direction_dir(source, processed_dir, direction)
+    index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION, config)
+    report = store_report(steps, samples, skipped) | config
+    report |= {"n_built": len(built)} if limit else {}
+    only = {s.step_id for s in built} if limit else None
+    return report | write_strategy_views(
+        source, strategies, steps, samples, skipped, index, seed, processed_dir, direction, only
+    )
+
+
+def store_report(steps: list[ElementaryStep], samples: dict, skipped: dict) -> dict:
+    """The counts of a store build over the training `steps`: samples, skip reasons (also by
+    domain class), stretched alkali bonds, and the label, drawing and reading counts of every
+    sample (`split_report`)."""
     every = split_report("all", sorted(samples), samples, {})
-    report = {
+    return {
         "n_training_steps": len(steps),
         "n_samples": len(samples),
         "skipped": dict(Counter(str(r) for r in skipped.values()).most_common()),
@@ -944,9 +987,6 @@ def build_all_samples(
             )
         },
     }
-    return report | write_strategy_views(
-        source, strategies, steps, samples, skipped, index, seed, processed_dir
-    )
 
 
 def write_strategy_views(
@@ -958,10 +998,15 @@ def write_strategy_views(
     index: Path,
     seed: int = 0,
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    direction: str = FORWARD,
+    only: set[str] | None = None,
 ) -> dict:
     """One split file per strategy, one view per split over the store `index`, and the pair
     statistics of every training part. A strategy that cannot run on the source is reported,
-    not raised."""
+    not raised. The split is computed on the forward training `steps` with the forward frozen
+    snapshot whatever the direction, so the backward parts are the forward ones step by step;
+    the backward files go to `backward/`, each with the molecule leakage of its inputs
+    (`arrows.backward.molecule_leakage`). `only` (a pilot's steps) keeps the views to them."""
     parquet = steps_path(source, processed_dir)
     report: dict = {"splits": {}, "strategies_not_applicable": {}, "frozen": {}, "excluded": {}}
     for strategy in strategies:
@@ -977,23 +1022,42 @@ def write_strategy_views(
         if frozen is not None:
             gone = frozen_excluded(frozen, steps)
             report["frozen"][strategy] = {"SPLIT_CONFLICT": dict(conflicts), "excluded": gone}
-        split_file = write_split_file(
-            splits_path(source, strategy, processed_dir), strategy, seed, ids, parquet
+        path = splits_path(source, strategy, processed_dir, direction)
+        split_file = write_split_file(path, strategy, seed, ids, parquet)
+        if only is not None:
+            ids = {split: [i for i in members if i in only] for split, members in ids.items()}
+        if direction != FORWARD:
+            report.setdefault("leakage", {})[strategy] = molecule_leakage(steps, ids, direction)
+        where = (source, processed_dir, direction)
+        report["splits"] |= _write_split_views(
+            where, ids, samples, skipped, index, split_file, seed
         )
-        for split, members in ids.items():
-            counts = split_report(split, members, samples, skipped)
-            view = samples_path(source, split, processed_dir)
-            # the domain classes the training steps admitted (`read_training_steps`)
-            config = _config(split, seed) | {"admit": domain.admit_config(source)}
-            store.write_view(view, members, counts, index, split_file, config)
-            report["splits"][split] = counts
-            if split.endswith("_train"):
-                train = [samples[i] for i in members if i in samples]
-                for cells in PAIR_CELLS:
-                    name = split[: -len("_train")]
-                    stats_path = pair_stats_path(source, name, processed_dir, cells)
-                    write_pair_stats(stats_path, pair_stats(train, cells=cells), view, index, cells)
     return report
+
+
+def _write_split_views(where: tuple, ids: dict, samples, skipped, index, split_file, seed) -> dict:
+    """The view of every split of one strategy (`where`: source, processed_dir, direction) and
+    the pair statistics of its training part; returns each split's counts. A backward view's
+    config holds the direction and the store's step limit (`direction_config`)."""
+    source, processed_dir, direction = where
+    limit = 0 if direction == FORWARD else prov.read_header(index).config.get("limit", 0)
+    out = {}
+    for split, members in ids.items():
+        counts = split_report(split, members, samples, skipped)
+        view = samples_path(source, split, processed_dir, direction)
+        # the domain classes the training steps admitted (`read_training_steps`)
+        config = _config(split, seed) | {"admit": domain.admit_config(source)}
+        config |= direction_config(direction, int(limit))
+        store.write_view(view, members, counts, index, split_file, config)
+        out[split] = counts
+        if split.endswith("_train"):
+            train = [samples[i] for i in members if i in samples]
+            for cells in PAIR_CELLS:
+                name = split[: -len("_train")]
+                stats_path = pair_stats_path(source, name, processed_dir, cells, direction)
+                stats = pair_stats(train, cells=cells)
+                write_pair_stats(stats_path, stats, view, index, cells, direction)
+    return out
 
 
 def write_views_from_store(
@@ -1001,27 +1065,37 @@ def write_views_from_store(
     strategies: Iterable[str],
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
     seed: int = 0,
+    direction: str = FORWARD,
 ) -> dict:
-    """`write_strategy_views` over the sample store already built: the store and the views of
-    the other strategies are left as they are."""
+    """`write_strategy_views` over the sample store of `direction` already built: the store and
+    the views of the other strategies are left as they are. A pilot's store (built with a step
+    limit) keeps its views to the steps it holds."""
     parquet = steps_path(source, processed_dir)
     samples, skipped, index = store.load_store(
-        source_dir(source, processed_dir), MechanismSample, SAMPLE_VERSION
+        direction_dir(source, processed_dir, direction), MechanismSample, SAMPLE_VERSION
     )
+    limited = bool(prov.read_header(index).config.get("limit"))
+    only = set(samples) | set(skipped) if limited else None
     steps = read_training_steps(parquet)
     report = {"n_training_steps": len(steps), "n_samples": len(samples), "views_only": True}
     return report | write_strategy_views(
-        source, strategies, steps, samples, skipped, index, seed, processed_dir
+        source, strategies, steps, samples, skipped, index, seed, processed_dir, direction, only
     )
 
 
 def pair_stats_path(
-    source: str, name: str, processed_dir: Path = DEFAULT_PROCESSED_DIR, cells: str = "valid"
+    source: str,
+    name: str,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    cells: str = "valid",
+    direction: str = FORWARD,
 ) -> Path:
     """`pair_feature_stats_<name>.json` (`..._<name>_allcells.json` for pair_cells 'all'): the
-    standardization statistics of one split strategy, fitted on its training part."""
+    standardization statistics of one split strategy, fitted on its training part (of the
+    backward samples in `backward/`)."""
     suffix = "" if cells == "valid" else "_allcells"
-    return source_dir(source, processed_dir) / f"pair_feature_stats_{name}{suffix}.json"
+    root = direction_dir(source, processed_dir, direction)
+    return root / f"pair_feature_stats_{name}{suffix}.json"
 
 
 def pair_stats(
@@ -1051,18 +1125,23 @@ def pair_stats(
 
 
 def write_pair_stats(
-    path: Path, stats: PairStats, view: Path, index: Path, cells: str = "valid"
+    path: Path,
+    stats: PairStats,
+    view: Path,
+    index: Path,
+    cells: str = "valid",
+    direction: str = FORWARD,
 ) -> Path:
     """The statistics with a provenance header: the training view and the store index they were
-    fitted on are its inputs, the physical K and eps, the features and the cells its
-    configuration."""
+    fitted on are its inputs, the physical K and eps, the features and the cells (and for the
+    backward samples the direction) its configuration."""
     params = KSParams()
     config = {
         "sample_version": SAMPLE_VERSION,
         "pair_features": list(stats.names),
         "cells": cells,
         "params": {"K": params.K, "eps": params.eps},
-    }
+    } | direction_config(direction)
     body = {"features": stats.to_dict()}
     header = prov.stamp(
         "pair_stats",

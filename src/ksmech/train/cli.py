@@ -5,6 +5,10 @@
     ksmech-train fit --run dense_plain_general_s0 --preset general --seed 0 --no-resonance-draws
     ksmech-train fit --run joint_s0 --preset open_shell --source pmechdb+rmechdb \\
         --split pmechdb=molecule,rmechdb=rc_molecule --val-cohort pmechdb=closed_base
+    ksmech-train fit --run backward_s0 --direction backward   # the previous-step model
+
+`--direction backward` reads the backward store (`arrows.backward`, `<source>/backward/`) and
+records the direction in run.json; the default, forward, is unchanged.
 
 `--preset general|legacy|open_shell` sets the flags of `model.config.PRESETS` as the defaults of
 their options (GENERAL: every pair cell, the orbital extras; LEGACY: the v17 inputs; open_shell:
@@ -23,6 +27,7 @@ import sys
 from dataclasses import fields
 from pathlib import Path
 
+from ksmech.arrows.backward import DIRECTIONS
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.model.config import PRESETS, ModelConfig
 from ksmech.train.loop import (
@@ -87,6 +92,9 @@ def _logging(run_dir: Path) -> None:
 
 def cmd_fit(args) -> int:
     cfg, model_cfg = _config(TrainConfig, args), _config(ModelConfig, args)
+    if cfg.direction not in DIRECTIONS:
+        print(f"--direction {cfg.direction!r}: one of {DIRECTIONS}", file=sys.stderr)
+        return 2
     run_dir = Path(args.models_dir) / cfg.source / args.run
     if (run_dir / "run.json").exists() and not args.resume:
         print(f"{run_dir} exists: pass --resume or choose another --run", file=sys.stderr)

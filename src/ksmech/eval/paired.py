@@ -7,8 +7,9 @@ the pooled SD being the within-arm SD of every run (df = runs - 2). Beside it, t
 McNemar test of H1 "A is worse": on the discordant samples, n_ab = A misses where B hits and
 n_ba = A hits where B misses, p = P(X >= n_ab) for X ~ Binomial(n_ab + n_ba, 1/2). It is run on
 the majority-of-seeds hits of each arm (a sample is a hit when more than half the arm's runs hit
-it) and on every seed pair. Arms decoded on different samples, parts, cohorts, caps, beams or
-decode versions are refused: the comparison would not be paired.
+it) and on every seed pair. Arms decoded on different samples, parts, cohorts, caps, beams,
+directions (forward hits carry none, backward ones `direction`) or decode versions are refused:
+the comparison would not be paired.
 
 The metric is the rank of the own label (`own`, the default) or `any`: the rank of the first
 completion whose product is one the source records for the same reactant pool (`rank_any`,
@@ -28,7 +29,7 @@ from ksmech.data import provenance as prov
 TOLERANCE_FLOOR = 1.0  # percentage points
 METRICS = {"own": "rank", "any": "rank_any"}  # the per-sample field each metric reads
 PAIRED_KEYS = ("source", "split", "part", "cohort", "scope", "beam", "limit", "caps",
-               "max_bonds", "max_atoms", "max_candidates")  # fmt: skip
+               "max_bonds", "max_atoms", "max_candidates", "direction")  # fmt: skip
 
 
 def mcnemar_one_sided(a: np.ndarray, b: np.ndarray) -> dict:
