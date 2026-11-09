@@ -8858,3 +8858,28 @@ function sums the species' G into the G of a pool (`qm.hessian`, `qm.thermo`, `q
   `backward_smoke`): 5 steps, 273 s, val top-1 2.4% (untrained); its decode of 16 val samples:
   nothing found on 15 (an untrained model), 1.4 s per sample, files
   `decode_*_molecule_val_backward_n16.json` with the directions in their config.
+
+## 2026-11-09: the search towards a product on pathway benchmarks (network plan, section 5)
+
+- **`ksmech-network evaluate --set reactmech|human_benchmark`** (`network.benchmarks`,
+  `network.evaluate`). A case is a start pool, a target and what the benchmark records: the
+  ReactMech chains ingested whole (`data.pathways`; the target keeps its maps only when every
+  boundary kept the same numbers, so a mapped target is on the start's numbering), or the human
+  benchmark's reactants, final product and step targets. Per case: the arrival level, the
+  recorded pathway's rank, the step targets the best pathway passes, the expansions and cuts.
+- **The recorded pathway is matched by its sequence of pool keys.** The plan compares "the set
+  of steps plus the final pool", i.e. the mechanism class; that needs every recorded step's
+  matrix on the start pool's numbering, which the chains give only after composing the
+  renumberings of `data.pathways`. Until then the sequence match is a lower bound on the class
+  match (a pathway that swaps two independent steps does not count).
+- **A target the start already holds is START_IS_GOAL.** A degenerate exchange (the same
+  molecules, atoms changing partners) has a target equal to the start map-free, and the pool
+  graph merges its child into the root; one of the 12 chains below is such a case.
+- **First run, a check of the machinery rather than a benchmark.** dense_plain_general_s0
+  (ReactMech pilot), 30 expansions, depth 6, on the 12 chains the pilot ingested whole (5,584
+  chains are not ingested): arrival 9 of 12 (5 EXACT, 4 SKELETON), the recorded pathway at rank
+  1 on 5 and within 5 on 6, 17 expansions on average. 9 of the 12 chains lie in the molecule
+  split's training part, and 180 of 208 expansions failed as MISSING_TOKENS: the search reaches
+  species no QM batch has seen. A benchmark needs the chains ingested in full with their QM
+  (`ksmech-data pathways` reports 17,595 chain steps outside the pilot), or `--build-missing`
+  (GFN2 per new species, minutes each).

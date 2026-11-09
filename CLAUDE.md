@@ -433,7 +433,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   simple paths (A* with `--step-cost` x the remaining-change bound when the target is mapped on the
   start pool, else uniform-cost; MAPPING_FAILED counted), arrival EXACT (identity keys) or SKELETON
   (heavy-atom connectivity, up to protons), mechanism classes up to the order of independent steps
-  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`)
+  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`),
+  `uv run ksmech-network evaluate --set reactmech|human_benchmark --run NAME [--run-source S]
+  [--part val] [--limit N] [the search options]` (per case the arrival, the recorded pathway's rank by
+  its pool-key sequence, the step targets passed, the expansions; the rates over the cases;
+  `network_eval_<set>[_<part>][_n<limit>].json` beside the checkpoint)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]
