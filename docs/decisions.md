@@ -9155,3 +9155,34 @@ and `network.pools` are unchanged; `network.cli` gains the subcommand.
 - **Not run for real.** The only backward checkpoint is H's CPU smoke run (`backward_smoke`, one
   epoch on 64 samples): on the hemiketal alkoxide it proposes no valid step (EXHAUSTED). The
   full backward store (about 45 min on 4 processes) and the 3-seed training come first.
+
+## 2026-11-09: the orbital-token ablation switches (docs/todo.md, first item)
+
+- **Three switches, all batch-time selections out of the stored columns** (as every P9 ablation):
+  `ModelConfig.drop_token_features` removes token input columns by name, atom or orbital, and
+  `orbital` removes every orbital column (the occupation, the centre weights and shares, the
+  alignment and overlap columns, the radius, `orbital_extra` and `spin_role`); `spectral_set`
+  False removes the set encoder over the spectral entries; `inherit_atoms` False removes the
+  centre-weighted atom embeddings. On the command line `--drop-token-features orbital`,
+  `--no-spectral-set`, `--no-inherit-atoms`. A pre-ablation run reads its defaults, bit for bit.
+- **With no orbital column MLP_O is a learned vector**, the MLP of an empty input (initialized as
+  MECH is). Arm (c) then leaves an orbital token only its inherited atom embeddings, its
+  fragment and that learned vector, so a bonding orbital and its antibonding partner over the same
+  atoms look alike at layer 0 and the pair track (whose rows are occupied, columns virtual) is
+  what tells them apart. That is the question the arm asks, so the occupation goes with the
+  other columns; `--drop-token-features` by name keeps it when wanted.
+- **`FeatureStats.names()` falls back to the v17 columns only when both name lists are empty**
+  (a v15-v17 checkpoint), so statistics of an arm without orbital columns read no orbital
+  column; dropping every atom column is refused. `fit_feature_stats` distinguishes "no names
+  given" (the v17 columns) from an empty list.
+- **One place builds the orbital token** (`TokenEmbedding.orbital_terms`): the encoders and the
+  embedding page (`eval.embedding.embedding_parts`, whose parts still sum to h(0)) read it.
+  Tested on the fixture molecules: in each arm, perturbing a removed input leaves h(0)
+  unchanged and perturbing a kept one changes it; the dense, flex and sparse encoders build and
+  encode with every switch off.
+- **The runs** (`scripts/orbital_ablation.sh fit|decode|compare`): arms a (as pm_v19_s0), b, c, d,
+  3 seeds each, molecule split, general preset, 30 epochs, selected on closed_base val; decoded
+  on closed_base val; each of b, c, d paired with a by `ksmech-eval compare`, top-1 and top-3,
+  metric own and any. Arm a is retrained with the others: pm_v19_s0 ran on a 3090 with cu126,
+  and an ablation's reference must train on the same GPU and torch (P9 step 9). Not run yet:
+  12 runs are about 4-5 h on a 5090 pod (three side by side) or several days on the RX 6600 XT.

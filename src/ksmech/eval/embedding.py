@@ -67,12 +67,7 @@ def embedding_parts(embed: TokenEmbedding, batch: dict, inp: dict) -> dict[str, 
         "atom_inputs": embed.atom(inp["atom_x"]) * on_atom,
     }
     h_atom = atom["element"] + atom["charge"] + atom["atom_inputs"]
-    spectral = embed.spectral(inp["spectra"]) * inp["spectra_mask"][..., None]
-    orbital = {
-        "orbital_inputs": embed.orbital(inp["orbital_x"]),
-        "spectral": spectral.sum(-2),
-        "inherited": batch["incidence"][:, n_atoms:, :].to(h_atom.dtype) @ h_atom,
-    }
+    orbital = embed.orbital_terms(batch, inp, h_atom)
     no_atom, no_orbital = torch.zeros_like(h_atom), torch.zeros_like(orbital["spectral"])
     tokens = {k: torch.cat([v, no_orbital], 1) for k, v in atom.items()}
     tokens |= {k: torch.cat([no_atom, v], 1) for k, v in orbital.items()}

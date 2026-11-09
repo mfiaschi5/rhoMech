@@ -360,7 +360,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   ablation; evaluation keeps them; counted as DROPPED_DOMAIN_CLASS);
   every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation, `--no-somo-channels`,
-  `--no-own-pair-channel`; metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
+  `--no-own-pair-channel`; the orbital-token ablation `--drop-token-features orbital` (or column
+  names), `--no-spectral-set`, `--no-inherit-atoms` (its runs: `scripts/orbital_ablation.sh`); metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
   pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run; `--direction
   backward` trains the previous-step model on the backward store, views and pair statistics
   checked to be backward, the direction in run.json, which a forward run leaves out)

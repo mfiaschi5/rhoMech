@@ -68,11 +68,12 @@ class FeatureStats:
     orbital_names: tuple[str, ...] = ()
 
     def names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """(atom columns, orbital columns) the statistics are of."""
-        return (
-            self.atom_names or tuple(atom_feature_names()),
-            self.orbital_names or tuple(feature_names()),
-        )
+        """(atom columns, orbital columns) the statistics are of; statistics without any name
+        are a v15-v17 checkpoint's and read the v17 columns (an ablation that drops every orbital
+        column keeps its atom names, and every atom column cannot be dropped)."""
+        if not self.atom_names and not self.orbital_names:
+            return tuple(atom_feature_names()), tuple(feature_names())
+        return self.atom_names, self.orbital_names
 
     def to_dict(self) -> dict:
         return {
@@ -122,7 +123,27 @@ def token_columns(cfg) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if spin == "somo_population":
         atoms = (*atoms, "somo_population")
     role = ("spin_role",) if getattr(cfg, "spin_role", False) else ()
-    return atoms, (*feature_names(), *cfg.orbital_extra, *role)
+    return dropped_columns(cfg, atoms, (*feature_names(), *cfg.orbital_extra, *role))
+
+
+ORBITAL_COLUMNS = "orbital"  # `drop_token_features`: every orbital column
+
+
+def dropped_columns(cfg, atoms: tuple[str, ...], orbitals: tuple[str, ...]):
+    """(atom, orbital) columns without `cfg.drop_token_features` (the token-input ablation):
+    a name drops that column, 'orbital' every orbital column. ValueError for a name that is no
+    column of the configuration, or when no atom column would be left."""
+    drop = set(getattr(cfg, "drop_token_features", ()))
+    if ORBITAL_COLUMNS in drop:
+        drop |= set(orbitals)
+        drop.discard(ORBITAL_COLUMNS)
+    unknown = drop - set(atoms) - set(orbitals)
+    if unknown:
+        raise ValueError(f"drop_token_features {sorted(unknown)}: not input columns here")
+    atoms = tuple(n for n in atoms if n not in drop)
+    if not atoms:
+        raise ValueError("drop_token_features leaves no atom column")
+    return atoms, tuple(n for n in orbitals if n not in drop)
 
 
 def select_columns(x, stored, names):
@@ -148,8 +169,8 @@ def fit_feature_stats(samples: Iterable, atom_names=None, orbital_names=None) ->
     """The statistics of the token inputs `atom_names` and `orbital_names` (default: the v17
     columns) over `samples`, selected by name from each sample's stored columns."""
     samples = list(samples)
-    atom_names = tuple(atom_names or atom_feature_names())
-    orbital_names = tuple(orbital_names or feature_names())
+    atom_names = tuple(atom_feature_names() if atom_names is None else atom_names)
+    orbital_names = tuple(feature_names() if orbital_names is None else orbital_names)
 
     def cols(s, kind: str, names):
         return select_columns(getattr(s, f"{kind}_features"), getattr(s, f"{kind}_columns"), names)
