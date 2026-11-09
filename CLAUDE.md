@@ -419,7 +419,17 @@ Main CLI entry points are added phase by phase and listed here as they land:
   simple paths (A* with `--step-cost` x the remaining-change bound when the target is mapped on the
   start pool, else uniform-cost; MAPPING_FAILED counted), arrival EXACT (identity keys) or SKELETON
   (heavy-atom connectivity, up to protons), mechanism classes up to the order of independent steps
-  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`)
+  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`),
+  `uv run ksmech-network species --run NAME --start SMILES [--target SMILES] [--reservoir SMILES]
+  [--tolerance 0.05] [--max-species 10] [--max-expansions 60] [--partner-weight 1] [--k 3]
+  [--levels EXACT SKELETON] [--beam 5] [--build-missing] [--out FILE]` (item J, the species graph:
+  OR nodes species by identity key v2, AND nodes elementary steps with their atom maps
+  (`network.species`, `network.lift`); grown species by species, the frontier species of largest
+  mass joining the core while it has `--tolerance`, each reacting alone, with itself and with the
+  core, the reservoir in every pool, partners at fixed concentration; the species by mass, the
+  end species' shares and the unexplored mass; with `--target` the k shortest hyperpaths (SBT
+  and Nielsen-Andersen-Pretolani, `network.hyperpaths`, additive -log p, one per class) as
+  linearized events, and the atom flux of each target species (`network.flux`); every cut counted)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]

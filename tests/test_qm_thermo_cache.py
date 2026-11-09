@@ -63,12 +63,12 @@ def test_the_sidecar_round_trips_and_goes_stale_with_its_record(qm_dir, tmp_path
 
 def test_the_command_computes_skips_and_answers_from_the_cache(qm_dir, tmp_path, capsys):
     out, report = tmp_path / "thermo", tmp_path / "report.json"
-    argv = ["thermo", "--smiles", "CC", "ClC", "CN", "--cache-dir", str(qm_dir)]
+    argv = ["thermo", "--smiles", "CC", "ClC", "CCCCCCN", "--cache-dir", str(qm_dir)]
     argv += ["--out-dir", str(out), "--report", str(report), "--temperatures", "298.15", "350"]
     assert main(argv) == 0
     rows = {r["smiles"]: r for r in json.loads(report.read_text())["rows"]}
     assert rows["CC"]["status"] == "ok" and rows["CCl"]["status"] == "ok"
-    assert (rows["CN"]["status"], rows["CN"]["reason"]) == ("skipped", "NO_RECORD")
+    assert (rows["CCCCCCN"]["status"], rows["CCCCCCN"]["reason"]) == ("skipped", "NO_RECORD")
     assert [t["T"] for t in rows["CC"]["thermo"]] == [298.15, 350.0]
     assert rows["CC"]["thermo"][0]["g_minus_e_kcal"] == pytest.approx(35.0, abs=1.5)
     printed = capsys.readouterr().out

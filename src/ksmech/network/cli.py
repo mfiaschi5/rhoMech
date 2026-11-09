@@ -10,6 +10,9 @@ level, log P and cost, the mechanism classes up to the order of independent step
 p(class | reaches) among the pathways found, the nodes expanded, the cuts and every skip code.
 `--out` writes them as JSON with a provenance header. A molecule without tokens fails its node
 (MISSING_TOKENS) unless `--build-missing` computes them with GFN2-xTB first.
+
+`species` (item J) grows the species graph of the start pool and reports its hyperpaths and atom
+flux (`network.species_cli`).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.data import provenance as prov
+from ksmech.network import species_cli
 
 SEARCH_VERSION = 1
 
@@ -49,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     s.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
     s.add_argument("--out", type=Path, help="the result (JSON)")
+    species_cli.add_parser(sub)  # item J: `ksmech-network species`
     return p
 
 
@@ -105,7 +110,8 @@ def cmd_search(args, console: Console) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"search": cmd_search}[args.command](args, Console())
+    commands = {"search": cmd_search, "species": species_cli.cmd_species}
+    return commands[args.command](args, Console())
 
 
 if __name__ == "__main__":
