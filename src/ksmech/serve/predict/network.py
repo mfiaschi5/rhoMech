@@ -5,6 +5,8 @@ reading and the orbital readings of its forming bonds (`serve.science.edgestep`)
 
 Pure: no file I/O, no RDKit calls, no clock. The only view of the outside is a `Chemistry`
 (`expand` / `apply`) and the `NetHooks` (cancel flag, progress, reason-coded skips, snapshots).
+The graph algorithms shared with the engine (the turnover rule of a cycle, the best-first simple
+paths) live in `ksmech.network.graph`; this module keeps the data model and the JSON form.
 
 - Nodes are keyed by pool id; a node keeps the representative state first reached in this
   network (ties by lower state id in the deterministic BFS order), and other states that reach
@@ -20,7 +22,6 @@ Pure: no file I/O, no RDKit calls, no clock. The only view of the outside is a `
 from __future__ import annotations
 
 import hashlib
-import heapq
 import math
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -28,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from ksmech.network.graph import MAX_PATHWAY_POPS, PathOps, best_simple_paths, turnover_closure
 from ksmech.serve.core.contracts import (
     ExpandRequest,
     Expansion,
@@ -44,7 +46,6 @@ if TYPE_CHECKING:
     from ksmech.serve.chem.chemistry import Chemistry
 
 NETWORK_FORMAT = "ksmech-serve/network-v2"  # v2: edges are reaction matrices (spec v9)
-MAX_PATHWAY_POPS = 10_000
 CONTINUABLE_TERMINAL = ("MAX_STEPS", "NODE_BUDGET")
 MINUS = "−"
 
@@ -619,11 +620,6 @@ def _signed(c: Counter, sign: str) -> str:
     return " ".join(f"{sign}{n} {x}" if n > 1 else f"{sign}{x}" for x, n in sorted(c.items()))
 
 
-def _catalyst(pools: list[Counter], j: int, inter: Counter) -> dict[str, int]:
-    between = pools[j + 1 : -1]
-    return {x: n for x, n in sorted(inter.items()) if min(p[x] for p in between) < n}
-
-
 def detect_closure(net: Network, e: Edge) -> Cycle | None:
     """The cycle edge e = (u -> v) closes, if any: a recurrence (v on the Viterbi path of u) or
     the latest turnover anchor w (design 4.4). Pure: nothing is mutated."""
@@ -644,29 +640,23 @@ def detect_closure(net: Network, e: Edge) -> Cycle | None:
         )
     pools = [split_pool_key(net.nodes[n].pool_key) for n in pi]
     root_support = set(split_pool_key(net.nodes[net.root].pool_key))
-    p_v = pools[-1]
-    for j in range(len(pi) - 3, -1, -1):
-        p_w = pools[j]
-        consumed, produced = p_w - p_v, p_v - p_w
-        if not consumed or not produced or not set(consumed) <= root_support:
-            continue
-        catalyst = _catalyst(pools, j, p_w & p_v)
-        if not catalyst:
-            continue
-        label = f"{_signed(produced, MINUS)} {_signed(consumed, '+')}"
-        return Cycle(
-            _cycle_id("turnover", pi[j], e.id),
-            "turnover",
-            pi[j],
-            e.id,
-            pi[j:],
-            _path_edges(net, pi, j, e),
-            catalyst,
-            dict(sorted(consumed.items())),
-            dict(sorted(produced.items())),
-            {"source": e.target, "target": pi[j], "label": label},
-        )
-    return None
+    t = turnover_closure(pools, root_support)
+    if t is None:
+        return None
+    j = t.anchor
+    label = f"{_signed(Counter(t.produced), MINUS)} {_signed(Counter(t.consumed), '+')}"
+    return Cycle(
+        _cycle_id("turnover", pi[j], e.id),
+        "turnover",
+        pi[j],
+        e.id,
+        pi[j:],
+        _path_edges(net, pi, j, e),
+        t.catalyst,
+        t.consumed,
+        t.produced,
+        {"source": e.target, "target": pi[j], "label": label},
+    )
 
 
 def mark_cycles(net: Network, e: Edge, created: bool, stop_at_turnover: bool = True) -> None:
@@ -744,25 +734,18 @@ def rank_pathways(net: Network, limit: int = 20, include_pruned: bool = False) -
     """Best-first simple paths from the root over active edges (a final recurrence edge may
     revisit one node), by log-probability desc, then fewer edges, then edge ids."""
     out = _active_out(net, include_pruned)
-    heap: list[tuple] = []
-
-    def push(nodes: tuple[str, ...], eids: tuple[str, ...], logp: float, e: Edge) -> None:
-        nodes2, eids2, logp2 = nodes + (e.target,), eids + (e.id,), logp + e.path_logp
-        heapq.heappush(heap, (-logp2, len(eids2), eids2, nodes2, _ends_with(net, out, e, nodes2)))
-
-    for e in out[net.root]:
-        push((net.root,), (), 0.0, e)
-    result: list[Pathway] = []
-    pops = 0
-    while heap and len(result) < limit and pops < MAX_PATHWAY_POPS:
-        neg, _, eids, nodes, ends = heapq.heappop(heap)
-        pops += 1
-        if ends is not None:
-            result.append(_pathway(net, len(result) + 1, nodes, eids, -neg, ends))
-            continue
-        for e in _admissible(out, nodes[-1], nodes):
-            push(nodes, eids, -neg, e)
-    return result
+    ops = PathOps(
+        target=lambda e: e.target,
+        weight=lambda e: e.path_logp,
+        edge_id=lambda e: e.id,
+        admissible=lambda x, on_path: _admissible(out, x, on_path),
+        ends=lambda e, nodes: _ends_with(net, out, e, nodes),
+    )
+    found = best_simple_paths(net.root, ops, limit, MAX_PATHWAY_POPS)
+    return [
+        _pathway(net, rank, nodes, eids, logp, ends)
+        for rank, (nodes, eids, logp, ends) in enumerate(found, start=1)
+    ]
 
 
 # ---- user steps

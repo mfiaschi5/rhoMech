@@ -8498,3 +8498,87 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   `QMConfig().method`, so switching the default means recomputing every source's records and
   everything built on them, a decision of its own. Serve's metal path (`MetalGFN2Calculator`)
   goes through the same `_optimize`, so it follows the option too.
+
+## 2026-11-09: multi-reference evaluation and the log P of a given matrix (network plan A, C)
+
+- **`rank_any`: any outcome the source records for the pool.** Item A of
+  `docs/reaction_network_plan.md`. Every decoded completion now carries its product pool key
+  (`Completion.key`, the map-free identity key v2 `lewis_apply` gives B + R). The decode report
+  and hit files get `rank_any`, the rank of the first completion that is the own label or whose
+  product key is one the source records for the same reactant pool, and `n_outcomes`; the report
+  gets `top{k}_any`, the same top-k over the samples of multi-outcome pools (`multi_outcome`), and
+  a `siblings` section. `ksmech-eval compare --metric own|any` pairs on either rank; a hit file
+  without `rank_any` is refused for `any`. DECODE_VERSION 5.
+- **Pools and products by identity key, never by matrix.** Sibling samples number their atoms
+  differently, so `eval.siblings` groups the source's training steps (`read_training_steps`:
+  resonance and excluded steps out) by the map-free identity key of the drawn reactants and
+  collects the identity keys of the drawn products, the key the sample store writes as
+  `product_key`. Checked on the first 400 PMechDB molecule-val samples: B + R of each label's
+  first variant through `lewis_apply` gives exactly the stored `product_key` on 400 of 400, so
+  the completions' keys and the recorded ones are comparable. An own hit whose key differs is
+  counted (OWN_KEY_MISMATCH); a step RDKit cannot read is counted (SIBLING_KEY_FAILED) and has no
+  siblings. `rank_any` is never above `rank`: the own label always counts.
+- **Siblings come from the whole source.** They are taken from every training step, whatever part
+  of the split they fall in, and the report counts the siblings from another part. With the
+  molecule split a pool's steps share their molecules and fall in one part, so the count is a
+  check rather than a correction. On v19 PMechDB: 12,512 training steps, 901 of them in 436
+  pools with more than one recorded product (v18: 973 in 474); the table takes about 20 s.
+- **`model.decode.matrix_logp`: the log P of a given R at a state.** Item C needs it for reverse
+  edges (-R at the child) and for scoring a known pathway. For each anchor the decoder would
+  decode R around (its forming bonds, or its breaking bonds when none forms), the same
+  log P(e) + sum over every other entry of log P(its class) as `exact_logp`, built afresh from
+  R (`table_logp`), so a decoded completion gets back exactly its log P (tested anchor by anchor
+  on a tiny model). `best` is the maximum over anchors (the decoder merges anchors by max) and
+  `marginal` their log-sum-exp; an R the head cannot write (an odd atom entry on a 3-class
+  head, a +1 entry around a breaking anchor) scores -inf.
+
+## 2026-11-09: the network core in the engine; search towards a product (network plan C, D, I1, I2)
+
+- **`ksmech.network`, an engine package; the web app imports its algorithms.** Item C asked for
+  the pure core of `serve/predict/network.py` to move into the engine. That module's data model
+  (nodes holding serve `PoolState`s, edges with arrow and orbital readings, the JSON form and
+  revisions) is the web app's contract with its UI, so it stays; what moved is what both need:
+  the pool key (`network.keys`, re-exported by `serve.core.keys`), the turnover rule of a cycle
+  (`graph.turnover_closure`) and the best-first simple paths (`graph.best_simple_paths`, which
+  `serve.predict.network.rank_pathways` now calls). The serve tests pass unchanged (872), so the
+  network JSON stays byte for byte.
+- **The search runs on an implicit graph with an expansion cache.** `network.search`: an
+  `Expander` proposes steps from a state with their log P; `ImplicitGraph` expands each node once
+  (the expensive model call) and every algorithm is measured by the nodes it expanded.
+  `k_best_pathways` is best-first search over simple paths with priority g + h, g the summed
+  -log p + `step_cost`: with costs >= 0 and an admissible h, goal paths pop in non-decreasing
+  cost, so k = 1 is A* (I1) and the first k are the k best simple pathways (I2), lazily on the
+  implicit graph, as K* would, without first exploring a fixed subgraph for Yen's algorithm.
+  Tested against exhaustive enumeration on 12 random graphs, with and without a perfect
+  heuristic (the heuristic never expands more). Cuts are counted: DEPTH_CUT, CYCLE,
+  EXPANSION_BUDGET, POP_BUDGET.
+- **A step cost is what makes the remaining-change heuristic useful.** The plan's heuristic is a
+  lower bound on the steps left (`target.steps_lower_bound`: the remaining dB on the target's
+  mapped heavy atoms against the decoder's caps, each step changing at most 8 bond entries by 1
+  and 2 atom entries by 2). In -log p units a step can cost nearly 0, so the bound in steps
+  says nothing about the cost unless each step pays at least something: the heuristic is
+  `step_cost` x the bound, exact for the cost -log p + `step_cost`. With the default
+  `step_cost` 0 the search is uniform-cost and exact on -log p; the calibration of `step_cost`
+  is item 9's.
+- **No map-free similarity as heuristic.** Where the target is not mapped on the start pool
+  (MAPPING_FAILED, counted), the plan offered a map-free similarity to the target. It is not a
+  lower bound, so it would make A* inexact; the search runs uniform-cost instead. An atom mapper
+  (RXNMapper or similar, D3) is the way to a bound for unmapped targets, and is not added yet.
+- **Arrival on two levels.** EXACT: the target's species (identity key v2) are in the pool with
+  their multiplicity, by-products allowed. SKELETON: their heavy-atom skeletons (connectivity
+  only, no H, charge, bond order or radical) are, so a worked-up neutral product or another
+  tautomer is reached up to proton transfers. Erasing bond orders also merges a ketone and its
+  alcohol, so the level is always reported with the pathway and `--levels EXACT` restricts it.
+- **Engine pool states as the web app's: Kekule, explicit H, every atom mapped.** The map numbers
+  follow every atom through a pathway, so a step's signature (R on map numbers) is the same in
+  every pool, which the mechanism classes need, and a mapped target can be compared with the
+  pool. `pool_state` keeps the given map numbers and numbers the other atoms after them. B + R is
+  written on the mapped molecule with `arrows.apply.apply_edit`, after the stored samples' checks
+  (`lewis_apply`); a changed atom's radical count is the parity of its N.
+- **Mechanism classes by partial-order reduction.** Two steps are independent when they touch no
+  common atom (map number); a pathway's class is the canonical linear extension of its
+  dependency DAG (Kahn's algorithm, smallest signature first). p(class | reaches) is the summed
+  probability of its pathways over every pathway found, so it is relative to the budgets.
+- **`ksmech-network search`** (new entry point): a checkpoint on the CPU, a start pool and a
+  target; the k best pathways with arrival level, log P and class, the classes with their
+  probabilities, the expansions, cuts and skips, and `--out` as JSON with a provenance header.

@@ -343,7 +343,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   legacy tag the files `_caps<b>-<a>-<c>`; on a pool with no unpaired electron the closed-shell
   screen drops a +1 atom entry off every broken bond (ODD_OFF_BROKEN_BOND), `--closed-minus1-filter`
   also any -1 atom entry (CLOSED_MINUS1, files tagged `_minus1filter`, off until P9's ablation sets
-  it); `odd_top1` and per-sample `screened` in the report and the hit file;
+  it); `odd_top1` and per-sample `screened` in the report and the hit file; `rank_any` and
+  `top{k}_any` against every product the source records for the same reactant pool (identity key
+  v2, `eval.siblings`; siblings from the whole source, those of another part counted), with the
+  multi-outcome subset (`multi_outcome`);
   `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
   `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
   it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
@@ -353,7 +356,7 @@ Main CLI entry points are added phase by phase and listed here as they land:
   domain_class values pinned once as a cohort); `uv run ksmech-eval pin --source pmechdb --name closed_base [--workers N]`
   (open-shell plan P0b: the molecule split's samples as a cohort, its GBDT subsets `<name>_gbdt_valid|all`
   and `baseline_<name>.json`, per-sample digests of every named column, `eval.pin`; each written once),
-  `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--out FILE]` (two arms of decode runs
+  `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--metric own|any] [--out FILE]` (two arms of decode runs
   paired by sample: A fails when its mean top-k is below B's by more than max(2 x pooled SD, 1 point),
   the exact one-sided McNemar test on majority-of-seeds hits and every seed pair; arms decoded on other
   samples, cohorts, caps or decode versions refused, `eval.paired`); `uv run ksmech-physics gbdt --score-only [--model PATH
@@ -384,6 +387,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
   of h(0), every layer's attention and token updates (rebuilt from the recorded layer inputs and
   checked against the model's own forward), the decoder's anchor logits split into site, pair
   and physics terms; CPU by default; `--smiles` builds missing tokens with GFN2-xTB)
+- Network: `uv run ksmech-network search --run NAME [--run-source pmechdb] --start SMILES --target
+  SMILES [--k 5] [--max-expansions 50] [--max-depth 6] [--step-cost 0] [--levels EXACT SKELETON]
+  [--beam 5] [--build-missing] [--out FILE]` (the engine's network, `ksmech.network`: pool states
+  expanded by a checkpoint on the CPU, the k best pathways to the target by best-first search over
+  simple paths (A* with `--step-cost` x the remaining-change bound when the target is mapped on the
+  start pool, else uniform-cost; MAPPING_FAILED counted), arrival EXACT (identity keys) or SKELETON
+  (heavy-atom connectivity, up to protons), mechanism classes up to the order of independent steps
+  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]

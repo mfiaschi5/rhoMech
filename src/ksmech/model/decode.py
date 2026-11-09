@@ -34,9 +34,9 @@ on a stored sample's Lewis structure, `serve.science.stepapply.apply_matrix` on 
    until P9's ablation sets it.
 5. The `cfg.per_anchor` best distinct products of each anchor are kept; over all anchors the
    products are merged by their pool key (the sorted sigma keys of the product), the best
-   log P kept (`DECODE_MERGED` counts the others); best first. An anchor with no valid
-   completion within `max_pops` search nodes or `max_applied` applications is counted as
-   `DECODE_ANCHOR_UNCOMPLETED`.
+   log P kept (`DECODE_MERGED` counts the others), each completion carrying its key; best
+   first. An anchor with no valid completion within `max_pops` search nodes or `max_applied`
+   applications is counted as `DECODE_ANCHOR_UNCOMPLETED`.
 
 The END_MECH head is not read: on PMechDB it is untrained (lambda_stop = 0).
 """
@@ -93,6 +93,7 @@ class Completion:
     bonds: tuple[tuple[int, int, int], ...]  # (i, j, delta), i < j, the anchor included
     lone: tuple[tuple[int, int], ...]  # (i, delta)
     anchor: tuple[int, int, int]
+    key: str | None = None  # the product pool key `apply` gave (None: built without one)
 
 
 # ---- the candidate changes of one anchor
@@ -267,7 +268,8 @@ def complete_anchor(t: EntryTable, apply: Apply, cfg: DecodeConfig, skips: Count
             if key is not None and key in out:
                 skips["DECODE_MERGED"] += 1
             elif key is not None:
-                out[key] = Completion(exact_logp(pb, cls, t.anchor_logp), bonds, lone, t.anchor)
+                logp = exact_logp(pb, cls, t.anchor_logp)
+                out[key] = Completion(logp, bonds, lone, t.anchor, key)
         if why is not None:
             skips[f"DECODE_DROPPED:{why}"] += 1
         if len(out) >= cfg.per_anchor or applied >= cfg.max_applied:
@@ -354,3 +356,68 @@ def decode_pool(model, sample, cfg: DecodeConfig, apply: Apply, scope: str, skip
         table = entry_table(model, batch, h, p, anchor)
         found.append(complete_anchor(table, apply, cfg, skips))
     return merge(found, skips)
+
+
+# ---- the log-probability of a given reaction matrix
+
+
+@dataclass(frozen=True)
+class MatrixScore:
+    """log P of one reaction matrix at a state: per admissible anchor (a, b, sign) the decoder's
+    log P(e) + sum of every entry's log P, the best of them (the decoder ranks completions by
+    it, merging anchors by max) and their log-sum-exp (the marginal over anchors)."""
+
+    per_anchor: dict[tuple[int, int, int], float]
+    best: float
+    marginal: float
+
+
+def matrix_anchors(bonds) -> list[tuple[int, int, int]]:
+    """The anchors an R is decoded around: its forming bonds, or its breaking bonds when none
+    forms (spec v9, "Edit labels"), as (a, b, sign) with a < b."""
+    form = [(min(i, j), max(i, j), FORM) for i, j, d in bonds if d > 0]
+    return sorted(form) or sorted((min(i, j), max(i, j), BREAK) for i, j, d in bonds if d < 0)
+
+
+def table_logp(t: EntryTable, bonds, lone) -> float:
+    """log P(e) + sum over every other entry of log P(its class in R) on one anchor's table;
+    -inf when R holds a class the head has not (an atom change outside its alphabet, or a +1
+    entry around a breaking anchor)."""
+    a, b, sign = t.anchor
+    delta = {(min(i, j), max(i, j)): int(d) for i, j, d in bonds}
+    if delta.pop((a, b), None) != (1 if sign == FORM else -1):
+        return float("-inf")
+    if sign == BREAK and any(d > 0 for d in delta.values()):
+        return float("-inf")
+    n = t.atom_lp.shape[0]
+    pi, pj = np.triu_indices(n, 1)
+    keep = ~((pi == a) & (pj == b))
+    pi, pj = pi[keep], pj[keep]
+    cls = np.full(len(pi), ZERO)
+    index = {(int(i), int(j)): k for k, (i, j) in enumerate(zip(pi, pj, strict=True))}
+    for pair, d in delta.items():
+        cls[index[pair]] = d + 1  # PAIR_VALUES = (-1, 0, +1)
+    zero = t.atom_values.index(0)
+    atom_cls = np.full(n, zero)
+    for i, d in lone:
+        if int(d) not in t.atom_values:
+            return float("-inf")
+        atom_cls[int(i)] = t.atom_values.index(int(d))
+    pairs = t.pair_lp[pi, pj][np.arange(len(cls)), cls]
+    atoms = t.atom_lp[np.arange(n), atom_cls]
+    return float(t.anchor_logp + pairs.sum() + atoms.sum())
+
+
+def matrix_logp(model, sample, bonds, lone) -> MatrixScore:
+    """log P of the reaction matrix (bonds, lone) on the sample's global atoms, under the model
+    (reaction-network plan, item C: the score of a given step, e.g. a reverse edge -R at the
+    child state). An R with no admissible anchor scores -inf."""
+    batch, h, p, lp = encode_pool(model, sample)
+    scores = {}
+    for a, b, sign in matrix_anchors(bonds):
+        table = entry_table(model, batch, h, p, (float(lp[a, b, sign]), a, b, sign))
+        scores[(a, b, sign)] = table_logp(table, bonds, lone)
+    values = np.array(list(scores.values()) or [float("-inf")])
+    best = float(values.max())
+    marginal = best if not np.isfinite(best) else float(best + np.log(np.exp(values - best).sum()))
+    return MatrixScore(scores, best, marginal)

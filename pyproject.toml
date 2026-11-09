@@ -27,6 +27,7 @@ ksmech-physics = "ksmech.physics.cli:main"
 ksmech-serve = "ksmech.serve.app.cli:main"
 ksmech-train = "ksmech.train.cli:main"
 ksmech-eval = "ksmech.eval.cli:main"
+ksmech-network = "ksmech.network.cli:main"
 ksmech = "ksmech.client.cli:main"
 ksmech-mcp = "ksmech.mcp.server:main"
 

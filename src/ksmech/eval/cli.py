@@ -81,8 +81,9 @@ from ksmech.train.loop import DEFAULT_MODELS_DIR
 
 FLOOR_VERSION = 4  # 3: --cells valid|all (pooling over the pair_valid cells or every cell);
 #   4: --floor legacy|own_break, --kernel g|g2, --drop-intra-open (open-shell plan P7)
-DECODE_VERSION = 4  # 3: decoder caps legacy | labels, recorded in the header; 4: the closed-shell
-#   screen, --closed-minus1-filter, odd_top1 and the screened counts per sample (open-shell P9)
+DECODE_VERSION = 5  # 3: decoder caps legacy | labels, recorded in the header; 4: the closed-shell
+#   screen, --closed-minus1-filter, odd_top1 and the screened counts per sample (open-shell P9);
+#   5: rank_any against every product the source records for the pool (network plan, item A)
 
 
 def _floor_options(f) -> None:
@@ -121,6 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--a", nargs="+", type=Path, required=True, help="arm A's hit files (GENERAL)")
     c.add_argument("--b", nargs="+", type=Path, required=True, help="arm B's hit files (LEGACY)")
     c.add_argument("--k", type=int, default=1, help="top-k of a hit")
+    c.add_argument("--metric", default="own", choices=["own", "any"], help="own: the sample's "
+                   "label; any: any product the source records for the pool")  # fmt: skip
     c.add_argument("--out", type=Path, help="the report (JSON)")
     pin = sub.add_parser("pin", help="pin a split's samples as a cohort with per-column digests")
     pin.add_argument("--source", required=True, choices=[str(x) for x in Source])
@@ -251,8 +254,46 @@ def _decode_caps(args) -> tuple[dict[str, int], dict[str, str]]:
     return caps, prov.file_input(train) if args.caps == "labels" else {}
 
 
+def _outcomes(args, console: Console) -> tuple[dict, dict, dict[str, str]]:
+    """(step id -> the pool's recorded outcomes, the skip counts, the inputs): the source's
+    training steps grouped by reactant key (`eval.siblings`), parts from the split file."""
+    from collections import Counter
+
+    from ksmech.arrows.steps import load_split_file, splits_path
+    from ksmech.data.io import read_training_steps
+    from ksmech.eval.siblings import outcome_table, parts_of, side_keys
+
+    steps_file = steps_path(args.source, args.processed_dir)
+    split_file = splits_path(args.source, args.split, args.processed_dir)
+    skips: Counter = Counter()
+    keys = side_keys(read_training_steps(steps_file), skips)
+    parts = parts_of(load_split_file(split_file)) if split_file.is_file() else {}
+    if not parts:
+        console.print(f"[yellow]no split file {split_file.name}: sibling parts unknown[/yellow]")
+    inputs = prov.file_input(steps_file) | (prov.file_input(split_file) if parts else {})
+    return outcome_table(keys, parts), dict(skips), inputs
+
+
+def _print_decode(console: Console, report: dict, title: str) -> None:
+    """The top-k table (own label and any recorded outcome) and the multi-outcome subset."""
+    table = Table(title=f"full-R decoding, {title}")
+    for col in ("n", "top-1", "top-3", "top-5", "not found", "s / sample"):
+        table.add_column(col)
+    per_sample = f"{report['mean_seconds']:.1f}"
+    for name, suffix in (("own", ""), ("any", "_any")):
+        tops = (f"{report[f'top{k}{suffix}']:.1%}" for k in (1, 3, 5))
+        n = f"{report['n']} {name}"
+        table.add_row(n, *tops, str(report["not_found"]) if not suffix else "", per_sample)
+    console.print(table)
+    m = report["multi_outcome"]
+    if m["n"]:
+        console.print(f"pools with several recorded products: {m['n']} samples, top-1 own "
+                      f"{m['top1']:.1%}, any {m['top1_any']:.1%}")  # fmt: skip
+
+
 def cmd_decode(args, console: Console) -> int:
     from ksmech.eval.decode import decode_report, sample_decoder
+    from ksmech.eval.siblings import outcome_summary
     from ksmech.model.decode import DecodeConfig
     from ksmech.train.loop import load_model
 
@@ -266,15 +307,17 @@ def cmd_decode(args, console: Console) -> int:
     minus1 = args.closed_minus1_filter
     cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam, closed_minus1_filter=minus1, **caps)
     samples = load_samples(path, ids=ids)
-    report = decode_report(samples, sample_decoder(model, cfg, args.scope))
+    outcomes, sibling_skips, sibling_inputs = _outcomes(args, console)
+    report = decode_report(samples, sample_decoder(model, cfg, args.scope), outcomes=outcomes)
     hits = report.pop("per_sample")
     report |= _extras(args, hits, samples, path) | _run_notes(payload)
+    report["siblings"] = outcome_summary(outcomes, ids, args.part) | {"skips": sibling_skips}
     keys = ("source", "split", "part", "limit", "beam", "scope", "cohort", "slice")
     keys = (*keys, "closed_minus1_filter")
     config = {k: getattr(args, k) for k in keys}
     config |= {"run_source": run_source, "checkpoint": _checkpoint_text(args.checkpoint, payload)}
     config |= _sample_versions(path, payload, console) | {"caps": args.caps, **caps}
-    inputs = prov.file_input(path) | prov.file_input(ckpt) | caps_input
+    inputs = prov.file_input(path) | prov.file_input(ckpt) | caps_input | sibling_inputs
     header = prov.stamp("decode", DECODE_VERSION, inputs, config)
     suffix = f"_{args.source}" if args.source != run_source else ""
     suffix += f"_{args.cohort}" if args.cohort != "all" else ""
@@ -288,13 +331,7 @@ def cmd_decode(args, console: Console) -> int:
     prov.write_json(
         hits_out, {"per_sample": hits}, prov.stamp("decode_hits", DECODE_VERSION, inputs, config)
     )
-    table = Table(title=f"full-R decoding, {args.run} {args.checkpoint}, {args.split} {args.part}")
-    for col in ("n", "top-1", "top-3", "top-5", "not found", "s / sample"):
-        table.add_column(col)
-    tops = (f"{report[f'top{k}']:.1%}" for k in (1, 3, 5))
-    per_sample = f"{report['mean_seconds']:.1f}"
-    table.add_row(str(report["n"]), *tops, str(report["not_found"]), per_sample)
-    console.print(table)
+    _print_decode(console, report, f"{args.run} {args.checkpoint}, {args.split} {args.part}")
     for code, count in report["skips"].items():
         console.print(f"  {code}: {count}")
     console.print(f"wrote {out} and {hits_out.name}")
@@ -375,12 +412,13 @@ def cmd_compare(args, console: Console) -> int:
     from ksmech.eval.paired import compare_arms
 
     try:
-        report = compare_arms(args.a, args.b, args.k)
+        report = compare_arms(args.a, args.b, args.k, args.metric)
     except ValueError as err:
         console.print(f"[red]{err}")
         return 2
     d, m = report["decision"], report["majority"]
-    console.print(f"n {report['n']}, top-{args.k} per run: A {report['top_k']['a']}, "
+    console.print(f"n {report['n']}, top-{args.k} ({args.metric}) per run: "
+                  f"A {report['top_k']['a']}, "
                   f"B {report['top_k']['b']}")  # fmt: skip
     console.print(f"mean A {d['mean_a']:.2f}, mean B {d['mean_b']:.2f}, difference "
                   f"{d['difference']:+.2f}, pooled SD {d['pooled_sd']:.2f}, tolerance "
@@ -391,7 +429,8 @@ def cmd_compare(args, console: Console) -> int:
         inputs = {}
         for path in [*args.a, *args.b]:
             inputs |= prov.file_input(path)
-        header = prov.stamp("decode_compare", DECODE_VERSION, inputs, {"k": args.k})
+        config = {"k": args.k, "metric": args.metric}
+        header = prov.stamp("decode_compare", DECODE_VERSION, inputs, config)
         prov.write_json(args.out, report, header)
         console.print(f"wrote {args.out}")
     return 0

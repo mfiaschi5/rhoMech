@@ -25,14 +25,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
 from rdkit import Chem, rdBase
 
+from ksmech.network.keys import pool_key_of, split_pool_key  # noqa: F401 (the engine's, re-exported)
 from ksmech.serve.core.errors import Code, ServeError
 
 POOL_KEY_VERSION = 2
@@ -87,15 +87,6 @@ def fragment_keys(mol: Chem.Mol) -> list[FragmentKey]:
         charge = sum(a.GetFormalCharge() for a in frag.GetAtoms())
         out.append(FragmentKey(tuple(int(a) for a in atoms), token_key, species, flag, charge))
     return out
-
-
-def pool_key_of(species_keys: Iterable[str]) -> str:
-    return ".".join(sorted(species_keys))
-
-
-def split_pool_key(pool_key: str) -> Counter[str]:
-    """The multiset of species keys of a pool key."""
-    return Counter(k for k in pool_key.split(".") if k)
 
 
 def pool_id(pool_key: str) -> str:
