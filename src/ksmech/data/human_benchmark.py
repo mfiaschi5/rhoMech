@@ -1,12 +1,13 @@
 """The PMechRP human benchmark: 350 textbook pathways (Clayden, 2nd ed.) as an evaluation-only
-table (reaction-network plan, item G; docs/data_schema.md, "Human benchmark").
+table (reaction-network plan, item G; docs/data_schema.md, "Pathway benchmark files").
 
-NEVER TRAINED ON. The benchmark comes from the release PMechDB comes from, and many of its step
-targets are PMechDB products, drawn with PMechDB's reaction-centre map numbers (10, 20, ...);
-`overlap` measures how much of it the molecule split's training part already holds. It is no
-`Source`: the ingest, the sample store and `ksmech-train` take their sources from that enum, and
-`ksmech-train` refuses its name besides (`refuse_training`). Its files live under
-`data/processed/human_benchmark/`, beside no sample view.
+NEVER TRAINED ON. The benchmark comes from the release PMechDB comes from, and most of its step
+targets are drawn with PMechDB's reaction-centre map numbers (10, 20, ...), though few are
+PMechDB products; `data.benchmark_checks.overlap` measures how much of it a PMechDB split's
+training part already holds. It is no `Source`: the ingest, the sample store and `ksmech-train`
+take their sources from that enum, and `ksmech-train` refuses its name besides
+(`refuse_training`). Its files live under `data/processed/human_benchmark/`, beside no sample
+view.
 
 What the file holds (opened 2026-11-09): one pathway per row; `Temp (≠ RT)` (a temperature
 such as `-78 °C`, or `n/a`, which the header reads as room temperature), the reactant pool
