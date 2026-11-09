@@ -9102,3 +9102,28 @@ and `network.pools` are unchanged; `network.cli` gains the subcommand.
   SKELETON in one event (cost 2.89); `--max-species 4 --tolerance 0.1`: 14 pools, and two joins
   among the three hyperpaths (methanol made by a proton transfer to methoxide, then added to
   acetone).
+
+## 2026-11-09: free energies wired into the chain; failed expansions; fragment order (network plan B, E)
+
+- **`--free-energy qm`** (`network.thermo_provider`, the adapter point of item E): each fragment
+  of a pool is looked up by its record key in the thermochemistry sidecars of item B and
+  evaluated at T; G(pool) = sum of the species' G (1 M) plus RT ln(c / 1 M) for the reservoir
+  species at `--reservoir-molar` (water as solvent 55.3 M), so a reservoir copy is priced at its
+  chemical potential as `network.reservoir` asks. H and S come with G (the standard-state shift
+  counted as an entropy, so G = H - TS holds term by term), which gives T*. A fragment without a
+  sidecar leaves its pool without G (NO_FREE_ENERGY in the chain; THERMO_MISSING / THERMO_STALE
+  counted per species). Checked end to end on methoxide + acetone with pm_control_s0: 12 of the
+  22 species the network reached have sidecars (the other 9 have no QM record), and the chain
+  gives dG and T* where both ends have them.
+- **A pool whose expansion fails is EXPAND_FAILED, not NO_OUTGOING_STEP.** In that run the
+  hemiketal alkoxide, without tokens, took 88% of the mass as a "dead end": a featurization
+  failure is not chemistry. Such pools are absorbing (they cannot be expanded), their mass joins
+  the unexplored mass (the uncertainty) and they are never end states; the stop criterion
+  (`frontier_mass`, UNEXPLORED only) is unchanged.
+- **Pool SMILES list their fragments by identity key.** The model reads a fragment index, so the
+  same pool drawn in two fragment orders scores differently (item J's run: best log P -24.58
+  against -28.11 on CH3Cl + OH-). `network.pools.state_of_mol` writes the fragments in the order
+  of their identity keys (ties by their mapped SMILES), so the order no longer depends on the map
+  numbers and the pool and species graphs see one order. The dataset's own order, which the
+  model was trained on, is still the drawing's; that a model should be invariant to it is a
+  training question (fragment order is not augmented today).

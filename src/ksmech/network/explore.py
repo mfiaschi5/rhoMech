@@ -6,9 +6,10 @@ each unexpanded pool. After every expansion the explored graph becomes a Markov 
 (`network.chain`: reverse edges scored at the children, detailed balance with the free
 energies), each pool is classified, and the absorption probabilities from the start are solved:
 
-- an expanded pool is NO_OUTGOING_STEP when it proposed no step (its expansion failure, if
-  any, is in the graph's skips), SINK_AT_T when every step out climbs more than delta(T)
-  after the rescan (`network.stop`), and transient otherwise;
+- an expanded pool is EXPAND_FAILED when its expansion failed (no tokens, no Wiberg index: the
+  model never saw it, so its mass is unexplained, reported with the unexplored mass and never as
+  an end state), NO_OUTGOING_STEP when it proposed no step, SINK_AT_T when every step out
+  climbs more than delta(T) after the rescan (`network.stop`), and transient otherwise;
 - an unexpanded pool is TURNOVER when its first path from the start closes a catalytic
   turnover (`graph.turnover_closure`, never expanded; `stop_at_turnover` False expands it as any
   other pool), CLIMB_CUT when its G lies more than
@@ -22,8 +23,9 @@ way to the aldol) is followed once enough mass reaches it, instead of being prun
 The search stops when the UNEXPLORED mass is at most `mass_tol` (MASS_TOL), when no pool is
 left to expand (EXHAUSTED) or at `max_expansions` (EXPANSION_BUDGET). The result lists the end
 states with their probabilities (sinks, turnovers, dead ends and equilibrium classes spread
-over their pools), the unexplored mass (UNEXPLORED plus CLIMB_CUT: the uncertainty), the sink
-checks, NO_NET_REACTION and the equilibrium populations over the explored pools.
+over their pools), the unexplored mass (UNEXPLORED, CLIMB_CUT and EXPAND_FAILED: the
+uncertainty), the sink checks, NO_NET_REACTION and the equilibrium populations over the
+explored pools.
 
 Monte Carlo tree search, the plan's option behind a flag, is not implemented.
 """
@@ -50,8 +52,8 @@ from ksmech.network.stop import SINK_AT_T, SinkCheck, StopParams, confirm_sink, 
 from ksmech.network.tpt import transition_paths
 
 NO_OUTGOING_STEP, TURNOVER = "NO_OUTGOING_STEP", "TURNOVER"
-UNEXPLORED, CLIMB_CUT = "UNEXPLORED", "CLIMB_CUT"
-NOT_ENDS = (UNEXPLORED, CLIMB_CUT)
+UNEXPLORED, CLIMB_CUT, EXPAND_FAILED = "UNEXPLORED", "CLIMB_CUT", "EXPAND_FAILED"
+NOT_ENDS = (UNEXPLORED, CLIMB_CUT, EXPAND_FAILED)
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,7 @@ class ExploreResult:
     absorption: Absorption
     absorbing: dict[str, str]
     ends: list[EndState]
-    unexplored_mass: float  # UNEXPLORED + CLIMB_CUT
+    unexplored_mass: float  # UNEXPLORED + CLIMB_CUT + EXPAND_FAILED
     frontier_mass: float  # UNEXPLORED only (the stop criterion)
     reason: str  # MASS_TOL | EXHAUSTED | EXPANSION_BUDGET
     sinks: dict[str, SinkCheck]
@@ -150,6 +152,8 @@ class _Run:
         for key in list(chain.keys):
             if key not in self.graph.out:
                 absorbing[key] = self._unexpanded(chain, key)
+            elif key in self.graph.failures:
+                absorbing[key] = EXPAND_FAILED
             elif not any(e.target != key for e in self.graph.out[key]):
                 absorbing[key] = NO_OUTGOING_STEP
             else:
@@ -185,7 +189,7 @@ def _ends(chain: MarkovChain, ab: Absorption, absorbing: dict[str, str]) -> list
 def _result(run: _Run, chain, absorbing, ab: Absorption, reason: str) -> ExploreResult:
     probs = ab.state_probabilities(run.graph.root)
     frontier = sum(p for k, p in probs.items() if absorbing.get(k) == UNEXPLORED)
-    cut = sum(p for k, p in probs.items() if absorbing.get(k) == CLIMB_CUT)
+    cut = sum(p for k, p in probs.items() if absorbing.get(k) in (CLIMB_CUT, EXPAND_FAILED))
     start_sink = absorbing.get(run.graph.root) == SINK_AT_T
     verdict, share = no_net_reaction(chain, start_sink, run.params.stop)
     counts = Counter(run.counts) + chain.counts + run.graph.skips

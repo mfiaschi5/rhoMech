@@ -70,11 +70,15 @@ def _numbered(mol: Chem.Mol) -> Chem.Mol:
 
 
 def state_of_mol(mol: Chem.Mol) -> PoolState:
-    """The state of a mapped, explicit-H, Kekule molecule."""
+    """The state of a mapped, explicit-H, Kekule molecule. Its SMILES lists the fragments in
+    the order of their identity keys (ties by their mapped SMILES), so the fragment order the
+    model sees does not depend on the map numbers: the model reads a fragment index, and a pool
+    drawn in two orders scores differently (decisions.md, 2026-11-09)."""
     frags = fragments(mol)
     with rdBase.BlockLogs():
-        smiles = Chem.MolToSmiles(mol, canonical=True)
-        species = tuple(sorted(identity_key(f) for f in frags))
+        rows = sorted((identity_key(f), Chem.MolToSmiles(f, canonical=True)) for f in frags)
+    smiles = ".".join(text for _, text in rows)
+    species = tuple(key for key, _ in rows)
     skeletons = tuple(sorted(skeleton_key(f) for f in frags))
     orders, lone = heavy_state(mol)
     return PoolState(smiles, species, skeletons, orders, lone)

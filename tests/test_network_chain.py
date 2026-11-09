@@ -360,3 +360,56 @@ def test_free_energy_values_and_the_adapter_point():
     assert climb_threshold(298.15, 0.01, 0.0) == pytest.approx(2.728, abs=1e-3)
     assert climb_threshold(383.15, 0.01, 0.0) == pytest.approx(3.506, abs=1e-3)
     assert StopParams().threshold == pytest.approx(2.728 + 5.0, abs=1e-3)
+
+
+def test_the_qm_provider_sums_species_and_prices_the_reservoir_at_its_concentration():
+    """Item B wired into the chain (`network.thermo_provider`): G(pool) = sum of the species'
+    G, a reservoir species at RT ln(c / 1 M) above its standard G, None when one is missing."""
+    import math
+
+    from ksmech.network.free_energy import Thermo, load_thermo_model, rt
+    from ksmech.network.pools import pool_state
+    from ksmech.network.thermo_provider import THERMO_MISSING, QMThermo, at_concentration
+
+    table = {"CCl": Thermo(-10.0, -8.0, 0.006), "[OH-]": Thermo(-5.0, -4.0, 0.004),
+             "O": Thermo(-3.0, -2.0, 0.005)}  # fmt: skip
+
+    class Fake(QMThermo):
+        def _compute(self, record_key, t):
+            if record_key not in table:
+                self.counts[THERMO_MISSING] += 1
+            return table.get(record_key)
+
+    water = pool_state("O").species[0]
+    model = load_thermo_model("qm", reservoir_smiles={water: "O"}, molar={water: 55.3},
+                              species=Fake())  # fmt: skip
+    t = 298.15
+    g = model.free_energy(pool_state("CCl.[OH-]"), t)
+    assert (g.g, g.h, g.s) == pytest.approx((-15.0, -12.0, 0.010))
+    wet = model.free_energy(pool_state("CCl.[OH-].O"), t)
+    assert wet.g == pytest.approx(-18.0 + rt(t) * math.log(55.3))
+    assert wet.h == pytest.approx(-14.0)  # the shift is entropic: H unchanged, S lower
+    assert wet.s == pytest.approx(0.015 - rt(t) * math.log(55.3) / t)
+    mu = model.chemical_potential(water, t)
+    assert mu.g == pytest.approx(at_concentration(table["O"], 55.3, t).g)
+    assert model.chemical_potential("not-a-reservoir-key", t) is None
+    assert model.free_energy(pool_state("CBr.[OH-]"), t) is None
+    assert load_thermo_model("none") is None
+
+
+def test_a_pool_that_fails_to_expand_is_unexplained_mass_not_an_end_state():
+    """A pool the model cannot expand (no tokens) is EXPAND_FAILED: its mass joins the
+    unexplored mass, never an end state; a pool that expands to nothing is NO_OUTGOING_STEP."""
+    from ksmech.network.explore import EXPAND_FAILED
+
+    class Failing(Stub):
+        def expand(self, state):
+            if state == "A":
+                return Expansion([], Counter(), "MISSING_TOKENS")
+            return super().expand(state)
+
+    res = explore(Failing(_tree()), "R", None, _params(mass_tol=0.0))
+    assert res.absorbing["A"] == EXPAND_FAILED and "A1" not in res.graph.states
+    assert all(e.key != "A" for e in res.ends)
+    assert res.unexplored_mass == pytest.approx(0.9, abs=1e-6) and res.frontier_mass == 0.0
+    assert [e.key for e in res.ends] == ["B2"]

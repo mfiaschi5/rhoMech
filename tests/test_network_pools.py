@@ -156,3 +156,12 @@ def test_a_step_and_its_reverse_are_scored_on_map_numbers(expander):
     back = expander.reverse_logp(proposal)
     assert not isinstance(back, str) and back.best <= 0.0
     assert expander.step_logp(start, [(1, 99, 1)], []) == "STEP_OUTSIDE_POOL"
+
+
+def test_the_fragment_order_follows_the_species_keys_not_the_map_numbers():
+    a = pool_state("[CH3:1][Cl:2].[OH-:3]")
+    b = pool_state("[OH-:1].[CH3:2][Cl:3]")
+    assert a.species == b.species and list(a.species) == sorted(a.species)
+    for state in (a, b):
+        frags = Chem.GetMolFrags(parse_mapped(state.smiles), asMols=True, sanitizeFrags=False)
+        assert [identity_key(f) for f in frags] == list(state.species)

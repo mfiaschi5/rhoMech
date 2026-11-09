@@ -13,8 +13,8 @@ item B plugs in without the network knowing how it is computed:
 
 `ThermoModel` bundles them. `load_thermo_model` is the adapter point for item B: its
 G(pool) = sum_i G_i(T) + RT ln(c_i / c0) (`qm.thermo.pool_free_energy`, in Hartree, with the
-reservoir's fixed potentials) is wired there; today it knows only 'none', and the chain then
-falls back to the model's own probabilities.
+reservoir's fixed potentials) is wired there as 'qm' (`network.thermo_provider`); with 'none'
+the chain falls back to the model's own probabilities.
 
 `inversion(dh, ds)`: the inversion temperature T* = dH / dS and on which side of it the change
 is favoured, from dG(T) = dH - T dS linearized at the T where H and S were evaluated:
@@ -95,12 +95,16 @@ class ThermoModel:
 def load_thermo_model(kind: str = "none", **options) -> ThermoModel | None:
     """ADAPTER POINT (reaction-network plan, item B): the free energies a network run reads.
     'none' gives None (every state NO_FREE_ENERGY: the chain runs on the model's own
-    probabilities and no sink can be declared). Item B adds its provider here: a
-    `ThermoModel` whose `free_energy(state, T)` is G(pool) over `state.species` (identity keys
-    v2) in kcal/mol, and whose `chemical_potential(key, T)` is a reservoir species' mu."""
+    probabilities and no sink can be declared). 'qm' gives item B's provider
+    (`network.thermo_provider.qm_thermo_model`, `options` its arguments): G(pool) from the
+    thermochemistry sidecars in kcal/mol, the reservoir species at their concentration."""
     if kind == "none":
         return None
-    raise ValueError(f"unknown free-energy provider {kind!r}: only 'none' so far (item B)")
+    if kind == "qm":  # item B: the thermochemistry sidecars (`network.thermo_provider`)
+        from ksmech.network.thermo_provider import qm_thermo_model
+
+        return qm_thermo_model(**options)
+    raise ValueError(f"unknown free-energy provider {kind!r}: 'none' or 'qm'")
 
 
 def rt(temperature_k: float) -> float:

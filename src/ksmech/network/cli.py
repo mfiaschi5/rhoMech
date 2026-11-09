@@ -127,8 +127,10 @@ def _predict_parser(sub, models_dir: Path, tokens_dir: Path) -> None:
                    help="expand pools that close a catalytic turnover")  # fmt: skip
     s.add_argument("--reservoir", nargs="*", default=[], help="species always available")
     s.add_argument("--reservoir-copies", type=int, default=1, help="copies kept in each pool")
-    s.add_argument("--free-energy", default="none", choices=["none"],
-                   help="the free-energy provider (item B)")  # fmt: skip
+    s.add_argument("--reservoir-molar", nargs="*", type=float, default=[],
+                   help="the reservoir species' concentrations (mol/L, default 1)")  # fmt: skip
+    s.add_argument("--free-energy", default="none", choices=["none", "qm"],
+                   help="none, or qm: the thermochemistry sidecars (ksmech-qm thermo)")  # fmt: skip
     s.add_argument("--beam", type=int, default=5, help="anchors completed and products kept each")
     s.add_argument("--build-missing", action="store_true", help="compute missing tokens (GFN2)")
     s.add_argument("--tpt-ends", type=int, default=3, help="end states given pathways (TPT)")
@@ -281,9 +283,22 @@ def _predict_expander(args):
     return ckpt, expander, start
 
 
+def _thermo_model(args, expander):
+    """The free-energy provider of --free-energy, the reservoir species at --reservoir-molar."""
+    from ksmech.network.free_energy import load_thermo_model
+
+    if args.free_energy != "qm":
+        return load_thermo_model(args.free_energy)
+    keys = list(getattr(getattr(expander, "reservoir", None), "smiles", {}))
+    if len(args.reservoir_molar) not in (0, len(keys)):
+        raise SystemExit(f"--reservoir-molar takes one value per reservoir species ({len(keys)})")
+    smiles = getattr(getattr(expander, "reservoir", None), "smiles", {})
+    return load_thermo_model("qm", reservoir_smiles=smiles,
+                             molar=dict(zip(keys, args.reservoir_molar, strict=False)))  # fmt: skip
+
+
 def cmd_predict(args, console: Console) -> int:
     from ksmech.network.explore import ExploreParams, explore, pathways_to_ends, predict_rows
-    from ksmech.network.free_energy import load_thermo_model
 
     ckpt, expander, start = _predict_expander(args)
     climb = None if args.no_climb_limit else args.max_climb
@@ -291,7 +306,7 @@ def cmd_predict(args, console: Console) -> int:
                            mass_tol=args.mass_tol, epsilon=args.epsilon, margin_kcal=args.margin,
                            max_climb_kcal=climb, rescan_factor=args.rescan_factor,
                            stop_at_turnover=not args.no_stop_at_turnover)  # fmt: skip
-    res = explore(expander, start, load_thermo_model(args.free_energy), params)
+    res = explore(expander, start, _thermo_model(args, expander), params)
     rows = predict_rows(res, pathways_to_ends(res, args.tpt_ends, args.pathways))
     rows["threshold_kcal"] = params.stop.threshold
     _print_predict(console, rows, args.top)
@@ -299,7 +314,8 @@ def cmd_predict(args, console: Console) -> int:
         keys = ("run", "run_source", "checkpoint", "start", "temperature_k", "max_expansions",
                 "mass_tol", "epsilon", "margin", "max_climb", "no_climb_limit", "rescan_factor",
                 "no_stop_at_turnover",
-                "reservoir", "reservoir_copies", "free_energy", "beam", "build_missing",
+                "reservoir", "reservoir_copies", "reservoir_molar", "free_energy", "beam",
+                "build_missing",
                 "tpt_ends", "pathways")  # fmt: skip
         header = prov.stamp("network_predict", PREDICT_VERSION, prov.file_input(ckpt),
                             {k: getattr(args, k) for k in keys})  # fmt: skip
