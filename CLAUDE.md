@@ -217,7 +217,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8 [--steps-from FILE]` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   the spawned workers run tblite on the system's LP64 OpenBLAS instead of the wheel's netlib copy
   (`qm.blas`, `KSMECH_BLAS=auto|bundled|PATH`; `--workers 1` and the web app keep the netlib copy;
-  a pod needs `libopenblas0-serial`); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
+  a pod needs `libopenblas0-serial`); `--optimizer tblite-anc` optimizes in approximate normal
+  coordinates with RFO steps and restarted SCFs (`qm.anc`, method `.../tblite-anc`, 2-4x fewer
+  energies than the default L-BFGS-B `.../tblite-lbfgs`; its `--maxiter` counts energies); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
   codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,

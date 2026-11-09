@@ -440,17 +440,18 @@ def test_walls_only_when_a_bond_breaks(monkeypatch):
     _, broken = _ptcl4_stretched(1.5)
     z = np.array([a.GetAtomicNum() for a in mol.GetAtoms()])
     bohr = metal_qm.BOHR_ANG
-    walls_seen = []
+    walls_seen, free = [], [ok]
 
-    def fake_walls(*args, **kwargs):
-        walls_seen.append(args[7])
+    def fake_optimize(mol_, z_, start, charge, unpaired, walls=None):
+        if walls is None:
+            return free[0] / bohr
+        walls_seen.append(walls)
         return ok / bohr
 
-    monkeypatch.setattr(metal_qm, "optimize_tblite", fake_walls)
     calc = metal_qm.MetalGFN2Calculator(metal_qm.MetalQMConfig())
-    monkeypatch.setattr(calc, "_optimize", lambda *a: ok / bohr)
+    monkeypatch.setattr(calc, "_optimize", fake_optimize)
     assert calc._relax(mol, z, ok / bohr, -2, 0)[1] is False and walls_seen == []
-    monkeypatch.setattr(calc, "_optimize", lambda *a: broken / bohr)
+    free[0] = broken
     xyz, restrained = calc._relax(mol, z, ok / bohr, -2, 0)
     assert restrained is True and len(walls_seen) == 1
     walls = walls_seen[0]

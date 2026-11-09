@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--source", required=True, choices=[str(s) for s in Source])
     run.add_argument("--workers", type=int, default=1)
     run.add_argument("--n-conformers", type=int, default=1)
-    run.add_argument("--optimizer", choices=["tblite", "xtb"], default="tblite")
+    run.add_argument("--optimizer", choices=["tblite", "tblite-anc", "xtb"], default="tblite")
     run.add_argument("--limit", type=int, default=None, help="random subset, for pilots")
     run.add_argument("--timeout", type=int, default=900, help="seconds per molecule")
     run.add_argument("--maxiter", type=int, default=500, help="geometry optimizer iterations")

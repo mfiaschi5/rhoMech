@@ -31,7 +31,6 @@ from ksmech.qm.geometry import (
     BOHR_ANG,
     SKIP_BOND_ELEMENTS,
     WallRestraint,
-    optimize_tblite,
 )
 from ksmech.qm.records import QMError, ReasonCode, cache_path, save_record
 from ksmech.qm.xtb_calc import GFN2Calculator, QMConfig
@@ -100,19 +99,18 @@ class MetalGFN2Calculator(GFN2Calculator):
 
     def _relax(self, mol, z, start_bohr, charge, unpaired) -> tuple[np.ndarray, bool]:
         cfg = self.config
-        xyz = self._optimize(z, start_bohr, charge, unpaired)
         try:
+            xyz = self._optimize(mol, z, start_bohr, charge, unpaired)
             check_metal_connectivity(mol, xyz * BOHR_ANG, cfg.conn_cov_factor, cfg.ml_cov_factor)
             return xyz, False
         except QMError as exc:
-            if not (cfg.restrain and cfg.optimizer == "tblite"):
+            if exc.reason is not ReasonCode.CONNECTIVITY_CHANGED or not (
+                cfg.restrain and cfg.optimizer != "xtb"
+            ):
                 raise
             log.info("free optimization broke a bond (%s); retrying with walls", exc.detail)
         walls = metal_bond_walls(mol, cfg.wall_factor, cfg.ml_wall_factor, cfg.wall_k)
-        xyz = optimize_tblite(
-            z, start_bohr, charge, unpaired, cfg.fmax, cfg.maxiter, cfg.solvent, walls,
-            scf_maxiter=cfg.scf_maxiter,
-        )  # fmt: skip
+        xyz = self._optimize(mol, z, start_bohr, charge, unpaired, walls)
         check_metal_connectivity(mol, xyz * BOHR_ANG, cfg.conn_cov_factor, cfg.ml_cov_factor)
         return xyz, True
 

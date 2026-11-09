@@ -492,7 +492,8 @@ is a plain `.npz` (no pickle). `ksmech.qm.records.load_record` returns a `QMReco
 
 The key is `sha256(f"{smiles}|{conformer_id}|{method}")`, where `smiles` is the map-free canonical
 SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
-`GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key). A
+`GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key;
+`--optimizer tblite-anc` writes `.../tblite-anc`, `xtb` writes `.../xtb-opt`). A
 species whose spin `data.spin` reassigns (a singlet carbene or CO drawn with two radical
 electrons, an odd Cu(II) or Fe(III) fragment RDKit counts 0; open-shell plan P4) has the tag
 `+spin-v1-u<u>` right after the optimizer part, before any later suffix:

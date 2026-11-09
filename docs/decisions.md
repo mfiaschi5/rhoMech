@@ -8444,3 +8444,57 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   optimizer (xtb's ANCopt needs 6-73 cycles where L-BFGS-B needs 23-326), and stopping a free
   optimization once a bond has clearly broken (the restrained 11% of the molecules take 46% of
   the time).
+
+## 2026-11-09: an ANC / RFO optimizer with restarted SCFs (`--optimizer tblite-anc`)
+
+- **Why.** After OpenBLAS the geometry optimization is still 60-97% of a molecule's time, and
+  scipy's L-BFGS-B in Cartesian coordinates needs many energies: 23-326 on six ReactMech molecules
+  of 21-120 atoms, each SCF started from the guess; the restrained 11% of the molecules take 46%
+  of the CPU time, because the free run goes on to its end after a bond has broken and the walled
+  run then starts over.
+- **Candidates, same flow (free run, connectivity check, walls), 34 molecules** (`pmechdb`,
+  `reactmech`, `rmechdb`, 16-123 atoms: five per size bin, six restrained, three radicals; OpenBLAS,
+  eight at a time). Energies over the set and wall time:
+  L-BFGS-B 8,225 / 1,360 s; L-BFGS-B with restarted SCFs 6,880 / 701 s; ASE's `PreconLBFGS`
+  (Exp preconditioner, restarted) 5,411 / 582 s; geomeTRIC (TRIC internal coordinates,
+  restarted) 1,797 / 1,917 s, the fewest steps but up to a second of Python per step at 100
+  atoms; xtb 6.7.1's ANCopt binary (free run only, no walls) 2,660 / 510 s. The restart alone
+  cuts the time per energy about twofold.
+- **Choice: ANCopt's scheme in numpy over tblite (`qm.anc`).** Approximate normal coordinates
+  from Lindh's model Hessian (1995: stretch, bend and torsion terms damped by
+  rho_ij = exp(alpha (r_ref^2 - r^2)), parameters by period; Wilson B vectors checked against
+  finite differences), the rigid motions projected out, eigenvalues floored at 0.01 (xtb's
+  hlow); RFO steps in a trust region (0.3 Bohr to start, 1e-3 to 1.0, doubled at ratio > 0.75,
+  quartered below 0.25, an uphill step taken back); BFGS in the basis, which is rebuilt from the
+  updated Hessian every 20 steps. Same convergence test as L-BFGS-B (every gradient component
+  <= fmax = 3e-4 Ha/Bohr), so both ends are minima of equal standing. No dependency, no binary, the
+  walls and tblite's own energies throughout (xtb's binary has its own GFN2 / ALPB: tblite's
+  gradient at its optimum was 0.9-3.5e-4, sometimes above fmax, and it has no walls). Each SCF
+  starts from the previous point's wavefunction (`geometry.TbliteEnergy`, as tblite's ASE
+  calculator does), from the guess when that start fails.
+- **The free run stops once a bond stays broken (`geometry.DissociationGuard`).** In the 99 free
+  runs of the comparison that ended with every bond intact, no bond ever passed 1.3x its
+  covalent-radius sum on the way (the largest: 1.30); the runs that broke a bond passed 1.3x
+  after 2-111 energies and ended at 1.3-3.6x. The ANC path's free run is stopped as a
+  CONNECTIVITY_CHANGED once a bond has been beyond `conn_cov_factor` (1.3) at five trial
+  geometries in a row (`DISSOCIATED_PATIENCE`), and the walled run follows at once; the old path
+  is untouched.
+- **End to end** (`GFN2Calculator.run`: embedding excluded, optimization, final singlepoint,
+  N+-1 Fukui, %Vbur; four at a time, OpenBLAS): 34 molecules, 8,084 -> 3,202 energies
+  (2.5x fewer) and 1,039 -> 332 s (3.1x); per molecule from 0.84x (22 atoms, the one slower) to
+  6.1x, the restrained ones 2.8-6.1x. A 101-atom restrained molecule fails the old path at its
+  iteration limit (OPT_NOT_CONVERGED) and converges with ANC in 30 s. The ANC energy is lower or
+  equal (within 0.005 kcal/mol) on 32 of the 33 molecules both finish, median -0.21 kcal/mol and
+  down to -4.0: L-BFGS-B stops early on flat surfaces. The exception is a restrained hypervalent
+  sulfur species (+15 kcal/mol): S-Cl and N-S lean on their walls in both runs, which converge
+  into minima 0.63 A apart, a property of the walled surface rather than of either optimizer.
+  One 42-atom molecule is restrained by ANC and not by L-BFGS-B, whose free run had stopped short
+  of the bond's dissociation (ASE's and geomeTRIC's runs break it too).
+- **A method of its own.** `QMConfig(optimizer="tblite-anc")`, method
+  `GFN2-xTB/ALPB-water/tblite-anc`, so its records never share a cache key with the L-BFGS-B ones;
+  `ksmech-qm run --optimizer tblite-anc`. Its `--maxiter` counts energies (L-BFGS-B's counts
+  iterations, with twice as many energies allowed). The default stays `tblite`
+  (`.../tblite-lbfgs`), bit for bit as before: every reader of QM records looks them up under
+  `QMConfig().method`, so switching the default means recomputing every source's records and
+  everything built on them, a decision of its own. Serve's metal path (`MetalGFN2Calculator`)
+  goes through the same `_optimize`, so it follows the option too.

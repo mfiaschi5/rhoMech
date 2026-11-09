@@ -2,7 +2,10 @@
 a tagged species' optimization (`kick`, `formed_bonds`; open-shell plan P4).
 
 tblite has no optimizer, so the default backend runs scipy L-BFGS-B on tblite energies and
-gradients (Cartesian, Bohr). The other backend shells out to the `xtb` binary (`--opt --gfn 2`).
+gradients (Cartesian, Bohr), each SCF from the guess. `optimize_tblite_anc` runs the ANC / RFO
+steps of `qm.anc` instead, each SCF restarted from the previous point's wavefunction
+(`TbliteEnergy`), and may stop a free run as soon as a bond has dissociated
+(`DissociationGuard`). The other backend shells out to the `xtb` binary (`--opt --gfn 2`).
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import itertools
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +23,7 @@ from rdkit import Chem
 from scipy.optimize import minimize
 from tblite.interface import Calculator, TBLiteRuntimeError
 
+from ksmech.qm.anc import AncSettings, optimize_anc
 from ksmech.qm.records import QMError, ReasonCode
 
 BOHR_ANG = 0.529177210903
@@ -31,6 +36,7 @@ SCF_MAXITER = 250  # tblite's own default SCF cycle limit
 KICK_ANG = 0.02
 KICK_SEED = 0
 FORMED_FACTOR = 1.2  # a non-bonded pair closer than this x r_cov sum is a formed bond (the walls)
+DISSOCIATED_PATIENCE = 5  # the ANC path's free run stops after this many steps with a bond broken
 
 
 def new_calculator(
@@ -132,6 +138,114 @@ def optimize_tblite(
             f"max|grad|={np.abs(out.jac).max():.2e} after {out.nit} iterations ({out.message})",
         )
     return out.x.reshape(-1, 3)
+
+
+class TbliteEnergy:
+    """GFN2 energy and gradient along one optimization (`qm.anc`'s objective): each SCF starts
+    from the previous point's wavefunction, or from the guess when that start fails, plus the
+    optional bond walls. A `guard` sees every trial geometry first and may raise a QMError."""
+
+    def __init__(
+        self,
+        z: np.ndarray,
+        xyz_bohr: np.ndarray,
+        charge: int,
+        unpaired: int,
+        solvent: str | None,
+        scf_maxiter: int = SCF_MAXITER,
+        walls: WallRestraint | None = None,
+        guard: Callable[[np.ndarray], None] | None = None,
+    ) -> None:
+        self.calc = new_calculator(z, xyz_bohr, charge, unpaired, solvent, scf_maxiter=scf_maxiter)
+        self.walls, self.guard = walls, guard
+        self.result = None  # the last point's tblite Result: the next SCF's start
+        self.fresh_starts = 0
+
+    def _singlepoint(self):
+        try:
+            return self.calc.singlepoint(self.result)
+        except TBLiteRuntimeError:
+            if self.result is None:
+                raise
+            self.result, self.fresh_starts = None, self.fresh_starts + 1
+            return self.calc.singlepoint()
+
+    def __call__(self, xyz_bohr: np.ndarray) -> tuple[float, np.ndarray]:
+        if self.guard is not None:
+            self.guard(xyz_bohr)
+        self.calc.update(positions=xyz_bohr)
+        self.result = self._singlepoint()
+        energy, grad = float(self.result.get("energy")), np.array(self.result.get("gradient"))
+        if self.walls is not None:
+            e_wall, g_wall = self.walls.energy_gradient(xyz_bohr)
+            energy, grad = energy + e_wall, grad + g_wall
+        return energy, grad
+
+
+class DissociationGuard:
+    """A `TbliteEnergy` guard: CONNECTIVITY_CHANGED once an input bond (Li, Na, Mg and K bonds
+    excepted) has been longer than `factor` x its covalent-radius sum at `patience` trial
+    geometries in a row. In the benchmark of 2026-11-09 no free run that ended with its bonds
+    intact ever passed 1.3x on the way (99 runs), while a bond that broke passed it within a few
+    dozen steps and stayed: the free run need not go on to its end."""
+
+    def __init__(self, mol: Chem.Mol, factor: float, patience: int = DISSOCIATED_PATIENCE) -> None:
+        table = Chem.GetPeriodicTable()
+        z = [a.GetAtomicNum() for a in mol.GetAtoms()]
+        pairs = [
+            (b.GetBeginAtomIdx(), b.GetEndAtomIdx())
+            for b in mol.GetBonds()
+            if z[b.GetBeginAtomIdx()] not in SKIP_BOND_ELEMENTS
+            and z[b.GetEndAtomIdx()] not in SKIP_BOND_ELEMENTS
+        ]
+        self.pairs = np.array(pairs, dtype=int).reshape(-1, 2)
+        radius = table.GetRcovalent
+        self.rcov = np.array([radius(z[i]) + radius(z[j]) for i, j in pairs])
+        self.factor, self.patience, self.streak = factor, patience, 0
+
+    def __call__(self, xyz_bohr: np.ndarray) -> None:
+        if not len(self.pairs):
+            return
+        d = np.linalg.norm(xyz_bohr[self.pairs[:, 0]] - xyz_bohr[self.pairs[:, 1]], axis=1)
+        ratio = d * BOHR_ANG / self.rcov
+        k = int(ratio.argmax())
+        self.streak = self.streak + 1 if ratio[k] > self.factor else 0
+        if self.streak >= self.patience:
+            i, j = self.pairs[k]
+            raise QMError(
+                ReasonCode.CONNECTIVITY_CHANGED,
+                f"bond ({i},{j}) at {ratio[k]:.2f}x, beyond {self.factor}x for "
+                f"{self.patience} steps of the optimization",
+            )
+
+
+def optimize_tblite_anc(
+    z: np.ndarray,
+    xyz_bohr: np.ndarray,
+    charge: int,
+    unpaired: int,
+    fmax: float,
+    maxiter: int,
+    solvent: str | None = None,
+    walls: WallRestraint | None = None,
+    scf_maxiter: int = SCF_MAXITER,
+    guard: Callable[[np.ndarray], None] | None = None,
+) -> np.ndarray:
+    """ANC / RFO steps (`qm.anc`) on GFN2 energies and gradients, each SCF restarted from the
+    previous point, plus optional bond walls and a guard. Returns Bohr coordinates (n, 3)."""
+    if len(z) == 1:
+        return xyz_bohr.copy()
+    energy = TbliteEnergy(z, xyz_bohr, charge, unpaired, solvent, scf_maxiter, walls, guard)
+    try:
+        out = optimize_anc(energy, z, xyz_bohr, AncSettings(fmax=fmax, maxiter=maxiter))
+    except TBLiteRuntimeError as exc:
+        raise QMError(ReasonCode.SCF_NOT_CONVERGED, f"during optimization: {exc}") from exc
+    if not out.converged:
+        raise QMError(
+            ReasonCode.OPT_NOT_CONVERGED,
+            f"max|grad|={out.gmax:.2e} after {out.n_evals} energies (ANC)",
+        )
+    return out.xyz
 
 
 def _write_xyz(path: Path, z: np.ndarray, xyz_ang: np.ndarray) -> None:

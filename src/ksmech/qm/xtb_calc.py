@@ -33,19 +33,22 @@ from ksmech.qm.ao import ao_layout
 from ksmech.qm.embed import NOTES_PROP, prepare_mol
 from ksmech.qm.geometry import (
     BOHR_ANG,
+    DissociationGuard,
     bond_walls,
     check_connectivity,
     formed_bonds,
     kick,
     new_calculator,
     optimize_tblite,
+    optimize_tblite_anc,
     optimize_xtb,
 )
 from ksmech.qm.records import DEFAULT_CACHE_DIR, QMError, QMRecord, ReasonCode
 from ksmech.qm.sterics import buried_volume_per_atom
 
 log = logging.getLogger(__name__)
-_OPTIMIZERS = ("tblite", "xtb")
+_OPTIMIZERS = ("tblite", "tblite-anc", "xtb")
+_OPT_TAGS = {"tblite": "tblite-lbfgs", "tblite-anc": "tblite-anc", "xtb": "xtb-opt"}
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,7 @@ class QMConfig:
     scf_maxiter: int = 250  # SCF cycles per energy (tblite's default); not part of `method`
     timeout_s: int = 900  # per molecule, enforced by the batch runner (103 atoms take ~300 s)
     conn_cov_factor: float = 1.3  # an input bond stretched beyond this x r_cov sum = broken
-    restrain: bool = True  # retry a dissociating species with bond walls (tblite backend only)
+    restrain: bool = True  # retry a dissociating species with bond walls (tblite backends only)
     wall_factor: float = 1.2  # walls start at this x r_cov sum
     wall_k: float = 1.0  # Hartree / Bohr^2
     cache_dir: Path = DEFAULT_CACHE_DIR
@@ -72,8 +75,8 @@ class QMConfig:
     def method(self) -> str:
         """Part of the cache key: results from different backends must not collide."""
         medium = f"ALPB-{self.solvent}" if self.solvent else "gas"
-        opt = "tblite-lbfgs" if self.optimizer == "tblite" else "xtb-opt"
-        base = f"GFN2-xTB/{medium}/{'given' if self.given_geometry else opt}"
+        opt = "given" if self.given_geometry else _OPT_TAGS[self.optimizer]
+        base = f"GFN2-xTB/{medium}/{opt}"
         return qm_spin.tagged(base, self.spin_tag)
 
 
@@ -134,20 +137,17 @@ class GFN2Calculator:
     def __init__(self, config: QMConfig | None = None) -> None:
         self.config = config or QMConfig()
 
-    def _optimize(self, z, xyz_bohr, charge, unpaired) -> np.ndarray:
+    def _optimize(self, mol, z, xyz_bohr, charge, unpaired, walls=None) -> np.ndarray:
+        """One optimization by the configured backend: free (`walls` None) or with walls. The
+        ANC backend's free run stops once a bond stays broken (`DissociationGuard`)."""
         cfg = self.config
         if cfg.optimizer == "xtb":
             return optimize_xtb(z, xyz_bohr, charge, unpaired, cfg.solvent)
-        return optimize_tblite(
-            z,
-            xyz_bohr,
-            charge,
-            unpaired,
-            cfg.fmax,
-            cfg.maxiter,
-            cfg.solvent,
-            scf_maxiter=cfg.scf_maxiter,
-        )
+        args = (z, xyz_bohr, charge, unpaired, cfg.fmax, cfg.maxiter, cfg.solvent, walls)
+        if cfg.optimizer == "tblite-anc":
+            guard = DissociationGuard(mol, cfg.conn_cov_factor) if walls is None else None
+            return optimize_tblite_anc(*args, scf_maxiter=cfg.scf_maxiter, guard=guard)
+        return optimize_tblite(*args, scf_maxiter=cfg.scf_maxiter)
 
     def _relax(self, mol, z, start_bohr, charge, unpaired) -> tuple[np.ndarray, bool]:
         """Free optimization; if an input bond breaks, redo it from the start geometry with walls.
@@ -156,26 +156,18 @@ class GFN2Calculator:
         a bond still breaks (or restraining is unavailable or switched off).
         """
         cfg = self.config
-        xyz_bohr = self._optimize(z, start_bohr, charge, unpaired)
         try:
+            xyz_bohr = self._optimize(mol, z, start_bohr, charge, unpaired)
             check_connectivity(mol, xyz_bohr * BOHR_ANG, cfg.conn_cov_factor)
             return xyz_bohr, False
         except QMError as exc:
-            if not (cfg.restrain and cfg.optimizer == "tblite"):
+            if exc.reason is not ReasonCode.CONNECTIVITY_CHANGED or not (
+                cfg.restrain and cfg.optimizer != "xtb"
+            ):
                 raise
             log.info("free optimization broke a bond (%s); retrying with walls", exc.detail)
         walls = bond_walls(mol, cfg.wall_factor, cfg.wall_k)
-        xyz_bohr = optimize_tblite(
-            z,
-            start_bohr,
-            charge,
-            unpaired,
-            cfg.fmax,
-            cfg.maxiter,
-            cfg.solvent,
-            walls,
-            scf_maxiter=cfg.scf_maxiter,
-        )
+        xyz_bohr = self._optimize(mol, z, start_bohr, charge, unpaired, walls)
         check_connectivity(mol, xyz_bohr * BOHR_ANG, cfg.conn_cov_factor)
         return xyz_bohr, True
 

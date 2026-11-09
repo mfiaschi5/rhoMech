@@ -140,3 +140,15 @@ def test_restraint_is_unavailable_for_the_xtb_backend(qm_config):
     cfg = replace(qm_config, optimizer="xtb")
     assert cfg.restrain and cfg.optimizer == "xtb"  # `_relax` re-raises instead of restraining
     assert QMConfig().method != cfg.method
+
+
+def test_the_anc_path_restrains_a_dissociating_species_too(qm_config):
+    """`tblite-anc`: the free run stops at the dissociated bond, the walls keep it."""
+    cfg = replace(qm_config, optimizer="tblite-anc")
+    assert cfg.method.endswith("/tblite-anc") and cfg.method != qm_config.method
+    mol = embedded(DISSOCIATES)
+    out = GFN2Calculator(cfg).try_run(mol, 0)
+    assert out.record is not None, out.detail
+    assert "RESTRAINED_GEOM" in out.record.warnings and out.record.method == cfg.method
+    ratios = [r for _, _, r in bond_stretch_ratios(mol, out.record.coords_ang)]
+    assert max(ratios) <= cfg.conn_cov_factor
