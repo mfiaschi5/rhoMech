@@ -9127,3 +9127,31 @@ and `network.pools` are unchanged; `network.cli` gains the subcommand.
   numbers and the pool and species graphs see one order. The dataset's own order, which the
   model was trained on, is still the drawing's; that a model should be invariant to it is a
   training question (fragment order is not augmented today).
+
+## 2026-11-09: the previous steps from a product alone (network plan K)
+
+- **`network.retro`, `ksmech-network retro`.** The start is the target molecule only. An OR node is
+  a species to make; a backward step (the backward model of item H on the species, or on the
+  species with a by-product) is an AND node whose parents must each be made in turn. A branch ends
+  at a building block (`--building-blocks`; no catalogue ships with the repo, a new data
+  dependency for the user to choose), a reservoir species, or a species a `stable` callback
+  declares stable at T (item F's sink test; not wired by default, since it needs free energies
+  for every species reached).
+- **The by-product reservoir is counted from the data** (`byproduct_reservoir`): the small species
+  (at most 4 heavy atoms by default) a recorded step makes and its reactants do not hold, ranked
+  by the steps releasing them. PMechDB v19: water 973 steps, Br- 643, Cl- 440. Going back, a step
+  on the species plus a by-product x counts only if it touches x (NOT_USING_BYPRODUCT), since x
+  is what the forward step released.
+- **AND-OR search: AO\* with an admissible value**, 0 by default. From the root the AND child of
+  lowest lower bound is followed, then its first unsolved parent, until an unexpanded species is
+  reached; the bounds are revised up the tree; a species already on the branch is not expanded
+  again (CYCLE). With value 0 the cost of the route found is the optimum (the sum of -log p of its
+  steps): tested against exhaustive search on 25 random AND-OR instances, and an admissible
+  value never expands more. Retro\*'s learned value (plan section 6) plugs in as `value`;
+  proof-number search and MCTS are not implemented.
+- **Forward verification** (`verify_forward`, `--verify-run`): the route's leaves, with their
+  counts, as one pool, and the forward search must reach the target; only then is the route
+  verified.
+- **Not run for real.** The only backward checkpoint is H's CPU smoke run (`backward_smoke`, one
+  epoch on 64 samples): on the hemiketal alkoxide it proposes no valid step (EXHAUSTED). The
+  full backward store (about 45 min on 4 processes) and the 3-seed training come first.

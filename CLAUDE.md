@@ -469,6 +469,13 @@ Main CLI entry points are added phase by phase and listed here as they land:
   end species' shares and the unexplored mass; with `--target` the k shortest hyperpaths (SBT
   and Nielsen-Andersen-Pretolani, `network.hyperpaths`, additive -log p, one per class) as
   linearized events, and the atom flux of each target species (`network.flux`); every cut counted)
+- Retro: `uv run ksmech-network retro --run BACKWARD_RUN --target SMILES [--reservoir-source pmechdb]
+  [--n-byproducts 3] [--max-heavy 4] [--building-blocks SMILES... | --building-blocks-file FILE]
+  [--max-expansions 100] [--max-depth 7] [--verify-run FORWARD_RUN] [--out FILE]` (network plan K:
+  the previous steps from a product alone; AND-OR search, AO* with value 0, over the backward
+  model's steps on the species alone and with each of the most frequent by-products counted from
+  the source's recorded steps; leaves the catalogue given and the reservoir; `--verify-run` checks
+  the route forward with `network.towards`)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]

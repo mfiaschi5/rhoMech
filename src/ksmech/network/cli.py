@@ -51,7 +51,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.data import provenance as prov
-from ksmech.network import species_cli
+from ksmech.network import retro_cli, species_cli
 
 SEARCH_VERSION = 1
 SEARCH_KEYS = ("k", "max_expansions", "max_depth", "step_cost", "levels", "beam", "build_missing")
@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     _evaluate_parser(sub)
     _predict_parser(sub, DEFAULT_MODELS_DIR, DEFAULT_TOKENS_DIR)
     species_cli.add_parser(sub)  # item J: `ksmech-network species`
+    retro_cli.add_parser(sub)  # item K: `ksmech-network retro`
     return p
 
 
@@ -331,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         "evaluate": cmd_evaluate,
         "predict": cmd_predict,
         "species": species_cli.cmd_species,
+        "retro": retro_cli.cmd_retro,
     }
     return commands[args.command](args, Console())
 
