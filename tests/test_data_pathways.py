@@ -58,6 +58,7 @@ def tree(tmp_path):
     chains = [(None, [A0, A1, A2]), (None, [A0, A1, A2]), (None, ["CCO", "CC=O"])]
     write_mechanisms(raw / "ID_Split42" / "ID_CRM_dataset" / "ID_CRM.csv", chains)
     ood = [("acid_halide", [A0, A1]), ("amide", [B0, B1, "CC(=O)NC.Cl"])]
+    ood.append(("acid_halide", [A0, A1, A2]))  # repeats an ID_CRM chain: its class is kept
     write_mechanisms(raw / "OOD_Split42" / "OOD_CRM_dataset" / "OOD_Set1.csv", ood, True)
     processed = tmp_path / "processed"
     folder = processed / "reactmech"
@@ -78,10 +79,12 @@ def test_read_chains_drops_repeats(tree):
     raw, _ = tree
     counts = Counter()
     chains = pw.read_chains(pw.chain_files(raw), counts)
-    assert counts[pw.ChainCode.DUPLICATE_CHAIN] == 1
+    assert counts[pw.ChainCode.DUPLICATE_CHAIN] == 2
+    assert counts["DUPLICATE_CHAIN:OOD_Set1.csv"] == 1
     assert [c.chain_file for c in chains] == ["ID_CRM.csv"] * 2 + ["OOD_Set1.csv"] * 2
     assert [c.n_steps for c in chains] == [2, 1, 1, 2]
-    assert chains[2].mechanism_class == "acid_halide" and chains[0].mechanism_class is None
+    assert chains[2].mechanism_class == "acid_halide" and chains[1].mechanism_class is None
+    assert chains[0].mechanism_class == "acid_halide"  # from its OOD_Set1 repeat
     assert chains[3].row == 2  # 1-based data row in its own file
 
 
@@ -128,7 +131,7 @@ def test_build_rows_codes_and_maps(tree):
     assert (first["ingest_status"], second["ingest_status"]) == ("steps", "rejected")
     assert by[(pw.pathway_id([B0, B1, "CC(=O)NC.Cl"]), 0)]["ingest_status"] == "not_sampled"
     codes = report["codes"]
-    assert codes["DUPLICATE_CHAIN"] == 1 and codes["NO_STEP_LINE"] == 2
+    assert codes["DUPLICATE_CHAIN"] == 2 and codes["NO_STEP_LINE"] == 2
     assert codes["CHAIN_UNMATCHED"] == 1 and codes["CHAIN_PARTIAL"] == 1
     assert codes["CHAIN_LAST_UNMATCHED"] == 2
     assert codes["STEP_IN_SEVERAL_CHAINS"] == 1 and codes["STOP_LABEL_CONFLICT"] == 1

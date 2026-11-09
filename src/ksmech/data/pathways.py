@@ -32,7 +32,7 @@ import json
 import logging
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -121,20 +121,23 @@ def chain_files(raw: Path | None = None) -> list[Path]:
 
 def read_chains(paths: Iterable[Path], counts: Counter) -> list[Chain]:
     """Every chain of the mechanism files, each once: a repeat of an earlier chain's species
-    list is counted (DUPLICATE_CHAIN) and dropped."""
+    list is counted (DUPLICATE_CHAIN) and dropped, its class kept when the first copy has
+    none (an OOD set repeating an ID_CRM chain)."""
     chains: list[Chain] = []
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
     for path in paths:
         with open(path, newline="", encoding="utf-8") as fh:
             for row, rec in enumerate(csv.DictReader(fh), start=1):
                 species = tuple(ast.literal_eval(rec["mechanisms"]))
-                pid = pathway_id(species)
+                pid, cls = pathway_id(species), rec.get("mechanistic_class")
                 if pid in seen:
                     counts[ChainCode.DUPLICATE_CHAIN] += 1
                     counts[f"{ChainCode.DUPLICATE_CHAIN}:{path.name}"] += 1
+                    first = chains[seen[pid]]
+                    if first.mechanism_class is None and cls:
+                        chains[seen[pid]] = replace(first, mechanism_class=cls)
                     continue
-                seen.add(pid)
-                cls = rec.get("mechanistic_class")
+                seen[pid] = len(chains)
                 chains.append(Chain(pid, path.name, row, species, cls))
     return chains
 
