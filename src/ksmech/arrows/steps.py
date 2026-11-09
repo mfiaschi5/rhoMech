@@ -939,7 +939,7 @@ def build_all_samples(
     view per split. A strategy that cannot run on the source is reported, not raised. With
     `direction` backward each step is seen from its child (`arrows.backward.backward_step`) and
     everything is written to `backward/` (`direction_dir`); `limit` (backward only, a pilot)
-    builds that many training steps drawn at random (`pilot_steps`, seeded by `seed`) and keeps
+    builds that many training steps drawn at random (`pilot_steps`, never the split seed) and keeps
     the views to them."""
     if limit and direction == FORWARD:
         raise ValueError("a step limit builds a partial store: backward only (a partial forward "
@@ -947,7 +947,7 @@ def build_all_samples(
     console = console or Console()
     parquet = steps_path(source, processed_dir)
     steps = read_training_steps(parquet)
-    built = pilot_steps(steps, limit, seed)
+    built = pilot_steps(steps, limit)
     loader = loader or TokenCache()
     samples, skipped = build_step_samples_parallel(oriented(built, direction), loader, n_workers)
     config = direction_config(direction, limit)

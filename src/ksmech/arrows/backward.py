@@ -110,9 +110,15 @@ def require_direction(path: Path, direction: str) -> Path:
     return path
 
 
-def pilot_steps(steps: list[ElementaryStep], limit: int, seed: int = 0) -> list[ElementaryStep]:
+PILOT_SEED = 0  # the draw of a pilot's steps, apart from the split's seed
+
+
+def pilot_steps(
+    steps: list[ElementaryStep], limit: int, seed: int = PILOT_SEED
+) -> list[ElementaryStep]:
     """`limit` training steps drawn at random (seeded), in their parquet order: a pilot's
-    subset. All of them when `limit` is 0 or not below their number."""
+    subset, the same for `samples` and `edit-labels`. All of them when `limit` is 0 or not
+    below their number."""
     import numpy as np
 
     if not limit or limit >= len(steps):

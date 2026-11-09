@@ -43,10 +43,11 @@ from ksmech.arrows.steps import (
     sample_for_step,
     samples_path,
     splits_path,
+    write_views_from_store,
 )
 from ksmech.data import chem
 from ksmech.data import provenance as prov
-from ksmech.data.io import steps_path, write_steps
+from ksmech.data.io import read_training_steps, steps_path, write_steps
 from ksmech.data.resonance import identity_key
 from ksmech.data.schema import Arrow, ElementaryStep, SinkKind, SourceKind
 from ksmech.eval.decode import hit_rank, lewis_apply
@@ -290,6 +291,10 @@ def test_a_pilot_builds_a_random_subset_and_keeps_its_views_to_it(mini_processed
     )
     assert report["n_built"] == 3 and report["limit"] == 3
     assert sum(r["n_steps"] for r in report["splits"].values()) == 3
+    every = read_training_steps(steps_path("pmechdb", mini_processed))
+    drawn = {s.step_id for s in pilot_steps(every, 3)}  # whatever the split's seed
+    views = [samples_path("pmechdb", split, mini_processed, BACKWARD) for split in report["splits"]]
+    assert {i for v in views for i in json.loads(v.read_text())["ids"]} == drawn
     index = direction_dir("pmechdb", mini_processed, BACKWARD) / "samples" / "index.json"
     assert prov.read_header(index).config == {
         "sample_version": prov.read_header(index).schema_version,
@@ -297,6 +302,12 @@ def test_a_pilot_builds_a_random_subset_and_keeps_its_views_to_it(mini_processed
         "direction": BACKWARD,
         "limit": 3,
     }
+    kept = {v: v.read_bytes() for v in views}  # views of another strategy over the pilot store
+    more = write_views_from_store("pmechdb", ["scaffold"], mini_processed, 1, BACKWARD)
+    assert {v: v.read_bytes() for v in views} == kept
+    added = [samples_path("pmechdb", s, mini_processed, BACKWARD) for s in more["splits"]]
+    assert {i for v in added for i in json.loads(v.read_text())["ids"]} == drawn
+    assert all(prov.read_header(v).config["limit"] == 3 for v in added)
     steps = list(range(10))
     assert pilot_steps(steps, 4, 0) == pilot_steps(steps, 4, 0) != pilot_steps(steps, 4, 1)
     assert pilot_steps(steps, 0) == steps and pilot_steps(steps, 20) == steps

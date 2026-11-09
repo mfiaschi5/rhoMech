@@ -49,8 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--direction", default=FORWARD, choices=DIRECTIONS,
                        help="backward: each step seen from its child, in backward/")  # fmt: skip
         p.add_argument("--limit", type=int, default=0, help="backward only: that many training "
-                       "steps drawn at random (--seed), a pilot")  # fmt: skip
-    e.add_argument("--seed", type=int, default=0)
+                       "steps drawn at random, a pilot")  # fmt: skip
     a.add_argument("--no-member-check", action="store_true", help="skip the set-member swap")
     s.add_argument(
         "--strategy",
@@ -243,7 +242,7 @@ def cmd_edit_labels(args: argparse.Namespace, path: Path, console: Console) -> i
     from ksmech.arrows.backward import backward_agreement, oriented, pilot_steps
 
     loader = TokenCache(args.tokens_dir)
-    steps = pilot_steps(read_training_steps(path), args.limit, args.seed)
+    steps = pilot_steps(read_training_steps(path), args.limit)
     labels = {s.step_id: step_label(s, loader) for s in oriented(steps, args.direction)}
     report = label_report(labels)
     if args.direction == BACKWARD:

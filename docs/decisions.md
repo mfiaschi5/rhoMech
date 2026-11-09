@@ -8498,3 +8498,88 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   `QMConfig().method`, so switching the default means recomputing every source's records and
   everything built on them, a decision of its own. Serve's metal path (`MetalGFN2Calculator`)
   goes through the same `_optimize`, so it follows the option too.
+
+## 2026-11-09: the previous step, backward samples (reaction-network plan, item H)
+
+- **One label path.** A backward sample is the forward builder (`arrows.steps.sample_for_step`)
+  on the step with its sides swapped (`arrows.backward.backward_step`): the child pool's tokens,
+  Lewis structure, pair features and resonance drawings, the edit-label class of the swapped step
+  on the child's token atoms closed under the child pool's symmetry, and the parent's identity
+  key as product key. The forward arrows are dropped (they draw the forward electron flow), so the
+  swapped step takes the path of a source without arrows: R from the two mapped sides
+  (`delta_be.mapped_closest`, KEKULE_CLOSEST), the hydrogens that move written as atoms
+  (`arrows.hydrogens`). PMechDB maps every atom an arrow touches and draws a moving H as a mapped
+  atom, so the mapped difference is the whole change; an unmapped atom that changed would fail
+  the product check (PRODUCT_MISMATCH, counted). No pilot step failed it. `delta_be.mol_label`
+  (the first half of `step_label`, unchanged) gives the label on the mol atoms.
+- **The class is -R up to resonance, not always the negated forward class.** The label rule is
+  the forward one: the elementary R of lowest cost that takes the drawn input to a resonance form
+  of the target (fewest formal charges in that form, then fewest entries). On the 500-step pilot
+  (mol atoms, compared through the atom maps, `ksmech-arrows edit-labels --direction backward
+  --limit 500`): the backward class is the negated forward class on 399, disjoint from it on 51,
+  and has a member on an unmapped atom (not comparable by maps) on 50; never a partial overlap.
+  The disjoint ones are resonance, of two kinds: (a) 22 where the forward class reaches a form of
+  the product other than the drawn one (a conjugate addition to an enone: the forward class
+  reaches the carbanion in 4 entries, the backward class starts from the drawn enolate, 6
+  entries); (b) 29 where the forward class reaches the drawn product but the parent has another
+  form with as few charges that the child reaches in fewer entries (the reverse of an addition to
+  an oxocarbenium or a nitrilium is labelled as the heterolysis to the carbocation form, 2
+  entries, not the push from the O or N lone pair, 4 entries). Every member takes the drawn child
+  to the parent with the maps kept (tested), and training draws the child's other resonance forms
+  with their labels recomputed, as forward. Kept: the input is the child as the dataset draws it.
+  Whether a backward class should also admit the negated forward members (a union), so that (b)
+  keeps the lone-pair push, is a spec question left open.
+- **Anchors.** Unchanged rule (`ReactionMatrix.anchors`): the bonds -R forms, else those it
+  breaks. A forward pure addition (no bond order falls) gives a backward class with breaking
+  anchors only; the loss and the decoder already take them (the 732 forward PMechDB samples with
+  breaking anchors, the heterolyses), checked on a hand-made step: the batch marks the break side,
+  the step loss is finite, and the beam decoder completes the heterolysis from the breaking
+  anchor. Pilot: 37 of 498 samples (7.4%) have breaking anchors, 5.9% forward.
+- **The decoder's merge by product key hides one charge placement.** The map-free key zeroes the
+  charges (`resonance.sigma_key`): CH3+ + Br- and CH3- + Br+ have one key, so `decode_pool` keeps
+  whichever completion scores higher and drops the other (DECODE_MERGED) before `hit_rank`
+  compares matrices. Both directions are affected, the backward one more often, since the reverse
+  of every addition of an anion to a cation is a heterolysis. Not changed here (item A works on
+  the product keys of completions); the test keys completions by their matrix as well.
+- **A store of its own.** `data/processed/<source>/backward/` (`direction_dir`): shards, index,
+  views, split files, pair statistics and the samples, edit-label and coverage reports under the
+  forward names, so no forward artifact is overwritten or made stale. The forward artifacts carry
+  no direction key (bit for bit as before, tested); the backward ones carry `direction` in the
+  shard, index, view and statistics configs, `samples_report.json` and `edit_labels_report.json`.
+  Training reads the views and statistics of its direction and refuses a file written for the
+  other (`require_direction`); run.json's `train` config holds `direction` only for a backward
+  run, so a forward header and its `--resume` check stay as they were. A decode records
+  `direction` and `checkpoint_direction` when either is backward (a mismatch warns), tags its
+  files `_backward`, and `direction` is one of `eval.paired.PAIRED_KEYS`: forward hits (none) and
+  backward hits never pair. No new field on `MechanismSample`, so the forward shards are
+  unchanged and SAMPLE_VERSION stays 19.
+- **One split for both directions.** The backward parts are the forward parts step by step: the
+  split functions run on the forward training steps with the forward frozen snapshots, and the
+  split file is written again into `backward/` so the views' provenance stays in that directory
+  (on PMechDB both split files are identical). One split is what a shared encoder and the
+  round-trip check need: no step's forward test is the other direction's training. The molecule
+  split groups the non-trivial molecules of both sides, so no backward input of val or test holds
+  a molecule of training; each build reports it per part (`leakage`; pilot 0/43 val, 0/48 test).
+  The scaffold split holds out the forward reactant's scaffold, i.e. the backward target's, not
+  the input's, so backward scaffold numbers are no scaffold hold-out of the input (molecule
+  leakage 24/50 val, 20/57 test in the pilot; the forward scaffold split is molecule-leaky too).
+- **Pilot option.** `--limit N` (backward only; `pilot_steps`, N training steps drawn with a
+  fixed seed, the same subset for `samples` and `edit-labels`, never tied to the split seed)
+  builds a partial store whose views keep to its steps; its configs record the limit. Refused
+  forward: a partial forward store would replace the full one.
+- **Coverage (`ksmech-arrows coverage`).** Every species of both sides read through the token
+  loader (`TokenCache`: stale files and missing Wiberg sidecars count) and the QM manifest;
+  1 min 45 s on 4 processes. PMechDB, 12,512 training steps: 11,217 of the 11,255 product species
+  have tokens; the 38 without are QM failures (SCF_NOT_CONVERGED 34, TIMEOUT 4); 3,619 product
+  species occur on no reactant side, 7 of them without tokens; 12,473 steps have every product
+  species (12,469 every reactant species, the forward store's count). The token build covers both
+  sides already (`collect_molecules`): the backward store needs no new QM or tokens.
+- **Pilot (500 random PMechDB training steps, 4 processes).** 498 samples (MISSING_TOKENS 2),
+  classes 1: 354, 2: 99, 3: 23, 4+: 22 (after the symmetric closure), label maxima 6 bonds and 2
+  atoms (the forward ones), the resonance enumeration cut at RESONANCE_CAP on 46; the drawn R is
+  in its class on 465. 2 min 34 s wall, 413 s CPU (0.83 s per step), so the full PMechDB
+  backward store is about 2.9 CPU hours: 45-50 min on 4 processes, about 15 min on 14. A CPU
+  smoke fit (`--direction backward --limit 64 --epochs 1 --preset general`, run
+  `backward_smoke`): 5 steps, 273 s, val top-1 2.4% (untrained); its decode of 16 val samples:
+  nothing found on 15 (an untrained model), 1.4 s per sample, files
+  `decode_*_molecule_val_backward_n16.json` with the directions in their config.

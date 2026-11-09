@@ -256,7 +256,7 @@ Main CLI entry points are added phase by phase and listed here as they land:
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`).
   The previous step (reaction-network plan, item H; `arrows.backward`): `samples --direction
-  backward [--limit N --seed S]` and `edit-labels --direction backward [--limit N]` build the
+  backward [--limit N]` and `edit-labels --direction backward [--limit N]` build the
   same artifacts for each step seen from its child (the sides swapped, the arrows dropped, so
   the label is the class of -R on the child pool by the same code) under
   `data/processed/<source>/backward/`, never touching a forward file; the parts are the forward
