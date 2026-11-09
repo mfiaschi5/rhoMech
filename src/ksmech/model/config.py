@@ -33,6 +33,10 @@ class ModelConfig:
     somo_channels: bool = True  # False (P9's ablation): the open-shell pair channel is undefined
     #   and no reader sees an open-shell row or a hole column (`inputs.without_open_cells`)
     own_pair_channel: bool = True  # False (P9's ablation): own_g and own_g2 are undefined
+    drop_token_features: tuple[str, ...] = ()  # ablation: these token input columns leave (atom
+    #   or orbital column names; 'orbital' every orbital column, the occupation included)
+    spectral_set: bool = True  # False (ablation): no set encoder over an orbital's spectral entries
+    inherit_atoms: bool = True  # False (ablation): an orbital token inherits no atom embedding
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)
@@ -44,6 +48,7 @@ class ModelConfig:
         d = asdict(self)
         d["drop_pair_features"] = list(self.drop_pair_features)
         d["orbital_extra"] = list(self.orbital_extra)
+        d["drop_token_features"] = list(self.drop_token_features)
         return d
 
     @classmethod
@@ -51,6 +56,7 @@ class ModelConfig:
         kw = {f.name: d[f.name] for f in fields(cls) if f.name in d}
         kw["drop_pair_features"] = tuple(kw.get("drop_pair_features", ()))
         kw["orbital_extra"] = tuple(kw.get("orbital_extra", ()))
+        kw["drop_token_features"] = tuple(kw.get("drop_token_features", ()))
         return cls(**kw)
 
 
