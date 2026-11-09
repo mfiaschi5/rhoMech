@@ -8767,3 +8767,112 @@ function sums the species' G into the G of a pool (`qm.hessian`, `qm.thermo`, `q
   kcal/mol, so 0.2 stays. `--workers 1` runs in the calling process on tblite's bundled netlib
   BLAS (`qm.blas`), about 25% slower at 48 atoms. Warnings: IMAGINARY_INVERTED on 11 of the 46,
   IMAGINARY_DROPPED on 6 (acetone, methyl acetate and 4 of the 20 dataset records).
+
+## 2026-11-09: prediction without a product: the Markov chain, the thermodynamic stop, transition path theory, exploration by mass (network plan E, F, I3, I4)
+
+- **Reverse edges are scored by the forward model at the child, once per explored edge.** For an
+  edge R from i to j, -R is scored at j with `ModelExpander.reverse_logp` (`model.decode.matrix_logp`)
+  and its `best` anchor is read, the quantity the decoder ranks completions by, so the forward
+  log p (the proposal's) and the reverse one are the same kind of number. The scoring happens
+  when the edge is found, not when the child is expanded: the weight of the edge into a frontier
+  pool, and so the mass that reaches it, needs s_ij. A directed pair scored twice (j's own
+  proposal for i, and the reverse of i's proposal for j) keeps the larger log p, as the decoder
+  merges two completions of one product. A child that fails featurization, or a -R with no
+  admissible anchor, leaves the reverse missing (REVERSE_MISSING:<code>, once per edge): the edge
+  then runs one way (ONE_WAY), w_ij = p_ij exp(-dG/2RT) and w_ji = 0; no stand-in number for the
+  missing probability is invented.
+- **A continuous-time chain with the rates w; absorption on its jump chain.** With
+  w_ij = s_ij exp(-dG_ij/2RT), s_ij = sqrt(p_ij p_ji), the pair products pi_i w_ij are symmetric
+  for pi = exp(-phi/RT)/Z, so the continuous-time chain with rates w has Boltzmann as its
+  stationary distribution (tested pair by pair and against the sparse solve of pi Q = 0, on six
+  random graphs at two temperatures). The row-normalized jump chain has pi_i W_i instead, but the
+  same absorption probabilities, which `chain.absorb` computes with one sparse LU factorization.
+  Without free energies a pair runs on the model's own probabilities (w_ij = p_ij, w_ji = p_ji,
+  NO_FREE_ENERGY_LINK); its pairs are `unbalanced`, and Boltzmann is never claimed for a region
+  holding one.
+- **Reservoir species: named by identity key, kept in every pool, priced at mu.** The search
+  parameter is a set of species keys (identity key v2, the names `PoolState.species` already
+  uses), each with one molecule's SMILES (`network.reservoir`); every pool keeps `copies` of each
+  (default 1) so the model sees it. A consumed copy is replaced by a fresh molecule (new map
+  numbers) and a released copy beyond `copies` is removed, never one the step touches (the
+  reverse -R must stay on the pool's atoms; a touched surplus copy stays, RESERVOIR_KEPT_TOUCHED);
+  each proposal records the copies the replenishment took (`info["reservoir_draw"]`). The state's
+  potential is phi = G(state) - sum_x D_x mu_x with D_x the draws from the start (the bath's loss),
+  so A + H2O -> B costs G(B) - G(A) - mu(H2O) and the replenishment costs nothing. This is the
+  same bookkeeping as item B's `pool_free_energy` with a negative count for a species owed to the
+  reservoir. D is summed along the first path found; a second path with other draws, which atom
+  conservation forbids for independent reservoir species, is counted RESERVOIR_DRAW_MISMATCH.
+- **The free-energy interface (the adapter point for item B).** `network.free_energy`:
+  `FreeEnergy(state, T)` returns G in kcal/mol, a (G, H, S) triple (S in kcal/(mol K)) or a
+  `Thermo`, or None (NO_FREE_ENERGY); `ChemicalPotential(species_key, T)` the same for a
+  reservoir species; `ThermoModel` bundles both. `load_thermo_model(kind)` is where item B's
+  provider is wired (G(pool) over `state.species` from `qm.thermo.pool_free_energy`, Hartree x
+  627.509); today only 'none'. G is read per pool key, once per run (`chain.ThermoCache`).
+- **Absorbing states.** SINK_AT_T; TURNOVER when the pool's first path from the start closes a
+  catalytic cycle (`graph.turnover_closure` on the species multisets along the path, the web
+  app's rule), never expanded; NO_OUTGOING_STEP when the expansion proposed nothing (the plan's
+  "no outgoing step": the reverse steps into such a pool are not used, it is where the model
+  stops). During the exploration the unexpanded pools are absorbing too (UNEXPLORED, CLIMB_CUT),
+  which is what makes their mass measurable. An explored region that reaches no absorbing pool
+  (everything reversible, nothing left to expand) is an EQUILIBRIUM class, its mass spread by
+  Boltzmann (or the chain's stationary distribution when unbalanced).
+- **TURNOVER absorbing by default, behind a flag** (`stop_at_turnover`, `--no-stop-at-turnover`;
+  the web app's `NetParams.stop_at_turnover` default). In a smoke run (pm_control_s0, methoxide +
+  acetone, 4 expansions, no free energies) 66% of the mass went to the base-catalysed enol: the
+  enolate O-protonated by methanol regenerates methoxide, which closes a turnover. That is the
+  rule doing what it says, but an uphill turnover product absorbing mass is what the free
+  energies should judge; whether a turnover stays absorbing once they exist is left open, and
+  the flag expands such pools like any other.
+- **A sink counts the steps back too.** "Every step out climbs more than delta(T)" is tested on
+  the chain's links out of the pool: its proposals and the reverse steps of the edges that reach
+  it. Otherwise a pool 1 kcal/mol above its parent, from which the model proposes only steps
+  uphill, would be called a sink although its way back descends. A step without a dG is not
+  known to climb, so a pool with one is never a sink: without free energies nothing is.
+- **The rescan.** Before a pool is declared SINK_AT_T, the expander's `rescan(state, factor)` hook
+  decodes it again with `rescan_factor` (4) x the anchors, products per anchor, applications and
+  search nodes (the caps on bond and atom changes stay: they are physical); the steps it adds to
+  new children join the graph (edges already explored are left as they are, so their reverse
+  scores stay valid), and the test runs again. Once per pool. `SinkCheck` reports the steps
+  examined and the rescan's proposals. `stop.ModelRescan` gives a `ModelExpander` the hook
+  without changing `network.pools`; an expander without it leaves the sink unconfirmed
+  (SINK_NOT_RESCANNED, counted).
+- **NO_NET_REACTION only when every explored pool has a free energy.** START_IS_SINK, or the
+  start's Boltzmann share over the explored pools above 1 - epsilon (REACTANTS_DOMINATE). A pool
+  without G could hold the population, so with one the share is not reported and no verdict on
+  it is given.
+- **T\* linearized at T.** T* = dH/dS from the H and S the provider gives at the run's
+  temperature: "above" (dH > 0, dS > 0: a release of H2O, CO2 or N2 gains with heat), "below"
+  (dH < 0, dS < 0: an association loses with heat), "always" or "never" when the signs disagree.
+  For edges and for each end state against the start.
+- **Exploration by mass: the hitting probability of each unexpanded pool.** With every unexpanded
+  pool absorbing, the probability that the chain from the start reaches it first is the mass it
+  would explain; the most probable is expanded next (ties: the first found). The stop is on the
+  UNEXPLORED mass (`--mass-tol`); the mass of the CLIMB_CUT pools, which will never be expanded,
+  is reported with it as the unexplored mass (the uncertainty) but cannot stop the search, which
+  would otherwise run to the budget whenever a high pool is reached.
+- **The climb budget is a height above the start.** "The cumulative climb allowed" is read as
+  G(pool) - G(start): the quantity the population argument of item F speaks of. A pool above it
+  is not expanded (CLIMB_CUT); its edge is kept with its dG and K, so no edge is cut for being
+  uphill (D2).
+- **Transition path theory on the source's strongly connected component.** q+ and q- by sparse
+  LU solves on the component (q- on the time-reversed chain, which a balanced chain makes
+  1 - q+); pi Boltzmann when the component is balanced, else the numerical stationary
+  distribution; the net reactive flux decomposed by repeatedly extracting the widest
+  (largest-bottleneck) path. On a balanced chain the net flux runs up the committor, so it is
+  acyclic, every extraction zeroes an edge and the shares add up to 1 (tested with flux
+  conservation at every intermediate and the committor bounds on six random graphs).
+- **Provisional defaults, to be calibrated** (plan item 9: no recorded reaction a false sink):
+  temperature 298.15 K; epsilon 0.01 (delta = 2.73 kcal/mol at 25 C before the margin); margin
+  5.0 kcal/mol (GFN2's error on reaction energies is several kcal/mol, more for charged species,
+  and RRHO overstates the entropy cost of association in solution, so the margin starts above
+  delta itself, on the side of fewer false sinks); climb budget 20 kcal/mol above the start; mass
+  tolerance 0.01; rescan factor 4.
+- **Not done: MCTS** (the plan's option behind a flag for deep networks). The mass expansion is
+  deterministic and gives its error bound; MCTS waits until a network proves too deep for it.
+- **`ksmech-network predict`** (new subcommand): the checkpoint on the CPU with the rescan hook,
+  the optional reservoir, the free-energy provider (only 'none' until item B's `qm.thermo` is
+  wired there), the exploration by mass with the thermodynamic stop, and TPT pathways to the most probable end states; `--out`
+  as JSON with a provenance header (`network_predict`, version 1): the states with their class,
+  G and equilibrium share, the end states with p and T*, the sinks with the steps examined, every
+  edge with log p forward and back, dG, K, dH, dS and T*, the pathways with their flux shares,
+  and every count.

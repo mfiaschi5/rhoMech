@@ -419,7 +419,23 @@ Main CLI entry points are added phase by phase and listed here as they land:
   simple paths (A* with `--step-cost` x the remaining-change bound when the target is mapped on the
   start pool, else uniform-cost; MAPPING_FAILED counted), arrival EXACT (identity keys) or SKELETON
   (heavy-atom connectivity, up to protons), mechanism classes up to the order of independent steps
-  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`)
+  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`),
+  `uv run ksmech-network predict --run NAME [--run-source pmechdb] --start SMILES
+  [--temperature-k 298.15] [--max-expansions 50] [--mass-tol 0.01] [--epsilon 0.01] [--margin 5.0]
+  [--max-climb 20 | --no-climb-limit] [--rescan-factor 4] [--no-stop-at-turnover]
+  [--reservoir SMILES...] [--reservoir-copies 1] [--free-energy none] [--beam 5] [--build-missing]
+  [--tpt-ends 3] [--pathways 5] [--out FILE]` (prediction without a product, network plan E, F,
+  I3, I4: best-first by probability mass, `network.explore`, on the Markov chain of the explored
+  graph, `network.chain`: reverse edges -R scored by the model at the children (REVERSE_MISSING
+  counted), rates sqrt(p_f p_b) exp(-+dG/2RT) so the stationary distribution is Boltzmann, with the
+  free energies of `network.free_energy.load_thermo_model`, the adapter point of item B (only
+  'none' until item B's provider is wired there: the model's own probabilities, NO_FREE_ENERGY);
+  reservoir species kept in every pool and priced at their chemical potential
+  (`network.reservoir`); `--temperature-k` is
+  physical, not the predictor's softmax temperature; the end states with their probabilities
+  (SINK_AT_T only after a rescan with `--rescan-factor` x the candidates, TURNOVER,
+  NO_OUTGOING_STEP, EQUILIBRIUM), the unexplored mass, NO_NET_REACTION, every edge's dG, K and T*,
+  the dominant pathways to the top end states by transition path theory, `network.tpt`)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]
