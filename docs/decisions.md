@@ -8582,3 +8582,76 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
 - **`ksmech-network search`** (new entry point): a checkpoint on the CPU, a start pool and a
   target; the k best pathways with arrival level, log P and class, the classes with their
   probabilities, the expansions, cuts and skips, and `--out` as JSON with a provenance header.
+
+## 2026-11-09: pathway data (reaction-network plan, item G)
+
+`ksmech-data pathways --source reactmech` (`data.pathways`) and `ksmech-data human-benchmark`
+(`data.human_benchmark`, `data.benchmark_checks`). Schemas in `docs/data_schema.md`
+("Mechanism files", "Pathway benchmark files", and the two "Processed" sections).
+
+- **ReactMech's chains are a sidecar, not columns of the steps parquet.** Filling
+  `pathway_id` / `step_index` in `steps.parquet` would change its hash, so every split file,
+  view and sample store built on it would be refused (STALE_ARTIFACT); and `molecule_groups`
+  joins the steps of one pathway, so the molecule split itself would move. A later full ingest
+  may want that (a chain then never straddles two parts), but it is a decision of its own with a
+  rebuild of every store. `pathways.parquet` is guarded by `pathways_report.json`, whose
+  provenance header carries the parquet's sha256 as its content hash (a parquet has no header
+  `provenance.read_header` reads); `load_pathways` checks the header and the hash.
+- **A chain step is matched by its map-free canonical sides**, the class index's key
+  (`reactmech.side_key`, made public, no behaviour change), and takes the ingest's step id of
+  the line (`make_step_id`), so the sidecar is valid for the 10k pilot and for a full ingest;
+  `ingest_status` says which (`steps`, `not_sampled`, `rejected`). No pair matched two lines and
+  no step sits in two chains, so `SEVERAL_LINES`, `STEP_IN_SEVERAL_CHAINS` and
+  `STOP_LABEL_CONFLICT` are 0. The OOD sets are read as chains too (same format; all 9,933 steps
+  of OOD_Set1's 3,311 chains match). A repeated chain (72 rows, 5 of them OOD_Set1 rows repeating
+  ID_CRM chains) is dropped by its species-list id, and its class is kept when the first copy
+  has none.
+- **Each mechanism file holds the chains its own split leaves out**: ID_CRM's steps are the
+  OOD-only lines, OOD_Set1's the ID-only lines. Not a mislabelling: each split keeps its set of
+  whole mechanisms out, the ID split to test whole mechanisms, the OOD split its held-out
+  classes.
+- **Map consistency has four outcomes per boundary** (`boundary_maps`): `same` (one mapped
+  drawing), `renumbered` (one mapped drawing after a renumbering, read off the canonical atom
+  ranks of the two map-free drawings: one drawing has one canonical labelling, so atoms of equal
+  rank correspond; the renumbering is unique up to the pool's automorphisms, which is harmless
+  for a bond-electron difference), `partly_mapped` (one drawing, but some atoms carry a number
+  on one side only: ID_CRM's lines leave spectators unmapped and map them once they react) and
+  `inconsistent` (two drawings). "Equal up to renumbering" alone would be always true here,
+  since the match already requires one map-free molecule at both ends; the useful question is
+  whether the numbers carry the atoms across. Result over 5,550 whole chains with a boundary:
+  all consistent, 4,459 (80.3%) by a renumbering alone, 277 (5.0%) with unchanged numbers.
+  For item D: the dataset's numbers compose only within a step; across steps a chain's map
+  needs `renumbering` at every boundary, and a graph match (an isomorphism of the two drawings)
+  where it is partly mapped.
+- **The pilot holds little of the chains**: 1,653 of the 19,250 chain steps are in the 10k
+  steps parquet, 458 of the 5,595 stop rows, 11 whole chains. Training the stop head on
+  ReactMech needs the chain steps ingested and featurized (QM and tokens), which is a pilot
+  decision for the user (open).
+- **The human benchmark is evaluation only and no `Source`.** The ingest, the sample store
+  and `ksmech-train` take their sources from that enum, so none can read it; besides,
+  `train.loop.sources` refuses its name (`human_benchmark.refuse_training`, EvaluationOnly),
+  the table carries `evaluation_only` on every row and in its provenance config, and its files
+  sit under `data/processed/human_benchmark/` beside no sample view. Normalizations are counted,
+  never silent: stripped cells, the one target cell holding a whole PMechDB record read as its
+  product side (the depth file's value), blank targets kept as null positions, `n/a` kept as a
+  null temperature (the header says room temperature; no 25 °C is invented).
+- **Overlap with PMechDB, molecule split** (`overlap_pmechdb_molecule.json`): species by
+  map-free canonical SMILES (stereo kept) and by the identity key v2 (resonance forms, stereo,
+  charge placement collapsed); a benchmark step counts as found when a part's step makes its
+  target from the previous target (step 1: from any non-trivial reactant; lenient, so a leak is
+  over-counted rather than missed). Of 1,421 distinct benchmark species (1,359 non-trivial),
+  molecule train holds 295 by SMILES and 326 by key (244 / 274 non-trivial). 234 / 243 of the
+  350 pathways share a non-trivial species with train, but only 60 / 71 have a step found and
+  11 / 14 every step (93 / 112 of the 1,034 steps); over every PMechDB part 62 / 75 and 11 / 15.
+  Only 148 of the 1,006 readable targets are a product of any PMechDB step, although 320
+  targets carry PMechDB-style maps: the benchmark shares PMechDB's drawing, not its steps.
+  Proposed (open): report pathway results on all 350 and on the pathways with no step found in
+  training (290 by SMILES, 279 by key).
+- **QM and token coverage** (`qm_coverage.json`, file lookups only; the index is not
+  refreshed, since that writes the shared `data/cache/index.sqlite`): of the 1,421 species, 346
+  have a QM record and current tokens, 1,072 need the QM batch (all admitted by the spin
+  census), 3 have a failure tombstone (iron bromides and chlorides), none needs only a token
+  build. By role: reactants 224 of 508 covered, targets 147 of 961, final products 54 of 344.
+  Not run (hours, the user's call). The QM batch collects species from a steps parquet
+  (`qm.batch.collect_molecules`), so the benchmark's species need an entry point of their own
+  (a species list, for instance from `qm_coverage.json`): open.

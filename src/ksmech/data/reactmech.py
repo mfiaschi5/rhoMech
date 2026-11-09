@@ -22,7 +22,9 @@ What the files hold (opened 2026-10-26):
   Set2's 4 (Buchwald-Hartwig aminations with Pd and Ni) match no step of the split files, whose
   Ni steps are other couplings. The other 58 of the paper's 67 classes are not released, so
   every other step has `mechanism_class` None.
-- `data/ID_Split42/ID_CRM_dataset/ID_CRM.csv`: 2,751 mechanisms without a class. Not read.
+- `data/ID_Split42/ID_CRM_dataset/ID_CRM.csv`: 2,751 mechanisms without a class. Not read by
+  the ingest: `data.pathways` reads it, and the OOD sets, for the step order (a sidecar,
+  `ksmech-data pathways`).
 - `data/PrebioMech/`: a separate set of prebiotic steps. Not read.
 
 The steps have no arrows (`arrows=[]`, `require_arrows=False`): their reaction matrix is the
@@ -62,8 +64,9 @@ def resolve_inputs(raw: Path | None = None, parts: tuple[str, ...] = SPLIT_FILES
     return hits
 
 
-def _key(smiles: str) -> str | None:
-    """Map-free canonical SMILES of one side, or None when it does not parse."""
+def side_key(smiles: str) -> str | None:
+    """Map-free canonical SMILES of one side, or None when it does not parse (the class index
+    and the pathway chains of `data.pathways` join a mechanism's species to the steps by it)."""
     try:
         return chem.unmapped_canonical(chem.parse_mapped(smiles))
     except (chem.SmilesParseError, chem.SanitizeError, ValueError):
@@ -80,7 +83,7 @@ def class_index(raw: Path | None = None) -> tuple[dict[tuple[str, str], str], in
     for path in sorted(p for name in CLASS_FILES for p in root.glob(f"**/{name}")):
         with open(path, newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
-                keys = [_key(s) for s in ast.literal_eval(row["mechanisms"])]
+                keys = [side_key(s) for s in ast.literal_eval(row["mechanisms"])]
                 for pair in zip(keys, keys[1:], strict=False):
                     if None in pair:
                         continue
@@ -94,7 +97,7 @@ def class_index(raw: Path | None = None) -> tuple[dict[tuple[str, str], str], in
 def parse_line(text: str, step_id: str, classes: dict | None = None) -> ElementaryStep:
     rxn = text.split()[0]
     reac, prod = split_reaction(rxn)
-    mechanism_class = (classes or {}).get((_key(reac), _key(prod))) if classes else None
+    mechanism_class = (classes or {}).get((side_key(reac), side_key(prod))) if classes else None
     return build_step(
         step_id=step_id,
         source=Source.REACTMECH,
