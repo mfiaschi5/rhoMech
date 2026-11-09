@@ -202,6 +202,17 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `stats.json`), `uv run ksmech-data leakage-audit [--write-cohorts]` (rmechdb's leakage audit
   in both directions, species by key v2, `leakage_audit.json`; the cohorts `leak_guard_joint`,
   `rc_heldout_overlap`, `rc_heldout_shared`, `closed_base_rmechdb_overlap`, each pinned once)
+- Pathway data (reaction-network plan, item G): `uv run ksmech-data pathways --source reactmech
+  [--workers 4]` (the chains of `ID_CRM.csv` and the OOD sets joined to the ingest's step ids:
+  `pathways.parquet` beside the steps, `pathway_id`, `step_index`, `n_steps`, `is_last` (the stop
+  label), `ingest_status`, `maps_to_next`; `pathways_report.json` with the reason codes and the
+  map consistency; the steps parquet is not touched, `data.pathways.load_pathways` checks the
+  report), `uv run ksmech-data human-benchmark [--split molecule] [--workers 4]` (the PMechRP
+  human benchmark, 350 Clayden pathways, EVALUATION ONLY, no `Source` and refused by
+  `ksmech-train`: `data/processed/human_benchmark/pathways.parquet` + `pathways_report.json`,
+  `overlap_pmechdb_<split>.json` (species and steps found in each PMechDB part, by canonical
+  SMILES and identity key v2) and `qm_coverage.json` (species without a QM record or tokens,
+  file lookups only))
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts

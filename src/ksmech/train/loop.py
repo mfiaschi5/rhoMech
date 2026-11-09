@@ -54,6 +54,7 @@ from ksmech.arrows.steps import (
     samples_path,
 )
 from ksmech.data import provenance as prov
+from ksmech.data.human_benchmark import refuse_training
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
 from ksmech.eval.cohorts import load_cohort, restrict
 from ksmech.model.config import ModelConfig
@@ -111,8 +112,11 @@ class NonFiniteError(RuntimeError):
 
 
 def sources(cfg: TrainConfig) -> tuple[str, ...]:
-    """The sources of a run: `pmechdb+reactmech` names two."""
-    return tuple(cfg.source.split("+"))
+    """The sources of a run: `pmechdb+reactmech` names two. An evaluation-only set (the human
+    benchmark) is refused (`EvaluationOnly`): it is never trained on."""
+    names = tuple(cfg.source.split("+"))
+    refuse_training(names)
+    return names
 
 
 def _source_map(text: str) -> dict[str, str]:
