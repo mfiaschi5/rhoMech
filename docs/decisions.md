@@ -9400,3 +9400,70 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
   later in the token build.
 - **The two records** were moved out of the cache (backup in the session's scratchpad) and
   recomputed from the committed code, then their tokens built.
+
+## 2026-11-10: the orbital-token ablation: the 25 orbital columns stay, for now (docs/todo.md)
+
+- **Runs.** On one pod (vast.ai, 1x RTX 5090, torch 2.14.1+cu130, code 79a402f), 3 fits per GPU,
+  about 80 min each: arms a (as pm_v19_s0), b (`--drop-token-features orbital`: the 23 v17
+  orbital columns and the two `orbital_extra`, occupation included; MLP_O becomes one learned
+  vector), c (b and `--no-spectral-set`), d (c and `--no-inherit-atoms`), 3 seeds each, molecule
+  split, general preset, dense, no resonance draws, selected on closed_base val, 30 epochs
+  (`scripts/orbital_ablation.sh`, the pod package in rhoMech-hf-staging/pod_orb, logs in
+  `data/models/pod_runs/orb_2026-11-10/`). Every run decoded on closed_base val (beam 5, caps
+  legacy, DECODE_VERSION 5). The reference on this GPU matches the RX 6600 XT one: orb_a_s0
+  full-R top-1/3/5 63.2/81.2/86.5 against pm_v19_s0's 62.4/81.4/86.0.
+- **PMechDB closed_base val** (n 1,238; `ksmech-eval compare`, arm vs a, full-R %, McNemar
+  one-sided for "the arm is worse"; `data/models/pmechdb/orbital_ablation_compare/`):
+
+  | arm | top-1 own | top-1 any | top-3 own | top-3 any | tolerance |
+  |---|---|---|---|---|---|
+  | a | 65.05 | 67.56 | 82.88 | 85.95 | |
+  | b | -1.24 (p 0.11) | -1.08 (0.17) | +1.99 | +1.67 | 3.0-4.3 |
+  | c | -0.67 | -0.27 | -1.91 (0.053) | -1.83 (0.036) | 2.9-3.4 |
+  | d | +0.43 | +0.54 | +1.35 | +1.32 | 3.3-3.4 |
+
+- **ReactMech molecule val, out of distribution** (n 911; the PMechDB checkpoints decoded with
+  `--run-source pmechdb --source reactmech`; `orbital_ablation_compare_reactmech/`):
+
+  | arm | top-1 own | top-1 any | top-3 own | top-3 any | tolerance |
+  |---|---|---|---|---|---|
+  | a | 51.99 | 53.71 | 71.13 | 73.87 | |
+  | b | -0.95 (p 0.050) | -1.13 (0.054) | -1.10 (0.13) | -1.61 (0.030) | 2.5-4.0 |
+  | c | -1.21 (0.063) | -1.72 (0.040) | -1.02 (0.013) | -1.61 (0.003) | 5.2-8.2 |
+  | d | +0.37 | +0.11 | -0.80 (0.24) | -1.10 (0.22) | 2.7-5.5 |
+
+- **Block permutation importance of the three orb_a runs** (`ksmech-eval importance --scope
+  blocks --repeats 3`, `token_importance_molecule_val_{closed_base,reactmech}.json`). On PMechDB
+  the atom Fukui block costs 19-22 points of top-1 and the frontier weights 4-7; every orbital
+  block moves top-1 by at most 1.6 points and the anchor NLL by -0.12..+0.05. On ReactMech the
+  Fukui block costs 13-17; the s/p/d shares (dNLL +0.06..+0.15, top-1 -0.4..-2.0), p shares
+  (+0.02..+0.07, -0.7..-0.9), d shares (+0.04..+0.08, -0.2..-1.4) and centre weights
+  (+0.03..+0.06, 0..-1.9) raise the NLL in all 12 block-seed cases; the energy, two-centre and
+  s-share blocks stay at about 0.
+- **Textbook cases** (the five of `physics.textbook`, each checkpoint's forming-anchor scores):
+  the expected pair first in 7/15 (a), 4/15 (b), 9/15 (c), 7/15 (d) case-seeds; the seed moves
+  the ranks as much as the arm; no arm gets the 1,4 addition of cyanide to acrolein. Not used.
+- **Reading.** By the letter of the todo rule no arm fails, so the columns would be redundant.
+  But the rule cannot see an effect below about 3 points (seed SD 1.4-2.1, for c up to 4 on
+  ReactMech), and two independent measures agree out of distribution: the arms without the
+  columns lose 1-1.7 points on ReactMech, and the full model reads exactly the shape blocks (s/p/d
+  shares, centre weights) there while it ignores them on PMechDB. The columns carry a small piece
+  of what transfers to new molecules, as the spec's orbital token intends.
+- **Decision (the user, 2026-11-10).** The orbital token keeps its 25 columns for now; which of
+  them to drop is decided later (docs/todo.md). Seen in passing: on ReactMech permuting the atom
+  frontier weights raises top-1 in two of three seeds (+5.5, +3.8 points) while it costs 4-7 on
+  PMechDB, so those weights transfer badly out of distribution.
+
+## 2026-11-10: the backward model trained (network plan H)
+
+- **Runs.** bwd_s0-2 on the same pod and code, `--direction backward`, the arm-a options. The
+  backward store was built at home (`ksmech-arrows samples --direction backward`: 12,473 samples
+  of 12,512 training steps, 39 MISSING_TOKENS; molecule split 10,014 / 1,243 / 1,189, no backward
+  input of val or test in training), because a pod holds no QM records and every token file
+  verifies its record (built on the pod the store had 0 samples). The shards also name the
+  product side's tokens and bond indices: 3,565 of each were not in store 19 and one token had
+  been rebuilt since, so they were sent before the fits (`pod_orb/ship_backward.sh` now sends the
+  store's whole input closure, `pod_orb/backward_inputs.py`).
+- **Result.** Closed_base val of the backward samples (n 1,233), full-R top-1/3/5: 61.4/78.8/82.3,
+  57.8/74.9/80.0, 59.0/77.9/80.9; any recorded parent 63.0/59.9/61.2 at top-1. The forward arm a
+  on its own closed_base val: 63.2-66.2 at top-1.

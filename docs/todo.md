@@ -3,32 +3,20 @@
 Open work, newest last. Each item says why, what done looks like, and where it came from. An item
 leaves this file when it is done (its outcome goes to `docs/decisions.md`).
 
-## Do the orbital token columns carry anything the model needs? (2026-11-09)
+## Which orbital token columns to drop, if any (2026-11-10)
 
-**Why.** The permutation importance of pm_v19_s0 (`ksmech-eval importance`, molecule val, 1,241
-samples, 3 repeats; `data/models/pmechdb/pm_v19_s0/token_importance_molecule_val.json`) found the
-model relying on the atom tokens only: element (dNLL +4.57, top-1 -43.6%), formal charge (+1.98,
--30.2%), the Fukui block (+0.79, -18.3%), the Mulliken charge (+0.71, -13.9%), %Vbur (+0.37,
--5.3%), the frontier weights (+0.19, -4.3%). Every orbital column, and the spectral set, moves
-the anchor NLL by less than 0.03 and top-1 by at most 0.5%. The likely reason: the orbital
-information already reaches the model through the pair features (G, g2, the cross-centre
-coupling) and through the embedding each orbital inherits from its centre atoms, so the orbital
-columns are redundant. Permutation cannot tell redundant from useless: a retrained model can
-shift the work onto another input, so only a retrained ablation settles it.
+**Why.** The orbital-token ablation (`docs/decisions.md`, 2026-11-10) kept the 25 orbital
+columns for now, the user's call: on PMechDB closed_base val no arm without them is worse, but on
+ReactMech val the arms without them lose 1-1.7 points (McNemar p 0.003-0.06), and the full model
+reads the s/p/d shares and the centre weights there (12 of 12 block-seed cases raise the NLL)
+while it ignores them on PMechDB. The energy, two-centre and s-share blocks showed no use on
+either set. The user decides later which columns, if any, leave the orbital token.
 
-**What.**
-- A `ModelConfig` switch that removes the orbital token columns at batch time (like
-  `drop_pair_features`: the orbital MLP input zeroed and masked, or a `drop_token_features` by
-  name), with the spectral set as its own switch; tests on the fixture molecules.
-- Three arms on the molecule split, `closed_base` val, 3 seeds each, general preset: (a) as
-  pm_v19_s0; (b) no orbital columns; (c) no orbital columns and no spectral set. Optionally (d) no
-  inherited atom embeddings, to see whether the orbital token then needs its own columns.
-- Decode the arms and pair them with `ksmech-eval compare` (A fails when its mean top-k is below
-  B's by more than max(2 x pooled SD, 1 point)).
+**What.** An arm with only the chosen columns removed (`--drop-token-features NAME...`), 3 seeds,
+judged on ReactMech val as well as PMechDB closed_base val, by the tolerance rule and by McNemar
+(the rule alone cannot see an effect below about 3 points).
 
-**Done when.** The comparison is in `docs/decisions.md`: either the orbital columns stay
-(an arm without them is worse beyond the tolerance), or they are redundant with the pair track
-and the inherited atom embeddings, and the spec's orbital token is revisited.
+**Done when.** The user's choice and its comparison are in `docs/decisions.md`.
 
 ## Reaction networks: towards a product, without one, and from a product alone (2026-11-09)
 
