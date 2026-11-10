@@ -212,7 +212,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `ksmech-train`: `data/processed/human_benchmark/pathways.parquet` + `pathways_report.json`,
   `overlap_pmechdb_<split>.json` (species and steps found in each PMechDB part, by canonical
   SMILES and identity key v2) and `qm_coverage.json` (species without a QM record or tokens,
-  file lookups only))
+  file lookups only); `--species-file [PATH]` rebuilds nothing: it writes `qm_species.json`,
+  the species of `qm_coverage.json` without a record or current tokens (tombstones counted, left
+  out), and prints the batch's commands in order: `ksmech-qm run --species-from FILE --name
+  human_benchmark`, `ksmech-qm bond-index`, `ksmech-orbitals build --species-from FILE --name
+  human_benchmark`, `ksmech-data human-benchmark`)
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
@@ -225,7 +229,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   files as `split_frozen_<strategy>.json`, FROZEN_SPLIT_SCHEMA, no file inputs: `samples` then
   keeps every frozen step in its part, places new groups by hash and counts SPLIT_CONFLICT;
   a snapshot is replaced only by hand). The open-shell plan is `docs/open_shell_plan.md`.
-- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8 [--steps-from FILE]` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
+- QM featurization: `uv run ksmech-qm run --source pmechdb --workers 8 [--steps-from FILE]`
+  or `--species-from FILE [--name N]` in place of `--source` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   the spawned workers run tblite on the system's LP64 OpenBLAS instead of the wheel's netlib copy
   (`qm.blas`, `KSMECH_BLAS=auto|bundled|PATH`; `--workers 1` and the web app keep the netlib copy;
   a pod needs `libopenblas0-serial`); `--optimizer tblite-anc` optimizes in approximate normal
@@ -234,6 +239,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `--solvent S` another ALPB solvent of `xtb_calc.ALPB_SOLVENTS` (one name each: methanol, dmso,
   thf, ...) or `gas`, a method of its own (`GFN2-xTB/ALPB-S/...`) whose records sit beside the
   water ones (the token build and serve still read water only); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
+  `--species-from` the species a JSON file lists (a list of SMILES, a `species` list, or
+  `qm_coverage.json`'s status lists, of which `qm_missing` and `tokens_*`), canonicalized map-free,
+  with the same census, cache keys, memo and options, the manifest under
+  `data/processed/species/<name>/` (`--name`, default the file's stem; never a source's folder;
+  `qm.species`);
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
   codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,
@@ -259,7 +269,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `index refresh [--rebuild]` only refreshes; the files stay the source of truth)
 - Orbital tokens: `uv run ksmech-orbitals build --source pmechdb --workers 4` (PM-localized orbital
   and atom tokens, one `.npz` per molecule under `data/cache/tokens/` plus `summary.json`; molecules
-  without a QM record are skipped and counted, so re-run after the QM batch), `uv run
+  without a QM record are skipped and counted, so re-run after the QM batch; `--species-from FILE
+  [--name N]` in place of `--source`: a species list's tokens, as for `ksmech-qm run`, the summary
+  only in `data/processed/species/<name>/tokens_summary.json`), `uv run
   ksmech-orbitals show --smiles 'CC(=O)C'` (token table of one cached molecule),
   `uv run ksmech-orbitals fg-vocab --source pmechdb` (regenerate the functional-group vocabulary)
 - Arrows: `uv run ksmech-arrows roundtrip --source pmechdb` (dataset arrows applied as one

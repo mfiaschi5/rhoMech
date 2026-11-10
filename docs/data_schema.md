@@ -415,7 +415,7 @@ the parquet's sha256 as its content hash; `data.pathways.load_pathways` checks b
 
 ## Processed: `data/processed/human_benchmark/` (`ksmech-data human-benchmark`)
 
-Evaluation only, never trained on. Four files:
+Evaluation only, never trained on. Four files, and a fifth on request (`qm_species.json`):
 
 - `pathways.parquet`, one row per pathway:
 
@@ -447,7 +447,15 @@ Evaluation only, never trained on. Four files:
 - `qm_coverage.json` (kind `human_benchmark_qm_coverage`): each distinct species' QM record,
   failure tombstone, spin census and tokens under conformer 0 and its own method (file lookups
   in `data/cache/qm` and `data/cache/tokens`), counts overall and by role, and the species of
-  every incomplete status.
+  every incomplete status (`species`: {`qm_missing`, `qm_tombstone`, `qm_census_refused`,
+  `tokens_missing`, `tokens_old_schema`, `tokens_no_header`: [SMILES]}, the empty ones absent).
+- `qm_species.json` (kind `human_benchmark_qm_species`, input `qm_coverage.json`, config its
+  method and conformer; written only by `ksmech-data human-benchmark --species-file [PATH]`,
+  which rebuilds nothing else): `species`, the sorted map-free canonical SMILES of
+  `qm_missing` and every `tokens_*` list (what a QM batch or a token build completes,
+  `qm.species.coverage_species`), `n_species`, `left_out` ({list: size} of the others: the
+  tombstones and census refusals), `evaluation_only`. The input of `ksmech-qm run
+  --species-from` and `ksmech-orbitals build --species-from`.
 
 ## Processed: `data/processed/<source>/samples/` and `samples_<split>.json`
 
@@ -671,6 +679,16 @@ non-metal with u >= 2 that is not a Hund case or has no count, unless a counted 
 `method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
 row whose method is its own species' method under the run's configuration
 (`qm.batch.row_method`).
+
+A species list (`ksmech-qm run --species-from FILE --name N`, `qm.species`) writes the same
+manifest to `data/processed/species/<N>/qm_manifest.parquet` (`N` letters, digits, `_`, `.`,
+`-`; default the file's stem): `species/` is no `Source` folder, so it never meets a source's
+manifest. Its rows are those of a source's run (the census refusals with conformer -1, a SMILES
+RDKit cannot read as CANONICALIZE_FAILED with conformer -1); the census grants a list no
+exemption. `ksmech-orbitals build --species-from FILE --name N` writes its summary only to
+`data/processed/species/<N>/tokens_summary.json` (not to `data/cache/tokens/summary.json`;
+`source` is `species/<N>`, no step counts, `not_collected` the census refusals and
+canonicalization failures).
 
 ### Thermo sidecars: `data/cache/thermo/<sha256>.npz` (`ksmech-qm thermo`)
 

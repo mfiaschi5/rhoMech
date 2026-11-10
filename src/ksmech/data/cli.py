@@ -66,6 +66,17 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--workers", type=int, default=4, help="spawned processes for RDKit")
     h.add_argument("--qm-cache-dir", type=Path, default=Path("data/cache/qm"))
     h.add_argument("--tokens-dir", type=Path, default=Path("data/cache/tokens"))
+    h.add_argument(
+        "--species-file",
+        type=Path,
+        nargs="?",
+        const=True,  # the flag alone: the default path
+        default=None,
+        metavar="PATH",
+        help="only write the QM batch's species list from the existing qm_coverage.json "
+        "(default <processed-dir>/human_benchmark/qm_species.json) and print the batch "
+        "commands; nothing else is rebuilt",
+    )
     v = sub.add_parser("provenance", help="print an artifact's provenance chain, or backfill")
     v.add_argument("path", type=Path, nargs="?", help="artifact to describe")
     v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
@@ -148,6 +159,8 @@ def cmd_human_benchmark(args: argparse.Namespace, console: Console) -> int:
     from ksmech.data import human_benchmark as hb
 
     out_dir = Path(args.processed_dir) / hb.NAME
+    if args.species_file is not None:
+        return cmd_benchmark_species(out_dir, args.species_file, console)
     table, report_path, report, pathways = hb.write_benchmark(args.raw or hb.RAW_FILE, out_dir)
     console.print(f"{report['pathways']} pathways, {report['steps']} steps (evaluation only)")
     _print_counts("codes", {k: v for k, v in report["codes"].items() if v}, console)
@@ -161,6 +174,27 @@ def cmd_human_benchmark(args: argparse.Namespace, console: Console) -> int:
     _print_counts("tokens", cov["tokens"], console)
     for path in (table, report_path, ov_path, cov_path):
         console.print(f"wrote {path}")
+    return 0
+
+
+def cmd_benchmark_species(out_dir: Path, path: Path | bool, console: Console) -> int:
+    """`human-benchmark --species-file [PATH]`: the species list of the QM batch and the token
+    build from the existing `qm_coverage.json` (`benchmark_checks.write_species_file`), then
+    the commands that compute them, in order."""
+    from ksmech.data import benchmark_checks as checks
+    from ksmech.data.provenance import StaleArtifact
+
+    try:
+        out, body = checks.write_species_file(out_dir, None if path is True else path)
+    except (FileNotFoundError, StaleArtifact) as exc:
+        console.print(f"[red]{exc}[/red]; run `ksmech-data human-benchmark` first")
+        return 2
+    console.print(f"{body['n_species']} species without a QM record or current tokens")
+    _print_counts("left out (no batch completes them)", body["left_out"], console)
+    console.print(f"wrote {out}", soft_wrap=True)
+    console.print("then run, in order:")
+    for line in checks.batch_commands(out):
+        console.print(f"  {line}", markup=False, highlight=False, soft_wrap=True)
     return 0
 
 
