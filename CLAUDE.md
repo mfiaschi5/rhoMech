@@ -476,7 +476,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   the previous steps from a product alone; AND-OR search, AO* with value 0, over the backward
   model's steps on the species alone and with each of the most frequent by-products counted from
   the source's recorded steps; leaves the catalogue given and the reservoir; `--verify-run` checks
-  the route forward with `network.towards`)
+  the route forward with `network.towards`), `uv run ksmech-network retro-eval --set
+  human_benchmark|reactmech --run BACKWARD_RUN [--verify-run FORWARD_RUN] [--part val] [--limit N]`
+  (each case's final product the target, its recorded reactants the catalogue: solved, recovered,
+  verified forward, species expanded; `network_retro_eval_<set>...json` beside the checkpoint)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]

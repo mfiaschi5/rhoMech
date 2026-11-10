@@ -87,7 +87,7 @@ def test_the_part_option_selects_the_cases_of_that_part(monkeypatch):
 
     cases = [Case("a", START, "CO", part="val"), Case("b", START, "CO", part="train"),
              Case("c", START, "CO", part="mixed")]  # fmt: skip
-    monkeypatch.setattr(benchmarks, "reactmech_cases", lambda *a, **k: cases)
+    monkeypatch.setattr(benchmarks, "reactmech_cases", lambda *a, **k: list(cases))
     args = SimpleNamespace(set="reactmech", processed_dir=None, split="molecule", part="val",
                            limit=None)  # fmt: skip
     assert [c.case_id for c in _cases(args, Counter())] == ["a"]
@@ -101,3 +101,28 @@ def test_the_human_benchmark_is_read_under_processed_dir(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(hb, "load_pathways", lambda out_dir: seen.append(out_dir) or [])
     assert human_benchmark_cases(tmp_path) == [] and seen == [tmp_path / hb.NAME]
+
+
+class ToyBackward:
+    """The previous pool of a species, given by hand: CO came from CCl + OH-."""
+
+    def expand(self, pool):
+        if pool.key == pool_state("CO").key:
+            return Expansion([Proposal(pool_state(START), -0.4, "back", frozenset({1}))])
+        return Expansion([])
+
+
+def test_a_retro_case_recovers_the_recorded_reactants_and_is_verified_forward():
+    from ksmech.network.evaluate import retro_case, retro_summary
+    from ksmech.network.retro import RetroParams
+
+    case = Case("r1", START, "CO", None, (), "benchmark")
+    row = retro_case(ToyBackward(), case, [], RetroParams(), 0, TOY, SearchParams(k=1))
+    assert (row["solved"], row["recovered"], row["verified"]) == (True, True, True)
+    assert row["cost"] == pytest.approx(0.4) and row["expanded"] == 1
+    other = retro_case(ToyBackward(), Case("r2", "CCBr.[OH-]", "CO"), [], RetroParams(), 0)
+    assert other["solved"] is False and other["recovered"] is False and other["verified"] is None
+    bad = retro_case(ToyBackward(), Case("r3", "C(", "CO"), [], RetroParams(), 0)
+    s = retro_summary([row, other, bad])
+    assert (s["n"], s["failed"], s["solved"], s["recovered"]) == (2, 1, 0.5, 0.5)
+    assert (s["n_verified_checked"], s["verified"]) == (1, 1.0)

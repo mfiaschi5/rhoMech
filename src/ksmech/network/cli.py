@@ -199,14 +199,9 @@ def _expander(args):
 
 
 def _cases(args, counts):
-    from ksmech.network.benchmarks import human_benchmark_cases, reactmech_cases
+    from ksmech.network.benchmarks import load_cases
 
-    if args.set == "reactmech":
-        cases = reactmech_cases(args.processed_dir, args.split, counts)
-    else:
-        cases = human_benchmark_cases(args.processed_dir, counts)
-    cases = [c for c in cases if args.part == "all" or c.part == args.part]
-    return cases[: args.limit] if args.limit is not None else cases
+    return load_cases(args.set, args.processed_dir, args.split, args.part, args.limit, counts)
 
 
 def cmd_evaluate(args, console: Console) -> int:
@@ -333,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         "predict": cmd_predict,
         "species": species_cli.cmd_species,
         "retro": retro_cli.cmd_retro,
+        "retro-eval": retro_cli.cmd_retro_eval,
     }
     return commands[args.command](args, Console())
 
