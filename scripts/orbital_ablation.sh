@@ -18,8 +18,8 @@ shift || true
 ARMS=("${@:-a b c d}")
 ARMS=(${ARMS[*]})
 SEEDS=(0 1 2)
-COMMON=(--source pmechdb --split molecule --preset general --epochs 30
-        --val-cohort pmechdb=closed_base)
+COMMON=(--source pmechdb --split molecule --preset general --epochs 30 --encoder dense
+        --no-resonance-draws --val-cohort pmechdb=closed_base)  # pm_v19_s0's options
 
 flags() {
   case $1 in
