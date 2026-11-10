@@ -117,7 +117,7 @@ def test_the_command_never_writes_the_record(eclipsed_ethane, tmp_path, capsys):
     side = tc.read_arrays(Path(row["path"]))
     assert np.abs(side["coords_ang"] - rec.coords_ang).max() > 0.1
     printed = capsys.readouterr().out
-    assert "re-optimization by outcome" in printed and "REOPTIMIZED" in printed
+    assert "re-optimization along imaginary modes" in printed and "REOPTIMIZED" in printed
 
 
 def _old_sidecar(arrays: dict, record_path: Path, config: tc.ThermoConfig) -> Path:

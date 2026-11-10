@@ -7,10 +7,10 @@ sidecar exists), `known_failure` (a tombstone covers these settings), `skipped` 
 RECORD_STALE, UNKNOWN_METHOD) or `failed` (SCF_NOT_CONVERGED, TIMEOUT, UNEXPECTED,
 WORKER_CRASH). The counts by status and reason, the warnings, the re-optimizations along
 imaginary modes by outcome and stop code (`qm.thermo_reopt`: MINIMUM, REOPTIMIZED, PERSISTENT
-with REOPT_ROUNDS, REOPT_NO_LOWER_MINIMUM, REOPT_BUDGET, REOPT_OFF, REOPT_NO_GRAPH) with their
-energy drops and the directions not kept by reason, and the time per molecule against its atom
-count are printed at the end; `--report` writes every row as JSON, with ZPE, H, S and G at the
-asked temperatures and the re-optimization's fields.
+with REOPT_ROUNDS, REOPT_NO_LOWER_MINIMUM, REOPT_BUDGET, REOPT_HESSIAN_FAILED, REOPT_OFF,
+REOPT_NO_GRAPH) with their energy drops and the directions not kept by reason, and the time
+per molecule against its atom count are printed at the end; `--report` writes every row as
+JSON, with ZPE, H, S and G at the asked temperatures and the re-optimization's fields.
 """
 
 from __future__ import annotations
@@ -258,12 +258,13 @@ def reopt_counts(rows: list[dict]) -> list[tuple[str, str, int, float, float, fl
 
 
 def _reopt_table(rows: list[dict]) -> Table:
-    table = Table(title="imaginary modes: re-optimization by outcome and stop code (computed now)")
-    for col in ("outcome", "stop", "count", "rounds", "mean drop", "max drop"):
-        table.add_column(col, justify="left" if col in ("outcome", "stop") else "right")
-    table.add_column("example")
-    for outcome, stop, n, rounds, mean, top, ex in reopt_counts(rows):
-        cells = (str(n), f"{rounds:.2f}", f"{mean:.3f}", f"{top:.3f}", ex[:50])
+    table = Table(title="re-optimization along imaginary modes (computed now)")
+    table.add_column("outcome", no_wrap=True, min_width=11)
+    table.add_column("stop", no_wrap=True, min_width=22)
+    for col in ("count", "rounds", "drop", "max"):
+        table.add_column(col, justify="right", no_wrap=True)
+    for outcome, stop, n, rounds, mean, top, _ in reopt_counts(rows):
+        cells = (str(n), f"{rounds:.2f}", f"{mean:.3f}", f"{top:.3f}")
         table.add_row(outcome, stop or "-", *cells)
     return table
 
@@ -275,7 +276,7 @@ def print_summary(rows: list[dict], console: Console) -> None:
         console.print(f"  warning {w}: {n}")
     if reopt_counts(rows):
         console.print(_reopt_table(rows))
-        console.print("  (energy drops in kcal/mol, record minus thermo minimum)")
+        console.print("  (rounds kept; drops in kcal/mol, record minus thermo minimum: mean, max)")
     rejected = Counter(
         w for r in rows if r["status"] == "ok" for w in r.get("reopt_rejected", "").split(",") if w
     )
@@ -283,7 +284,7 @@ def print_summary(rows: list[dict], console: Console) -> None:
         console.print(f"  re-optimized direction not kept, {w}: {n}")
     bins = timing_bins(rows)
     if bins:
-        table = Table(title="time per Hessian by atom count (computed now)")
+        table = Table(title="time per Hessian by atom count (computed now, re-optimizations in)")
         for col in ("atoms", "molecules", "mean s", "median s", "max s"):
             table.add_column(col, justify="right")
         for label, n, mean, med, top in bins:

@@ -242,12 +242,22 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (Wiberg bond indices of the Lewis bonds of every cached record, `data/cache/bond_index/`; the
   token cache needs them, so re-run after the QM batch), `uv run ksmech-qm thermo --source S...
   [--steps-from FILE] | --smiles SMILES... [--workers 4] [--solvent water] [--limit N]
-  [--report FILE --temperatures T...] [--retry-failed]` (reaction-network plan item B: the
+  [--report FILE --temperatures T...] [--retry-failed] [--reopt-threshold -10] [--reopt-rounds 3]
+  [--reopt-fmax 1e-4] [--reopt-maxiter 1000]` (reaction-network plan item B: the
   thermochemistry sidecar of every cached record, `data/cache/thermo/<key>.npz` stamped with its
   record: a central-difference Hessian of tblite's GFN2 gradients at the record's geometry with
-  its solvent, charge and spin (`qm.hessian`, 6N+1 gradients, xtb's 0.005 Bohr step), the
-  frequencies, moments, symmetry number and multiplicity; G(T) at any T from `qm.thermo`
-  (quasi-RRHO, xtb's imaginary-mode rule, 1 M standard state), the pool's G from
+  its solvent, charge and spin (`qm.hessian`, 6N+1 gradients, xtb's 0.005 Bohr step); a mode
+  below `--reopt-threshold` cm^-1 is followed downhill (`qm.thermo_reopt`: displaced both ways,
+  each start re-optimized on the record's surface by ANC at `--reopt-fmax`, kept when it breaks
+  or forms no bond relative to the record and lies lower, the Hessian again, up to
+  `--reopt-rounds`; 0 = xtb's rule only), and the sidecar holds that thermo minimum (geometry,
+  energy, frequencies, moments, symmetry number, multiplicity) beside the record's energy and
+  frequencies, the rounds and the energy drop, never writing the record; a mode left keeps
+  xtb's rule (IMAGINARY_PERSISTENT; stop codes REOPT_ROUNDS, REOPT_NO_LOWER_MINIMUM,
+  REOPT_BUDGET, REOPT_HESSIAN_FAILED counted in the summary); a sidecar written before
+  2026-11-10 reads stale (its config lacks the re-optimization keys) and is recomputed; G(T) at
+  any T from `qm.thermo` (quasi-RRHO, xtb's imaginary-mode rule on what is left, 1 M standard
+  state), the pool's G from
   `qm.thermo.pool_free_energy`, one species' from `qm.thermo_cache.free_energy_of`; NO_RECORD,
   RECORD_STALE, UNKNOWN_METHOD skipped and counted, SCF_NOT_CONVERGED and TIMEOUT leave
   `thermo/<key>.failed.json`; t ~ 1.8e-4 N^2.93 s per molecule, the whole cache about 208
