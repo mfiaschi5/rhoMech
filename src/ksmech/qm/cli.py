@@ -19,7 +19,7 @@ from rich.table import Table
 from ksmech.data import qmugs
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
 from ksmech.data.schema import Source
-from ksmech.qm import index
+from ksmech.qm import index, species
 from ksmech.qm.batch import collect_molecules, featurize_dataset, summarize
 from ksmech.qm.bond_index import DEFAULT_BOND_INDEX_DIR, build_bond_indices
 from ksmech.qm.given import featurize_qmugs
@@ -66,7 +66,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_run_parser(sub) -> None:
     run = sub.add_parser("run", help="embed, optimize and featurize every unique molecule")
-    run.add_argument("--source", required=True, choices=[str(s) for s in Source])
+    pick = run.add_mutually_exclusive_group(required=True)
+    pick.add_argument("--source", choices=[str(s) for s in Source])
+    pick.add_argument(
+        "--species-from",
+        type=Path,
+        default=None,
+        help="the species a JSON file lists instead of a source's (`qm.species`): a list of "
+        "SMILES, a 'species' list, or qm_coverage.json's status lists",
+    )
+    run.add_argument(
+        "--name",
+        default=None,
+        help="with --species-from: the manifest goes to <processed-dir>/species/<name>/ "
+        "(default: the file's stem)",
+    )
     run.add_argument("--workers", type=int, default=1)
     run.add_argument("--n-conformers", type=int, default=1)
     run.add_argument("--optimizer", choices=["tblite", "tblite-anc", "xtb"], default="tblite")
@@ -264,6 +278,67 @@ def cmd_index(args: argparse.Namespace, console: Console) -> int:
     return status
 
 
+def _run_options(args: argparse.Namespace, config: QMConfig, console: Console) -> dict:
+    """The options `ksmech-qm run` passes to the batch, a source's or a species list's."""
+    return dict(
+        n_workers=args.workers,
+        n_conformers=args.n_conformers,
+        config=config,
+        limit=args.limit,
+        retry_failed=not args.no_retry_failed,
+        console=console,
+        retry_reasons=args.retry_reason,
+    )
+
+
+def _species_run(args: argparse.Namespace, config: QMConfig, console: Console):
+    """`--species-from`, checked and read: the batch over the file's species, its manifest
+    under `<processed-dir>/species/<name>/` (`qm.species`)."""
+    if args.steps_from is not None:
+        raise ValueError("--steps-from selects a source's steps: not with --species-from")
+    name = species.run_name(args.species_from, args.name)
+    path = species.manifest_path(name, args.processed_dir)  # checks the name
+    smiles, left = species.read_species_file(args.species_from)
+    for key, n in left.items():
+        console.print(f"[yellow]{args.species_from}: {n} species of {key!r} left out[/yellow]")
+    console.print(f"{len(smiles)} species listed in {args.species_from}; manifest {path}")
+    opts = _run_options(args, config, console)
+    return lambda: species.featurize_species(smiles, name, args.processed_dir, **opts)
+
+
+def _source_run(args: argparse.Namespace, config: QMConfig, console: Console):
+    """`--source`, checked: the batch over the source's molecules (of `--steps-from`)."""
+    if args.name is not None:
+        raise ValueError("--name names a species run: only with --species-from")
+    ids, opts = steps_from(args.steps_from), _run_options(args, config, console)
+    return lambda: featurize_dataset(
+        args.source, processed_dir=args.processed_dir, step_ids=ids, **opts
+    )
+
+
+def cmd_run(args: argparse.Namespace, config: QMConfig, console: Console) -> int:
+    """`ksmech-qm run` over a source's molecules or a species list's, then the --min-success
+    gate. Exit 2 for options or files that cannot run."""
+    plan = _species_run if args.species_from is not None else _source_run
+    try:
+        run = plan(args, config, console)
+    except (ValueError, FileNotFoundError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+    try:
+        manifest = run()
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]; run `ksmech-data ingest --source {args.source}` first")
+        return 2
+    success = summarize(manifest)["success_fraction"]
+    if not success >= args.min_success:
+        console.print(
+            f"[red]success {success:.2%} is below --min-success {args.min_success:.0%}[/red]"
+        )
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -285,29 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         conn_cov_factor=args.conn_cov_factor,
         cache_dir=args.cache_dir,
     )
-    try:
-        manifest = featurize_dataset(
-            args.source,
-            n_workers=args.workers,
-            n_conformers=args.n_conformers,
-            config=config,
-            processed_dir=args.processed_dir,
-            limit=args.limit,
-            retry_failed=not args.no_retry_failed,
-            console=console,
-            retry_reasons=args.retry_reason,
-            step_ids=steps_from(args.steps_from),
-        )
-    except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]; run `ksmech-data ingest --source {args.source}` first")
-        return 2
-    success = summarize(manifest)["success_fraction"]
-    if not success >= args.min_success:
-        console.print(
-            f"[red]success {success:.2%} is below --min-success {args.min_success:.0%}[/red]"
-        )
-        return 1
-    return 0
+    return cmd_run(args, config, console)
 
 
 if __name__ == "__main__":

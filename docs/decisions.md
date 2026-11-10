@@ -9235,3 +9235,54 @@ Taken one by one after the merge of `claude/network`:
   calibrate them.
 - **Push main** to the public repository once these land (code only; the RMechDB guard
   `tests/test_p8_no_flower_lines.py` passes).
+
+## 2026-11-10: species lists for the QM batch and the token build (the human benchmark's species)
+
+- **`ksmech-qm run --species-from FILE` and `ksmech-orbitals build --species-from FILE`**
+  (`qm.species`), exclusive with `--source` (argparse refuses both, and neither): the
+  molecules are the species a JSON file lists instead of a source's step fragments, so the
+  1,072 species of the human benchmark that no source holds get records and tokens. Each
+  SMILES is split into fragments and each fragment canonicalized map-free
+  (`chem.unmapped_canonical` of `chem.parse_mapped`), the keys of the QM cache and the token
+  files; the 1,072 listed keys canonicalize to themselves. The rest is the source path
+  unchanged: `batch.featurize_molecules`, which `featurize_dataset` now calls too, with the
+  same tasks, spin census (SPIN_CENSUS_REFUSED, conformer -1), per-species tagged methods,
+  cache keys, tombstones and failure memo, reason codes, workers, OpenBLAS and options.
+- **A list has no census exemption.** The counted exemptions
+  (`curation/multi_radical_exemptions.json`) are step ids; a species list names no step.
+- **Accepted shapes.** A list of SMILES; an object whose `species` is a list (the shape the
+  helper writes, with its provenance header); or an object whose `species` holds status lists,
+  as `qm_coverage.json` does. From those the lists a batch can complete are read: `qm_missing`
+  and every `tokens_*` list. The others (`qm_tombstone`, `qm_census_refused`) are printed with
+  their sizes and left out. A tombstoned species would only be answered from the memo, and a
+  refused one refused again. Any other shape is a ValueError (exit 2).
+- **Manifest naming.** `data/processed/species/<name>/qm_manifest.parquet`, `--name` (letters,
+  digits, `_`, `.`, `-`, one path part) defaulting to the file's stem. `species/` is no
+  `Source` folder, so a list never writes over a source's manifest, whatever its name (tested
+  with every source's name). `--name` with `--source` and `--steps-from` with
+  `--species-from` are refused (exit 2) before any work.
+- **The species token build writes its summary only to
+  `data/processed/species/<name>/tokens_summary.json`**, not to the cache's shared
+  `summary.json`, which a source's build overwrites and nothing reads. There are no steps, so
+  there is no `fermi_smeared.steps` block. `not_collected` lists the census refusals and the
+  canonicalization failures.
+- **`ksmech-qm bond-index` needs no change.** It globs every record under the cache and writes
+  a sidecar for each record that has none or a stale one, so the new records are covered.
+  Checked on the pilot's 5 records (copies: 5 built). The token build reads the Wiberg indices
+  from the record itself (`tokens.lewis_bond_indices`); the sidecars serve the sample store.
+- **Helper.** `ksmech-data human-benchmark --species-file [PATH]` rebuilds nothing. It reads
+  the existing `qm_coverage.json`, with its provenance verified, and writes `qm_species.json`
+  beside it (kind `human_benchmark_qm_species`, input the coverage) or to PATH. It then prints
+  the four commands in order: the QM run, `bond-index`, the token build, and
+  `ksmech-data human-benchmark` to refresh the coverage. `--species-from qm_coverage.json`
+  reads the same species directly. The frozen list is the reproducible input, since the
+  coverage changes as the batch runs.
+- **Pilot** (5 species drawn as `--limit 5` would draw them, seed 0, 2 workers, the default
+  method `GFN2-xTB/ALPB-water/tblite-lbfgs`, OpenBLAS in the workers): all 5 ok, one
+  RESTRAINED_GEOM warning (NC([OH2+])c1ccccc1). Calculation seconds were 0.3 (14 atoms), 0.7
+  (16), 1.7 (30), 1.9 (19) and 8.1 (50). The QM step took 13 s wall, the token build 6 s wall,
+  all 5 built and current. A power law fitted on the PMechDB and ReactMech manifests (t ~
+  2.2e-4 N^2.95 s, N atoms with H) predicts 2.4 times the pilot's total on these 5. Over the
+  1,072 species (median 28 atoms, at most 96) it predicts 3.0 CPU-hours, and the binned means
+  4.7. At 8 workers that is 10-35 min, the lower end at the pilot's speed. The tokens take a
+  few minutes more with 4 workers.

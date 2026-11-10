@@ -1,4 +1,5 @@
-"""Build token files for every unique molecule of a dataset from the GFN2 cache.
+"""Build token files for every unique molecule of a dataset, or of a species list
+(`build_species`), from the GFN2 cache.
 
 One `.npz` per (molecule, conformer) under `data/cache/tokens/`, keyed like the QM cache. A
 molecule whose QM record is missing is skipped and counted, so the build can be re-run once the
@@ -45,6 +46,7 @@ from ksmech.orbitals.tokens import (
     token_config,
 )
 from ksmech.processes import in_processes
+from ksmech.qm import species
 from ksmech.qm.batch import collect_molecules
 from ksmech.qm.records import (
     DEFAULT_CACHE_DIR,
@@ -60,6 +62,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TOKENS_DIR = Path("data/cache/tokens")
 SUMMARY_NAME = "summary.json"
+TOKENS_SUMMARY_NAME = "tokens_summary.json"  # under data/processed/<source>/ or species/<name>/
 N_WORST = 20
 _HIST_BIN = 10
 
@@ -691,13 +694,47 @@ def build_dataset(
     rows = run_build(smiles_list, config, n_workers)
     summary = summarize(rows, config, source)
     summary["fermi_smeared"]["steps"] = smeared_steps(source, processed_dir, rows)
-    out = Path(config.out_dir) / SUMMARY_NAME
-    out.parent.mkdir(parents=True, exist_ok=True)
+    per_source = source_dir(source, processed_dir) / TOKENS_SUMMARY_NAME  # kept per source
+    paths = [Path(config.out_dir) / SUMMARY_NAME] + [per_source] * per_source.parent.is_dir()
+    return _report(summary, paths, console)
+
+
+def _report(summary: dict, paths: list[Path], console: Console) -> dict:
+    """Write the summary to every path (each a new file: never through a hard link another
+    checkout shares), print it, return it."""
     text = (json.dumps(summary, indent=1) + "\n").encode()
-    prov.atomic_write(out, text)  # a new file: never through a hard link another checkout shares
-    per_source = source_dir(source, processed_dir) / "tokens_summary.json"  # kept per source
-    if per_source.parent.is_dir():
-        prov.atomic_write(per_source, text)
+    for path in paths:
+        prov.atomic_write(path, text)
     print_summary(summary, console, show_worst=summary["occupied_unresolved_fraction"] > 0.10)
-    console.print(f"wrote summary: {out}")
+    console.print(f"wrote summary: {paths[0]}")
     return summary
+
+
+def build_species(
+    smiles: list[str],
+    name: str,
+    config: BuildConfig | None = None,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    n_workers: int = 1,
+    limit: int | None = None,
+    console: Console | None = None,
+) -> dict:
+    """`build_dataset` for a species list (`ksmech-orbitals build --species-from`): the tokens
+    of every map-free canonical fragment the spin census admits (`qm.species.collect_species`),
+    a species without a QM record skipped and counted; the summary goes only to
+    `<processed_dir>/species/<name>/tokens_summary.json` (no steps, so no step counts)."""
+    config = config or BuildConfig()
+    console = console or Console()
+    out = species.species_dir(name, processed_dir) / TOKENS_SUMMARY_NAME  # checks the name
+    smiles_list, failed = species.collect_species(smiles)
+    if limit is not None:
+        smiles_list = smiles_list[:limit]
+    console.print(
+        f"{len(smiles_list)} unique species ({len(failed)} not canonicalizable or refused by the "
+        f"spin census), QM cache {config.qm_cache_dir}, tokens -> {config.out_dir} "
+        f"({n_workers} workers)"
+    )
+    rows = run_build(smiles_list, config, n_workers)
+    summary = summarize(rows, config, f"{species.SPECIES_DIR}/{name}")
+    summary["not_collected"] = {r["smiles"]: r["reason"] for r in failed}
+    return _report(summary, [out], console)

@@ -267,6 +267,41 @@ def test_cli_human_benchmark(tmp_path, capsys):
     assert "evaluation only" in capsys.readouterr().out
 
 
+def test_species_file_lists_what_a_batch_completes(tmp_path, capsys):
+    """`human-benchmark --species-file`: from the existing coverage, the species with no record
+    or no current tokens; tombstones counted and left out; the batch commands printed in order;
+    `--species-from` reads the species file and the coverage file alike."""
+    from ksmech.qm.failures import tombstone_path
+    from ksmech.qm.species import read_species_file
+    from ksmech.qm.spin import method_for
+    from ksmech.qm.xtb_calc import QMConfig
+
+    out = tmp_path / "processed" / hb.NAME
+    *_, pathways = hb.write_benchmark(write_csv(tmp_path / "b.csv"), out)
+    qm = tmp_path / "qm"
+    qm.mkdir()
+    tombstone_path(qm, "CC(C)I", 0, method_for("CC(C)I", QMConfig().method)).write_text("{}")
+    cov_path, cov = checks.write_coverage(pathways, out, qm, tmp_path / "tokens")
+    assert main(["human-benchmark", "--processed-dir", str(tmp_path / "processed"),
+                 "--species-file"]) == 0  # fmt: skip
+    path = out / checks.SPECIES_NAME
+    body = json.loads(path.read_text())
+    assert body["species"] == cov["species"]["qm_missing"] and "CC(C)I" not in body["species"]
+    assert body["left_out"] == {"qm_tombstone": 1} and body["n_species"] == len(body["species"])
+    assert body["provenance"]["kind"] == checks.SPECIES_KIND
+    assert read_species_file(path) == (body["species"], {})
+    assert read_species_file(cov_path) == (body["species"], {"qm_tombstone": 1})
+    text = capsys.readouterr().out
+    order = ["ksmech-qm run --species-from", "ksmech-qm bond-index", "ksmech-orbitals build"]
+    assert [text.index(c) for c in order] == sorted(text.index(c) for c in order)
+    assert f"--species-from {path} --name {hb.NAME}" in text
+    other = tmp_path / "elsewhere.json"
+    assert main(["human-benchmark", "--processed-dir", str(tmp_path / "processed"),
+                 "--species-file", str(other)]) == 0  # fmt: skip
+    assert json.loads(other.read_text())["species"] == body["species"]
+    assert main(["human-benchmark", "--processed-dir", str(tmp_path), "--species-file"]) == 2
+
+
 # ---- real file
 
 

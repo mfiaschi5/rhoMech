@@ -1,4 +1,5 @@
-"""Batch GFN2 featurization of every unique molecule in a dataset's `steps.parquet`.
+"""Batch GFN2 featurization of every unique molecule in a dataset's `steps.parquet`, or of a
+species list (`qm.species`: `ksmech-qm run --species-from`).
 
 Molecules are deduplicated on the map-free canonical SMILES. Each task embeds one molecule and
 runs the calculator on its conformers. The disk cache is the source of truth for resuming; the
@@ -465,12 +466,41 @@ def featurize_dataset(
     """Featurize every unique molecule of `source` (of the steps `step_ids` only, when given);
     resumable. Returns this run's manifest rows. Earlier failures are retried (`retry_failed`),
     or only those whose reason code is in `retry_reasons`."""
+    smiles_list, canon_failures = collect_molecules(source, processed_dir, step_ids)
+    return featurize_molecules(
+        smiles_list,
+        canon_failures,
+        manifest_path(source, processed_dir),
+        n_workers=n_workers,
+        n_conformers=n_conformers,
+        config=config,
+        limit=limit,
+        retry_failed=retry_failed,
+        console=console,
+        retry_reasons=retry_reasons,
+    )
+
+
+def featurize_molecules(
+    smiles_list: list[str],
+    canon_failures: list[dict],
+    path: Path,
+    n_workers: int = 1,
+    n_conformers: int = 1,
+    config: QMConfig | None = None,
+    limit: int | None = None,
+    retry_failed: bool = True,
+    console: Console | None = None,
+    retry_reasons: Collection[str] | None = None,
+) -> pd.DataFrame:
+    """Featurize the census-admitted molecules `smiles_list` (`--limit`: a random subset, seed
+    0) with the manifest at `path`, which keeps the rows of earlier runs and `canon_failures`
+    (the canonicalization and census rows of the collection); resumable. Returns this run's
+    manifest rows."""
     config = config or QMConfig()
     console = console or Console()
-    smiles_list, canon_failures = collect_molecules(source, processed_dir, step_ids)
     if limit is not None and limit < len(smiles_list):
         smiles_list = sorted(random.Random(0).sample(smiles_list, limit))
-    path = manifest_path(source, processed_dir)
     prev = load_manifest(path)
     if prev is not None and "method" not in prev.columns:
         prev = prev.assign(method="")  # manifests written before the method column existed

@@ -14,10 +14,13 @@ benchmark (lenient on purpose: a leak is better over-counted). Species of at mos
 Coverage: file lookups only (no index refresh, nothing written into the caches): the QM record
 and the tokens of conformer 0 under each species' own method (`qm.spin.method_for`), the
 failure tombstone beside a missing record, and the spin census that keeps a species out of QM.
+`write_species_file` turns the coverage into the species list of the QM batch and the token
+build (`ksmech-qm run --species-from`, `ksmech-orbitals build --species-from`).
 """
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -28,7 +31,13 @@ from rdkit import Chem
 
 from ksmech.data import chem
 from ksmech.data import provenance as prov
-from ksmech.data.human_benchmark import OUT_DIR, REPORT_NAME, BenchmarkPathway, try_species
+from ksmech.data.human_benchmark import (
+    NAME,
+    OUT_DIR,
+    REPORT_NAME,
+    BenchmarkPathway,
+    try_species,
+)
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, steps_path
 from ksmech.data.resonance import identity_key
 from ksmech.data.schema import Source
@@ -39,6 +48,8 @@ COVERAGE_KIND = "human_benchmark_qm_coverage"
 SCHEMA_VERSION = 1
 VIEWS = ("smiles", "identity_key")
 COVERAGE_NAME = "qm_coverage.json"
+SPECIES_KIND = "human_benchmark_qm_species"
+SPECIES_NAME = "qm_species.json"
 DETAIL_PARTS = ("train", "any_part")  # the parts whose per-pathway detail the file keeps
 CHUNK = 500
 
@@ -358,3 +369,34 @@ def write_coverage(
         extra={"qm_dir": str(qm_dir), "tokens_dir": str(tokens_dir)},
     )
     return prov.write_json(Path(out_dir) / COVERAGE_NAME, body, header), body
+
+
+# ---- the species file of the QM batch and the token build
+
+
+def write_species_file(out_dir: Path = OUT_DIR, path: Path | None = None) -> tuple[Path, dict]:
+    """`qm_species.json` (or `path`) from the existing `qm_coverage.json` of `out_dir`, its
+    provenance checked: the species a QM batch or a token build can complete (no record, or a
+    record without current tokens: `qm.species.coverage_species`), the other incomplete lists
+    counted under `left_out`. The input of `ksmech-qm run --species-from` and of
+    `ksmech-orbitals build --species-from` (`batch_commands`)."""
+    from ksmech.qm.species import coverage_species
+
+    cov_path = Path(out_dir) / COVERAGE_NAME
+    cov = prov.verify(cov_path, COVERAGE_KIND, SCHEMA_VERSION)
+    found, left = coverage_species(json.loads(cov_path.read_text())["species"])
+    body = {"evaluation_only": True, "n_species": len(found), "left_out": left, "species": found}
+    header = prov.stamp(SPECIES_KIND, SCHEMA_VERSION, prov.file_input(cov_path), cov.config)
+    return prov.write_json(path or Path(out_dir) / SPECIES_NAME, body, header), body
+
+
+def batch_commands(species_file: Path, name: str = NAME) -> list[str]:
+    """The commands that compute the listed species' QM records, Wiberg sidecars and tokens and
+    then refresh the coverage, in order (workers as CLAUDE.md's QM and token examples)."""
+    listed = f"--species-from {species_file} --name {name}"
+    return [
+        f"uv run ksmech-qm run {listed} --workers 8",
+        "uv run ksmech-qm bond-index",
+        f"uv run ksmech-orbitals build {listed} --workers 4",
+        "uv run ksmech-data human-benchmark",
+    ]
