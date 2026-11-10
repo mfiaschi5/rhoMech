@@ -232,6 +232,23 @@ def test_the_rounds_end_when_a_mode_persists(qm_record, monkeypatch):
     assert seen == pytest.approx([rec.energy_ha, rec.energy_ha - 1e-4, rec.energy_ha - 2e-4])
 
 
+def test_a_failed_hessian_at_a_kept_geometry_keeps_the_last_good_one(qm_record, monkeypatch):
+    rec = qm_record(ETHANE)
+
+    def evaluate(xyz, energy):
+        if energy < rec.energy_ha:
+            raise QMError(ReasonCode.SCF_NOT_CONVERGED, "displaced geometry")
+        return _point([-50.0, 300.0], xyz, energy)
+
+    def lower(record, mol, base, point, masses, settings):
+        return (point.xyz_ang, point.energy_ha - 1e-4), []
+
+    monkeypatch.setattr(ro, "lower_minimum", lower)
+    res = ro.follow_imaginary(rec, evaluate, np.ones(rec.n_atoms), ro.ReoptSettings())
+    assert (res.outcome, res.stop, res.rounds) == (ro.Outcome.PERSISTENT, "REOPT_HESSIAN_FAILED", 0)
+    assert res.rejected == ("SCF_NOT_CONVERGED",) and res.final.energy_ha == rec.energy_ha
+
+
 def test_a_record_whose_drawing_is_not_its_atoms_has_no_guard(qm_record):
     rec = replace(qm_record(ETHANE), atom_order_smiles="CO")
     res = ro.follow_imaginary(

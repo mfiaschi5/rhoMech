@@ -21,11 +21,13 @@ numerical zero) is followed downhill instead, in rounds:
    next geometry, whose Hessian the caller computes (`follow_imaginary`'s `evaluate`);
 4. the rounds stop at a geometry with no mode below the threshold (MINIMUM untouched, else
    REOPTIMIZED) or with one left (PERSISTENT, why in `StopCode`): xtb's rule then applies to the
-   last Hessian, as before. The record itself is never changed.
+   last Hessian, as before; a Hessian that fails at a kept geometry leaves the last good one
+   (REOPT_HESSIAN_FAILED). The record itself is never changed.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,6 +51,8 @@ from ksmech.qm.geometry import (
 )
 from ksmech.qm.records import QMError, QMRecord, ReasonCode
 from ksmech.qm.xtb_calc import QMConfig, solvent_of
+
+log = logging.getLogger(__name__)
 
 REOPT_THRESHOLD_CM = -10.0
 REOPT_ROUNDS = 3
@@ -74,6 +78,7 @@ class StopCode(StrEnum):
     ROUNDS = "REOPT_ROUNDS"  # the last round's Hessian still has one
     NO_LOWER_MINIMUM = "REOPT_NO_LOWER_MINIMUM"  # neither direction was kept
     BUDGET = "REOPT_BUDGET"  # the time left is short of another round
+    HESSIAN_FAILED = "REOPT_HESSIAN_FAILED"  # a kept geometry's Hessian failed: the last good one
     NO_GRAPH = "REOPT_NO_GRAPH"  # the record's drawing does not give its atoms: no guard
 
 
@@ -288,8 +293,13 @@ def follow_imaginary(
         rejected += why
         if found is None:
             stop = str(StopCode.NO_LOWER_MINIMUM)
-        else:
+            continue
+        try:
             points.append(evaluate(*found))
+        except QMError as exc:  # the last good Hessian stays, the record's at worst
+            log.warning("Hessian of %s's re-optimized geometry failed: %s", record.smiles, exc)
+            rejected.append(str(exc.reason))
+            stop = str(StopCode.HESSIAN_FAILED)
     if stop:
         outcome = Outcome.PERSISTENT
     else:
