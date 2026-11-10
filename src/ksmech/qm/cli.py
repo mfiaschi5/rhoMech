@@ -26,6 +26,7 @@ from ksmech.qm.given import featurize_qmugs
 from ksmech.qm.records import DEFAULT_CACHE_DIR, ReasonCode
 from ksmech.qm.thermo_batch import make_tasks, print_summary, run_thermo, write_report
 from ksmech.qm.thermo_cache import DEFAULT_THERMO_DIR, ThermoConfig
+from ksmech.qm.thermo_reopt import REOPT_FMAX, REOPT_MAXITER, REOPT_ROUNDS, REOPT_THRESHOLD_CM
 from ksmech.qm.xtb_calc import ALPB_SOLVENTS, GAS, QMConfig, solvent_option
 
 DEFAULT_ROOT = DEFAULT_CACHE_DIR.parent  # data/cache: qm/, tokens/, bond_index/, thermo/
@@ -114,6 +115,22 @@ def _add_thermo_parser(sub) -> None:
     th.add_argument("--timeout", type=int, default=3600, help="seconds per molecule")
     th.add_argument("--scf-maxiter", type=int, default=250, help="SCF cycles per gradient")
     th.add_argument("--retry-failed", action="store_true", help="ignore the tombstones")
+    th.add_argument(
+        "--reopt-threshold",
+        type=float,
+        default=REOPT_THRESHOLD_CM,
+        help="cm^-1: re-optimize along the imaginary modes below it (below -1)",
+    )
+    th.add_argument(
+        "--reopt-rounds",
+        type=int,
+        default=REOPT_ROUNDS,
+        help="re-optimization rounds at most; 0: xtb's rule on the record's modes",
+    )
+    th.add_argument("--reopt-fmax", type=float, default=REOPT_FMAX, help="Hartree/Bohr")
+    th.add_argument(
+        "--reopt-maxiter", type=int, default=REOPT_MAXITER, help="energies per re-optimization"
+    )
     th.add_argument("--temperatures", type=float, nargs="+", default=[298.15], help="K, report")
     th.add_argument("--report", type=Path, default=None, help="every row as JSON")
     th.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
@@ -155,19 +172,28 @@ def thermo_species(args: argparse.Namespace) -> list[str]:
     return species
 
 
+def thermo_config(args: argparse.Namespace) -> ThermoConfig:
+    """The `ThermoConfig` of `ksmech-qm thermo`'s options; ValueError on a bad threshold."""
+    return ThermoConfig(
+        scf_maxiter=args.scf_maxiter,
+        timeout_s=args.timeout,
+        reopt_threshold_cm=args.reopt_threshold,
+        reopt_rounds=args.reopt_rounds,
+        reopt_fmax=args.reopt_fmax,
+        reopt_maxiter=args.reopt_maxiter,
+        qm_dir=args.cache_dir,
+        out_dir=args.out_dir,
+    )
+
+
 def cmd_thermo(args: argparse.Namespace, console: Console) -> int:
     try:
         species = thermo_species(args)
+        config = thermo_config(args)
     except (ValueError, FileNotFoundError) as exc:
         console.print(f"[red]{exc}[/red]")
         return 2
     qm = QMConfig(optimizer=args.optimizer, solvent=solvent_option(args.solvent))
-    config = ThermoConfig(
-        scf_maxiter=args.scf_maxiter,
-        timeout_s=args.timeout,
-        qm_dir=args.cache_dir,
-        out_dir=args.out_dir,
-    )
     tasks = make_tasks(species, qm.method, config, memo=not args.retry_failed)
     console.print(f"records {qm.method} under {args.cache_dir}, sidecars under {args.out_dir}")
     rows = run_thermo(tasks, args.workers, console)
