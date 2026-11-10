@@ -9286,3 +9286,88 @@ Taken one by one after the merge of `claude/network`:
   1,072 species (median 28 atoms, at most 96) it predicts 3.0 CPU-hours, and the binned means
   4.7. At 8 workers that is 10-35 min, the lower end at the pilot's speed. The tokens take a
   few minutes more with 4 workers.
+
+## 2026-11-10: re-optimization along imaginary modes before the thermochemistry (network plan B)
+
+Replaces the end of "Imaginary modes, as xtb's `print_thermo`" (2026-11-09): a mode below the
+threshold is now followed downhill, and xtb's rule applies only to what is left.
+
+- **Why.** The records are L-BFGS-B optima at fmax 3e-4 from an embedded start, and an
+  optimizer started on a symmetric geometry stays on it: some records are saddles of a methyl or
+  ring torsion (acetone -76 cm^-1, butanone -64, methoxyacetone -59). xtb's rule (invert above
+  -20 cm^-1, drop below) makes G jump when a soft mode crosses the cutoff (methyl acetate's
+  G - E_el spread 0.75 kcal/mol over orientations), and at a saddle the species' G belongs to the
+  minimum next to it, not to the saddle with a mode left out.
+- **The rule** (`qm.thermo_reopt.follow_imaginary`; `ksmech-qm thermo --reopt-threshold -10
+  --reopt-rounds 3 --reopt-fmax 1e-4 --reopt-maxiter 1000`). A Hessian with a mode below -10
+  cm^-1 starts a round (|nu| <= 1 stays a numerical zero, and the threshold must be below -1;
+  -10 leaves the noise-level modes of large flexible records, -2 to -10 in the pilot, to xtb's
+  inversion). The geometry is displaced along the sum of the modes below the threshold, each
+  mode's Cartesian displacement scaled to a largest atomic displacement of 1 and the sum to
+  0.2 A (in mass-weighted coordinates the sum has a positive component on every one of those
+  modes, so one displacement leaves every saddle at once), in both directions. Each start is
+  optimized on the record's own surface (GFN2, its ALPB solvent or gas, charge, unpaired count
+  and SCF budget) by the ANC / RFO optimizer (`geometry.optimize_tblite_anc`, the faster tblite
+  path whatever optimizer made the record: the minimum is the surface's, not the optimizer's) at
+  fmax 1e-4, three times tighter than the records' (a soft torsion needs it), with the free run
+  stopped by `DissociationGuard` once a drawn bond stays beyond 1.3x. A direction is kept when
+  it converged, breaks no drawn bond beyond 1.3x r_cov and forms no undrawn contact within 1.2x
+  that the record's geometry lacks (the QM run's two laws, `bond_stretch_ratios` and
+  `formed_bonds`, relative to the record: the record of CC(=O)OC(=O)C[O-] already has a C...O
+  contact at 0.995x, which must not reject every direction), and when its energy, a single point
+  with the record's settings and so comparable with the record's, is lower. The lower of the
+  kept ones is the next geometry, and its Hessian is computed. At most 3 rounds.
+- **Outcomes**, in the sidecar (`reopt_outcome`, `reopt_stop`, `reopt_rejected`) and in the
+  command's summary (a table by outcome and stop code with the rounds and energy drops, and the
+  directions not kept by reason): MINIMUM (untouched); REOPTIMIZED (warning
+  IMAGINARY_REOPTIMIZED); PERSISTENT (warning IMAGINARY_PERSISTENT: xtb's rule on the last
+  Hessian, which may be a re-optimized one) with the stop code REOPT_ROUNDS (the rounds are
+  spent), REOPT_NO_LOWER_MINIMUM (neither direction kept; each direction's reason is one of
+  CONNECTIVITY_CHANGED, BOND_FORMED, OPT_NOT_CONVERGED, SCF_NOT_CONVERGED, NOT_LOWER),
+  REOPT_BUDGET (the time left before `--timeout` is short of another round, estimated as 2x the
+  last Hessian, so a large molecule keeps its first Hessian rather than losing its sidecar to the
+  batch's TIMEOUT), REOPT_HESSIAN_FAILED (a kept geometry's Hessian failed; the last good one
+  stays), REOPT_OFF (`--reopt-rounds 0`) or REOPT_NO_GRAPH (the record's drawing does not give
+  its atoms, so there is no bond guard).
+- **Storage.** The sidecar holds the thermo minimum: `coords_ang`, `energy_ha`, `frequencies_cm`,
+  and the moments, point group and symmetry number at it. E_el in G is the minimum's: the
+  species' G belongs to its minimum. The record's energy, a saddle's, is kept as
+  `record_energy_ha`. Beside them: `record_frequencies_cm`, `energy_drop_ha` (record minus
+  minimum, >= 0), `reopt_rounds`, `reopt_seconds`. The record file is only read, because tokens
+  are built on its geometry and it stays their source of truth; a test checks its bytes and
+  mtime around a `ksmech-qm thermo` run.
+- **Stale by the config, not the schema version.** The re-optimization settings that decide the
+  content (threshold, rounds, step, fmax, the optimizer, the two bond factors) join the sidecar's
+  config; the budgets (maxiter, SCF cycles, timeout) do not. A sidecar written before lacks the
+  keys and reads as STALE_ARTIFACT ("config reopt_threshold_cm: absent -> -10.0"), so
+  `ksmech-qm thermo` recomputes it and `thermo_of` (the network's provider) counts it
+  THERMO_STALE. `THERMO_VERSION` stays 1 because the change only adds arrays and keys: a reader
+  of the old layout (main before this branch, which shares `data/cache/thermo/`) still verifies
+  and reads a new sidecar, and gets the minimum's E and frequencies, whereas a version bump would
+  have made every recomputed sidecar unreadable to it until the merge. `load_thermo(path)` with
+  no identity checks no config, as before. The tombstones' params gain the new fields, so an old
+  tombstone covers no new run.
+- **Pilot** (the 58 sidecars of `data/cache/thermo/`: the 46 of 2026-11-09 and 12 the network
+  work added; recomputed in place with 4 workers, all ok, the old ones kept aside for the
+  comparison). 47 MINIMUM, their record frequencies and G identical to the old sidecars
+  (|dG| = 0); 9 REOPTIMIZED, each in one round; 2 PERSISTENT with REOPT_NO_LOWER_MINIMUM. Energy
+  drops and G changes (298.15 K, 1 M, new minus old) of the 9: acetone 0.044 / -0.56 kcal/mol,
+  methyl acetate 0.017 / -0.73, CC(=O)OC(=O)C[O-] 0.072 / -0.75, methoxyacetone 0.058 / -0.51,
+  butanone 0.309 / -0.67, four dataset records of 32, 42, 88 and 102 atoms 0.68 / -0.48,
+  0.59 / -0.37, 0.54 / -0.99 and 1.84 / -1.80 (the 102-atom record had only a -12.6 mode, yet the
+  tight re-optimization found a conformer 1.8 kcal/mol lower). The five small ones had a mode at
+  or below -20 that xtb's rule dropped; it is now a real 24-91 cm^-1 torsion whose qRRHO entropy
+  lowers G - E by 0.36-0.71. The two persistent: a 60-atom N-protonated amide
+  (CC(=O)[NH2+]..., -33.2) whose free run moves an N-H proton away in both directions
+  (CONNECTIVITY_CHANGED; the drawn tautomer is no minimum on the GFN2/ALPB surface), so the
+  record and xtb's rule stay (dG 0); and a 73-atom record whose first round was kept (drop 0.52,
+  -15.0 to -11.9 cm^-1) and whose second converged no lower in both directions (NOT_LOWER, a
+  torsion at the noise level), inverted by xtb's rule (dG +0.26). The five records with modes
+  between -10 and -2 cm^-1 (59-180 atoms) are untouched. Cost: a re-optimization takes 0.1-0.6
+  of a Hessian, a re-optimized species 2-3x its old time (one more Hessian), and the pilot 2542 s
+  against 2228 s (+14%). Over six orientations of the record, methyl acetate's G - E_el spread
+  falls from 0.88 kcal/mol (xtb's rule) to 0.27 (G 0.31), acetone's from 0.09 to 0.07, and their
+  mean G moves by -0.50 and -0.51.
+- **Not done.** A PERSISTENT sidecar of a budget stop (REOPT_BUDGET, or OPT_NOT_CONVERGED in
+  `reopt_rejected`) is current, so a larger `--timeout` or `--reopt-maxiter` does not rerun it;
+  delete the sidecar to retry it.

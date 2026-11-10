@@ -5,9 +5,12 @@ a set of species, in spawned workers (`qm.batch.execute`: one thread each, tblit
 Every species ends in one row with a status: `ok` (computed now), `up_to_date` (a current
 sidecar exists), `known_failure` (a tombstone covers these settings), `skipped` (NO_RECORD,
 RECORD_STALE, UNKNOWN_METHOD) or `failed` (SCF_NOT_CONVERGED, TIMEOUT, UNEXPECTED,
-WORKER_CRASH). The counts by status and reason, the warnings and the time per molecule against
-its atom count are printed at the end; `--report` writes every row as JSON, with ZPE, H, S and
-G at the asked temperatures.
+WORKER_CRASH). The counts by status and reason, the warnings, the re-optimizations along
+imaginary modes by outcome and stop code (`qm.thermo_reopt`: MINIMUM, REOPTIMIZED, PERSISTENT
+with REOPT_ROUNDS, REOPT_NO_LOWER_MINIMUM, REOPT_BUDGET, REOPT_HESSIAN_FAILED, REOPT_OFF,
+REOPT_NO_GRAPH) with their energy drops and the directions not kept by reason, and the time
+per molecule against its atom count are printed at the end; `--report` writes every row as
+JSON, with ZPE, H, S and G at the asked temperatures and the re-optimization's fields.
 """
 
 from __future__ import annotations
@@ -40,7 +43,9 @@ from ksmech.qm.thermo_cache import (
     is_current,
     known_failure,
     load_thermo,
+    read_arrays,
     remember_failure,
+    reopt_fields,
     save_thermo,
     thermo_path,
 )
@@ -130,6 +135,7 @@ def _compute(task: ThermoTask) -> dict[str, Any]:
         seconds=seconds,
         n_atoms=record.n_atoms,
         path=str(out),
+        **reopt_fields(arrays),
     )
 
 
@@ -237,14 +243,48 @@ def timing_bins(rows: list[dict]) -> list[tuple[str, int, float, float, float]]:
     return out
 
 
+def reopt_counts(rows: list[dict]) -> list[tuple[str, str, int, float, float, float, str]]:
+    """(outcome, stop code, molecules, mean rounds, mean and max energy drop in kcal/mol, an
+    example) of the `ok` rows by the re-optimization's outcome and stop code."""
+    done = [r for r in rows if r["status"] == "ok" and "reopt_outcome" in r]
+    out = []
+    for key in sorted({(r["reopt_outcome"], r["reopt_stop"]) for r in done}):
+        group = [r for r in done if (r["reopt_outcome"], r["reopt_stop"]) == key]
+        drops = np.array([r["energy_drop_kcal"] for r in group])
+        rounds = float(np.mean([r["reopt_rounds"] for r in group]))
+        out.append((*key, len(group), rounds, float(drops.mean()), float(drops.max()),
+                    group[0]["smiles"]))  # fmt: skip
+    return out
+
+
+def _reopt_table(rows: list[dict]) -> Table:
+    table = Table(title="re-optimization along imaginary modes (computed now)")
+    table.add_column("outcome", no_wrap=True, min_width=11)
+    table.add_column("stop", no_wrap=True, min_width=22)
+    for col in ("count", "rounds", "drop", "max"):
+        table.add_column(col, justify="right", no_wrap=True)
+    for outcome, stop, n, rounds, mean, top, _ in reopt_counts(rows):
+        cells = (str(n), f"{rounds:.2f}", f"{mean:.3f}", f"{top:.3f}")
+        table.add_row(outcome, stop or "-", *cells)
+    return table
+
+
 def print_summary(rows: list[dict], console: Console) -> None:
     console.print(_status_table(rows))
     warn = Counter(w for r in rows if r["status"] == "ok" for w in r["warnings"].split(",") if w)
     for w, n in warn.most_common():
         console.print(f"  warning {w}: {n}")
+    if reopt_counts(rows):
+        console.print(_reopt_table(rows))
+        console.print("  (rounds kept; drops in kcal/mol, record minus thermo minimum: mean, max)")
+    rejected = Counter(
+        w for r in rows if r["status"] == "ok" for w in r.get("reopt_rejected", "").split(",") if w
+    )
+    for w, n in rejected.most_common():
+        console.print(f"  re-optimized direction not kept, {w}: {n}")
     bins = timing_bins(rows)
     if bins:
-        table = Table(title="time per Hessian by atom count (computed now)")
+        table = Table(title="time per Hessian by atom count (computed now, re-optimizations in)")
         for col in ("atoms", "molecules", "mean s", "median s", "max s"):
             table.add_column(col, justify="right")
         for label, n, mean, med, top in bins:
@@ -275,17 +315,20 @@ def write_report(
     temperatures: Sequence[float],
     settings: ThermoSettings = DEFAULTS,
 ) -> Path:
-    """Every row, with ZPE, H, S and G at `temperatures` for the species that have a sidecar."""
+    """Every row, with ZPE, H, S and G at `temperatures` and the re-optimization's fields for
+    the species that have a sidecar."""
     out = []
     for r in rows:
         extra = {}
         if r["status"] in ("ok", "up_to_date"):
+            extra = reopt_fields(read_arrays(Path(r["path"])))
             extra["thermo"] = _thermo_rows(r["path"], temperatures, settings)
         out.append({**r, **extra})
     body = {
         "temperatures": list(temperatures),
         "settings": settings.__dict__,
         "counts": dict(Counter(f"{r['status']}:{r['reason']}" for r in rows)),
+        "reopt": reopt_counts(rows),
         "timing": timing_bins(rows),
         "rows": out,
     }

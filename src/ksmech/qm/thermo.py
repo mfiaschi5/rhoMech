@@ -8,11 +8,15 @@ Per molecule (`MolecularThermo`, read from the sidecar `qm.thermo_cache` writes)
   entropy: S = w S_HO + (1 - w) S_free-rotor, w = 1 / (1 + (nu0 / nu)^4), nu0 = 50 cm^-1, the
   free rotor's moment mu' = mu B_av / (mu + B_av) with B_av the mean principal moment of the
   molecule), and the electronic entropy R ln(2S + 1);
-- the frequencies are used as xtb's thermo uses them: |nu| <= 1 cm^-1 is dropped, an imaginary
-  mode above -20 cm^-1 is inverted (made real), one at or below -20 cm^-1 is dropped and counted;
+- the frequencies are those of the species' thermo minimum: the record's geometry, re-optimized
+  along its imaginary modes below -10 cm^-1 when it has any (`qm.thermo_reopt`); they are used as
+  xtb's thermo uses them: |nu| <= 1 cm^-1 is dropped, an imaginary mode above -20 cm^-1 is
+  inverted (made real), one at or below -20 cm^-1 is dropped and counted (a mode the
+  re-optimization could not remove, IMAGINARY_PERSISTENT);
 - the ZPE and the vibrational enthalpy are harmonic over every kept mode (xtb interpolates only
   the entropy and the heat capacity);
-- the electronic energy is the record's: GFN2 with ALPB, whose solvation free energy is the
+- the electronic energy is the thermo minimum's (the record's when nothing was re-optimized):
+  GFN2 with ALPB, whose solvation free energy is the
   'gsolv' state (1 L of gas to 1 L of solution, no shift). The standard state of a G returned
   here is 1 M in solution: G = E_el + ZPE + H_thermal - T S(gas, 1 atm) + RT ln(V_m / 1 L),
   with V_m = RT / p0 (24.465 L/mol at 298.15 K, so +1.894 kcal/mol).
@@ -74,7 +78,7 @@ DEFAULTS = ThermoSettings()
 class MolecularThermo:
     """Everything G(T) needs, without the Hessian."""
 
-    energy_ha: float  # electronic energy, ALPB solvation included ('gsolv' state)
+    energy_ha: float  # electronic energy at the thermo minimum, ALPB included ('gsolv' state)
     frequencies_cm: np.ndarray  # (3N-6,) or (3N-5,) or (0,): signed, negative = imaginary
     moments_amu_ang2: np.ndarray  # (3,) principal moments, ascending
     mass_amu: float
