@@ -73,7 +73,11 @@ def test_arrival_exact_and_up_to_protons():
     assert arrival(acid, product.species, product.skeletons, levels=(EXACT,)) is None
     salt = target_from_smiles("CC(=O)[O-]")
     assert arrival(salt, product.species, product.skeletons) == EXACT
-    assert skeleton_key(Chem.MolFromSmiles("C=CO")) == skeleton_key(Chem.MolFromSmiles("CC=O"))
+    assert skeleton_key(Chem.MolFromSmiles("C=CO")) != skeleton_key(Chem.MolFromSmiles("CC=O"))
+    assert skeleton_key(Chem.MolFromSmiles("CC(C)=O")) != skeleton_key(Chem.MolFromSmiles("CC(C)O"))
+    kekule = [Chem.MolFromSmiles(x, sanitize=False)
+              for x in ("C1=CC=C2C=CC=CC2=C1", "C1=CC2=CC=CC=C2C=C1")]  # fmt: skip
+    assert skeleton_key(kekule[0]) == skeleton_key(kekule[1])  # one ring system, one key
     two = target_from_smiles("CO.CO")  # multiplicity counts
     assert arrival(two, pool_state("CO").species, pool_state("CO").skeletons) is None
 

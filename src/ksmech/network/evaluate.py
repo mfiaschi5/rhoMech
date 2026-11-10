@@ -108,3 +108,63 @@ def summary(rows: list[dict], k: int) -> dict:
         "mean_expanded": float(np.mean([r["expanded"] for r in done])) if done else 0.0,
         "skips": dict(sorted(skips.items())),
     }
+
+
+def retro_case(backward, case: Case, byproducts, params, n_byproducts: int = 3,
+               forward=None, forward_params=None) -> dict:  # fmt: skip
+    """One case of the search from the product alone (item K, plan section 5): the case's
+    final product the target, its recorded reactants the catalogue (decided 2026-11-10) and the
+    counted by-products the reservoir. Per case: solved, the route's cost and leaves, whether
+    its leaves outside the reservoir are exactly the recorded reactants (`recovered`), the
+    forward verification with `forward` when given, the species expanded."""
+    from ksmech.network.retro import (
+        Leaves,
+        ModelRetroExpander,
+        RetroParams,
+        leaves_of,
+        retro_search,
+        verify_forward,
+    )  # fmt: skip
+
+    try:
+        start = pool_state(case.start)
+        expander = ModelRetroExpander(backward, case.target, byproducts, n_byproducts)
+    except Exception as exc:  # noqa: BLE001 - the case is reported, not dropped
+        return {
+            "case": case.case_id,
+            "part": case.part,
+            "failure": f"UNPARSED:{type(exc).__name__}",
+        }
+    reservoir = frozenset(k for k, _, _ in byproducts)
+    leaves = Leaves(catalogue=frozenset(start.species), reservoir=reservoir)
+    res = retro_search(expander, expander.target, leaves, params or RetroParams())
+    found = leaves_of(res.route)
+    recorded = {k for k in start.species if k not in reservoir}
+    recovered = res.route is not None and {k for k in found if k not in reservoir} == recorded
+    row = {"case": case.case_id, "part": case.part, "reason": res.reason,
+           "expanded": res.expanded, "solved": res.route is not None,
+           "cost": None if res.route is None else res.route.cost,
+           "leaves": {expander.smiles.get(k, k): n for k, n in found.items()},
+           "recovered": recovered,
+           "verified": None, "cuts": dict(res.cuts), "skips": dict(expander.skips)}  # fmt: skip
+    if forward is not None and res.route is not None:
+        row["verified"], _ = verify_forward(forward, res.route, case.target, expander.smiles,
+                                            forward_params)  # fmt: skip
+    return row
+
+
+def retro_summary(rows: list[dict]) -> dict:
+    """Solved, recovered and verified shares and the mean species expanded."""
+    done = [r for r in rows if "failure" not in r]
+    n = len(done)
+    share = lambda f: sum(map(f, done)) / n if n else 0.0  # noqa: E731
+    checked = [r for r in done if r["verified"] is not None]
+    return {
+        "n": n,
+        "failed": len(rows) - n,
+        "solved": share(lambda r: r["solved"]),
+        "recovered": share(lambda r: r["recovered"]),
+        "n_verified_checked": len(checked),
+        "verified": sum(bool(r["verified"]) for r in checked) / max(len(checked), 1),
+        "mean_expanded": float(np.mean([r["expanded"] for r in done])) if done else 0.0,
+    }

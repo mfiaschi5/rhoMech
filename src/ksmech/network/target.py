@@ -5,10 +5,12 @@ Arrival is tested on two levels, reported with the pathway:
 - EXACT: every species of the target (identity key v2, `data.resonance.identity_key`: the sigma
   key of a closed shell, with the unpaired counts of an open shell) is in the pool, with its
   multiplicity; the pool may hold by-products besides;
-- SKELETON: every target species' heavy-atom skeleton (connectivity only: no H, no charges, no
-  bond orders, no radicals) is in the pool, so a product drawn after work-up (neutral, or as
-  another tautomer) is reached up to proton transfers. Erasing the bond orders also merges
-  species that differ by a hydride or a reduction, which is why the level is always reported.
+- SKELETON: every target species' heavy-atom skeleton (its heavy atoms with their bond orders,
+  no H, no charges, no radicals, aromaticity perceived) is in the pool, so a product drawn after
+  work-up (neutral, or protonated) is reached up to proton transfers that move no bond: an acid
+  and its carboxylate agree, a ketone and its alcohol, or two tautomers, do not (decided
+  2026-11-10; until then the bond orders were erased and those merged). The level is always
+  reported.
 
 When the target is atom-mapped on the start pool's map numbers (a dataset's chain keeps them),
 the remaining change dB = B_target - B_now on the target's heavy atoms gives a lower bound on the
@@ -21,6 +23,7 @@ map number the pool lacks, has no bound (MAPPING_FAILED): the search runs withou
 
 from __future__ import annotations
 
+import contextlib
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -42,8 +45,10 @@ def fragments(mol: Chem.Mol) -> list[Chem.Mol]:
 
 
 def skeleton_key(frag: Chem.Mol) -> str:
-    """The canonical SMILES of a fragment's heavy atoms with every bond single, no charge, no H,
-    no radical and no map number."""
+    """The canonical SMILES of a fragment's heavy atoms with their bond orders, no charge, no H,
+    no radical and no map number; aromaticity is perceived on it, so the Kekule forms of one
+    ring system give one key (decided 2026-11-10: an acid and its carboxylate agree, a ketone
+    and its alcohol, or two tautomers, do not)."""
     rw = Chem.RWMol(frag)
     for atom in sorted((a.GetIdx() for a in rw.GetAtoms() if a.GetAtomicNum() == 1), reverse=True):
         rw.RemoveAtom(atom)
@@ -55,10 +60,14 @@ def skeleton_key(frag: Chem.Mol) -> str:
         atom.SetAtomMapNum(0)
         atom.SetIsAromatic(False)
     for bond in rw.GetBonds():
-        bond.SetBondType(Chem.BondType.SINGLE)
         bond.SetIsAromatic(False)
+    mol = rw.GetMol()
     with rdBase.BlockLogs():
-        return Chem.MolToSmiles(rw.GetMol(), canonical=True)
+        mol.UpdatePropertyCache(strict=False)
+        Chem.GetSymmSSSR(mol)
+        with contextlib.suppress(Exception):  # an exotic ring system keeps its Kekule form
+            Chem.SetAromaticity(mol)
+        return Chem.MolToSmiles(mol, canonical=True)
 
 
 def heavy_state(mol: Chem.Mol) -> tuple[dict[tuple[int, int], int], dict[int, int]]:

@@ -50,12 +50,12 @@ no free energy. The full plan, with the reasons and the code facts, is
 - D3: packages are allowed (the xtb program, CREST, an atom mapper, scipy.sparse, a building-block
   catalogue).
 
-**Status (2026-11-09).** The code of every item is on the branch `claude/network` (not merged into
-main), with its tests and `docs/decisions.md` entries: A (`rank_any`, `compare --metric any`), B
+**Status (2026-11-10).** The code of every item is on main (merged 2026-11-10), with its tests
+and `docs/decisions.md` entries: A (`rank_any`, `compare --metric any`), B
 (`ksmech-qm thermo`), C, D/I1/I2 (`ksmech-network search`, `evaluate`), E/F/I3/I4 (`ksmech-network
 predict`, `--free-energy qm`), G (`ksmech-data pathways`, `human-benchmark`), H (`--direction
-backward`, pilot only), J (`ksmech-network species`), K (`ksmech-network retro`), L (spec v10.1
-draft, to approve). What is left is compute, data and calibration:
+backward`, pilot only), J (`ksmech-network species`), K (`ksmech-network retro`), L (spec v10.1,
+approved 2026-11-10). What is left is compute, data and calibration:
 - the thermochemistry of the species a network reaches (`ksmech-qm thermo`; the whole cache is
   about 208 CPU-h) and the default for imaginary modes of loose minima;
 - QM and tokens for the human benchmark's 1,072 uncovered species and for the ReactMech chain

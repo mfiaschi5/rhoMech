@@ -106,3 +106,23 @@ def human_benchmark_cases(
             continue
         out.append(Case(p.pathway_id, p.reactants, target, None, tuple(p.targets), "benchmark"))
     return out
+
+
+def load_cases(
+    name: str,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    split: str = "molecule",
+    part: str = "all",
+    limit: int | None = None,
+    counts: Counter | None = None,
+) -> list[Case]:
+    """The cases of benchmark `name` (reactmech or human_benchmark), those of `part` only unless
+    it is 'all', the first `limit` of them."""
+    if name == "reactmech":
+        cases = reactmech_cases(processed_dir, split, counts)
+    elif name == "human_benchmark":
+        cases = human_benchmark_cases(processed_dir, counts)
+    else:
+        raise ValueError(f"benchmark {name!r}: reactmech or human_benchmark")
+    cases = [c for c in cases if part == "all" or c.part == part]
+    return cases[:limit] if limit is not None else cases

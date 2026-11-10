@@ -9203,3 +9203,35 @@ and `network.pools` are unchanged; `network.cli` gains the subcommand.
   counts states; `retro_search` expands a species once and reuses its steps on every branch
   (`max_expansions` counts distinct species); the pool expander's sample cache keeps the states
   used last (LRU, it was first in, first out).
+
+## 2026-11-10: the user's decisions on the open points of the reaction network and the ablation
+
+Taken one by one after the merge of `claude/network`:
+
+- **Training on a 5090 pod**: the 12 orbital-ablation runs (arm a retrained beside b, c, d) and
+  the backward model's 3 seeds, after its full store; every reference on the same GPU and torch
+  as its arms.
+- **Thermochemistry on demand**: `ksmech-qm thermo` over the species a network reaches, no batch
+  over the whole cache (about 208 CPU-h).
+- **Imaginary modes are re-optimized away**: a species whose Hessian has an imaginary mode is
+  re-optimized along it before its thermochemistry (its own entry below, when it lands); xtb's
+  rule stays the fallback.
+- **QM and tokens for the human benchmark's 1,072 uncovered species** (a species-list input to
+  the batches); the ReactMech chains outside the pilot wait.
+- **The catalogue of `retro` is the recorded reactants** of each benchmark case, for its
+  evaluation; no external catalogue (ZINC, eMolecules) for now. `ksmech-network retro-eval`
+  (`network.evaluate.retro_case`) runs it: a case is solved when a route ends on the catalogue and
+  the reservoir, recovered when its leaves outside the reservoir are exactly the recorded
+  reactants, verified when the forward search from its leaves reaches the product.
+- **Spec v10.1 approved** ("The reaction network", Inference).
+- **SKELETON keeps the bond orders** (`network.target.skeleton_key`): heavy atoms and their
+  bond orders, H, charges and radicals removed, aromaticity perceived, so a product drawn after
+  work-up is reached up to the proton transfers that move no bond. An acid and its carboxylate
+  agree; a ketone and its alcohol, or two tautomers, no longer do (they did with connectivity
+  only). Naphthalene's two Kekule drawings give one key.
+- **Kept as built**: turnovers absorbing by default, NO_OUTGOING_STEP absorbing, the ablation's
+  arm (b) without the occupation, and the provisional network parameters (step_cost 0, epsilon
+  0.01, margin 5 kcal/mol, climb 20 kcal/mol, mass tolerance 0.01) until the benchmarks
+  calibrate them.
+- **Push main** to the public repository once these land (code only; the RMechDB guard
+  `tests/test_p8_no_flower_lines.py` passes).
