@@ -119,9 +119,8 @@ def _atom_issue(z, q0, q, nonbonding, order, touched) -> str | None:
     return None
 
 
-def lewis_apply(sample) -> Apply:
-    """B + R of a completion on the sample's Lewis structure: (product key, None) or (None, the
-    first issue code) (module docstring)."""
+def _lewis_start(sample) -> tuple[np.ndarray, np.ndarray, dict[tuple[int, int], int], np.ndarray]:
+    """(Z, formal charges, bond orders, N) of the sample's Lewis structure on its token atoms."""
     z = sample.atom_categorical[:, 0].astype(np.int64)
     q0 = sample.atom_categorical[:, 1].astype(np.int64)
     order0 = {(int(i), int(j)): int(o) for i, j, o in sample.bonds}
@@ -129,23 +128,55 @@ def lewis_apply(sample) -> Apply:
     if len(n0) != len(z):
         who = getattr(sample, "step_id", "a sample")
         raise ValueError(f"{who}: no N for every atom (a sample older than v19?)")
+    return z, q0, order0, n0
+
+
+def _lewis_entries(q0, order0, n0, bonds, lone):
+    """(bond orders, N, formal charges) after R, the charges following (dq = -(dN + dB)), or
+    the issue code BOND_ORDER / LONE_PAIRS."""
+    order, n, q = dict(order0), n0.copy(), q0.copy()
+    for i, j, d in bonds:
+        o = order.get((i, j), 0) + d
+        if not 0 <= o <= MAX_ORDER:
+            return "BOND_ORDER"
+        order[(i, j)] = o
+        q[i] -= d
+        q[j] -= d
+    for i, d in lone:
+        n[i] += d
+        q[i] -= d
+    return "LONE_PAIRS" if (n < 0).any() else (order, n, q)
+
+
+def lewis_product(sample) -> Callable[[object, object], Chem.Mol | None]:
+    """`product(bonds, lone)`: B + R on the sample's Lewis structure as an unsanitized molecule,
+    token atom k mapped k + 1 with its radical electrons from N, or None when the orders or N
+    leave their range. The round-trip check (`eval.roundtrip`) reads the child pool from it."""
+    z, q0, order0, n0 = _lewis_start(sample)
+
+    def product(bonds, lone):
+        after = _lewis_entries(q0, order0, n0, bonds, lone)
+        if isinstance(after, str):
+            return None
+        order, n, q = after
+        with rdBase.BlockLogs():
+            return _pool_mol(z, q, order, n)
+
+    return product
+
+
+def lewis_apply(sample) -> Apply:
+    """B + R of a completion on the sample's Lewis structure: (product key, None) or (None, the
+    first issue code) (module docstring)."""
+    z, q0, order0, n0 = _lewis_start(sample)
     with rdBase.BlockLogs():
         before = identity_key(_pool_mol(z, q0, order0, n0), keep_maps=True, nonbonding=n0)
 
     def apply(bonds, lone):
-        order, n, q = dict(order0), n0.copy(), q0.copy()
-        for i, j, d in bonds:
-            o = order.get((i, j), 0) + d
-            if not 0 <= o <= MAX_ORDER:
-                return None, "BOND_ORDER"
-            order[(i, j)] = o
-            q[i] -= d
-            q[j] -= d
-        for i, d in lone:
-            n[i] += d
-            q[i] -= d
-        if (n < 0).any():
-            return None, "LONE_PAIRS"
+        after = _lewis_entries(q0, order0, n0, bonds, lone)
+        if isinstance(after, str):
+            return None, after
+        order, n, q = after
         touched = {a for i, j, _ in bonds for a in (i, j)} | {i for i, _ in lone}
         why = _atom_issue(z, q0, q, n, order, touched)
         if why is not None:
@@ -199,7 +230,7 @@ def any_rank(found: list[Completion], rank: int | None, products: frozenset[str]
     return min(ranks) if ranks else None
 
 
-def _row(sample, found: list[Completion], outcomes: Mapping, skips: Counter) -> dict:
+def hit_row(sample, found: list[Completion], outcomes: Mapping, skips: Counter) -> dict:
     """One sample's row: the own rank and `rank_any` against its pool's recorded outcomes (the
     own label alone when the step has no entry: `rank_any` = `rank`, `n_outcomes` 0), and how
     many outcomes the pool records. An own hit whose product key is not the recorded one is
@@ -214,7 +245,7 @@ def _row(sample, found: list[Completion], outcomes: Mapping, skips: Counter) -> 
     return row | {"n_outcomes": len(products), "n_found": len(found), "odd_top1": _odd_top1(found)}
 
 
-def _tops(rows: list[dict], field: str, ks: tuple[int, ...], suffix: str = "") -> dict:
+def tops(rows: list[dict], field: str, ks: tuple[int, ...], suffix: str = "") -> dict:
     n = len(rows)
     hit = [r[field] for r in rows]
     return {
@@ -225,7 +256,7 @@ def _tops(rows: list[dict], field: str, ks: tuple[int, ...], suffix: str = "") -
 def _multi_outcome(rows: list[dict], ks: tuple[int, ...]) -> dict:
     """Own and any top-k over the samples whose pool records more than one product."""
     multi = [r for r in rows if r["n_outcomes"] > 1]
-    return {"n": len(multi)} | _tops(multi, "rank", ks) | _tops(multi, "rank_any", ks, "_any")
+    return {"n": len(multi)} | tops(multi, "rank", ks) | tops(multi, "rank_any", ks, "_any")
 
 
 def decode_report(
@@ -255,7 +286,7 @@ def decode_report(
         t0 = time.perf_counter()
         found = decode(sample, skips)
         seconds.append(time.perf_counter() - t0)
-        rows.append(_row(sample, found, outcomes or {}, skips))
+        rows.append(hit_row(sample, found, outcomes or {}, skips))
         dropped = {c: skips[f"DECODE_DROPPED:{c}"] - before[c] for c in SCREEN_CODES}
         if any(dropped.values()):
             rows[-1]["screened"] = {c: k for c, k in dropped.items() if k}
@@ -263,8 +294,8 @@ def decode_report(
             skips["DECODE_NOTHING_FOUND"] += 1
     with_found = [r for r in rows if r["n_found"]]
     return (
-        _tops(rows, "rank", ks)
-        | _tops(rows, "rank_any", ks, "_any")
+        tops(rows, "rank", ks)
+        | tops(rows, "rank_any", ks, "_any")
         | {
             "n": len(rows),
             "not_found": sum(r["rank"] is None for r in rows),

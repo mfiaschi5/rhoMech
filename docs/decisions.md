@@ -9467,3 +9467,39 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
 - **Result.** Closed_base val of the backward samples (n 1,233), full-R top-1/3/5: 61.4/78.8/82.3,
   57.8/74.9/80.0, 59.0/77.9/80.9; any recorded parent 63.0/59.9/61.2 at top-1. The forward arm a
   on its own closed_base val: 63.2-66.2 at top-1.
+
+## 2026-11-10: the round-trip check as a reranker of the forward beam (network plan H, I5)
+
+- **What.** `ksmech-eval roundtrip --run FWD --backward-run BWD` (`eval.roundtrip`): the forward
+  decoder's completions of each stored sample, exactly as `decode` gives them, and for each of
+  the first `--top` (5) the backward model's log P of -R at the child; the first `--top` ranked
+  by log P_f + lambda log P_b for every lambda of `--lambdas` (0 always added). Its per-lambda
+  hit rows are `decode_hits` files with decode's config keys, so `compare` pairs a lambda with
+  lambda 0 or with the decode's own hits.
+- **The child.** B + R on the sample's own Lewis structure (`eval.decode.lewis_product`, split
+  out of `lewis_apply`), token atom k mapped k + 1, read as a `network.pools.PoolState`, and -R
+  scored there by `ModelExpander.step_logp` with the backward checkpoint: the same featurization
+  and scoring code as the network's reverse edges and retro's expansions. Checked: -R applied on
+  the child's map numbers gives the parent's pool key back (test), and lambda 0 reproduces the
+  pod's decode hits of orb_a_s0 sample by sample.
+- **Scores.** The forward term is the decoder's own (its best anchor, the order the beam has);
+  the backward term the marginal over -R's anchors (`MatrixScore.marginal`), the probability of
+  the previous step whichever bond the backward model starts from. A backward -inf (a class the
+  head has not) is ignored at lambda 0 and ranks last otherwise.
+- **A completion without a backward score keeps its forward place**, and only the scored ones
+  are permuted among the places they hold. Pushing the unscored ones down would mix missing
+  tokens with chemistry; this way lambda 0 is the decode, and the reranker measures only what
+  the backward model adds. The reasons are counted: CHILD_INVALID (a child RDKit cannot read,
+  4.6-7% of the beam on a 60- and a 200-sample probe, hypervalent halides; the network drops
+  them as PRODUCT_INVALID), MISSING_TOKENS, STALE_ARTIFACT, NO_BOND_INDEX. The report also gives
+  every top-k over the samples whose first `top` completions are all scored (`full`).
+- **Only the first 5.** Rescoring a fixed N-best list is the usual reranker, and it bounds the
+  QM: on 200 random closed_base val samples the beam (13.5 completions per sample) has 1,878
+  distinct child species without tokens, 631 in the first 5, 62 at top 1 (the label's children
+  have tokens, the backward store needed them). `--species-file FILE` decodes only and lists
+  those species for `ksmech-qm run --species-from`, `bond-index`, `ksmech-orbitals build
+  --species-from`; GFN2 cost 2.3 s median, 14 s mean per species on the human benchmark's batch.
+- **First look (6 samples).** The forward top-1 sits at log P near 0 and the alternatives below
+  -10, so the backward term can move the top-1 only at lambda of about 1 or more; the run's grid
+  is 0.25, 0.5, 1, 2, 4. Lambda is chosen on PMechDB closed_base val, and ReactMech molecule val
+  checks the choice out of distribution.

@@ -9,6 +9,7 @@
     ksmech-eval cohort --source pmechdb --name open_shell \
         --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE
     ksmech-eval compare --a <GENERAL hit files> --b <LEGACY hit files> --out FILE
+    ksmech-eval roundtrip --run orb_a_s0 --backward-run bwd_s0 --cohort closed_base
 
 `floor` ranks each step's anchor by |G^atom| (no learned parameter) on the validation and test
 parts and writes `anchor_floor_report_<split>.json`, the reference every trained model is
@@ -28,6 +29,9 @@ is always on. A run's selection note (`train.loop.run_notes`) is copied into the
 `--direction backward` decodes the previous-step samples (`arrows.backward`): B_parent =
 B_child + R on the child's Lewis structure, the same laws; the config records the direction and
 the file names carry `_backward`.
+
+`roundtrip` reranks the forward beam of `decode` by the backward model's log P of -R at each
+child (`eval.roundtrip`, `eval.roundtrip_cli`): one `decode_hits` file per lambda for `compare`.
 
 `importance` permutes each token input column, and each block of related columns, across the
 tokens of a part and scores the part again with the training metrics (`eval.importance`): how
@@ -122,6 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     _cohort_args(f)
     _decode_parser(sub)
     _importance_parser(sub)
+    from ksmech.eval.roundtrip_cli import add_parser as roundtrip_parser
+
+    roundtrip_parser(sub)
     c = sub.add_parser("compare", help="two arms of decode runs, paired: tolerance and McNemar")
     c.add_argument("--a", nargs="+", type=Path, required=True, help="arm A's hit files (GENERAL)")
     c.add_argument("--b", nargs="+", type=Path, required=True, help="arm B's hit files (LEGACY)")
@@ -161,9 +168,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _decode_parser(sub) -> None:
+    d = sub.add_parser("decode", help="the beam decoder on stored samples: full-R top-k")
+    decode_args(d)
+    d.add_argument("--direction", default=FORWARD, choices=DIRECTIONS,
+                   help="backward: the previous-step samples (<source>/backward/)")  # fmt: skip
+
+
+def decode_args(d) -> None:
+    """The options of a forward decode, shared by `decode` and `roundtrip`."""
     from ksmech.eval.decode import CAP_FIELDS, CAPS
 
-    d = sub.add_parser("decode", help="the beam decoder on stored samples: full-R top-k")
     d.add_argument("--run", required=True, help="training run under <models-dir>/<run-source>/")
     d.add_argument("--checkpoint", default="best", choices=["best", "last"])
     d.add_argument("--source", default="pmechdb", choices=[str(x) for x in Source],
@@ -182,8 +196,6 @@ def _decode_parser(sub) -> None:
         d.add_argument(f"--{name.replace('_', '-')}", type=int, help="overrides --caps")
     d.add_argument("--closed-minus1-filter", action="store_true",
                    help="refuse any -1 atom entry on a pool with no unpaired electron")  # fmt: skip
-    d.add_argument("--direction", default=FORWARD, choices=DIRECTIONS,
-                   help="backward: the previous-step samples (<source>/backward/)")  # fmt: skip
     d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     _cohort_args(d)
@@ -313,6 +325,21 @@ def _print_decode(console: Console, report: dict, title: str) -> None:
                       f"{m['top1']:.1%}, any {m['top1_any']:.1%}")  # fmt: skip
 
 
+def decode_suffix(args, run_source: str, caps: dict[str, int]) -> str:
+    """The file-name suffix of a decode: direction, a samples' source other than the run's,
+    cohort, limit, the -1 filter and caps other than the legacy ones."""
+    from ksmech.model.decode import DecodeConfig
+
+    suffix = "_backward" if getattr(args, "direction", FORWARD) == BACKWARD else ""
+    suffix += f"_{args.source}" if args.source != run_source else ""
+    suffix += f"_{args.cohort}" if args.cohort != "all" else ""
+    suffix += f"_n{args.limit}" if args.limit is not None else ""
+    suffix += "_minus1filter" if args.closed_minus1_filter else ""
+    if caps != {k: getattr(DecodeConfig(), k) for k in caps}:  # the legacy files stay as they are
+        suffix += "_caps{max_bonds}-{max_atoms}-{max_candidates}".format(**caps)
+    return suffix
+
+
 def cmd_decode(args, console: Console) -> int:
     from ksmech.eval.decode import decode_report, sample_decoder
     from ksmech.eval.siblings import outcome_summary
@@ -345,13 +372,7 @@ def cmd_decode(args, console: Console) -> int:
     config |= _directions(args.direction, payload, console)
     inputs = prov.file_input(path) | prov.file_input(ckpt) | caps_input | sibling_inputs
     header = prov.stamp("decode", DECODE_VERSION, inputs, config)
-    suffix = "_backward" if args.direction == BACKWARD else ""
-    suffix += f"_{args.source}" if args.source != run_source else ""
-    suffix += f"_{args.cohort}" if args.cohort != "all" else ""
-    suffix += f"_n{args.limit}" if args.limit is not None else ""
-    suffix += "_minus1filter" if minus1 else ""
-    if caps != {k: getattr(DecodeConfig(), k) for k in caps}:  # the legacy files stay as they are
-        suffix += "_caps{max_bonds}-{max_atoms}-{max_candidates}".format(**caps)
+    suffix = decode_suffix(args, run_source, caps)
     out = ckpt.parent / f"decode_report_{args.split}_{args.part}{suffix}.json"
     prov.write_json(out, report, header)
     hits_out = ckpt.parent / f"decode_hits_{args.split}_{args.part}{suffix}.json"
@@ -646,6 +667,8 @@ def _print_trace(console: Console, tr: dict, sample: MechanismSample) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from ksmech.eval import roundtrip_cli
+
     args = build_parser().parse_args(argv)
     commands = {
         "floor": cmd_floor,
@@ -655,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
         "pin": cmd_pin,
         "cohort": cmd_cohort,
         "compare": cmd_compare,
+        "roundtrip": roundtrip_cli.cmd_roundtrip,
     }
     return commands[args.command](args, Console())
 

@@ -418,6 +418,15 @@ Main CLI entry points are added phase by phase and listed here as they land:
   domain_class values pinned once as a cohort); `uv run ksmech-eval pin --source pmechdb --name closed_base [--workers N]`
   (open-shell plan P0b: the molecule split's samples as a cohort, its GBDT subsets `<name>_gbdt_valid|all`
   and `baseline_<name>.json`, per-sample digests of every named column, `eval.pin`; each written once),
+  `uv run ksmech-eval roundtrip --run FWD --backward-run BWD [the decode options] [--lambdas 0.25
+  0.5 1 2] [--top 5] [--species-file FILE]` (network plan H, I5: the forward beam of each stored
+  sample, as `decode` gives it, its first `--top` completions reranked by log P_f + lambda x the
+  backward model's log P of -R at the child (`eval.roundtrip`; a completion without a backward
+  score keeps its place, its reason counted, so lambda 0 is the decode);
+  `roundtrip_report_<split>_<part><suffix>_<BWD>.json` and one `decode_hits` file per lambda,
+  `roundtrip_hits_..._lam<lambda>.json`, beside the forward checkpoint, for `compare`;
+  `--species-file` decodes only and lists the child species without tokens for `ksmech-qm run
+  --species-from`, `bond-index` and `ksmech-orbitals build --species-from`);
   `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--metric own|any] [--out FILE]` (two arms of decode runs
   paired by sample: A fails when its mean top-k is below B's by more than max(2 x pooled SD, 1 point),
   the exact one-sided McNemar test on majority-of-seeds hits and every seed pair; arms decoded on other

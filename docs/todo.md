@@ -46,10 +46,11 @@ backward`, pilot only), J (`ksmech-network species`), K (`ksmech-network retro`)
 approved 2026-11-10). What is left is compute, data and calibration:
 - the thermochemistry of the species a network reaches (`ksmech-qm thermo`; the whole cache is
   about 208 CPU-h) and the default for imaginary modes of loose minima;
-- QM and tokens for the human benchmark's 1,072 uncovered species and for the ReactMech chain
-  steps outside the pilot (17,595), so the benchmarks of section 5 can run;
-- the full backward store (about 45 min on 4 processes) and its 3-seed training, then I1
-  bidirectional and the round-trip reranker (I5), which need it;
+- QM and tokens for the ReactMech chain steps outside the pilot (17,595), so the benchmarks of
+  section 5 can run (the human benchmark's species: done 2026-11-10, 1,056 of 1,072, 19 tombstones);
+- the backward model is trained (3 seeds, 2026-11-10, `docs/decisions.md`); the round-trip
+  reranker (I5) is `ksmech-eval roundtrip`, its evaluation (QM of the beam's child species, the
+  lambda grid on both val sets) and I1 bidirectional come next;
 - the calibration of the flags (`step_cost`, epsilon and margin, the climb budget, the mass
   tolerance) and the measures of "Done when".
 
