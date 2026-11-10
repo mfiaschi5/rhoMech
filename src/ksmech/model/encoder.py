@@ -29,7 +29,10 @@ def mlp(n_in: int, hidden: int, n_out: int) -> nn.Sequential:
 class TokenEmbedding(nn.Module):
     """h^(0) of atom tokens (E_Z + E_charge + MLP_A) and orbital tokens (MLP_O + set encoder over
     the spectral entries + the centre-weighted atom embeddings), the fragment embedding, and the
-    learned MECH token prepended at position 0."""
+    learned MECH token prepended at position 0. The ablations of the orbital token
+    (`ModelConfig.drop_token_features`, `spectral_set`, `inherit_atoms`) remove a term: with no
+    orbital column MLP_O is a learned vector (the MLP of an empty input), without the set encoder
+    or the inherited embeddings their term is absent (`orbital_terms`)."""
 
     def __init__(self, cfg: ModelConfig, n_atom_x: int, n_orbital_x: int):
         super().__init__()
@@ -37,8 +40,11 @@ class TokenEmbedding(nn.Module):
         self.z = nn.Embedding(MAX_Z + 1, d)
         self.charge = nn.Embedding(2 * CHARGE_MAX + 1, d)
         self.atom = mlp(n_atom_x, d, d)
-        self.orbital = mlp(n_orbital_x, d, d)
-        self.spectral = mlp(2, d, d)
+        self.orbital = mlp(n_orbital_x, d, d) if n_orbital_x else None
+        if self.orbital is None:
+            self.orbital_base = nn.Parameter(torch.randn(d) / math.sqrt(d))
+        self.spectral = mlp(2, d, d) if getattr(cfg, "spectral_set", True) else None
+        self.inherit = bool(getattr(cfg, "inherit_atoms", True))
         self.fragment = nn.Embedding(cfg.fragments, d)
         if getattr(cfg, "atom_spin_input", "none") == "categorical_u":  # P7, P9's ablation arm
             self.spin = nn.Embedding(SPIN_MAX + 1, d)
@@ -53,13 +59,29 @@ class TokenEmbedding(nn.Module):
         if hasattr(self, "spin"):
             h_atom = h_atom + self.spin(cat[..., 2].clamp(0, SPIN_MAX))
         h_atom = (h_atom + self.atom(inp["atom_x"])) * batch["is_atom"][:, :n_atoms, None]
-        spectral = self.spectral(inp["spectra"]) * inp["spectra_mask"][..., None]
-        inherited = batch["incidence"][:, n_atoms:, :].to(h_atom.dtype) @ h_atom
-        h_orb = self.orbital(inp["orbital_x"]) + spectral.sum(-2) + inherited
+        h_orb = sum(self.orbital_terms(batch, inp, h_atom).values())
         h = torch.cat([h_atom, h_orb], 1)
         h = h + self.fragment(batch["fragment"].clamp(min=0) % self.n_fragments)
         h = h * batch["token_mask"][..., None]
         return torch.cat([self.mech.expand(h.shape[0], -1, -1).to(h.dtype), h], 1)
+
+    def orbital_terms(self, batch: dict, inp: dict, h_atom: torch.Tensor) -> dict:
+        """The additive terms of the orbital tokens' h^(0), each (B, O, d): `orbital_inputs`
+        (MLP_O), `spectral` (the set encoder) and `inherited` (the centre-weighted atom
+        embeddings), zero where an ablation removes them."""
+        n_atoms = h_atom.shape[1]
+        incidence = batch["incidence"][:, n_atoms:, :].to(h_atom.dtype)
+        zero = torch.zeros(*incidence.shape[:2], h_atom.shape[-1], dtype=h_atom.dtype,
+                           device=h_atom.device)  # fmt: skip
+        if self.orbital is not None:
+            inputs = self.orbital(inp["orbital_x"])
+        else:
+            inputs = zero + self.orbital_base.to(h_atom.dtype)
+        spectral = zero
+        if self.spectral is not None:
+            spectral = (self.spectral(inp["spectra"]) * inp["spectra_mask"][..., None]).sum(-2)
+        inherited = incidence @ h_atom if self.inherit else zero
+        return {"orbital_inputs": inputs, "spectral": spectral, "inherited": inherited}
 
 
 class EncoderLayer(nn.Module):

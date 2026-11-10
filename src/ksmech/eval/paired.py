@@ -7,8 +7,13 @@ the pooled SD being the within-arm SD of every run (df = runs - 2). Beside it, t
 McNemar test of H1 "A is worse": on the discordant samples, n_ab = A misses where B hits and
 n_ba = A hits where B misses, p = P(X >= n_ab) for X ~ Binomial(n_ab + n_ba, 1/2). It is run on
 the majority-of-seeds hits of each arm (a sample is a hit when more than half the arm's runs hit
-it) and on every seed pair. Arms decoded on different samples, parts, cohorts, caps, beams or
-decode versions are refused: the comparison would not be paired.
+it) and on every seed pair. Arms decoded on different samples, parts, cohorts, caps, beams,
+directions (forward hits carry none, backward ones `direction`) or decode versions are refused:
+the comparison would not be paired.
+
+The metric is the rank of the own label (`own`, the default) or `any`: the rank of the first
+completion whose product is one the source records for the same reactant pool (`rank_any`,
+decode version 5; reaction-network plan, item A). A file without `rank_any` is refused for it.
 """
 
 from __future__ import annotations
@@ -22,8 +27,9 @@ import numpy as np
 from ksmech.data import provenance as prov
 
 TOLERANCE_FLOOR = 1.0  # percentage points
+METRICS = {"own": "rank", "any": "rank_any"}  # the per-sample field each metric reads
 PAIRED_KEYS = ("source", "split", "part", "cohort", "scope", "beam", "limit", "caps",
-               "max_bonds", "max_atoms", "max_candidates")  # fmt: skip
+               "max_bonds", "max_atoms", "max_candidates", "direction")  # fmt: skip
 
 
 def mcnemar_one_sided(a: np.ndarray, b: np.ndarray) -> dict:
@@ -66,26 +72,32 @@ def decide(top_a: list[float], top_b: list[float]) -> dict:
     }
 
 
-def read_hits(path: Path) -> tuple[dict, dict[str, int | None]]:
-    """(the decode configuration and version of a hit file, step id -> 0-based rank)."""
+def read_hits(path: Path, metric: str = "own") -> tuple[dict, dict[str, int | None]]:
+    """(the decode configuration and version of a hit file, step id -> 0-based rank under
+    `metric`: own or any, `METRICS`)."""
+    if metric not in METRICS:
+        raise ValueError(f"metric {metric!r}, expected one of {sorted(METRICS)}")
     header = prov.read_header(path)
     if header is None or header.kind != "decode_hits":
         raise ValueError(f"{path} is not a decode_hits file")
     rows = json.loads(Path(path).read_text())["per_sample"]
+    field = METRICS[metric]
+    if rows and field not in rows[0]:
+        raise ValueError(f"{path} has no {field} (decode version {header.schema_version})")
     config = {k: header.config.get(k) for k in PAIRED_KEYS} | {"version": header.schema_version}
-    return config, {r["step_id"]: r["rank"] for r in rows}
+    return config, {r["step_id"]: r[field] for r in rows}
 
 
 def paired_hits(
-    files: dict[str, list[Path]], k: int = 1
+    files: dict[str, list[Path]], k: int = 1, metric: str = "own"
 ) -> tuple[list[str], dict[str, np.ndarray]]:
-    """(the shared step ids, arm -> (runs, samples) hits at k), every file checked to be
-    decoded the same way on the same samples."""
+    """(the shared step ids, arm -> (runs, samples) hits at k under `metric`), every file
+    checked to be decoded the same way on the same samples."""
     configs, ranks = [], {}
     for arm, paths in files.items():
         ranks[arm] = []
         for path in paths:
-            config, r = read_hits(path)
+            config, r = read_hits(path, metric)
             configs.append((path, config))
             ranks[arm].append(r)
     first_path, first = configs[0]
@@ -103,9 +115,10 @@ def paired_hits(
     return ids, hits
 
 
-def compare_arms(a: list[Path], b: list[Path], k: int = 1) -> dict:
-    """The decision, the majority-of-seeds McNemar test and every seed pair's, per-run top-k."""
-    ids, hits = paired_hits({"a": a, "b": b}, k)
+def compare_arms(a: list[Path], b: list[Path], k: int = 1, metric: str = "own") -> dict:
+    """The decision, the majority-of-seeds McNemar test and every seed pair's, per-run top-k,
+    under `metric` (own label or any recorded outcome)."""
+    ids, hits = paired_hits({"a": a, "b": b}, k, metric)
     top = {arm: [100.0 * float(h.mean()) for h in runs] for arm, runs in hits.items()}
     pairs = [
         {"a": str(pa), "b": str(pb)} | mcnemar_one_sided(ha, hb)
@@ -114,6 +127,7 @@ def compare_arms(a: list[Path], b: list[Path], k: int = 1) -> dict:
     ]
     return {
         "k": k,
+        "metric": metric,
         "n": len(ids),
         "runs": {"a": [str(p) for p in a], "b": [str(p) for p in b]},
         "top_k": top,

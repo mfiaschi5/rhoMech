@@ -105,7 +105,9 @@ def test_a_tagged_singlet_carbene_is_bent_and_stamped_with_its_tag(qm_config):
 
 # the functions that turn a configured method into a cache path: every call in the engine must
 # pass a method that went through `method_for`, or one a stored record or token file carries
-PATH_BUILDERS = re.compile(r"\b(cache_path|tokens_path|bond_index_path|tombstone_path)\(")
+PATH_BUILDERS = re.compile(
+    r"\b(cache_path|tokens_path|bond_index_path|tombstone_path|thermo_path)\("
+)
 RAW_METHOD = re.compile(r"(config|qm|self|cfg)\.method\b")
 
 

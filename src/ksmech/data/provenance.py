@@ -170,7 +170,7 @@ def spec_sha256() -> str:
     return file_sha256(SPEC_PATH) if SPEC_PATH.is_file() else ""
 
 
-def _normalized(obj: Any) -> Any:
+def normalized(obj: Any) -> Any:
     """`obj` as it reads back from JSON, so stored and expected configs compare equal."""
     return json.loads(json.dumps(obj, sort_keys=True, default=str))
 
@@ -193,10 +193,10 @@ def stamp(
         code_diff_sha256=diff_sha,
         spec_sha256=spec_sha256(),
         inputs=dict(sorted((inputs or {}).items())),
-        config=_normalized(dict(config or {})),
+        config=normalized(dict(config or {})),
         built_at=datetime.now(UTC).isoformat(timespec="seconds"),
         content_sha256=content_sha256,
-        extra=_normalized(dict(extra or {})),
+        extra=normalized(dict(extra or {})),
     )
 
 
@@ -285,7 +285,7 @@ def read_header(path: Path | str) -> Provenance | None:
 def _config_changes(header: Provenance, config: Mapping[str, Any]) -> list[str]:
     missing = object()
     out = []
-    for key, now in _normalized(dict(config)).items():
+    for key, now in normalized(dict(config)).items():
         was = header.config.get(key, missing)
         if was != now:
             out.append(f"config {key}: {'absent' if was is missing else repr(was)} -> {now!r}")

@@ -147,6 +147,19 @@ def identity_key(
     return f"{v1}|{';'.join(sorted(rows))}"
 
 
+def pool_key(mol: Chem.Mol, nonbonding: Sequence[int] | None = None) -> str:
+    """The pool key of a drawing: the identity key v2 of every fragment, sorted and joined by
+    '.' (the key the web app's and the engine's networks merge pools by, `network.keys`).
+    Unlike `identity_key` of the whole drawing, whose charges are zeroed over every fragment
+    before the total is appended, it keeps each fragment's charge, so CH3+ + Br- and CH3- + Br+
+    are two pools. `nonbonding` is N per atom of `mol`, as for `identity_key`."""
+    keys = []
+    for atoms, frag in _fragments(mol):
+        n = None if nonbonding is None else [int(nonbonding[i]) for i in atoms]
+        keys.append(identity_key(frag, nonbonding=n))
+    return ".".join(sorted(keys))
+
+
 def mapped_changes(
     reactants: Chem.Mol, products: Chem.Mol
 ) -> tuple[list[tuple[int, int, int]], list[tuple[int, int]]]:

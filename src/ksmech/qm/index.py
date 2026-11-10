@@ -18,6 +18,11 @@ Version 2 (open-shell plan P4) adds the spin of each record and tombstone: `unpa
 record's own; a tombstone's from its method's spin tag), `spin_source` ('rdkit' for an untagged
 method, else the source `data.spin` gives the species: 'species' or 'metal') and
 `spin_rule_version` (the tag's version, '+spin-v1-u<u>' -> 'spin-v1'; NULL untagged).
+
+Version 3 (reaction-network plan, item B) adds the thermochemistry sidecars of `qm.thermo_cache`
+(`thermo/<key>.npz`, kind `thermo`, with the identity columns of a record) and their tombstones
+(`thermo/<key>.failed.json`, kind `thermo_failure`, the columns of a QM tombstone), and the view's
+`has_thermo` and `thermo_failure_reason`.
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ from ksmech.data import spin
 from ksmech.qm import failures
 
 INDEX_NAME = "index.sqlite"
-INDEX_VERSION = 2  # PRAGMA user_version; another value drops and recreates the tables
+INDEX_VERSION = 3  # PRAGMA user_version; another value drops and recreates the tables
 BUSY_TIMEOUT_S = 30.0
 TAG = re.compile(r"\+(?P<version>spin-v\d+)-u(?P<u>\d+)")  # `qm.spin`'s tag in a method
 COMMIT_EVERY = 1000
@@ -51,7 +56,11 @@ LAYOUT = (
     ("qm_failure", "qm", failures.SUFFIX),
     ("tokens", "tokens", ".npz"),
     ("bond_index", "bond_index", ".npz"),
+    ("thermo", "thermo", ".npz"),
+    ("thermo_failure", "thermo", failures.SUFFIX),
 )
+RECORD_LIKE = ("qm_record", "thermo")  # npz kinds whose arrays carry a record's identity
+FAILURE_KINDS = ("qm_failure", "thermo_failure")
 COLUMNS = (
     "kind", "key", "path", "size", "mtime_ns", "problem", "schema_version", "content_sha256",
     "built_at", "code_git_hash", "code_dirty", "inputs", "config", "smiles", "conformer_id",
@@ -60,7 +69,8 @@ COLUMNS = (
 )  # fmt: skip
 SCHEMA = """
 CREATE TABLE artifact (
-    kind TEXT NOT NULL,          -- qm_record | qm_failure | tokens | bond_index
+    kind TEXT NOT NULL,          -- qm_record | qm_failure | tokens | bond_index | thermo |
+                                 -- thermo_failure
     key TEXT NOT NULL,           -- the cache key: sha256(smiles|conformer|method), the file stem
     path TEXT NOT NULL,          -- relative to the root
     size INTEGER NOT NULL,
@@ -73,7 +83,7 @@ CREATE TABLE artifact (
     code_dirty INTEGER,
     inputs TEXT,                 -- JSON, the header's inputs
     config TEXT,                 -- JSON, the header's config
-    smiles TEXT,                 -- QM records and tombstones: the map-free canonical SMILES
+    smiles TEXT,                 -- records, thermo sidecars, tombstones: map-free SMILES
     conformer_id INTEGER,
     method TEXT,
     n_atoms INTEGER,
@@ -96,12 +106,16 @@ SELECT k.key AS key,
        r.key IS NOT NULL AS has_record,
        f.reason AS failure_reason,
        t.key IS NOT NULL AS has_tokens,
-       b.key IS NOT NULL AS has_bond_index
+       b.key IS NOT NULL AS has_bond_index,
+       h.key IS NOT NULL AS has_thermo,
+       hf.reason AS thermo_failure_reason
 FROM (SELECT DISTINCT key FROM artifact WHERE kind IN ('qm_record', 'qm_failure')) AS k
 LEFT JOIN artifact AS r ON r.kind = 'qm_record' AND r.key = k.key
 LEFT JOIN artifact AS f ON f.kind = 'qm_failure' AND f.key = k.key
 LEFT JOIN artifact AS t ON t.kind = 'tokens' AND t.key = k.key
-LEFT JOIN artifact AS b ON b.kind = 'bond_index' AND b.key = k.key;
+LEFT JOIN artifact AS b ON b.kind = 'bond_index' AND b.key = k.key
+LEFT JOIN artifact AS h ON h.kind = 'thermo' AND h.key = k.key
+LEFT JOIN artifact AS hf ON hf.kind = 'thermo_failure' AND hf.key = k.key;
 """
 
 
@@ -205,19 +219,19 @@ def _read_npz(path: Path, kind: str) -> dict[str, Any]:
     try:
         with np.load(path, allow_pickle=False) as z:
             text = str(z[prov.HEADER_KEY]) if prov.HEADER_KEY in z.files else None
-            ident = _record_identity(z) if kind == "qm_record" else {}
+            ident = _record_identity(z) if kind in RECORD_LIKE else {}
         header = None if text is None else prov.Provenance.from_json(text)
     except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile):
         return {"problem": "CORRUPT_ARTIFACT"}
     return {**_header_columns(header, kind), **ident}
 
 
-def _read_tombstone(path: Path) -> dict[str, Any]:
+def _read_tombstone(path: Path, kind: str) -> dict[str, Any]:
     hit = failures.read(path)
     if hit is None:
         return {"problem": "CORRUPT_ARTIFACT"}
     return {
-        **_header_columns(prov.read_header(path), failures.KIND),
+        **_header_columns(prov.read_header(path), kind),
         "smiles": hit.smiles,
         "conformer_id": hit.conformer_id,
         "method": hit.method,
@@ -231,7 +245,7 @@ def _read_tombstone(path: Path) -> dict[str, Any]:
 
 def read_artifact(path: Path, kind: str) -> dict[str, Any]:
     """The index columns of one file (its location and stat apart)."""
-    return _read_tombstone(path) if kind == "qm_failure" else _read_npz(path, kind)
+    return _read_tombstone(path, kind) if kind in FAILURE_KINDS else _read_npz(path, kind)
 
 
 def _upsert(con: sqlite3.Connection, row: dict[str, Any]) -> None:
@@ -315,7 +329,8 @@ def stats(root: Path) -> dict[str, Any]:
             methods=_rows(
                 con,
                 "SELECT kind, method, COUNT(*) FROM artifact WHERE kind IN"
-                " ('qm_record', 'qm_failure') GROUP BY kind, method ORDER BY kind, method",
+                " ('qm_record', 'qm_failure', 'thermo', 'thermo_failure')"
+                " GROUP BY kind, method ORDER BY kind, method",
             ),
             spin=_rows(
                 con,
@@ -337,4 +352,21 @@ def stats(root: Path) -> dict[str, Any]:
             records_without_tokens=_unmatched(con, "qm_record", "tokens"),
             tokens_without_bond_index=_unmatched(con, "tokens", "bond_index"),
             failures_with_a_record=int(n_failures) - _unmatched(con, "qm_failure", "qm_record"),
+            **_thermo_stats(con),
         )
+
+
+def _thermo_stats(con: sqlite3.Connection) -> dict[str, Any]:
+    """The thermo sidecars' failures by reason, their warnings, and the records without one."""
+    warnings: Counter = Counter()
+    for (text,) in con.execute("SELECT warnings FROM artifact WHERE kind = 'thermo'"):
+        warnings.update(w for w in (text or "").split(",") if w)
+    return dict(
+        thermo_reasons=_rows(
+            con,
+            "SELECT reason, COUNT(*), MIN(smiles) FROM artifact WHERE kind = 'thermo_failure'"
+            " GROUP BY reason ORDER BY COUNT(*) DESC, reason",
+        ),
+        thermo_warnings=sorted(warnings.items(), key=lambda kv: (-kv[1], kv[0])),
+        records_without_thermo=_unmatched(con, "qm_record", "thermo"),
+    )

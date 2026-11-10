@@ -10,9 +10,11 @@ over 8 valence electrons, N + 2 x its bond orders; H and He over 2), FORMAL_CHAR
 non-metal it touches left at |formal charge| >= 2 that it did not carry), PRODUCT_INVALID
 (RDKit cannot write the product), RESONANCE_ONLY_STEP (the identity keys with the atom maps
 agree: no atom changes its sigma bonds or H, and no fragment its charge or spin). The product
-key is the map-free identity key v2 of the pool (`data.resonance.identity_key`, u from the
-tracked N), so completions that draw the same products differently merge, as serve's pool key
-merges them, while homolysis and heterolysis of one bond stay apart.
+key is the pool key (`data.resonance.pool_key`: the map-free identity key v2 of every fragment,
+u from the tracked N), so completions that draw the same products differently merge, as serve's
+pool key merges them, while homolysis and heterolysis of one bond, and the two heterolyses
+(CH3+ + Br- against CH3- + Br+), stay apart. Decode version 4 keyed by the identity key of the
+whole pool, whose charges are zeroed over every fragment, and merged the two heterolyses.
 
 The caps of the search (`decode_caps`): `legacy` keeps DecodeConfig's fixed 8 bond and 2 atom
 changes; `labels` takes the label maxima of the training part of the source decoded (the
@@ -36,7 +38,7 @@ from ksmech.arrows.delta_be import EditLabel
 from ksmech.arrows.lewis import MAX_ORDER
 from ksmech.arrows.symmetry import lewis_mol
 from ksmech.data import provenance as prov
-from ksmech.data.resonance import identity_key
+from ksmech.data.resonance import identity_key, pool_key
 from ksmech.model.decode import (
     NONMETALS,
     SCREEN_CODES,
@@ -152,7 +154,7 @@ def lewis_apply(sample) -> Apply:
             with rdBase.BlockLogs():
                 mol = _pool_mol(z, q, order, n)
                 mapped = identity_key(mol, keep_maps=True, nonbonding=n)
-                key = identity_key(mol, nonbonding=n)
+                key = pool_key(mol, nonbonding=n)
         except Exception:  # noqa: BLE001 - counted as PRODUCT_INVALID
             return None, "PRODUCT_INVALID"
         return (None, "RESONANCE_ONLY_STEP") if mapped == before else (key, None)
@@ -189,15 +191,59 @@ def _odd_top1(found: list[Completion]) -> bool:
     return bool(found) and any(d % 2 for _, d in found[0].lone)
 
 
-def decode_report(samples: Iterable, decode: Decode, ks: tuple[int, ...] = (1, 3, 5)) -> dict:
-    """Top-k exact-R hits over `samples`, the misses, the decoder's drop counts and the time
-    per sample. A sample without a label class is counted as NO_EDIT_LABEL and left out.
-    `per_sample` holds one row per scored sample (step id, the 0-based rank of the first hit or
-    None, the completions found, whether the best completion has an odd atom entry, and with
-    any the completions the closed-shell screen and filter dropped, by code), so two decodes
-    can be compared sample by sample. `odd_top1` is the share of the samples with a completion
-    whose best one has an odd entry."""
-    ranks: list[int | None] = []
+def any_rank(found: list[Completion], rank: int | None, products: frozenset[str]) -> int | None:
+    """The 0-based rank of the first completion that is the own label (`rank`) or whose product
+    key is one of `products`, the outcomes the source records for the pool; None when none is."""
+    hits = [r for r, c in enumerate(found) if c.key is not None and c.key in products]
+    ranks = [r for r in (rank, hits[0] if hits else None) if r is not None]
+    return min(ranks) if ranks else None
+
+
+def _row(sample, found: list[Completion], outcomes: Mapping, skips: Counter) -> dict:
+    """One sample's row: the own rank and `rank_any` against its pool's recorded outcomes (the
+    own label alone when the step has no entry: `rank_any` = `rank`, `n_outcomes` 0), and how
+    many outcomes the pool records. An own hit whose product key is not the recorded one is
+    counted as OWN_KEY_MISMATCH."""
+    step_id = getattr(sample, "step_id", None)
+    rank = hit_rank(found, sample.edit_label)
+    pool = outcomes.get(step_id)
+    products = pool.products if pool is not None else frozenset()
+    if pool is not None and rank is not None and found[rank].key not in (None, pool.own):
+        skips["OWN_KEY_MISMATCH"] += 1
+    row = {"step_id": step_id, "rank": rank, "rank_any": any_rank(found, rank, products)}
+    return row | {"n_outcomes": len(products), "n_found": len(found), "odd_top1": _odd_top1(found)}
+
+
+def _tops(rows: list[dict], field: str, ks: tuple[int, ...], suffix: str = "") -> dict:
+    n = len(rows)
+    hit = [r[field] for r in rows]
+    return {
+        f"top{k}{suffix}": sum(h is not None and h < k for h in hit) / n if n else 0.0 for k in ks
+    }
+
+
+def _multi_outcome(rows: list[dict], ks: tuple[int, ...]) -> dict:
+    """Own and any top-k over the samples whose pool records more than one product."""
+    multi = [r for r in rows if r["n_outcomes"] > 1]
+    return {"n": len(multi)} | _tops(multi, "rank", ks) | _tops(multi, "rank_any", ks, "_any")
+
+
+def decode_report(
+    samples: Iterable,
+    decode: Decode,
+    ks: tuple[int, ...] = (1, 3, 5),
+    outcomes: Mapping | None = None,
+) -> dict:
+    """Top-k exact-R hits over `samples`, and top-k against any outcome the source records for
+    the same reactant pool (`outcomes`: step id -> `eval.siblings.Outcomes`), the misses, the
+    decoder's drop counts and the time per sample. A sample without a label class is counted as
+    NO_EDIT_LABEL and left out. `per_sample` holds one row per scored sample (step id, the
+    0-based rank of the first own hit or None, `rank_any`, the outcomes its pool records, the
+    completions found, whether the best completion has an odd atom entry, and with any the
+    completions the closed-shell screen and filter dropped, by code), so two decodes can be
+    compared sample by sample. `odd_top1` is the share of the samples with a completion whose
+    best one has an odd entry; `multi_outcome` the own and any top-k over the samples whose pool
+    records several products."""
     rows: list[dict] = []
     skips: Counter = Counter()
     seconds: list[float] = []
@@ -209,22 +255,23 @@ def decode_report(samples: Iterable, decode: Decode, ks: tuple[int, ...] = (1, 3
         t0 = time.perf_counter()
         found = decode(sample, skips)
         seconds.append(time.perf_counter() - t0)
-        ranks.append(hit_rank(found, sample.edit_label))
-        rows.append({"step_id": getattr(sample, "step_id", None), "rank": ranks[-1]})
-        rows[-1] |= {"n_found": len(found), "odd_top1": _odd_top1(found)}
+        rows.append(_row(sample, found, outcomes or {}, skips))
         dropped = {c: skips[f"DECODE_DROPPED:{c}"] - before[c] for c in SCREEN_CODES}
         if any(dropped.values()):
             rows[-1]["screened"] = {c: k for c, k in dropped.items() if k}
         if not found:
             skips["DECODE_NOTHING_FOUND"] += 1
-    n = len(ranks)
-    out = {f"top{k}": sum(r is not None and r < k for r in ranks) / n if n else 0.0 for k in ks}
     with_found = [r for r in rows if r["n_found"]]
-    return out | {
-        "n": n,
-        "not_found": sum(r is None for r in ranks),
-        "odd_top1": sum(r["odd_top1"] for r in with_found) / max(len(with_found), 1),
-        "mean_seconds": float(np.mean(seconds)) if seconds else 0.0,
-        "skips": dict(sorted(skips.items())),
-        "per_sample": rows,
-    }
+    return (
+        _tops(rows, "rank", ks)
+        | _tops(rows, "rank_any", ks, "_any")
+        | {
+            "n": len(rows),
+            "not_found": sum(r["rank"] is None for r in rows),
+            "odd_top1": sum(r["odd_top1"] for r in with_found) / max(len(with_found), 1),
+            "multi_outcome": _multi_outcome(rows, ks),
+            "mean_seconds": float(np.mean(seconds)) if seconds else 0.0,
+            "skips": dict(sorted(skips.items())),
+            "per_sample": rows,
+        }
+    )

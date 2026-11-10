@@ -37,7 +37,7 @@ checked.
 | `compute` | the worker process (`worker.py`) and its scheduler (`procsched.py`) | |
 | `chem` | a pool's chemistry: normalization, featurization (QM, tokens, the sample), pool states, geometry, metal geometries, the Gaussian basis (`gto.py`, `data/sto_ng.json`) and its separable evaluation on cube grids (`gto_grid.py`), orbital cubes, token rows | |
 | `science` | the spec-v9 readings: G^atom, the arrow and orbital readings of R, B + R (`stepapply.py`), the step check, the edge step | |
-| `predict` | the predictors (floor, gbdt, network over `ksmech.model.decode`), the mechanism network, prediction jobs and expansion | `/predictors`, `/predict`, `/jobs/*`, `/step/check` |
+| `predict` | the predictors (floor, gbdt, network over `ksmech.model.decode`), the mechanism network (its graph algorithms and pool key from the engine's `ksmech.network`), prediction jobs and expansion | `/predictors`, `/predict`, `/jobs/*`, `/step/check` |
 | `runtime` | the shared context of the services (`context.py`) and the task table the worker runs (`tasks.py`) | |
 | `pool` | the view of one pool state | `/normalize`, `/pools`, `/pool/*` |
 | `workbench` | the molecule workbench: molecules, orbital sets, densities, properties, point groups | `/molecule/*`, `/depict2d` |

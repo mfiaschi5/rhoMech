@@ -54,6 +54,18 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     a.add_argument("--seed", type=int, default=0)
     a.add_argument("--write-cohorts", action="store_true", help="pin the four overlap cohorts")
+    w = sub.add_parser("pathways", help="ReactMech's chains as a sidecar (pathways.parquet)")
+    w.add_argument("--source", required=True, choices=[str(Source.REACTMECH)])
+    w.add_argument("--raw", type=Path, default=None, help="raw dir (default data/raw/reactmech)")
+    w.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    w.add_argument("--workers", type=int, default=4, help="spawned processes for RDKit")
+    h = sub.add_parser("human-benchmark", help="the 350 human pathways, evaluation only")
+    h.add_argument("--raw", type=Path, default=None, help="350_HumanBenchmark.csv")
+    h.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    h.add_argument("--split", default="molecule", help="PMechDB split of the overlap check")
+    h.add_argument("--workers", type=int, default=4, help="spawned processes for RDKit")
+    h.add_argument("--qm-cache-dir", type=Path, default=Path("data/cache/qm"))
+    h.add_argument("--tokens-dir", type=Path, default=Path("data/cache/tokens"))
     v = sub.add_parser("provenance", help="print an artifact's provenance chain, or backfill")
     v.add_argument("path", type=Path, nargs="?", help="artifact to describe")
     v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
@@ -75,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_survey(Source(args.source), args.processed_dir, console)
     if args.command == "leakage-audit":
         return cmd_leakage(args, console)
+    if args.command == "pathways":
+        return cmd_pathways(args, console)
+    if args.command == "human-benchmark":
+        return cmd_human_benchmark(args, console)
     if args.command == "freeze-sample":
         out = freeze_sample(Source(args.source), args.processed_dir)
         console.print(f"wrote {out}")
@@ -93,6 +109,58 @@ def cmd_leakage(args: argparse.Namespace, console: Console) -> int:
         elif key.startswith("rc_heldout"):
             console.print(f"{key}: {block}")
     console.print(f"wrote {out}")
+    return 0
+
+
+def _print_counts(title: str, counts: dict, console: Console) -> None:
+    console.print(f"{title}: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
+
+
+def cmd_pathways(args: argparse.Namespace, console: Console) -> int:
+    """`pathways.parquet` + `pathways_report.json` (`data.pathways`): the chains of the
+    mechanism files joined to the ingest's step ids; the steps parquet is not touched."""
+    from ksmech.data.pathways import write_pathways
+
+    table, out, report = write_pathways(args.raw, args.processed_dir, args.workers)
+    console.print(
+        f"{report['chains']} chains, {report['rows']} rows, {report['stop_rows']} stop rows"
+    )
+    for name, f in report["chain_files"].items():
+        _print_counts(name, f, console)
+    _print_counts("codes", report["codes"], console)
+    _print_counts("ingest status", report["ingest_status"], console)
+    _print_counts("maps", report["maps"]["boundaries"], console)
+    maps = report["maps"]
+    console.print(
+        f"whole chains with a boundary {maps['whole_chains_with_a_boundary']}: consistent "
+        f"{maps['consistent_chains']}, by renumbering {maps['renumbering_chains']}, "
+        f"same numbers {maps['same_number_chains']}"
+    )
+    console.print(f"wrote {table}\nwrote {out}")
+    return 0
+
+
+def cmd_human_benchmark(args: argparse.Namespace, console: Console) -> int:
+    """The evaluation-only table of the PMechRP human benchmark, its overlap with PMechDB's
+    split parts and its QM / token coverage (`data.human_benchmark`, `data.benchmark_checks`),
+    under `<processed>/human_benchmark/`. Never trained on."""
+    from ksmech.data import benchmark_checks as checks
+    from ksmech.data import human_benchmark as hb
+
+    out_dir = Path(args.processed_dir) / hb.NAME
+    table, report_path, report, pathways = hb.write_benchmark(args.raw or hb.RAW_FILE, out_dir)
+    console.print(f"{report['pathways']} pathways, {report['steps']} steps (evaluation only)")
+    _print_counts("codes", {k: v for k, v in report["codes"].items() if v}, console)
+    ov_path, ov = checks.write_overlap(
+        pathways, args.processed_dir, out_dir, args.split, args.workers
+    )
+    for view, block in ov["pathways"]["train"].items():
+        _print_counts(f"pathways vs PMechDB {args.split} train ({view})", block, console)
+    cov_path, cov = checks.write_coverage(pathways, out_dir, args.qm_cache_dir, args.tokens_dir)
+    _print_counts("QM", cov["qm"], console)
+    _print_counts("tokens", cov["tokens"], console)
+    for path in (table, report_path, ov_path, cov_path):
+        console.print(f"wrote {path}")
     return 0
 
 

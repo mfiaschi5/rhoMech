@@ -12,7 +12,7 @@ from ksmech.arrows.delta_be import EditLabel, ReactionMatrix, label_counts
 from ksmech.arrows.steps import SAMPLE_VERSION, samples_path
 from ksmech.data import provenance as prov
 from ksmech.data.provenance import StaleArtifact
-from ksmech.data.resonance import identity_key, sigma_key
+from ksmech.data.resonance import identity_key, pool_key, sigma_key
 from ksmech.eval.decode import caps_from_report, decode_caps, decode_report, hit_rank, lewis_apply
 from ksmech.model.decode import FORM, Completion, DecodeConfig, EntryTable, complete_anchor
 
@@ -41,7 +41,7 @@ SN2 = (((0, 5, 1), (0, 1, -1)), ((1, 2), (5, -2)))
 def test_sn2_gives_methanol_and_chloride():
     key, why = lewis_apply(MECL_OH)(*SN2)
     assert why is None
-    assert key == sigma_key(Chem.MolFromSmiles("CO.[Cl-]"))
+    assert key == pool_key(Chem.MolFromSmiles("CO.[Cl-]"))
 
 
 def test_a_missing_bond_cannot_break():
@@ -61,9 +61,9 @@ def test_a_homolysis_moves_one_electron_to_each_atom():
     so the product is two radicals, keyed apart from the heterolysis of the same bond."""
     key, why = lewis_apply(MECL_OH)(((0, 1, -1),), ((0, 1), (1, 1)))
     assert why is None
-    assert key == identity_key(Chem.MolFromSmiles("[CH3].[Cl].[OH-]"))
+    assert key == pool_key(Chem.MolFromSmiles("[CH3].[Cl].[OH-]"))
     hetero, _ = lewis_apply(MECL_OH)(((0, 1, -1),), ((1, 2),))
-    assert hetero == identity_key(Chem.MolFromSmiles("[CH3+].[Cl-].[OH-]")) != key
+    assert hetero == pool_key(Chem.MolFromSmiles("[CH3+].[Cl-].[OH-]")) != key
 
 
 def test_a_radical_recombines_through_its_odd_electron():

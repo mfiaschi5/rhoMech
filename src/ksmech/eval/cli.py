@@ -25,6 +25,9 @@ ones add `_caps<bonds>-<atoms>-<candidates>` to the file names. `--closed-minus1
 refuses any -1 atom entry on a pool with no unpaired electron (`model.decode`, an option whose
 default P9's ablation sets) and adds `_minus1filter` to the file names; the closed-shell screen
 is always on. A run's selection note (`train.loop.run_notes`) is copied into the report.
+`--direction backward` decodes the previous-step samples (`arrows.backward`): B_parent =
+B_child + R on the child's Lewis structure, the same laws; the config records the direction and
+the file names carry `_backward`.
 
 `importance` permutes each token input column, and each block of related columns, across the
 tokens of a part and scores the part again with the training metrics (`eval.importance`): how
@@ -62,6 +65,7 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
+from ksmech.arrows.backward import BACKWARD, DIRECTIONS, FORWARD, require_direction
 from ksmech.arrows.reactants import TokenCache
 from ksmech.arrows.steps import MechanismSample, load_samples, sample_ids, samples_path
 from ksmech.data import provenance as prov
@@ -81,8 +85,9 @@ from ksmech.train.loop import DEFAULT_MODELS_DIR
 
 FLOOR_VERSION = 4  # 3: --cells valid|all (pooling over the pair_valid cells or every cell);
 #   4: --floor legacy|own_break, --kernel g|g2, --drop-intra-open (open-shell plan P7)
-DECODE_VERSION = 4  # 3: decoder caps legacy | labels, recorded in the header; 4: the closed-shell
-#   screen, --closed-minus1-filter, odd_top1 and the screened counts per sample (open-shell P9)
+DECODE_VERSION = 5  # 3: decoder caps legacy | labels, recorded in the header; 4: the closed-shell
+#   screen, --closed-minus1-filter, odd_top1 and the screened counts per sample (open-shell P9);
+#   5: rank_any against every product the source records for the pool (network plan, item A)
 
 
 def _floor_options(f) -> None:
@@ -121,6 +126,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--a", nargs="+", type=Path, required=True, help="arm A's hit files (GENERAL)")
     c.add_argument("--b", nargs="+", type=Path, required=True, help="arm B's hit files (LEGACY)")
     c.add_argument("--k", type=int, default=1, help="top-k of a hit")
+    c.add_argument("--metric", default="own", choices=["own", "any"], help="own: the sample's "
+                   "label; any: any product the source records for the pool")  # fmt: skip
     c.add_argument("--out", type=Path, help="the report (JSON)")
     pin = sub.add_parser("pin", help="pin a split's samples as a cohort with per-column digests")
     pin.add_argument("--source", required=True, choices=[str(x) for x in Source])
@@ -175,6 +182,8 @@ def _decode_parser(sub) -> None:
         d.add_argument(f"--{name.replace('_', '-')}", type=int, help="overrides --caps")
     d.add_argument("--closed-minus1-filter", action="store_true",
                    help="refuse any -1 atom entry on a pool with no unpaired electron")  # fmt: skip
+    d.add_argument("--direction", default=FORWARD, choices=DIRECTIONS,
+                   help="backward: the previous-step samples (<source>/backward/)")  # fmt: skip
     d.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     d.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     _cohort_args(d)
@@ -239,20 +248,74 @@ def _sample_versions(path: Path, payload: dict, console: Console) -> dict:
     return {"checkpoint_sample_version": trained, "view_sample_version": view}
 
 
+def _directions(direction: str, payload: dict, console: Console) -> dict:
+    """The decoded samples' direction and the checkpoint's (`arrows.backward`), for the decode
+    config: nothing when both are forward (a forward header as before), else both; a mismatch
+    warns. With "direction" in `eval.paired.PAIRED_KEYS`, hits of two directions never pair."""
+    train = payload.get("provenance", {}).get("config", {}).get("train", {})
+    trained = train.get("direction", FORWARD)
+    if trained != direction:
+        console.print(f"[yellow]checkpoint trained on {trained} samples, decoding {direction}")
+    if direction == trained == FORWARD:
+        return {}
+    return {"direction": direction, "checkpoint_direction": trained}
+
+
 def _decode_caps(args) -> tuple[dict[str, int], dict[str, str]]:
     """The caps of a decode (`eval.decode.decode_caps`: --caps, then the overrides) and, with
     --caps labels, the training view of --source they are read from, an input of the report."""
     from ksmech.arrows.steps import SAMPLE_VERSION
     from ksmech.eval.decode import CAP_FIELDS, decode_caps
 
-    train = samples_path(args.source, f"{args.split}_train", args.processed_dir)
+    train = samples_path(args.source, f"{args.split}_train", args.processed_dir, args.direction)
     overrides = {name: getattr(args, name) for name in CAP_FIELDS}
     caps = decode_caps(args.caps, train, SAMPLE_VERSION, overrides)
     return caps, prov.file_input(train) if args.caps == "labels" else {}
 
 
+def _outcomes(args, console: Console) -> tuple[dict, dict, dict[str, str]]:
+    """(step id -> the pool's recorded outcomes, the skip counts, the inputs): the source's
+    training steps grouped by reactant key (product key for --direction backward,
+    `eval.siblings`), parts from the split file."""
+    from collections import Counter
+
+    from ksmech.arrows.steps import load_split_file, splits_path
+    from ksmech.data.io import read_training_steps
+    from ksmech.eval.siblings import outcome_table, parts_of, side_keys
+
+    steps_file = steps_path(args.source, args.processed_dir)
+    split_file = splits_path(args.source, args.split, args.processed_dir)
+    skips: Counter = Counter()
+    keys = side_keys(read_training_steps(steps_file), skips)
+    if args.direction == BACKWARD:  # a pool is the drawn products, its outcomes the reactants
+        keys = {step: (product, pool) for step, (pool, product) in keys.items()}
+    parts = parts_of(load_split_file(split_file)) if split_file.is_file() else {}
+    if not parts:
+        console.print(f"[yellow]no split file {split_file.name}: sibling parts unknown[/yellow]")
+    inputs = prov.file_input(steps_file) | (prov.file_input(split_file) if parts else {})
+    return outcome_table(keys, parts), dict(skips), inputs
+
+
+def _print_decode(console: Console, report: dict, title: str) -> None:
+    """The top-k table (own label and any recorded outcome) and the multi-outcome subset."""
+    table = Table(title=f"full-R decoding, {title}")
+    for col in ("n", "top-1", "top-3", "top-5", "not found", "s / sample"):
+        table.add_column(col)
+    per_sample = f"{report['mean_seconds']:.1f}"
+    for name, suffix in (("own", ""), ("any", "_any")):
+        tops = (f"{report[f'top{k}{suffix}']:.1%}" for k in (1, 3, 5))
+        n = f"{report['n']} {name}"
+        table.add_row(n, *tops, str(report["not_found"]) if not suffix else "", per_sample)
+    console.print(table)
+    m = report["multi_outcome"]
+    if m["n"]:
+        console.print(f"pools with several recorded products: {m['n']} samples, top-1 own "
+                      f"{m['top1']:.1%}, any {m['top1_any']:.1%}")  # fmt: skip
+
+
 def cmd_decode(args, console: Console) -> int:
     from ksmech.eval.decode import decode_report, sample_decoder
+    from ksmech.eval.siblings import outcome_summary
     from ksmech.model.decode import DecodeConfig
     from ksmech.train.loop import load_model
 
@@ -260,23 +323,30 @@ def cmd_decode(args, console: Console) -> int:
     run_source = args.run_source or args.source
     ckpt = args.models_dir / run_source / args.run / f"{args.checkpoint}.pt"
     model, payload = load_model(ckpt, "cpu")
-    path = samples_path(args.source, f"{args.split}_{args.part}", args.processed_dir)
+    path = samples_path(
+        args.source, f"{args.split}_{args.part}", args.processed_dir, args.direction
+    )
+    require_direction(path, args.direction)
     ids = _cohort_ids(args, path)
     ids = ids[: args.limit] if args.limit is not None else ids
     minus1 = args.closed_minus1_filter
     cfg = DecodeConfig(anchors=args.beam, per_anchor=args.beam, closed_minus1_filter=minus1, **caps)
     samples = load_samples(path, ids=ids)
-    report = decode_report(samples, sample_decoder(model, cfg, args.scope))
+    outcomes, sibling_skips, sibling_inputs = _outcomes(args, console)
+    report = decode_report(samples, sample_decoder(model, cfg, args.scope), outcomes=outcomes)
     hits = report.pop("per_sample")
     report |= _extras(args, hits, samples, path) | _run_notes(payload)
+    report["siblings"] = outcome_summary(outcomes, ids, args.part) | {"skips": sibling_skips}
     keys = ("source", "split", "part", "limit", "beam", "scope", "cohort", "slice")
     keys = (*keys, "closed_minus1_filter")
     config = {k: getattr(args, k) for k in keys}
     config |= {"run_source": run_source, "checkpoint": _checkpoint_text(args.checkpoint, payload)}
     config |= _sample_versions(path, payload, console) | {"caps": args.caps, **caps}
-    inputs = prov.file_input(path) | prov.file_input(ckpt) | caps_input
+    config |= _directions(args.direction, payload, console)
+    inputs = prov.file_input(path) | prov.file_input(ckpt) | caps_input | sibling_inputs
     header = prov.stamp("decode", DECODE_VERSION, inputs, config)
-    suffix = f"_{args.source}" if args.source != run_source else ""
+    suffix = "_backward" if args.direction == BACKWARD else ""
+    suffix += f"_{args.source}" if args.source != run_source else ""
     suffix += f"_{args.cohort}" if args.cohort != "all" else ""
     suffix += f"_n{args.limit}" if args.limit is not None else ""
     suffix += "_minus1filter" if minus1 else ""
@@ -288,13 +358,7 @@ def cmd_decode(args, console: Console) -> int:
     prov.write_json(
         hits_out, {"per_sample": hits}, prov.stamp("decode_hits", DECODE_VERSION, inputs, config)
     )
-    table = Table(title=f"full-R decoding, {args.run} {args.checkpoint}, {args.split} {args.part}")
-    for col in ("n", "top-1", "top-3", "top-5", "not found", "s / sample"):
-        table.add_column(col)
-    tops = (f"{report[f'top{k}']:.1%}" for k in (1, 3, 5))
-    per_sample = f"{report['mean_seconds']:.1f}"
-    table.add_row(str(report["n"]), *tops, str(report["not_found"]), per_sample)
-    console.print(table)
+    _print_decode(console, report, f"{args.run} {args.checkpoint}, {args.split} {args.part}")
     for code, count in report["skips"].items():
         console.print(f"  {code}: {count}")
     console.print(f"wrote {out} and {hits_out.name}")
@@ -375,12 +439,13 @@ def cmd_compare(args, console: Console) -> int:
     from ksmech.eval.paired import compare_arms
 
     try:
-        report = compare_arms(args.a, args.b, args.k)
+        report = compare_arms(args.a, args.b, args.k, args.metric)
     except ValueError as err:
         console.print(f"[red]{err}")
         return 2
     d, m = report["decision"], report["majority"]
-    console.print(f"n {report['n']}, top-{args.k} per run: A {report['top_k']['a']}, "
+    console.print(f"n {report['n']}, top-{args.k} ({args.metric}) per run: "
+                  f"A {report['top_k']['a']}, "
                   f"B {report['top_k']['b']}")  # fmt: skip
     console.print(f"mean A {d['mean_a']:.2f}, mean B {d['mean_b']:.2f}, difference "
                   f"{d['difference']:+.2f}, pooled SD {d['pooled_sd']:.2f}, tolerance "
@@ -391,7 +456,8 @@ def cmd_compare(args, console: Console) -> int:
         inputs = {}
         for path in [*args.a, *args.b]:
             inputs |= prov.file_input(path)
-        header = prov.stamp("decode_compare", DECODE_VERSION, inputs, {"k": args.k})
+        config = {"k": args.k, "metric": args.metric}
+        header = prov.stamp("decode_compare", DECODE_VERSION, inputs, config)
         prov.write_json(args.out, report, header)
         console.print(f"wrote {args.out}")
     return 0

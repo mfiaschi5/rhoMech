@@ -8498,3 +8498,708 @@ need a pod, the v19 stores on the private dataset, and for link 1 P4's 3 Release
   `QMConfig().method`, so switching the default means recomputing every source's records and
   everything built on them, a decision of its own. Serve's metal path (`MetalGFN2Calculator`)
   goes through the same `_optimize`, so it follows the option too.
+
+## 2026-11-09: multi-reference evaluation and the log P of a given matrix (network plan A, C)
+
+- **`rank_any`: any outcome the source records for the pool.** Item A of
+  `docs/reaction_network_plan.md`. Every decoded completion now carries its product pool key
+  (`Completion.key`, the map-free identity key v2 `lewis_apply` gives B + R). The decode report
+  and hit files get `rank_any`, the rank of the first completion that is the own label or whose
+  product key is one the source records for the same reactant pool, and `n_outcomes`; the report
+  gets `top{k}_any`, the same top-k over the samples of multi-outcome pools (`multi_outcome`), and
+  a `siblings` section. `ksmech-eval compare --metric own|any` pairs on either rank; a hit file
+  without `rank_any` is refused for `any`. DECODE_VERSION 5.
+- **Pools and products by pool key, never by matrix.** Sibling samples number their atoms
+  differently, so `eval.siblings` groups the source's training steps (`read_training_steps`:
+  resonance and excluded steps out) by the pool key of the drawn reactants and collects the pool
+  keys of the drawn products. The pool key (`data.resonance.pool_key`) is the identity key v2 of
+  every fragment, sorted and joined by '.', the key the web app and `ksmech.network` merge pools
+  by. The decoder now keys its completions by it too (`lewis_apply`): decode version 4 used the
+  identity key of the whole pool, whose charges are zeroed over every fragment before the total
+  is appended, so the two heterolyses of one bond (CH3+ + Br- and CH3- + Br+) shared a key and
+  the decoder kept only the likelier of them; the backward model's pilot (item H) found it. With
+  the pool key B + R of each label's first variant gives exactly the recorded products' key on
+  all 1,241 labelled PMechDB molecule-val samples. An own hit whose key differs is counted
+  (OWN_KEY_MISMATCH); a step RDKit cannot read is counted (SIBLING_KEY_FAILED), has no
+  siblings, and its `rank_any` is its `rank`. `rank_any` is never above `rank`. For
+  `--direction backward` the sides swap: a pool is the drawn products, its outcomes the
+  recorded reactant pools.
+- **Siblings come from the whole source.** They are taken from every training step, whatever part
+  of the split they fall in, and the report counts the siblings from another part. With the
+  molecule split a pool's steps share their molecules and fall in one part, so the count is a
+  check rather than a correction. On v19 PMechDB: 12,512 training steps, 901 of them in 436
+  pools with more than one recorded product (v18: 973 in 474); the table takes about 20 s.
+- **`model.decode.matrix_logp`: the log P of a given R at a state.** Item C needs it for reverse
+  edges (-R at the child) and for scoring a known pathway. For each anchor the decoder would
+  decode R around (its forming bonds, or its breaking bonds when none forms), the same
+  log P(e) + sum over every other entry of log P(its class) as `exact_logp`, built afresh from
+  R (`table_logp`), so a decoded completion gets back exactly its log P (tested anchor by anchor
+  on a tiny model). `best` is the maximum over anchors (the decoder merges anchors by max) and
+  `marginal` their log-sum-exp; an R the head cannot write (an odd atom entry on a 3-class
+  head, a +1 entry around a breaking anchor) scores -inf.
+
+## 2026-11-09: the network core in the engine; search towards a product (network plan C, D, I1, I2)
+
+- **`ksmech.network`, an engine package; the web app imports its algorithms.** Item C asked for
+  the pure core of `serve/predict/network.py` to move into the engine. That module's data model
+  (nodes holding serve `PoolState`s, edges with arrow and orbital readings, the JSON form and
+  revisions) is the web app's contract with its UI, so it stays; what moved is what both need:
+  the pool key (`network.keys`, re-exported by `serve.core.keys`), the turnover rule of a cycle
+  (`graph.turnover_closure`) and the best-first simple paths (`graph.best_simple_paths`, which
+  `serve.predict.network.rank_pathways` now calls). The serve tests pass unchanged (872), so the
+  network JSON stays byte for byte.
+- **The search runs on an implicit graph with an expansion cache.** `network.search`: an
+  `Expander` proposes steps from a state with their log P; `ImplicitGraph` expands each node once
+  (the expensive model call) and every algorithm is measured by the nodes it expanded.
+  `k_best_pathways` is best-first search over simple paths with priority g + h, g the summed
+  -log p + `step_cost`: with costs >= 0 and an admissible h, goal paths pop in non-decreasing
+  cost, so k = 1 is A* (I1) and the first k are the k best simple pathways (I2), lazily on the
+  implicit graph, as K* would, without first exploring a fixed subgraph for Yen's algorithm.
+  Tested against exhaustive enumeration on 12 random graphs, with and without a perfect
+  heuristic (the heuristic never expands more). Cuts are counted: DEPTH_CUT, CYCLE,
+  EXPANSION_BUDGET, POP_BUDGET.
+- **A step cost is what makes the remaining-change heuristic useful.** The plan's heuristic is a
+  lower bound on the steps left (`target.steps_lower_bound`: the remaining dB on the target's
+  mapped heavy atoms against the decoder's caps, each step changing at most 8 bond entries by 1
+  and 2 atom entries by 2). In -log p units a step can cost nearly 0, so the bound in steps
+  says nothing about the cost unless each step pays at least something: the heuristic is
+  `step_cost` x the bound, exact for the cost -log p + `step_cost`. With the default
+  `step_cost` 0 the search is uniform-cost and exact on -log p; the calibration of `step_cost`
+  is item 9's.
+- **No map-free similarity as heuristic.** Where the target is not mapped on the start pool
+  (MAPPING_FAILED, counted), the plan offered a map-free similarity to the target. It is not a
+  lower bound, so it would make A* inexact; the search runs uniform-cost instead. An atom mapper
+  (RXNMapper or similar, D3) is the way to a bound for unmapped targets, and is not added yet.
+- **Arrival on two levels.** EXACT: the target's species (identity key v2) are in the pool with
+  their multiplicity, by-products allowed. SKELETON: their heavy-atom skeletons (connectivity
+  only, no H, charge, bond order or radical) are, so a worked-up neutral product or another
+  tautomer is reached up to proton transfers. Erasing bond orders also merges a ketone and its
+  alcohol, so the level is always reported with the pathway and `--levels EXACT` restricts it.
+- **Engine pool states as the web app's: Kekule, explicit H, every atom mapped.** The map numbers
+  follow every atom through a pathway, so a step's signature (R on map numbers) is the same in
+  every pool, which the mechanism classes need, and a mapped target can be compared with the
+  pool. `pool_state` keeps the given map numbers and numbers the other atoms after them. B + R is
+  written on the mapped molecule with `arrows.apply.apply_edit`, after the stored samples' checks
+  (`lewis_apply`); a changed atom's radical count is the parity of its N.
+- **Mechanism classes by partial-order reduction.** Two steps are independent when they touch no
+  common atom (map number); a pathway's class is the canonical linear extension of its
+  dependency DAG (Kahn's algorithm, smallest signature first). p(class | reaches) is the summed
+  probability of its pathways over every pathway found, so it is relative to the budgets.
+- **`ksmech-network search`** (new entry point): a checkpoint on the CPU, a start pool and a
+  target; the k best pathways with arrival level, log P and class, the classes with their
+  probabilities, the expansions, cuts and skips, and `--out` as JSON with a provenance header.
+
+## 2026-11-09: pathway data (reaction-network plan, item G)
+
+`ksmech-data pathways --source reactmech` (`data.pathways`) and `ksmech-data human-benchmark`
+(`data.human_benchmark`, `data.benchmark_checks`). Schemas in `docs/data_schema.md`
+("Mechanism files", "Pathway benchmark files", and the two "Processed" sections).
+
+- **ReactMech's chains are a sidecar, not columns of the steps parquet.** Filling
+  `pathway_id` / `step_index` in `steps.parquet` would change its hash, so every split file,
+  view and sample store built on it would be refused (STALE_ARTIFACT); and `molecule_groups`
+  joins the steps of one pathway, so the molecule split itself would move. A later full ingest
+  may want that (a chain then never straddles two parts), but it is a decision of its own with a
+  rebuild of every store. `pathways.parquet` is guarded by `pathways_report.json`, whose
+  provenance header carries the parquet's sha256 as its content hash (a parquet has no header
+  `provenance.read_header` reads); `load_pathways` checks the header and the hash.
+- **A chain step is matched by its map-free canonical sides**, the class index's key
+  (`reactmech.side_key`, made public, no behaviour change), and takes the ingest's step id of
+  the line (`make_step_id`), so the sidecar is valid for the 10k pilot and for a full ingest;
+  `ingest_status` says which (`steps`, `not_sampled`, `rejected`). No pair matched two lines and
+  no step sits in two chains, so `SEVERAL_LINES`, `STEP_IN_SEVERAL_CHAINS` and
+  `STOP_LABEL_CONFLICT` are 0. The OOD sets are read as chains too (same format; all 9,933 steps
+  of OOD_Set1's 3,311 chains match). A repeated chain (72 rows, 5 of them OOD_Set1 rows repeating
+  ID_CRM chains) is dropped by its species-list id, and its class is kept when the first copy
+  has none.
+- **Each mechanism file holds the chains its own split leaves out**: ID_CRM's steps are the
+  OOD-only lines, OOD_Set1's the ID-only lines. Not a mislabelling: each split keeps its set of
+  whole mechanisms out, the ID split to test whole mechanisms, the OOD split its held-out
+  classes.
+- **Map consistency has four outcomes per boundary** (`boundary_maps`): `same` (one mapped
+  drawing), `renumbered` (one mapped drawing after a renumbering, read off the canonical atom
+  ranks of the two map-free drawings: one drawing has one canonical labelling, so atoms of equal
+  rank correspond; the renumbering is unique up to the pool's automorphisms, which is harmless
+  for a bond-electron difference), `partly_mapped` (one drawing, but some atoms carry a number
+  on one side only: ID_CRM's lines leave spectators unmapped and map them once they react) and
+  `inconsistent` (two drawings). "Equal up to renumbering" alone would be always true here,
+  since the match already requires one map-free molecule at both ends; the useful question is
+  whether the numbers carry the atoms across. Result over 5,550 whole chains with a boundary:
+  all consistent, 4,459 (80.3%) by a renumbering alone, 277 (5.0%) with unchanged numbers.
+  For item D: the dataset's numbers compose only within a step; across steps a chain's map
+  needs `renumbering` at every boundary, and a graph match (an isomorphism of the two drawings)
+  where it is partly mapped.
+- **The pilot holds little of the chains**: 1,653 of the 19,250 chain steps are in the 10k
+  steps parquet, 458 of the 5,595 stop rows, 11 whole chains. Training the stop head on
+  ReactMech needs the chain steps ingested and featurized (QM and tokens), which is a pilot
+  decision for the user (open).
+- **The human benchmark is evaluation only and no `Source`.** The ingest, the sample store
+  and `ksmech-train` take their sources from that enum, so none can read it; besides,
+  `train.loop.sources` refuses its name (`human_benchmark.refuse_training`, EvaluationOnly),
+  the table carries `evaluation_only` on every row and in its provenance config, and its files
+  sit under `data/processed/human_benchmark/` beside no sample view. Normalizations are counted,
+  never silent: stripped cells, the one target cell holding a whole PMechDB record read as its
+  product side (the depth file's value), blank targets kept as null positions, `n/a` kept as a
+  null temperature (the header says room temperature; no 25 °C is invented).
+- **Overlap with PMechDB, molecule split** (`overlap_pmechdb_molecule.json`): species by
+  map-free canonical SMILES (stereo kept) and by the identity key v2 (resonance forms, stereo,
+  charge placement collapsed); a benchmark step counts as found when a part's step makes its
+  target from the previous target (step 1: from any non-trivial reactant; lenient, so a leak is
+  over-counted rather than missed). Of 1,421 distinct benchmark species (1,359 non-trivial),
+  molecule train holds 295 by SMILES and 326 by key (244 / 274 non-trivial). 234 / 243 of the
+  350 pathways share a non-trivial species with train, but only 60 / 71 have a step found and
+  11 / 14 every step (93 / 112 of the 1,034 steps); over every PMechDB part 62 / 75 and 11 / 15.
+  Only 148 of the 1,006 readable targets are a product of any PMechDB step, although 320
+  targets carry PMechDB-style maps: the benchmark shares PMechDB's drawing, not its steps.
+  Proposed (open): report pathway results on all 350 and on the pathways with no step found in
+  training (290 by SMILES, 279 by key).
+- **QM and token coverage** (`qm_coverage.json`, file lookups only; the index is not
+  refreshed, since that writes the shared `data/cache/index.sqlite`): of the 1,421 species, 346
+  have a QM record and current tokens, 1,072 need the QM batch (all admitted by the spin
+  census), 3 have a failure tombstone (iron bromides and chlorides), none needs only a token
+  build. By role: reactants 224 of 508 covered, targets 147 of 961, final products 54 of 344.
+  Not run (hours, the user's call). The QM batch collects species from a steps parquet
+  (`qm.batch.collect_molecules`), so the benchmark's species need an entry point of their own
+  (a species list, for instance from `qm_coverage.json`): open.
+
+## 2026-11-09: the free energy of a species and of a pool (`ksmech-qm thermo`, reaction-network plan item B)
+
+Every cached record gets a sidecar with its harmonic frequencies, principal moments, symmetry
+number and multiplicity, so G(T) is evaluated at any temperature without the Hessian; a pure
+function sums the species' G into the G of a pool (`qm.hessian`, `qm.thermo`, `qm.thermo_cache`,
+`qm.thermo_batch`).
+
+- **The Hessian comes from tblite, not from the xtb program** (decided with the user before the
+  build; the plan's D3 had named the xtb program). Central differences of tblite's analytic GFN2
+  gradients, H[k] = (g(x + h e_k) - g(x - h e_k)) / 2h, as xtb's `--hess` does: h = 0.005 Bohr
+  (xtb's `step_hess`), SCC accuracy 0.2 (xtb's `--hess`), the result symmetrized (xtb too; the
+  largest |H - H^T| is stored, HESSIAN_ASYMMETRIC above xtb's 1e-2 warning). 6N + 1 gradients
+  per molecule; every displaced SCF starts from the reference point's converged wavefunction
+  (`singlepoint(ref, copy=True)`), from the guess when that start fails (counted,
+  `fresh_starts`). No new program, no new dependency.
+- **The record's own calculator.** GFN2, the ALPB solvent of the record's method (read back by
+  `xtb_calc.solvent_of`; a method with no medium part, the 245 early `GFN2-xTB/tblite-lbfgs`
+  records, is UNKNOWN_METHOD), the record's charge and unpaired count: a species `qm.spin`
+  reassigns carries its assigned count in its record, so the Hessian runs at it; tblite's
+  restricted open shell with fractional occupations and its 300 K electronic temperature, as for
+  the record. So the Hessian is the solvated surface's, as `xtb --alpb --hess`.
+- **Translations and rotations** are removed by transforming the mass-weighted Hessian to the
+  orthogonal complement of the six (five for a linear molecule, three for an atom) mass-weighted
+  rigid-body vectors and diagonalizing there: what xtb's `projectHessian` says it is equivalent
+  to, with the mode count exact by construction (xtb picks its zero modes by |freq| < 0.01).
+  Masses: RDKit's average atomic weights, as `qm.point_group`. Linear means the point group is
+  C∞v or D∞h at 0.1 A; an atom has no Hessian at all.
+- **Symmetry number**: the number of proper rotations in the group `qm.point_group` finds at
+  its 0.1 A tolerance (xtb's `desy` is 0.1 too); 1 for C∞v and an atom, 2 for D∞h. The fixture
+  records give benzene D6h 12, ethane D3d 6, chloromethane C3v 3, acetonitrile C3v 3,
+  acetaldehyde Cs 1. A point-group failure keeps the Hessian with sigma 1 (SYMMETRY_FAILED).
+- **Thermochemistry in numpy, xtb's conventions** (checked against xtb's `thermo.f90` and
+  `property.F90`): ideal-gas translation at p0 = 1 atm (xtb), rigid rotor, harmonic vibrations
+  with Grimme's quasi-RRHO for the entropy only, S = w S_HO + (1 - w) S_free-rotor with
+  w = 1 / (1 + (nu0 / nu)^4) and nu0 = 50 cm^-1 (xtb's `sthr`; the 2012 paper used 100), the
+  free rotor's moment mu' = mu B_av / (mu + B_av) with B_av the mean principal moment of the
+  molecule (xtb's `avmom`, not the paper's fixed 1e-44 kg m^2); ZPE and vibrational enthalpy
+  harmonic over every kept mode (xtb does not interpolate them). Added to xtb's: the electronic
+  entropy R ln(2S + 1), 2S + 1 = unpaired + 1 (spin only: an atom's orbital degeneracy, 4 for
+  Br 2P3/2, is not counted). Checked: water at its experimental geometry and fundamentals gives
+  S = 188.7 J/(mol K) and H(298) - H(0) = 9.92 kJ/mol (188.83 at 1 bar and 9.904); the GFN2
+  frequencies of the fixture records give S = 54.4, 64.7, 56.1 cal/(mol K) for ethane, benzene
+  and chloromethane (54.85, 64.34, 56.04 measured).
+- **Imaginary modes, as xtb's `print_thermo`**: |nu| <= 1 cm^-1 is dropped, -20 < nu < 0 is
+  inverted (made real), nu <= -20 is dropped and counted; the sidecar flags IMAGINARY_INVERTED and
+  IMAGINARY_DROPPED. The rule is applied when G is evaluated (`ThermoSettings.imag_cutoff_cm`),
+  so a caller can change it without a recomputation. Its cost: a soft mode that crosses -20
+  cm^-1 changes G by its whole free-rotor entropy, 0.6 kcal/mol for methyl acetate's torsion
+  (below). The records are L-BFGS minima at fmax 3e-4 Hartree/Bohr: some are saddles of a methyl
+  torsion (acetone, -76 cm^-1). The sidecar flags them; nothing re-optimizes along the mode
+  (xtb's `--ohess` would), since that would change the record.
+- **Standard state: 1 M in solution.** tblite's ALPB, like xtb's, defaults to the 'gsolv' state
+  (1 L of gas to 1 L of solution, no shift), so the record's energy already holds the 1 M -> 1 M
+  solvation free energy. G = E_el + ZPE + H_thermal - T S(ideal gas, 1 atm) + RT ln(V_m / 1 L),
+  V_m = RT / p0: 24.465 L/mol and +1.894 kcal/mol at 298.15 K, the molar volume taken at T
+  (xtb's 'bar1M' shift also scales its 24.79 L by T / 298.15). S and H are reported for the gas;
+  only G carries the shift (`ThermoSettings(standard_state="1atm")` leaves it out).
+- **ALPB is not rotation invariant.** Its surface grid is fixed in the frame, not on the
+  molecule: over six random orientations G - E_el spreads by 0.15 kcal/mol for ethanol, 0.02 for
+  benzene, 0.10 for TEMPO and 0.05 for acetone, and stiff modes by up to 6 cm^-1, whatever the
+  step (0.005, 0.01, 0.02 Bohr give the same spread); the gas-phase Hessian of the same
+  geometries spreads by 0.002. Methyl acetate spreads by 0.75 kcal/mol because a torsion at
+  -30 to +45 cm^-1 falls on either side of the -20 cutoff; inverting every imaginary mode brings
+  it to 0.14. The solvated Hessian is kept (the record's own surface, and what xtb computes): a
+  record has one orientation, so its G is reproducible, and 0.1-0.2 kcal/mol is far below GFN2's
+  error on reaction energies.
+- **The sidecar**: `data/cache/thermo/<cache key of the record>.npz`, kind `thermo`, version 1,
+  stamped with the record as its input (a new record makes it stale) and with the Hessian's
+  settings (step, accuracy, masses, symmetry tolerance) and the record's method and conformer as
+  its config; the time spent and the BLAS are tracing notes in `extra`, outside the content
+  hash. The thermochemistry settings are not part of it. `thermo_cache.free_energy_of(smiles, T)`
+  reads one species' G.
+- **Failures**: an SCF that fails from both starts at a displaced geometry (SCF_NOT_CONVERGED)
+  and a timeout (TIMEOUT, 3600 s by default) leave a tombstone `thermo/<key>.failed.json` in
+  the QM memo's format (kind `thermo_failure`), covered while the settings are the same and no
+  budget (`timeout_s`, `scf_maxiter`) is larger; a success removes it. NO_RECORD, RECORD_STALE
+  and UNKNOWN_METHOD are skips, counted but not remembered (a record may come later);
+  UNEXPECTED and WORKER_CRASH are not remembered either.
+- **The cache index goes to version 3**: kinds `thermo` (the identity columns of a record) and
+  `thermo_failure`, the view's `has_thermo` and `thermo_failure_reason`, and in `stats` the
+  thermo failures by reason, the thermo warnings and the records without a sidecar. A version
+  change drops and rebuilds a root's index the first time a checkout of the other version opens
+  it, so the shared `data/cache/index.sqlite` should be refreshed once after the merge and not
+  from a v2 checkout afterwards.
+- **The solvent is a parameter of the QM run.** The method string always carried the medium
+  (`ALPB-<solvent>` or `gas`), so a second solvent writes records beside the water ones under
+  other cache keys. `ksmech-qm run --solvent` and `ksmech-qm thermo --solvent` take one of the 25
+  GFN2 ALPB solvents of tblite, by one name each (`xtb_calc.ALPB_SOLVENTS`; every one runs):
+  tblite also accepts aliases and any case (`h2o`, `DMSO`, `dichloromethane`), which would give
+  one solvent two method strings, so `QMConfig` refuses any other name. The default keys are
+  unchanged. Not done: the readers downstream of QM (the token build, `TokenCache`, the samples,
+  serve) look records up under `QMConfig().method`, i.e. water; a model on another solvent's
+  tokens needs that method passed through those builders.
+- **G of a pool** (`qm.thermo.pool_free_energy`, pure, no I/O, no `ksmech.serve` import): G =
+  sum_i n_i mu_i, mu_i = G_i(T) + RT ln(c_i / c0) with c0 = 1 M (the standard state of G_i) and
+  c_i from the caller (c0 when absent, the data have none); a reservoir species (solvent,
+  reagent in excess) has a fixed mu instead, for every copy (`chemical_potential(G, T, c)`
+  gives one at a concentration: water as solvent, 55.3 M). A negative count is a species owed
+  to a reservoir, so pools that differ by a reservoir molecule compare: A + H2O(reservoir) -> B
+  is `reaction_free_energy({A: 1, H2O: 1}, {B: 1}, ...)`. Energies in Hartree, T in K.
+- **Pilot** (4 workers of one thread each on OpenBLAS, beside other jobs): the 29 fixture species
+  (`MOLECULES` and `OPEN_SHELL`) and 20 cached records of 5-180 atoms. 46 computed, 3 skipped
+  as NO_RECORD (the N2 and two ozone drawings, whose records sit under their redrawn SMILES), no
+  failure. Time per Hessian: under 0.3 s up to 9 atoms, 0.4 s at 10-19, 3.4 s at 20-39, 16 s at
+  40-59, 54 s at 60-79, 138 s at 80-119, 513 s at 158 and 932 s at 180 atoms; a fit gives
+  t = 1.8e-4 N^2.93 s. Over the 33,532 water records of the index (its atom counts of
+  2026-11-03): about 208 CPU-hours, 52 h on 4 workers, 26 h on 8, the records of 40-119 atoms
+  taking 177 of them. SCC accuracy 1.0 instead of 0.2 saves 10-17% and moves G by 0.15-0.33
+  kcal/mol, so 0.2 stays. `--workers 1` runs in the calling process on tblite's bundled netlib
+  BLAS (`qm.blas`), about 25% slower at 48 atoms. Warnings: IMAGINARY_INVERTED on 11 of the 46,
+  IMAGINARY_DROPPED on 6 (acetone, methyl acetate and 4 of the 20 dataset records).
+
+## 2026-11-09: the previous step, backward samples (reaction-network plan, item H)
+
+- **One label path.** A backward sample is the forward builder (`arrows.steps.sample_for_step`)
+  on the step with its sides swapped (`arrows.backward.backward_step`): the child pool's tokens,
+  Lewis structure, pair features and resonance drawings, the edit-label class of the swapped step
+  on the child's token atoms closed under the child pool's symmetry, and the parent's identity
+  key as product key. The forward arrows are dropped (they draw the forward electron flow), so the
+  swapped step takes the path of a source without arrows: R from the two mapped sides
+  (`delta_be.mapped_closest`, KEKULE_CLOSEST), the hydrogens that move written as atoms
+  (`arrows.hydrogens`). PMechDB maps every atom an arrow touches and draws a moving H as a mapped
+  atom, so the mapped difference is the whole change; an unmapped atom that changed would fail
+  the product check (PRODUCT_MISMATCH, counted). No pilot step failed it. `delta_be.mol_label`
+  (the first half of `step_label`, unchanged) gives the label on the mol atoms.
+- **The class is -R up to resonance, not always the negated forward class.** The label rule is
+  the forward one: the elementary R of lowest cost that takes the drawn input to a resonance form
+  of the target (fewest formal charges in that form, then fewest entries). On the 500-step pilot
+  (mol atoms, compared through the atom maps, `ksmech-arrows edit-labels --direction backward
+  --limit 500`): the backward class is the negated forward class on 399, disjoint from it on 51,
+  and has a member on an unmapped atom (not comparable by maps) on 50; never a partial overlap.
+  The disjoint ones are resonance, of two kinds: (a) 22 where the forward class reaches a form of
+  the product other than the drawn one (a conjugate addition to an enone: the forward class
+  reaches the carbanion in 4 entries, the backward class starts from the drawn enolate, 6
+  entries); (b) 29 where the forward class reaches the drawn product but the parent has another
+  form with as few charges that the child reaches in fewer entries (the reverse of an addition to
+  an oxocarbenium or a nitrilium is labelled as the heterolysis to the carbocation form, 2
+  entries, not the push from the O or N lone pair, 4 entries). Every member takes the drawn child
+  to the parent with the maps kept (tested), and training draws the child's other resonance forms
+  with their labels recomputed, as forward. Kept: the input is the child as the dataset draws it.
+  Whether a backward class should also admit the negated forward members (a union), so that (b)
+  keeps the lone-pair push, is a spec question left open.
+- **Anchors.** Unchanged rule (`ReactionMatrix.anchors`): the bonds -R forms, else those it
+  breaks. A forward pure addition (no bond order falls) gives a backward class with breaking
+  anchors only; the loss and the decoder already take them (the 732 forward PMechDB samples with
+  breaking anchors, the heterolyses), checked on a hand-made step: the batch marks the break side,
+  the step loss is finite, and the beam decoder completes the heterolysis from the breaking
+  anchor. Pilot: 37 of 498 samples (7.4%) have breaking anchors, 5.9% forward.
+- **The decoder's merge by product key hides one charge placement.** The map-free key zeroes the
+  charges (`resonance.sigma_key`): CH3+ + Br- and CH3- + Br+ have one key, so `decode_pool` keeps
+  whichever completion scores higher and drops the other (DECODE_MERGED) before `hit_rank`
+  compares matrices. Both directions are affected, the backward one more often, since the reverse
+  of every addition of an anion to a cation is a heterolysis. Not changed here (item A works on
+  the product keys of completions); the test keys completions by their matrix as well.
+- **A store of its own.** `data/processed/<source>/backward/` (`direction_dir`): shards, index,
+  views, split files, pair statistics and the samples, edit-label and coverage reports under the
+  forward names, so no forward artifact is overwritten or made stale. The forward artifacts carry
+  no direction key (bit for bit as before, tested); the backward ones carry `direction` in the
+  shard, index, view and statistics configs, `samples_report.json` and `edit_labels_report.json`.
+  Training reads the views and statistics of its direction and refuses a file written for the
+  other (`require_direction`); run.json's `train` config holds `direction` only for a backward
+  run, so a forward header and its `--resume` check stay as they were. A decode records
+  `direction` and `checkpoint_direction` when either is backward (a mismatch warns), tags its
+  files `_backward`, and `direction` is one of `eval.paired.PAIRED_KEYS`: forward hits (none) and
+  backward hits never pair. No new field on `MechanismSample`, so the forward shards are
+  unchanged and SAMPLE_VERSION stays 19.
+- **One split for both directions.** The backward parts are the forward parts step by step: the
+  split functions run on the forward training steps with the forward frozen snapshots, and the
+  split file is written again into `backward/` so the views' provenance stays in that directory
+  (on PMechDB both split files are identical). One split is what a shared encoder and the
+  round-trip check need: no step's forward test is the other direction's training. The molecule
+  split groups the non-trivial molecules of both sides, so no backward input of val or test holds
+  a molecule of training; each build reports it per part (`leakage`; pilot 0/43 val, 0/48 test).
+  The scaffold split holds out the forward reactant's scaffold, i.e. the backward target's, not
+  the input's, so backward scaffold numbers are no scaffold hold-out of the input (molecule
+  leakage 24/50 val, 20/57 test in the pilot; the forward scaffold split is molecule-leaky too).
+- **Pilot option.** `--limit N` (backward only; `pilot_steps`, N training steps drawn with a
+  fixed seed, the same subset for `samples` and `edit-labels`, never tied to the split seed)
+  builds a partial store whose views keep to its steps; its configs record the limit. Refused
+  forward: a partial forward store would replace the full one.
+- **Coverage (`ksmech-arrows coverage`).** Every species of both sides read through the token
+  loader (`TokenCache`: stale files and missing Wiberg sidecars count) and the QM manifest;
+  1 min 45 s on 4 processes. PMechDB, 12,512 training steps: 11,217 of the 11,255 product species
+  have tokens; the 38 without are QM failures (SCF_NOT_CONVERGED 34, TIMEOUT 4); 3,619 product
+  species occur on no reactant side, 7 of them without tokens; 12,473 steps have every product
+  species (12,469 every reactant species, the forward store's count). The token build covers both
+  sides already (`collect_molecules`): the backward store needs no new QM or tokens.
+- **Pilot (500 random PMechDB training steps, 4 processes).** 498 samples (MISSING_TOKENS 2),
+  classes 1: 354, 2: 99, 3: 23, 4+: 22 (after the symmetric closure), label maxima 6 bonds and 2
+  atoms (the forward ones), the resonance enumeration cut at RESONANCE_CAP on 46; the drawn R is
+  in its class on 465. 2 min 34 s wall, 413 s CPU (0.83 s per step), so the full PMechDB
+  backward store is about 2.9 CPU hours: 45-50 min on 4 processes, about 15 min on 14. A CPU
+  smoke fit (`--direction backward --limit 64 --epochs 1 --preset general`, run
+  `backward_smoke`): 5 steps, 273 s, val top-1 2.4% (untrained); its decode of 16 val samples:
+  nothing found on 15 (an untrained model), 1.4 s per sample, files
+  `decode_*_molecule_val_backward_n16.json` with the directions in their config.
+
+## 2026-11-09: the search towards a product on pathway benchmarks (network plan, section 5)
+
+- **`ksmech-network evaluate --set reactmech|human_benchmark`** (`network.benchmarks`,
+  `network.evaluate`). A case is a start pool, a target and what the benchmark records: the
+  ReactMech chains ingested whole (`data.pathways`; the target keeps its maps only when every
+  boundary kept the same numbers, so a mapped target is on the start's numbering), or the human
+  benchmark's reactants, final product and step targets. Per case: the arrival level, the
+  recorded pathway's rank, the step targets the best pathway passes, the expansions and cuts.
+- **The recorded pathway is matched by its sequence of pool keys.** The plan compares "the set
+  of steps plus the final pool", i.e. the mechanism class; that needs every recorded step's
+  matrix on the start pool's numbering, which the chains give only after composing the
+  renumberings of `data.pathways`. Until then the sequence match is a lower bound on the class
+  match (a pathway that swaps two independent steps does not count).
+- **A target the start already holds is START_IS_GOAL.** A degenerate exchange (the same
+  molecules, atoms changing partners) has a target equal to the start map-free, and the pool
+  graph merges its child into the root; one of the 12 chains below is such a case.
+- **First run, a check of the machinery rather than a benchmark.** dense_plain_general_s0
+  (ReactMech pilot), 30 expansions, depth 6, on the 12 chains the pilot ingested whole (5,584
+  chains are not ingested): arrival 9 of 12 (5 EXACT, 4 SKELETON), the recorded pathway at rank
+  1 on 5 and within 5 on 6, 17 expansions on average. 9 of the 12 chains lie in the molecule
+  split's training part, and 180 of 208 expansions failed as MISSING_TOKENS: the search reaches
+  species no QM batch has seen. A benchmark needs the chains ingested in full with their QM
+  (`ksmech-data pathways` reports 17,595 chain steps outside the pilot), or `--build-missing`
+  (GFN2 per new species, minutes each).
+
+## 2026-11-09: prediction without a product: the Markov chain, the thermodynamic stop, transition path theory, exploration by mass (network plan E, F, I3, I4)
+
+- **Reverse edges are scored by the forward model at the child, once per explored edge.** For an
+  edge R from i to j, -R is scored at j with `ModelExpander.reverse_logp` (`model.decode.matrix_logp`)
+  and its `best` anchor is read, the quantity the decoder ranks completions by, so the forward
+  log p (the proposal's) and the reverse one are the same kind of number. The scoring happens
+  when the edge is found, not when the child is expanded: the weight of the edge into a frontier
+  pool, and so the mass that reaches it, needs s_ij. A directed pair scored twice (j's own
+  proposal for i, and the reverse of i's proposal for j) keeps the larger log p, as the decoder
+  merges two completions of one product. A child that fails featurization, or a -R with no
+  admissible anchor, leaves the reverse missing (REVERSE_MISSING:<code>, once per edge): the edge
+  then runs one way (ONE_WAY), w_ij = p_ij exp(-dG/2RT) and w_ji = 0; no stand-in number for the
+  missing probability is invented.
+- **A continuous-time chain with the rates w; absorption on its jump chain.** With
+  w_ij = s_ij exp(-dG_ij/2RT), s_ij = sqrt(p_ij p_ji), the pair products pi_i w_ij are symmetric
+  for pi = exp(-phi/RT)/Z, so the continuous-time chain with rates w has Boltzmann as its
+  stationary distribution (tested pair by pair and against the sparse solve of pi Q = 0, on six
+  random graphs at two temperatures). The row-normalized jump chain has pi_i W_i instead, but the
+  same absorption probabilities, which `chain.absorb` computes with one sparse LU factorization.
+  Without free energies a pair runs on the model's own probabilities (w_ij = p_ij, w_ji = p_ji,
+  NO_FREE_ENERGY_LINK); its pairs are `unbalanced`, and Boltzmann is never claimed for a region
+  holding one.
+- **Reservoir species: named by identity key, kept in every pool, priced at mu.** The search
+  parameter is a set of species keys (identity key v2, the names `PoolState.species` already
+  uses), each with one molecule's SMILES (`network.reservoir`); every pool keeps `copies` of each
+  (default 1) so the model sees it. A consumed copy is replaced by a fresh molecule (new map
+  numbers) and a released copy beyond `copies` is removed, never one the step touches (the
+  reverse -R must stay on the pool's atoms; a touched surplus copy stays, RESERVOIR_KEPT_TOUCHED);
+  each proposal records the copies the replenishment took (`info["reservoir_draw"]`). The state's
+  potential is phi = G(state) - sum_x D_x mu_x with D_x the draws from the start (the bath's loss),
+  so A + H2O -> B costs G(B) - G(A) - mu(H2O) and the replenishment costs nothing. This is the
+  same bookkeeping as item B's `pool_free_energy` with a negative count for a species owed to the
+  reservoir. D is summed along the first path found; a second path with other draws, which atom
+  conservation forbids for independent reservoir species, is counted RESERVOIR_DRAW_MISMATCH.
+- **The free-energy interface (the adapter point for item B).** `network.free_energy`:
+  `FreeEnergy(state, T)` returns G in kcal/mol, a (G, H, S) triple (S in kcal/(mol K)) or a
+  `Thermo`, or None (NO_FREE_ENERGY); `ChemicalPotential(species_key, T)` the same for a
+  reservoir species; `ThermoModel` bundles both. `load_thermo_model(kind)` is where item B's
+  provider is wired (G(pool) over `state.species` from `qm.thermo.pool_free_energy`, Hartree x
+  627.509); today only 'none'. G is read per pool key, once per run (`chain.ThermoCache`).
+- **Absorbing states.** SINK_AT_T; TURNOVER when the pool's first path from the start closes a
+  catalytic cycle (`graph.turnover_closure` on the species multisets along the path, the web
+  app's rule), never expanded; NO_OUTGOING_STEP when the expansion proposed nothing (the plan's
+  "no outgoing step": the reverse steps into such a pool are not used, it is where the model
+  stops). During the exploration the unexpanded pools are absorbing too (UNEXPLORED, CLIMB_CUT),
+  which is what makes their mass measurable. An explored region that reaches no absorbing pool
+  (everything reversible, nothing left to expand) is an EQUILIBRIUM class, its mass spread by
+  Boltzmann (or the chain's stationary distribution when unbalanced).
+- **TURNOVER absorbing by default, behind a flag** (`stop_at_turnover`, `--no-stop-at-turnover`;
+  the web app's `NetParams.stop_at_turnover` default). In a smoke run (pm_control_s0, methoxide +
+  acetone, 4 expansions, no free energies) 66% of the mass went to the base-catalysed enol: the
+  enolate O-protonated by methanol regenerates methoxide, which closes a turnover. That is the
+  rule doing what it says, but an uphill turnover product absorbing mass is what the free
+  energies should judge; whether a turnover stays absorbing once they exist is left open, and
+  the flag expands such pools like any other.
+- **A sink counts the steps back too.** "Every step out climbs more than delta(T)" is tested on
+  the chain's links out of the pool: its proposals and the reverse steps of the edges that reach
+  it. Otherwise a pool 1 kcal/mol above its parent, from which the model proposes only steps
+  uphill, would be called a sink although its way back descends. A step without a dG is not
+  known to climb, so a pool with one is never a sink: without free energies nothing is.
+- **The rescan.** Before a pool is declared SINK_AT_T, the expander's `rescan(state, factor)` hook
+  decodes it again with `rescan_factor` (4) x the anchors, products per anchor, applications and
+  search nodes (the caps on bond and atom changes stay: they are physical); the steps it adds to
+  new children join the graph (edges already explored are left as they are, so their reverse
+  scores stay valid), and the test runs again. Once per pool. `SinkCheck` reports the steps
+  examined and the rescan's proposals. `stop.ModelRescan` gives a `ModelExpander` the hook
+  without changing `network.pools`; an expander without it leaves the sink unconfirmed
+  (SINK_NOT_RESCANNED, counted).
+- **NO_NET_REACTION only when every explored pool has a free energy.** START_IS_SINK, or the
+  start's Boltzmann share over the explored pools above 1 - epsilon (REACTANTS_DOMINATE). A pool
+  without G could hold the population, so with one the share is not reported and no verdict on
+  it is given.
+- **T\* linearized at T.** T* = dH/dS from the H and S the provider gives at the run's
+  temperature: "above" (dH > 0, dS > 0: a release of H2O, CO2 or N2 gains with heat), "below"
+  (dH < 0, dS < 0: an association loses with heat), "always" or "never" when the signs disagree.
+  For edges and for each end state against the start.
+- **Exploration by mass: the hitting probability of each unexpanded pool.** With every unexpanded
+  pool absorbing, the probability that the chain from the start reaches it first is the mass it
+  would explain; the most probable is expanded next (ties: the first found). The stop is on the
+  UNEXPLORED mass (`--mass-tol`); the mass of the CLIMB_CUT pools, which will never be expanded,
+  is reported with it as the unexplored mass (the uncertainty) but cannot stop the search, which
+  would otherwise run to the budget whenever a high pool is reached.
+- **The climb budget is a height above the start.** "The cumulative climb allowed" is read as
+  G(pool) - G(start): the quantity the population argument of item F speaks of. A pool above it
+  is not expanded (CLIMB_CUT); its edge is kept with its dG and K, so no edge is cut for being
+  uphill (D2).
+- **Transition path theory on the source's strongly connected component.** q+ and q- by sparse
+  LU solves on the component (q- on the time-reversed chain, which a balanced chain makes
+  1 - q+); pi Boltzmann when the component is balanced, else the numerical stationary
+  distribution; the net reactive flux decomposed by repeatedly extracting the widest
+  (largest-bottleneck) path. On a balanced chain the net flux runs up the committor, so it is
+  acyclic, every extraction zeroes an edge and the shares add up to 1 (tested with flux
+  conservation at every intermediate and the committor bounds on six random graphs).
+- **Provisional defaults, to be calibrated** (plan item 9: no recorded reaction a false sink):
+  temperature 298.15 K; epsilon 0.01 (delta = 2.73 kcal/mol at 25 C before the margin); margin
+  5.0 kcal/mol (GFN2's error on reaction energies is several kcal/mol, more for charged species,
+  and RRHO overstates the entropy cost of association in solution, so the margin starts above
+  delta itself, on the side of fewer false sinks); climb budget 20 kcal/mol above the start; mass
+  tolerance 0.01; rescan factor 4.
+- **Not done: MCTS** (the plan's option behind a flag for deep networks). The mass expansion is
+  deterministic and gives its error bound; MCTS waits until a network proves too deep for it.
+- **`ksmech-network predict`** (new subcommand): the checkpoint on the CPU with the rescan hook,
+  the optional reservoir, the free-energy provider (only 'none' until item B's `qm.thermo` is
+  wired there), the exploration by mass with the thermodynamic stop, and TPT pathways to the most probable end states; `--out`
+  as JSON with a provenance header (`network_predict`, version 1): the states with their class,
+  G and equilibrium share, the end states with p and T*, the sinks with the steps examined, every
+  edge with log p forward and back, dG, K, dH, dS and T*, the pathways with their flux shares,
+  and every count.
+
+## 2026-11-09: branches that join, the species graph and its hyperpaths (reaction-network plan, item J)
+
+`network.species` (the graph and its expansion), `network.lift` (pool states and species),
+`network.hyperpaths` (SBT, the k shortest hyperpaths, linearization), `network.flux` (masses,
+step fluxes, atom flux) and `ksmech-network species` (`network.species_cli`). `network.search`
+and `network.pools` are unchanged; `network.cli` gains the subcommand.
+
+- **OR nodes are identity keys v2, AND nodes are merged by (reactants, products).** A pool step's
+  reactants are the fragments it touches (the pool's others are spectators), its products the
+  fragments their atoms end in. Two proposals with the same reactant and product multisets are one
+  AND node, the best log P of their pools kept (DUPLICATE_STEP): symmetry-equivalent steps (two H
+  of one methyl) fall together, and the step's change and atom map are those of the first found.
+  A step whose two sides are the same multiset (a degenerate exchange) changes no species, so it
+  is no AND node (SELF_LOOP): its weight goes back to the carrier, whose other channels are
+  renormalized by 1 / (1 - that weight).
+- **A species' atoms are numbered by the canonical ranks of its sigma skeleton with every H an
+  atom** (`lift.local_ranks`: every bond single, no charge, radical, aromatic flag, stereo or map,
+  ties broken). One identity key means one sigma skeleton with the same H, so every drawing of a
+  species (any resonance form, any atom order) gets the same labelled graph up to its
+  automorphisms; tested on the fixture set and the open-shell list under random atom orders and on
+  three pairs of resonance forms. A species' drawing carries these indices + 1 as map numbers,
+  and every step's change and atom map are written on them. Which of two symmetric atoms a
+  drawing names first is not canonical (the benzene radical anion's charge lands on either C), so
+  steps are compared by species, never by atom numbers alone.
+- **A pool's species are drawn in key order.** The model's output depends on the order of the
+  fragments in a pool's SMILES: with the tiny test model, CH3Cl + OH- gave a best log P of -24.58
+  drawn chloromethane first and -28.11 drawn hydroxide first, and the same order with other map
+  numbers gave identical values. `lift.pool_of` sorts the species by key, so one multiset is
+  always one pool; the pool graph keeps RDKit's canonical order of its own SMILES, so the two
+  graphs can score the same pool differently.
+- **The expansion is pseudo-first order in the species that joins** (the carrier). When a species
+  joins the core it reacts alone, with itself and with each species already there, the reservoir
+  in every pool; each pair is one pool, expanded when the later of the two joins. Its partners are
+  at fixed concentration: a step of its pools is its channel, with weight w x p, w the pool's
+  share of the carrier's pools (alone 1, each partner pool `partner_weight`, normalized; no rate
+  exists to weigh them otherwise) and p the model's probability on that pool; a partner consumed
+  by a step comes from its supply, so the partner's own mass is not consumed. A step that touches
+  only the partners is theirs (PARTNER_ONLY, counted and dropped), one that touches only the
+  reservoir RESERVOIR_ONLY. The mass of a species is m = amount + sum of the fluxes of the steps
+  making it, F(s) = m(carrier) beta(s | carrier): a linear system over the core, with the
+  expected number of formations as the unit (a reversible pair counts each return). A loop gain
+  of at least 1 (chain branching at fixed partner concentration) has no finite mass: the series
+  is cut after 64 terms and counted (MASS_DIVERGED). The frontier species of largest mass joins
+  the core while that mass is at least the tolerance; budgets on core species and on pools
+  (model calls), and every species left on the frontier is counted below or above the tolerance.
+  What no channel of a carrier took (the decoder's dropped or unproposed mass, failed pools,
+  pools cut by the budget) is its leftover, reported as the unexplored mass.
+- **The species graph is read as a B-hypergraph with the additive weighting.** A step with
+  several products is one B-arc per distinct product species, so SBT (Gallo, Longo, Pallottino
+  and Nguyen 1993) and the k shortest hyperpaths (Nielsen, Andersen and Pretolani 2005) apply as
+  published: W(v) = w(arc) + sum over the tail of multiplicity x W(u), w = -log p. A species
+  needed twice is paid for twice (two molecules, two derivations: B + B -> C costs w + 2 W(B)).
+  A step whose two products are both used is also paid for once per product, although one event
+  makes both: the additive cost is an upper bound there, and the hyperpath's events (`unfold`)
+  fire it once, their summed log P reported beside the cost. The exact cost of such shared
+  events is an integer hyperflow problem (Andersen, Flamm, Merkle and Stadler), not a hyperpath
+  one; left open.
+- **The target is a virtual GOAL node.** One node per distinct target slot (identity key,
+  skeleton key), entered by a zero-weight arc from every species that is the slot EXACT, or at
+  SKELETON when allowed, and the GOAL arc needs every slot with its multiplicity, so a target of
+  several species is one hyperpath. A slot a starting species already is (at SKELETON, a
+  deprotonated reactant, say) costs 0, as the pool graph's arrival.
+- **The k shortest hyperpaths branch target first.** For the hyperpath found, its nodes in
+  reverse valid order (the order in which SBT made them final, reversed: each node before the
+  nodes its arc needs), subproblem i removes node i's arc and fixes the arcs of the nodes before
+  it, which are then in every hyperpath of the subproblem: the subproblems partition the
+  hyperpaths not yet found (Lawler), so they come in non-decreasing cost, each once. A hyperpath
+  is a set of steps, so the enumeration yields mechanisms up to the order of independent steps,
+  never their interleavings; hyperpaths with one species class (the multiset of steps by
+  reactants and products) are reported once (SAME_CLASS). Tested against exhaustive enumeration
+  on 30 random hypergraphs with joins, cycles and a species needed twice.
+- **A hyperpath unfolds into events whose atoms are numbered once.** Each step fires as often as
+  the needs above it require (the target once; ceil(need / copies made)), each event consuming
+  instances its species' own arc made (or the start's), and map numbers flow from the start
+  instances (a start pool's, `lift.start_numbering`, or 1, 2, ...) through the atom maps. All of
+  it is fixed before an order is chosen, so every order the event DAG allows is a pool-graph
+  pathway with the same steps on the same atoms, and `search.mechanism_class` is the same for all
+  (tested on 20 random valid orders of a six-event hyperpath). The join A -> B, C -> D,
+  B + D -> E is one hyperpath here and two pathways, one class, in the pool graph.
+- **A hyperpath and a pool-graph pathway compare on two levels** (`lift.compare`): the species
+  class (the pathway's steps split into species steps against the hyperpath's events), robust;
+  and `search.mechanism_class` once the hyperpath is linearized on the start pool's map numbers,
+  which differs where the graphs chose different atoms among symmetry-equivalent ones.
+  `search.mechanism_class` orders by the atoms a step changes, so a step that uses a molecule an
+  earlier one made without touching the atoms it changed counts as independent of it: the class
+  is a canonical key, and its order is not always one the reaction can run in.
+- **Atom flux traces each target atom back through a well-mixed pool per species.** Going back
+  from an atom of x, the share of a step s that made x is F(s) / (produced(x) + supplied(x)),
+  and the share of x's supply ends the path: START (a starting species), RESERVOIR, or PARTNER
+  (an intermediate held at fixed concentration, the approximation's artefact, reported). The
+  balance produced + supplied = consumed + terminal holds at every species and every atom
+  (tested on random graphs with splits, joins and cycles). A target atom's dominant pathways are
+  its most probable simple backward paths (`graph.best_simple_paths`); the dominant path of each
+  heavy atom (every atom when the species has none, H+) is merged into one set of steps, whose
+  share is the smallest atom share. These weights are the fixed-concentration approximation:
+  not products of step probabilities once bimolecular steps compete for partners, until a
+  microkinetic simulation with rates replaces them; the end state is item F's.
+- **What forms is reported as the frontier's shares.** Without a stop (item F) nothing is an end
+  species: the shares are those of the mass held by the species not expanded, and the core's
+  leftover is the unexplored mass.
+- **Not done:** AO* with an admissible heuristic (optional in the plan: SBT on the explored graph
+  needs none); a target-directed expansion (the expansion is by mass, the hyperpaths are read
+  afterwards); the comparison of nodes expanded against the pool graph on the same pathways
+  (plan section 5, item 9).
+- **Smoke run** (`pm_control_s0`, CPU, acetone + methoxide, target the hemiketal):
+  `--max-species 2`: 5 pools, 23 s with the model load, the alkoxide of the hemiketal at
+  SKELETON in one event (cost 2.89); `--max-species 4 --tolerance 0.1`: 14 pools, and two joins
+  among the three hyperpaths (methanol made by a proton transfer to methoxide, then added to
+  acetone).
+
+## 2026-11-09: free energies wired into the chain; failed expansions; fragment order (network plan B, E)
+
+- **`--free-energy qm`** (`network.thermo_provider`, the adapter point of item E): each fragment
+  of a pool is looked up by its record key in the thermochemistry sidecars of item B and
+  evaluated at T; G(pool) = sum of the species' G (1 M) plus RT ln(c / 1 M) for the reservoir
+  species at `--reservoir-molar` (water as solvent 55.3 M), so a reservoir copy is priced at its
+  chemical potential as `network.reservoir` asks. H and S come with G (the standard-state shift
+  counted as an entropy, so G = H - TS holds term by term), which gives T*. A fragment without a
+  sidecar leaves its pool without G (NO_FREE_ENERGY in the chain; THERMO_MISSING / THERMO_STALE
+  counted per species). Checked end to end on methoxide + acetone with pm_control_s0: 12 of the
+  22 species the network reached have sidecars (the other 9 have no QM record), and the chain
+  gives dG and T* where both ends have them.
+- **A pool whose expansion fails is EXPAND_FAILED, not NO_OUTGOING_STEP.** In that run the
+  hemiketal alkoxide, without tokens, took 88% of the mass as a "dead end": a featurization
+  failure is not chemistry. Such pools are absorbing (they cannot be expanded), their mass joins
+  the unexplored mass (the uncertainty) and they are never end states; the stop criterion
+  (`frontier_mass`, UNEXPLORED only) is unchanged.
+- **Pool SMILES list their fragments by identity key.** The model reads a fragment index, so the
+  same pool drawn in two fragment orders scores differently (item J's run: best log P -24.58
+  against -28.11 on CH3Cl + OH-). `network.pools.state_of_mol` writes the fragments in the order
+  of their identity keys (ties by their mapped SMILES), so the order no longer depends on the map
+  numbers and the pool and species graphs see one order. The dataset's own order, which the
+  model was trained on, is still the drawing's; that a model should be invariant to it is a
+  training question (fragment order is not augmented today).
+
+## 2026-11-09: the previous steps from a product alone (network plan K)
+
+- **`network.retro`, `ksmech-network retro`.** The start is the target molecule only. An OR node is
+  a species to make; a backward step (the backward model of item H on the species, or on the
+  species with a by-product) is an AND node whose parents must each be made in turn. A branch ends
+  at a building block (`--building-blocks`; no catalogue ships with the repo, a new data
+  dependency for the user to choose), a reservoir species, or a species a `stable` callback
+  declares stable at T (item F's sink test; not wired by default, since it needs free energies
+  for every species reached).
+- **The by-product reservoir is counted from the data** (`byproduct_reservoir`): the small species
+  (at most 4 heavy atoms by default) a recorded step makes and its reactants do not hold, ranked
+  by the steps releasing them. PMechDB v19: water 973 steps, Br- 643, Cl- 440. Going back, a step
+  on the species plus a by-product x counts only if it touches x (NOT_USING_BYPRODUCT), since x
+  is what the forward step released.
+- **AND-OR search: AO\* with an admissible value**, 0 by default. From the root the AND child of
+  lowest lower bound is followed, then its first unsolved parent, until an unexpanded species is
+  reached; the bounds are revised up the tree; a species already on the branch is not expanded
+  again (CYCLE). With value 0 the cost of the route found is the optimum (the sum of -log p of its
+  steps): tested against exhaustive search on 25 random AND-OR instances, and an admissible
+  value never expands more. Retro\*'s learned value (plan section 6) plugs in as `value`;
+  proof-number search and MCTS are not implemented.
+- **Forward verification** (`verify_forward`, `--verify-run`): the route's leaves, with their
+  counts, as one pool, and the forward search must reach the target; only then is the route
+  verified.
+- **Not run for real.** The only backward checkpoint is H's CPU smoke run (`backward_smoke`, one
+  epoch on 64 samples): on the hemiketal alkoxide it proposes no valid step (EXHAUSTED). The
+  full backward store (about 45 min on 4 processes) and the 3-seed training come first.
+
+## 2026-11-09: the orbital-token ablation switches (docs/todo.md, first item)
+
+- **Three switches, all batch-time selections out of the stored columns** (as every P9 ablation):
+  `ModelConfig.drop_token_features` removes token input columns by name, atom or orbital, and
+  `orbital` removes every orbital column (the occupation, the centre weights and shares, the
+  alignment and overlap columns, the radius, `orbital_extra` and `spin_role`); `spectral_set`
+  False removes the set encoder over the spectral entries; `inherit_atoms` False removes the
+  centre-weighted atom embeddings. On the command line `--drop-token-features orbital`,
+  `--no-spectral-set`, `--no-inherit-atoms`. A pre-ablation run reads its defaults, bit for bit.
+- **With no orbital column MLP_O is a learned vector**, the MLP of an empty input (initialized as
+  MECH is). Arm (c) then leaves an orbital token only its inherited atom embeddings, its
+  fragment and that learned vector, so a bonding orbital and its antibonding partner over the same
+  atoms look alike at layer 0 and the pair track (whose rows are occupied, columns virtual) is
+  what tells them apart. That is the question the arm asks, so the occupation goes with the
+  other columns; `--drop-token-features` by name keeps it when wanted.
+- **`FeatureStats.names()` falls back to the v17 columns only when both name lists are empty**
+  (a v15-v17 checkpoint), so statistics of an arm without orbital columns read no orbital
+  column; dropping every atom column is refused. `fit_feature_stats` distinguishes "no names
+  given" (the v17 columns) from an empty list.
+- **One place builds the orbital token** (`TokenEmbedding.orbital_terms`): the encoders and the
+  embedding page (`eval.embedding.embedding_parts`, whose parts still sum to h(0)) read it.
+  Tested on the fixture molecules: in each arm, perturbing a removed input leaves h(0)
+  unchanged and perturbing a kept one changes it; the dense, flex and sparse encoders build and
+  encode with every switch off.
+- **The runs** (`scripts/orbital_ablation.sh fit|decode|compare`): arms a (as pm_v19_s0), b, c, d,
+  3 seeds each, molecule split, general preset, 30 epochs, selected on closed_base val; decoded
+  on closed_base val; each of b, c, d paired with a by `ksmech-eval compare`, top-1 and top-3,
+  metric own and any. Arm a is retrained with the others: pm_v19_s0 ran on a 3090 with cu126,
+  and an ablation's reference must train on the same GPU and torch (P9 step 9). Not run yet:
+  12 runs are about 4-5 h on a 5090 pod (three side by side) or several days on the RX 6600 XT.
+
+## 2026-11-10: fixes from the review of claude/network before the merge
+
+- **Parts by name.** `eval.siblings.parts_of` returns a step's bare part (train, val, test) from
+  the split file's `<strategy>_<part>` keys. The decode report's same/other-part sibling counts
+  compared `molecule_val` with `val` and counted every sibling as from another part, and
+  `ksmech-network evaluate --part val` selected no chain.
+- **`--resume` compares what a run is** (`train.loop.comparable_config`): both headers with every
+  `ModelConfig` and `TrainConfig` field present, the fields a run predates at their defaults
+  (which keep its behaviour bit for bit); a key `TrainConfig` no longer has is still compared.
+  The ablation fields of 2026-11-09 had made every earlier run unresumable, as each new field
+  would.
+- `ksmech-network evaluate --set human_benchmark` reads `<processed-dir>/human_benchmark/`; the
+  heuristic of the search towards a product is computed once per state, so MAPPING_FAILED:STATE
+  counts states; `retro_search` expands a species once and reuses its steps on every branch
+  (`max_expansions` counts distinct species); the pool expander's sample cache keeps the states
+  used last (LRU, it was first in, first out).

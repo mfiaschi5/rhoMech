@@ -202,6 +202,17 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `stats.json`), `uv run ksmech-data leakage-audit [--write-cohorts]` (rmechdb's leakage audit
   in both directions, species by key v2, `leakage_audit.json`; the cohorts `leak_guard_joint`,
   `rc_heldout_overlap`, `rc_heldout_shared`, `closed_base_rmechdb_overlap`, each pinned once)
+- Pathway data (reaction-network plan, item G): `uv run ksmech-data pathways --source reactmech
+  [--workers 4]` (the chains of `ID_CRM.csv` and the OOD sets joined to the ingest's step ids:
+  `pathways.parquet` beside the steps, `pathway_id`, `step_index`, `n_steps`, `is_last` (the stop
+  label), `ingest_status`, `maps_to_next`; `pathways_report.json` with the reason codes and the
+  map consistency; the steps parquet is not touched, `data.pathways.load_pathways` checks the
+  report), `uv run ksmech-data human-benchmark [--split molecule] [--workers 4]` (the PMechRP
+  human benchmark, 350 Clayden pathways, EVALUATION ONLY, no `Source` and refused by
+  `ksmech-train`: `data/processed/human_benchmark/pathways.parquet` + `pathways_report.json`,
+  `overlap_pmechdb_<split>.json` (species and steps found in each PMechDB part, by canonical
+  SMILES and identity key v2) and `qm_coverage.json` (species without a QM record or tokens,
+  file lookups only))
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
@@ -219,16 +230,30 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (`qm.blas`, `KSMECH_BLAS=auto|bundled|PATH`; `--workers 1` and the web app keep the netlib copy;
   a pod needs `libopenblas0-serial`); `--optimizer tblite-anc` optimizes in approximate normal
   coordinates with RFO steps and restarted SCFs (`qm.anc`, method `.../tblite-anc`, 2-4x fewer
-  energies than the default L-BFGS-B `.../tblite-lbfgs`; its `--maxiter` counts energies); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
+  energies than the default L-BFGS-B `.../tblite-lbfgs`; its `--maxiter` counts energies);
+  `--solvent S` another ALPB solvent of `xtb_calc.ALPB_SOLVENTS` (one name each: methanol, dmso,
+  thf, ...) or `gas`, a method of its own (`GFN2-xTB/ALPB-S/...`) whose records sit beside the
+  water ones (the token build and serve still read water only); `--steps-from` only the fragments of the steps a JSON file lists, `qm_steps` or `ids`;
   `--timeout`, `--maxiter`, `--scf-maxiter` relax convergence for a retry of failures and do not
   change the method string; `--retry-reason REASON ...` retries only the failures with those
   codes; a failure that would recur leaves a tombstone `<key>.failed.json` next to the records,
   and a later run of any source, or the web app, with the same settings and no larger budget
   answers from it instead of rerunning xTB), `uv run ksmech-qm bond-index`
   (Wiberg bond indices of the Lewis bonds of every cached record, `data/cache/bond_index/`; the
-  token cache needs them, so re-run after the QM batch), `uv run ksmech-qm index stats [--root
+  token cache needs them, so re-run after the QM batch), `uv run ksmech-qm thermo --source S...
+  [--steps-from FILE] | --smiles SMILES... [--workers 4] [--solvent water] [--limit N]
+  [--report FILE --temperatures T...] [--retry-failed]` (reaction-network plan item B: the
+  thermochemistry sidecar of every cached record, `data/cache/thermo/<key>.npz` stamped with its
+  record: a central-difference Hessian of tblite's GFN2 gradients at the record's geometry with
+  its solvent, charge and spin (`qm.hessian`, 6N+1 gradients, xtb's 0.005 Bohr step), the
+  frequencies, moments, symmetry number and multiplicity; G(T) at any T from `qm.thermo`
+  (quasi-RRHO, xtb's imaginary-mode rule, 1 M standard state), the pool's G from
+  `qm.thermo.pool_free_energy`, one species' from `qm.thermo_cache.free_energy_of`; NO_RECORD,
+  RECORD_STALE, UNKNOWN_METHOD skipped and counted, SCF_NOT_CONVERGED and TIMEOUT leave
+  `thermo/<key>.failed.json`; t ~ 1.8e-4 N^2.93 s per molecule, the whole cache about 208
+  CPU-hours, so run over it only with the user's OK), `uv run ksmech-qm index stats [--root
   data/cache --root data/serve]` (the SQLite index `<root>/index.sqlite` of records, tombstones,
-  tokens and Wiberg sidecars, read from the file headers and refreshed incrementally first;
+  tokens, Wiberg and thermo sidecars, read from the file headers and refreshed incrementally first;
   the records of species `data.spin` reassigns, under the tagged method `+spin-v1-u<u>`
   (`qm.spin`), listed by spin source;
   `index refresh [--rebuild]` only refreshes; the files stay the source of truth)
@@ -254,7 +279,17 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `--strategy`; `--views-only` writes
   the named strategies' views over the store already built; `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
-  labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`)
+  labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`).
+  The previous step (reaction-network plan, item H; `arrows.backward`): `samples --direction
+  backward [--limit N]` and `edit-labels --direction backward [--limit N]` build the
+  same artifacts for each step seen from its child (the sides swapped, the arrows dropped, so
+  the label is the class of -R on the child pool by the same code) under
+  `data/processed/<source>/backward/`, never touching a forward file; the parts are the forward
+  parts step by step, the samples report holds the molecule `leakage` of the backward inputs,
+  edit-labels the `agreement` of each class with the negated forward class; `--limit` (backward
+  only) is a pilot of N random training steps, views kept to them; `uv run ksmech-arrows
+  coverage --source S [--workers N]` (read-only: token and QM coverage of both sides' species
+  and of the product-only ones, `backward/species_coverage.json`)
 - Physics: `uv run ksmech-physics gbdt --source pmechdb [--split molecule|scaffold] [--workers 8]
   [--n-jobs 14] [--cells valid|all]` (the fast LightGBM lambdarank reference on the geometry-free pair features over
   all training, ranking each step's first arrow: all positives + 20 hard (best by the gap kernel
@@ -325,8 +360,11 @@ Main CLI entry points are added phase by phase and listed here as they land:
   ablation; evaluation keeps them; counted as DROPPED_DOMAIN_CLASS);
   every `ModelConfig` field is an option,
   e.g. `--drop-pair-features g log_abs_g` for the G ablation, `--no-somo-channels`,
-  `--no-own-pair-channel`; metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
-  pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run)
+  `--no-own-pair-channel`; the orbital-token ablation `--drop-token-features orbital` (or column
+  names), `--no-spectral-set`, `--no-inherit-atoms` (its runs: `scripts/orbital_ablation.sh`); metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
+  pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run; `--direction
+  backward` trains the previous-step model on the backward store, views and pair statistics
+  checked to be backward, the direction in run.json, which a forward run leaves out)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]
   [--floor legacy|own_break] [--kernel g|g2] [--drop-intra-open]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, or every pair, no learned parameter, val and test
@@ -343,17 +381,22 @@ Main CLI entry points are added phase by phase and listed here as they land:
   legacy tag the files `_caps<b>-<a>-<c>`; on a pool with no unpaired electron the closed-shell
   screen drops a +1 atom entry off every broken bond (ODD_OFF_BROKEN_BOND), `--closed-minus1-filter`
   also any -1 atom entry (CLOSED_MINUS1, files tagged `_minus1filter`, off until P9's ablation sets
-  it); `odd_top1` and per-sample `screened` in the report and the hit file;
+  it); `odd_top1` and per-sample `screened` in the report and the hit file; `rank_any` and
+  `top{k}_any` against every product the source records for the same reactant pool (identity key
+  v2, `eval.siblings`; siblings from the whole source, those of another part counted), with the
+  multi-outcome subset (`multi_outcome`);
   `decode_report_<split>_<part>[_<source>][_<cohort>][_n<limit>].json` and per-sample
   `decode_hits_...json` beside the checkpoint; `--run-source` is the run's models directory when
-  it differs from `--source`, the samples decoded); both take `--cohort NAME` (only the steps of
+  it differs from `--source`, the samples decoded; `--direction backward` decodes the backward
+  samples, B_parent = B_child + R by the same laws, `direction` and `checkpoint_direction` in the
+  config, files tagged `_backward`, never paired with forward hits by `compare`); both take `--cohort NAME` (only the steps of
   `cohort_<NAME>.json`, `eval.cohorts`) and `--slice fermi_smeared|bond_stretched` (with and
   without), and report the covered fraction; `uv run ksmech-eval cohort --source pmechdb --name
   open_shell --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE` (the training steps of some
   domain_class values pinned once as a cohort); `uv run ksmech-eval pin --source pmechdb --name closed_base [--workers N]`
   (open-shell plan P0b: the molecule split's samples as a cohort, its GBDT subsets `<name>_gbdt_valid|all`
   and `baseline_<name>.json`, per-sample digests of every named column, `eval.pin`; each written once),
-  `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--out FILE]` (two arms of decode runs
+  `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--metric own|any] [--out FILE]` (two arms of decode runs
   paired by sample: A fails when its mean top-k is below B's by more than max(2 x pooled SD, 1 point),
   the exact one-sided McNemar test on majority-of-seeds hits and every seed pair; arms decoded on other
   samples, cohorts, caps or decode versions refused, `eval.paired`); `uv run ksmech-physics gbdt --score-only [--model PATH
@@ -384,6 +427,56 @@ Main CLI entry points are added phase by phase and listed here as they land:
   of h(0), every layer's attention and token updates (rebuilt from the recorded layer inputs and
   checked against the model's own forward), the decoder's anchor logits split into site, pair
   and physics terms; CPU by default; `--smiles` builds missing tokens with GFN2-xTB)
+- Network: `uv run ksmech-network search --run NAME [--run-source pmechdb] --start SMILES --target
+  SMILES [--k 5] [--max-expansions 50] [--max-depth 6] [--step-cost 0] [--levels EXACT SKELETON]
+  [--beam 5] [--build-missing] [--out FILE]` (the engine's network, `ksmech.network`: pool states
+  expanded by a checkpoint on the CPU, the k best pathways to the target by best-first search over
+  simple paths (A* with `--step-cost` x the remaining-change bound when the target is mapped on the
+  start pool, else uniform-cost; MAPPING_FAILED counted), arrival EXACT (identity keys) or SKELETON
+  (heavy-atom connectivity, up to protons), mechanism classes up to the order of independent steps
+  with p(class | reaches); the web app's network imports `network.graph` and `network.keys`),
+  `uv run ksmech-network evaluate --set reactmech|human_benchmark --run NAME [--run-source S]
+  [--part val] [--limit N] [the search options]` (per case the arrival, the recorded pathway's rank by
+  its pool-key sequence, the step targets passed, the expansions; the rates over the cases;
+  `network_eval_<set>[_<part>][_n<limit>].json` beside the checkpoint)
+
+  `uv run ksmech-network predict --run NAME [--run-source pmechdb] --start SMILES
+  [--temperature-k 298.15] [--max-expansions 50] [--mass-tol 0.01] [--epsilon 0.01] [--margin 5.0]
+  [--max-climb 20 | --no-climb-limit] [--rescan-factor 4] [--no-stop-at-turnover]
+  [--reservoir SMILES...] [--reservoir-copies 1] [--reservoir-molar C...] [--free-energy none|qm]
+  [--beam 5] [--build-missing]
+  [--tpt-ends 3] [--pathways 5] [--out FILE]` (prediction without a product, network plan E, F,
+  I3, I4: best-first by probability mass, `network.explore`, on the Markov chain of the explored
+  graph, `network.chain`: reverse edges -R scored by the model at the children (REVERSE_MISSING
+  counted), rates sqrt(p_f p_b) exp(-+dG/2RT) so the stationary distribution is Boltzmann, with the
+  free energies of `network.free_energy.load_thermo_model`: 'none' (the model's own
+  probabilities, NO_FREE_ENERGY) or 'qm' (item B's sidecars, `network.thermo_provider`; run
+  `ksmech-qm thermo` over the species first); a pool that fails to expand is EXPAND_FAILED, its mass
+  unexplained;
+  reservoir species kept in every pool and priced at their chemical potential
+  (`network.reservoir`); `--temperature-k` is
+  physical, not the predictor's softmax temperature; the end states with their probabilities
+  (SINK_AT_T only after a rescan with `--rescan-factor` x the candidates, TURNOVER,
+  NO_OUTGOING_STEP, EQUILIBRIUM), the unexplored mass, NO_NET_REACTION, every edge's dG, K and T*,
+  the dominant pathways to the top end states by transition path theory, `network.tpt`)
+
+  `uv run ksmech-network species --run NAME --start SMILES [--target SMILES] [--reservoir SMILES]
+  [--tolerance 0.05] [--max-species 10] [--max-expansions 60] [--partner-weight 1] [--k 3]
+  [--levels EXACT SKELETON] [--beam 5] [--build-missing] [--out FILE]` (item J, the species graph:
+  OR nodes species by identity key v2, AND nodes elementary steps with their atom maps
+  (`network.species`, `network.lift`); grown species by species, the frontier species of largest
+  mass joining the core while it has `--tolerance`, each reacting alone, with itself and with the
+  core, the reservoir in every pool, partners at fixed concentration; the species by mass, the
+  end species' shares and the unexplored mass; with `--target` the k shortest hyperpaths (SBT
+  and Nielsen-Andersen-Pretolani, `network.hyperpaths`, additive -log p, one per class) as
+  linearized events, and the atom flux of each target species (`network.flux`); every cut counted)
+- Retro: `uv run ksmech-network retro --run BACKWARD_RUN --target SMILES [--reservoir-source pmechdb]
+  [--n-byproducts 3] [--max-heavy 4] [--building-blocks SMILES... | --building-blocks-file FILE]
+  [--max-expansions 100] [--max-depth 7] [--verify-run FORWARD_RUN] [--out FILE]` (network plan K:
+  the previous steps from a product alone; AND-OR search, AO* with value 0, over the backward
+  model's steps on the species alone and with each of the most frequent by-products counted from
+  the source's recorded steps; leaves the catalogue given and the reservoir; `--verify-run` checks
+  the route forward with `network.towards`)
 - API client: `uv run ksmech [--url URL] [--token T] [--json] COMMAND` (the HTTP client
   `ksmech.client.KsmechClient`, `X-Ksmech-Via: cli`; `KSMECH_URL`, default http://127.0.0.1:8000,
   `KSMECH_TOKEN`): `health`, `meta`, `whoami`, `predictors`, `predict SMILES... [--predictor P]

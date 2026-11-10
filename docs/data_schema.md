@@ -25,7 +25,7 @@ The layout, with `foldN` for N = 0..4:
 | `two_stage_models/mixed_splits/...` | same layout; train has +10,000 combinatorial proton transfers |
 | `scaffold_split/{train,val,test}.txt` | same 13,104 curated steps, Murcko-scaffold split (11076/1014/1014) |
 | `chemformer/`, `graph2smiles/`, `molecular_transformer/`, `t5chem/` | model-specific tokenized copies (no arrows) |
-| `pathway_datasets/human_benchmark/`, `pathway_datasets/ORD_USPTO/` | multi-step pathway benchmarks: unmapped SMILES, no arrows |
+| `pathway_datasets/human_benchmark/`, `pathway_datasets/ORD_USPTO/` | multi-step pathway benchmarks: unmapped SMILES, no arrows; the human benchmark is read **evaluation only** (`ksmech-data human-benchmark`) |
 
 Checks that were run (`uv run python -I <script> data/raw/pmechrp`):
 
@@ -114,15 +114,63 @@ C[CH+:20]C.C1=CN[CH:10]=[CH:11]1>>C[CH:20](C)[CH:10]1[CH+:11]C=CN1,"10,11=10,20"
 
 We do not ingest this file because it adds nothing beyond `raw/`.
 
-### Pathway benchmark files (not ingested)
+### Pathway benchmark files (evaluation only, never ingested)
 
-- `pathway_datasets/human_benchmark/pathways/350_HumanBenchmark.csv` (350 rows). Header:
-  `Temp (≠ RT),Reactants,Final Product,Prod Formula,Min Steps,"Clayden, 2nd Ed Textbook Citation",Step 1 Target,...,Step 7 Target`.
-  Unmapped SMILES, no arrows.
-- `pathway_datasets/human_benchmark/pathways/raw/depthK.csv` (K = 1..7). Header:
-  `Reactants, Final Target, Depth, Step 1 Target, ..., Step K Target`.
-- `pathway_datasets/ORD_USPTO/raw/ORD_USPTO_transformations.csv` (133 lines). No header; one
-  unmapped reaction SMILES per line.
+Inspected 2026-11-09 (`data.human_benchmark`; reaction-network plan, item G).
+
+**`pathway_datasets/human_benchmark/pathways/350_HumanBenchmark.csv`**: UTF-8, LF line ends,
+no BOM; a header and 350 rows of 13 fields (CSV quoting where a field holds a comma). One
+textbook pathway per row (Clayden, 2nd ed.). The header, exactly:
+`Temp (≠ RT),Reactants,Final Product,Prod Formula,Min Steps,"Clayden, 2nd Ed Textbook Citation",Step 1 Target,...,Step 7 Target`.
+
+| Field | Content |
+|---|---|
+| `Temp (≠ RT)` | `n/a` on 182 rows (the header fills the column only when the temperature is not room temperature); `<number> °C` on 168, written `-78 °C` or, on 3 rows, `- 80 °C`; -80 to 200 °C, most often -78 °C (27 rows), 0 °C (20), 100 °C (17) |
+| `Reactants` | the starting pool as unmapped SMILES, fragments joined by `.`, reagents and counter-ions included (`CC(C)([O-])C.[N+]1(...)=CN(...)C=C1.[K+].[Cl-]`) |
+| `Final Product` | one species (no `.` on any row), unmapped |
+| `Prod Formula` | the final product's formula with its charge (`C10H17O-`) |
+| `Min Steps` | the number of steps, 1-7: 37 / 113 / 108 / 35 / 38 / 16 / 3 rows, 1,034 steps |
+| `Clayden, 2nd Ed Textbook Citation` | page and primary reference (`p 1009 Clayden, 2nd; JACS 1991, 113, 361`) |
+| `Step 1 Target` .. `Step 7 Target` | the species step k makes (7 cells hold two fragments); blank after `Min Steps` |
+
+Measured over the file:
+
+- The last filled target is always step `Min Steps`. 25 targets inside the steps are blank, on
+  19 rows (a step whose product was left out). The last target is the final product (map-free
+  canonical SMILES) on 348 rows; on 2 it differs only in stereo.
+- 320 target cells carry atom-map numbers in PMechDB's style (the reaction centre from 10 and
+  20: `[H:20][OH+:10]C(C)(C)CCO`); reactants and final products never do. They are mostly not
+  PMechDB steps: 148 of the 1,006 readable targets are a product of any PMechDB step (the
+  overlap below).
+- One target cell (row 51, step 1) holds a whole PMechDB record, `reactants>>products arrows`;
+  its depth file holds the product side, which the loader reads (TARGET_WAS_REACTION).
+- 7 cells have surrounding spaces. 3 species do not parse in RDKit: `CC#[N+:10][CH@:20]1...`
+  (the chirality written after the H count, a SMILES syntax error) and two hypervalent bromine
+  ate complexes, `CCCC[Br-]C1=CC=CC=C1` and `CCC[CH2:10][Br-:20]C1=CN=C(C=C1)OC` (valence).
+- No other condition (no solvent), no arrows, no pool after the first step, no id. No two rows
+  share reactants and final product.
+
+**`pathways/raw/depthK.csv`** (K = 1..7): the same 350 pathways split by step count, header
+`Reactants, Final Target, Depth, Step 1 Target, ..., Step K Target` (a space after each comma
+of the header only). `Depth` equals `Min Steps` and the targets equal the CSV's on every row
+but row 51 (its product side, above). No temperature, formula or citation. Not read.
+
+**`results/`**: PMechRP's own search outputs, not ground truth. `exact_structure_pathways/`
+and `mol_formula_pathways/` hold `depthK.json` as JSON lines, one per pathway, with `found`,
+`best_depth`, `best_score`, `elapsed_sec`, `best_path` (mapped reaction SMILES),
+`num_solutions`, `nodes_explored`, `best_step_ranks`, `intermediate_steps_total`,
+`intermediates_recovered`; two `.xlsx` plausibility analyses by chemists. Not read.
+
+**`ORD_USPTO/raw/ORD_USPTO_transformations.csv`**: 133 lines, no header, one unmapped
+`reactants>>product` per line, reagents and solvents among the reactants
+(`...N3CC(C3)O.[H-].CI.CN(C)C=O.C1CCOC1>>COC1CN(C1)...`); `ORD_USPTO/results/search_results.json`
+is JSON lines (133: `reactants`, `target`, `found`, `final_path`, ...). Not read (a final test of
+plan item G).
+
+**Evaluation only.** The human benchmark comes from PMechDB's release and is never trained on
+(docs/decisions.md, 2026-11-09). It is no `Source`, so neither the ingest, the sample store
+nor `ksmech-train` takes it, and `ksmech-train` refuses its name
+(`data.human_benchmark.refuse_training`).
 
 ## ReactMech (via the DeepMech data release)
 
@@ -139,9 +187,9 @@ checkpoint `models/DeepMech_Split42.pth` is not.
 |---|---|
 | `ID_Split42/{train,val,test}.txt` | **Ingested.** 73,474 / 10,497 / 20,993 steps, no line in two parts |
 | `OOD_Split42/{train,val,test}.txt` | **Ingested.** 71,129 / 10,162 / 20,323 steps: the same steps partitioned by class, plus 9,235 not in the ID split |
-| `OOD_Split42/OOD_CRM_dataset/OOD_Set1.csv` | **Read for classes.** 3,340 mechanisms, 5 classes |
-| `OOD_Split42/OOD_CRM_dataset/OOD_Set2.csv` | **Read for classes.** 438 mechanisms, 4 classes; none matches a step |
-| `ID_Split42/ID_CRM_dataset/ID_CRM.csv` | 2,751 mechanisms, no class column. Not read |
+| `OOD_Split42/OOD_CRM_dataset/OOD_Set1.csv` | **Read for classes and chains.** 3,340 mechanisms, 5 classes |
+| `OOD_Split42/OOD_CRM_dataset/OOD_Set2.csv` | **Read for classes and chains.** 438 mechanisms, 4 classes; none matches a step |
+| `ID_Split42/ID_CRM_dataset/ID_CRM.csv` | **Read for chains** (`ksmech-data pathways`, not by the ingest). 2,751 mechanisms, no class column |
 | `PrebioMech/{train,val,test}.txt` | 21,588 / 3,066 / 6,133 prebiotic steps, same line format. Not read |
 
 ### Step file format (`*_Split42/*.txt`)
@@ -179,7 +227,32 @@ step boundary: 2-11 species in ID_CRM, 4 in Set1, 5 in Set2.
   bidentate_bha, intramolecular_bha: Buchwald-Hartwig aminations with octylamine, Pd and Ni)
   match no step: the split files' Ni steps are other couplings (aryl boronic acids). The other
   58 of the paper's 67 classes are not released.
-- Not used yet: the pathways themselves (step order), ID_CRM's mechanisms.
+- **Chains** (inspected 2026-11-09, `data.pathways`). A row is one chain: n species give n - 1
+  steps, step k going from species k to species k + 1, each species the whole pool (spectators
+  and counter-ions included, no atom maps, aromatic SMILES with stereo). ID_CRM: 2,751 rows,
+  2,748 distinct chains (3 rows repeat one), 1-10 steps (32 / 638 / 735 / 276 / 437 / 533 /
+  61 / 32 / 2 / 2 chains of 1..10 steps), 10,721 steps; no species repeats inside a chain.
+  OOD_Set1: 3,340 rows, 3,311 distinct (5 of its 29 repeats are ID_CRM chains), 3 steps each;
+  OOD_Set2: 438 rows, 398 distinct, 4 steps each.
+- **Each mechanism file describes the chains held out of its own split.** The steps of the
+  ID_CRM chains are lines found only in `OOD_Split42` (9,233 of their 9,317 matched lines; the
+  9,235 OOD-only lines are all ID_CRM steps but 2), and the steps of OOD_Set1 are lines found
+  only in `ID_Split42` (all 9,948 classified lines). So ID_CRM is the ID model's set of whole
+  mechanisms kept out of the ID split, and the OOD sets the OOD model's held-out classes.
+- **Matching** (`ksmech-data pathways`): step k matches the line whose map-free canonical sides
+  are species k and k + 1 (`reactmech.side_key`, the class index's key); its step id is the
+  ingest's (`make_step_id` of the line). No pair matches two lines. ID_CRM: 9,317 of 10,721
+  steps match; 2,271 chains whole, 14 partial, 463 unmatched (of the 1,404 unmatched steps,
+  1,391 have neither side among the step lines: they are not in the released step files).
+  OOD_Set1: all 9,933 steps of its 3,311 chains. OOD_Set2: none (above).
+- **Atom maps along a chain**: every line maps its own pool (numbers from 1), so step k's
+  products and step k + 1's reactants are one molecule drawn with other numbers. Of the 13,641
+  boundaries between matched steps, 5,315 carry the same numbers on the same atoms, 6,911 are
+  one mapped drawing after a renumbering, 1,415 (ID_CRM only: lines that leave spectators
+  unmapped and map them once they react) are one drawing whose atoms one side maps and the
+  other does not, and none is two different drawings. Of the 5,550 whole chains with a
+  boundary, all are consistent up to a renumbering and a graph match, 4,459 (80.3%) by a
+  renumbering alone, 277 (5.0%) without one.
 
 ## rmechdb (RMechDB via FlowER's data release)
 
@@ -255,7 +328,7 @@ There is one row per `ksmech.data.schema.ElementaryStep`:
 |---|---|---|
 | `step_id` | string | `pmechdb-` + first 16 hex chars of SHA-1 of the raw record (the text inside the quotes); `reactmech-` of the line; `rmechdb-` of the map-free canonical reaction after the bath-gas strip and the spin redrawings |
 | `source` | string | `pmechdb`, `rmechdb`, `reactmech`, `mech_uspto`, `flower` |
-| `pathway_id` | string, nullable | null for PMechDB (not in the release) |
+| `pathway_id` | string, nullable | null for PMechDB (not in the release); null for ReactMech too, whose chains are the sidecar `pathways.parquet` (below), so the stores never go stale for it |
 | `step_index` | int32, nullable | null when `pathway_id` is null |
 | `reactants_smiles` | string | canonical atom-mapped SMILES (see `docs/decisions.md`) |
 | `products_smiles` | string | same canonicalization |
@@ -312,6 +385,69 @@ PMechDB, ReactMech or mech-USPTO species, of RC val/test reactions with PMechDB 
 steps, of rmechdb training with closed_base val/test (LEAK_GUARD for joint training) and the
 reverse. `--write-cohorts` pins `cohort_leak_guard_joint` and `cohort_rc_heldout_overlap`
 (rmechdb), `cohort_rc_heldout_shared` and `cohort_closed_base_rmechdb_overlap` (pmechdb).
+
+## Processed: `data/processed/reactmech/pathways.parquet` (`ksmech-data pathways`)
+
+The ReactMech chains (reaction-network plan, item G) as a sidecar of the steps: the steps
+parquet and everything the sample store reads are untouched. One row per (chain, position,
+matched step id); 19,250 rows, each step id once (no step sits in two chains).
+
+| Column | Arrow type | Notes |
+|---|---|---|
+| `step_id` | string | the ingest's id of the line (`reactmech-` + SHA-1 of the line), valid for the pilot and a full ingest |
+| `pathway_id` | string | `reactmech-path-` + 16 hex chars of SHA-1 of the chain's species list (JSON) |
+| `step_index` | int32 | 0-based position in the chain |
+| `n_steps` | int32 | the chain's length (species - 1), unmatched positions included |
+| `is_last` | int8 | the stop label: 1 on the chain's last step; 5,595 rows |
+| `chain_file` | string | `ID_CRM.csv` or `OOD_Set1.csv` |
+| `chain_row` | int32 | 1-based data row in that file |
+| `mechanism_class` | string, nullable | the OOD set's class (an ID_CRM chain an OOD set repeats takes it); null otherwise |
+| `ingest_status` | string | `steps` (in the current steps parquet: 1,653 rows, 458 of them stop rows), `not_sampled` (accepted, outside the 10k pilot: 17,595), `rejected` (in `rejections.csv`: 2) |
+| `maps_to_next` | string, nullable | the boundary to step k + 1: `same`, `renumbered`, `partly_mapped` or `inconsistent` (`data.pathways.boundary_maps`); null on the last step or before an unmatched one |
+
+`pathways_report.json` holds the counts per chain file, the reason codes (`ChainCode`:
+DUPLICATE_CHAIN 72, NO_STEP_LINE 2,996, CHAIN_UNMATCHED 861, CHAIN_PARTIAL 14,
+CHAIN_LAST_UNMATCHED 862; SPECIES_UNPARSABLE, SEVERAL_LINES, STEP_IN_SEVERAL_CHAINS and
+STOP_LABEL_CONFLICT 0), the pilot's coverage (1,456 chains have a step in the steps parquet, 11
+whole chains are in it) and the map summary. Its provenance header (kind `reactmech_pathways`;
+inputs the mechanism files, the six step files, `steps.parquet` and `rejections.csv`) carries
+the parquet's sha256 as its content hash; `data.pathways.load_pathways` checks both.
+
+## Processed: `data/processed/human_benchmark/` (`ksmech-data human-benchmark`)
+
+Evaluation only, never trained on. Four files:
+
+- `pathways.parquet`, one row per pathway:
+
+| Column | Arrow type | Notes |
+|---|---|---|
+| `pathway_id` | string | `human_benchmark-` + 16 hex chars of SHA-1 of `reactants>>final product` |
+| `row` | int32 | 1-based data row of the CSV |
+| `reactants_smiles` | string | as given, stripped |
+| `final_product_smiles` | string | as given |
+| `product_formula` | string | `Prod Formula` |
+| `n_steps` | int32 | `Min Steps` |
+| `step_targets` | list<string> | `n_steps` entries as given (maps kept; the record cell reduced to its product side), null where blank |
+| `step_target_smiles` | list<string> | the targets as map-free canonical SMILES (fragments sorted, joined by `.`), null where blank or unreadable |
+| `temperature_c` | float64, nullable | degrees Celsius; null for `n/a` (room temperature by the header) |
+| `temperature_raw` | string | the cell as given |
+| `citation` | string | the textbook citation |
+| `evaluation_only` | bool | always true |
+
+- `pathways_report.json`: counts and the normalizations (`BenchmarkCode`); its header (kind
+  `human_benchmark`, config `{"evaluation_only": true}`, input the CSV) carries the parquet's
+  sha256, which `data.human_benchmark.load_benchmark` checks.
+- `overlap_pmechdb_<split>.json` (kind `human_benchmark_overlap`; inputs the report, PMechDB's
+  steps parquet and `splits_<split>.json`): the benchmark's species found in each part of the
+  split and in their union (`any_part`), by map-free canonical SMILES and by identity key v2,
+  all and non-trivial (more than 3 heavy atoms); per part the pathways with a species / every
+  species found and with a step / every step found (a part's step makes the target from the
+  previous target, or for step 1 from any non-trivial reactant), the steps found and the
+  targets made from any reactants; `per_pathway` for `train` and `any_part`.
+- `qm_coverage.json` (kind `human_benchmark_qm_coverage`): each distinct species' QM record,
+  failure tombstone, spin census and tokens under conformer 0 and its own method (file lookups
+  in `data/cache/qm` and `data/cache/tokens`), counts overall and by role, and the species of
+  every incomplete status.
 
 ## Processed: `data/processed/<source>/samples/` and `samples_<split>.json`
 
@@ -493,7 +629,8 @@ is a plain `.npz` (no pickle). `ksmech.qm.records.load_record` returns a `QMReco
 The key is `sha256(f"{smiles}|{conformer_id}|{method}")`, where `smiles` is the map-free canonical
 SMILES (`ksmech.data.chem.unmapped_canonical`) and `method` looks like
 `GFN2-xTB/ALPB-water/tblite-lbfgs` (so the solvent model and optimizer are part of the key;
-`--optimizer tblite-anc` writes `.../tblite-anc`, `xtb` writes `.../xtb-opt`). A
+`--optimizer tblite-anc` writes `.../tblite-anc`, `xtb` writes `.../xtb-opt`; `--solvent dmso`
+writes `GFN2-xTB/ALPB-dmso/...`, `--solvent gas` `GFN2-xTB/gas/...`). A
 species whose spin `data.spin` reassigns (a singlet carbene or CO drawn with two radical
 electrons, an odd Cu(II) or Fe(III) fragment RDKit counts 0; open-shell plan P4) has the tag
 `+spin-v1-u<u>` right after the optimizer part, before any later suffix:
@@ -534,6 +671,33 @@ non-metal with u >= 2 that is not a Hund case or has no count, unless a counted 
 `method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
 row whose method is its own species' method under the run's configuration
 (`qm.batch.row_method`).
+
+### Thermo sidecars: `data/cache/thermo/<sha256>.npz` (`ksmech-qm thermo`)
+
+One file per QM record, under the record's own cache key (map-free SMILES, conformer, method
+with its spin tag), written by `ksmech.qm.thermo_cache`: the semi-numerical GFN2 Hessian at the
+record's geometry with the record's solvent, charge and unpaired count (`qm.hessian`), reduced
+to what G(T) needs. Provenance header kind `thermo`, version 1, input the record file, config
+the record's `method` and `conformer_id` and the Hessian's `fd_step_bohr`, `accuracy`, `masses`
+and `symmetry_tolerance`; `extra` holds the seconds spent and the BLAS. `load_thermo` returns a
+`qm.thermo.MolecularThermo`; `qm.thermo.thermo_at(data, T)` gives ZPE, H, S and G.
+
+| Field | dtype, shape | Notes |
+|---|---|---|
+| `smiles`, `method`, `point_group`, `warnings` | str, () | the record's identity; the Schoenflies symbol (`qm.point_group`, 0.1 A); comma-separated `ThermoCode` warnings: `IMAGINARY_INVERTED`, `IMAGINARY_DROPPED`, `NOT_STATIONARY`, `RESTRAINED_GEOM`, `HESSIAN_ASYMMETRIC`, `SYMMETRY_FAILED` |
+| `conformer_id`, `charge`, `unpaired`, `multiplicity` | int, () | multiplicity = unpaired + 1 |
+| `atomic_numbers` | int32, (n,) | |
+| `energy_ha` | float64, () | the record's energy (GFN2 with its ALPB solvation, 'gsolv' state) |
+| `frequencies_cm` | float64, (3n-6,), (3n-5,) or (0,) | harmonic, cm^-1, ascending; negative = imaginary; unscaled, every mode kept (the thermochemistry's mode rule is applied when G is evaluated) |
+| `moments_amu_ang2` | float64, (3,) | principal moments of inertia, amu A^2, ascending |
+| `mass_amu` | float64, () | sum of the average atomic masses |
+| `symmetry_number`, `linear` | int / bool, () | proper rotations of the point group; C∞v 1, D∞h 2 |
+| `grad_max`, `hessian_asymmetry` | float64, () | max \|gradient\| at the geometry (Hartree/Bohr); max \|H - H^T\| before symmetrizing (Hartree/Bohr^2) |
+| `n_gradients`, `fresh_starts` | int, () | gradients evaluated (6n + 1); displaced SCFs that had to start from the guess |
+
+A failure that recurs (SCF_NOT_CONVERGED, TIMEOUT) leaves `data/cache/thermo/<sha256>.failed.json`,
+the QM failure memo's format under the header kind `thermo_failure` (`smiles`, `conformer_id`,
+`method`, `reason`, `detail`, `seconds`, `params`: the `ThermoConfig` settings).
 
 ## Serve workbench: `data/serve/workbench/`
 

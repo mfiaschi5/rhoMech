@@ -2,10 +2,17 @@
 
 Status: proposed 2026-10-29, extended the same day with the previous-step model (item H), the
 graph search (item I), joining branches on a species graph (item J) and the search from a
-product alone (item K); nothing implemented. Listed in `docs/todo.md` on 2026-11-09, when it
-came to main. Nothing here changes the forward model's loss or the training presets. The
-measurements of section 1 were taken on the v18 stores (2026-10-29); main now holds Release B
-(v19), the open-shell plan, `eval/paired.py` and the closed_base cohort.
+product alone (item K). Listed in `docs/todo.md` on 2026-11-09, when it came to main.
+Implemented on 2026-11-09 on the branch `claude/network` (code and tests; every choice in
+`docs/decisions.md` under that date): A, B, C, D with I1 and I2, E, F, G, H (code and a pilot),
+I3, I4, J, K, and the spec's draft section (L, v10.1, "The reaction network", not yet approved).
+What waits is compute and data, not code: the thermochemistry batch over the species a network
+reaches, the ReactMech chains ingested in full with their QM, QM for the human benchmark's
+species, the backward store and its 3-seed training, the calibration of the flags (section 5),
+and section 6. Section 3 describes the code before the implementation. Nothing here changes the
+forward model's loss or the training presets. The measurements of section 1 were taken on the
+v18 stores (2026-10-29); main now holds Release B (v19), the open-shell plan, `eval/paired.py`
+and the closed_base cohort.
 
 ## Contents
 

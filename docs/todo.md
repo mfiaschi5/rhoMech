@@ -50,6 +50,21 @@ no free energy. The full plan, with the reasons and the code facts, is
 - D3: packages are allowed (the xtb program, CREST, an atom mapper, scipy.sparse, a building-block
   catalogue).
 
+**Status (2026-11-09).** The code of every item is on the branch `claude/network` (not merged into
+main), with its tests and `docs/decisions.md` entries: A (`rank_any`, `compare --metric any`), B
+(`ksmech-qm thermo`), C, D/I1/I2 (`ksmech-network search`, `evaluate`), E/F/I3/I4 (`ksmech-network
+predict`, `--free-energy qm`), G (`ksmech-data pathways`, `human-benchmark`), H (`--direction
+backward`, pilot only), J (`ksmech-network species`), K (`ksmech-network retro`), L (spec v10.1
+draft, to approve). What is left is compute, data and calibration:
+- the thermochemistry of the species a network reaches (`ksmech-qm thermo`; the whole cache is
+  about 208 CPU-h) and the default for imaginary modes of loose minima;
+- QM and tokens for the human benchmark's 1,072 uncovered species and for the ReactMech chain
+  steps outside the pilot (17,595), so the benchmarks of section 5 can run;
+- the full backward store (about 45 min on 4 processes) and its 3-seed training, then I1
+  bidirectional and the round-trip reranker (I5), which need it;
+- the calibration of the flags (`step_cost`, epsilon and margin, the climb budget, the mass
+  tolerance) and the measures of "Done when".
+
 **What**, in this order (letters are the plan's items):
 1. A. Multi-reference evaluation: a second rank `rank_any` in the hits files, by product pool
    key; `ksmech-eval compare --metric own|any`.
