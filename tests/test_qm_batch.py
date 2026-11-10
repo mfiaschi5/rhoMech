@@ -127,6 +127,26 @@ def test_timeout_is_reported_not_swallowed(tmp_path, monkeypatch):
     assert rows[0]["seconds"] >= 1
 
 
+def test_a_record_its_key_would_refuse_is_not_written(tmp_path, monkeypatch):
+    """A record whose SMILES is not its cache key fails as RECORD_KEY_MISMATCH instead of
+    being written as ok (its key would refuse it as STALE_ARTIFACT, 2026-11-10)."""
+    real = batch.GFN2Calculator.try_run
+
+    def renamed(self, mol, conf_id=0):
+        out = real(self, mol, conf_id)
+        out.record.smiles = "OCC"
+        return out
+
+    monkeypatch.setattr(batch.GFN2Calculator, "try_run", renamed)
+    batch._init_worker()
+    cfg = QMConfig(cache_dir=tmp_path, timeout_s=120)
+    rows = batch.process_molecule(batch.MolTask("CCO", 1, cfg))
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["reason"] == str(ReasonCode.RECORD_KEY_MISMATCH)
+    assert "OCC" in rows[0]["detail"]
+    assert not cache_path(tmp_path, "CCO", 0, cfg.method).exists()
+
+
 def test_summary_counts_and_reason_table():
     rows = [
         batch._row("a", 0, status="ok", warnings="VBUR_FAIL", method="m"),

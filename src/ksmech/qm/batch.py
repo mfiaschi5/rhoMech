@@ -121,6 +121,11 @@ def _compute(task: MolTask) -> list[dict]:
                 _row(task.smiles, cid, reason=str(out.reason), detail=out.detail, seconds=seconds)
             )
             continue
+        if out.record.smiles != task.smiles:  # its own key would refuse it (STALE_ARTIFACT)
+            reason, detail = ReasonCode.RECORD_KEY_MISMATCH, f"record {out.record.smiles!r}"
+            seconds = time.perf_counter() - t0
+            rows.append(_row(task.smiles, cid, reason=str(reason), detail=detail, seconds=seconds))
+            continue
         method = method_for(task.smiles, task.config.method)
         path = cache_path(task.config.cache_dir, task.smiles, cid, method)
         save_record(out.record, path)

@@ -676,7 +676,10 @@ One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cac
 `seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`,
 and so do the species the spin census refuses before QM (P8: `SPIN_CENSUS_REFUSED`, a
 non-metal with u >= 2 that is not a Hund case or has no count, unless a counted exemption's).
-`method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
+A record whose own SMILES (`chem.unmapped_canonical` of the worker's molecule) is not the key it
+was computed for is not written: `RECORD_KEY_MISMATCH`, with the record's SMILES as the detail
+(its key would refuse it as STALE_ARTIFACT; 2026-11-10, a ring double bond's E/Z swapped by
+the old canonicalization of an explicit-H molecule). `method` is per row: a tagged species' rows carry its tagged method, and a run's view keeps each
 row whose method is its own species' method under the run's configuration
 (`qm.batch.row_method`).
 

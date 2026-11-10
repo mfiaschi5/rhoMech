@@ -15,6 +15,8 @@ from rdkit.Chem import rdmolops
 _SANITIZE_NO_AROMATICITY = (
     Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
 )
+_REMOVE_HS = Chem.RemoveHsParameters()
+_REMOVE_HS.removeDefiningBondStereo = True  # `unmapped_canonical`: the stereo moves to a heavy atom
 
 
 class SmilesParseError(ValueError):
@@ -97,12 +99,34 @@ def map_to_fragment(mol: Chem.Mol) -> dict[int, int]:
     return out
 
 
-def unmapped_canonical(mol: Chem.Mol) -> str:
-    """Map-free, H-suppressed, aromatic canonical SMILES. Use it for molecule identity."""
+def _without_hydrogens(mol: Chem.Mol) -> Chem.Mol:
+    """`mol` map-free with its hydrogens removed on the molecule, its double-bond stereo kept.
+
+    Writing the hydrogens out and parsing the string back (as before 2026-11-10) turned a ring
+    double bond's E into Z when its stereo sat on its hydrogens: O=C1CCC/C=C\\CCCC1 with explicit
+    hydrogens came back as /C=C/, so the record the QM worker built from `embed.prepare_mol`
+    failed its own key (docs/decisions.md). The stereo labels are assigned from the bond
+    directions first (a `parse_mapped` molecule holds only directions), `removeDefiningBondStereo`
+    moves them onto heavy neighbours, and the directions, stale on a ring-closure bond once its
+    hydrogen is gone, are drawn again from the labels. Hydrogens RDKit keeps by default (an
+    isolated [H+], H2, isotopes) stay."""
     m = Chem.Mol(mol)
     for a in m.GetAtoms():
         a.SetAtomMapNum(0)
-    smi = Chem.MolToSmiles(m)
+    Chem.AssignStereochemistry(m, cleanIt=True, force=True)
+    with rdBase.BlockLogs():
+        m = Chem.RemoveHs(m, _REMOVE_HS, sanitize=False)
+    for b in m.GetBonds():
+        if b.GetBondDir() in (Chem.BondDir.ENDUPRIGHT, Chem.BondDir.ENDDOWNRIGHT):
+            b.SetBondDir(Chem.BondDir.NONE)
+    Chem.SetDoubleBondNeighborDirections(m)
+    return m
+
+
+def unmapped_canonical(mol: Chem.Mol) -> str:
+    """Map-free, H-suppressed, aromatic canonical SMILES. Use it for molecule identity: one
+    molecule has one key however its hydrogens are held (`_without_hydrogens`)."""
+    smi = Chem.MolToSmiles(_without_hydrogens(mol))
     with rdBase.BlockLogs():  # silences "not removing hydrogen atom without neighbors" ([H+])
         std = Chem.MolFromSmiles(smi)
     if std is None:

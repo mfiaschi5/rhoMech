@@ -9371,3 +9371,32 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
 - **Not done.** A PERSISTENT sidecar of a budget stop (REOPT_BUDGET, or OPT_NOT_CONVERGED in
   `reopt_rejected`) is current, so a larger `--timeout` or `--reopt-maxiter` does not rerun it;
   delete the sidecar to retry it.
+
+## 2026-11-10: one key per molecule however its hydrogens are held (`chem.unmapped_canonical`)
+
+- **The bug.** Two species of the human benchmark's QM batch, `O=C1CCC/C=C\CCCC1` and
+  `C/C1=C/CCC(=O)[C@@H]2CC(C)(C)[C@@H]2CC1`, were written as ok and then refused by the token
+  build (STALE_ARTIFACT, "input changed: smiles"). Their geometries are the asked-for isomers
+  (the stereo read back from the 3D coordinates), but the record's SMILES, which the worker
+  takes as `unmapped_canonical` of the explicit-H molecule of `embed.prepare_mol`, had the other
+  isomer's slash. The old function removed the hydrogens by writing them out and parsing the
+  string back; with explicit hydrogens RDKit puts a double bond's stereo on them, and once they
+  go, the bond directions left on a ring-closure bond are stale and `MolToSmiles` follows them,
+  not the bond's E/Z label: E becomes Z (cyclooctene, cyclodecenone, any ring double bond).
+- **The fix, at the root.** `chem._without_hydrogens`: the labels are assigned from the bond
+  directions (a `parse_mapped` molecule holds only directions), the hydrogens are removed on the
+  molecule with `removeDefiningBondStereo` (the stereo moves to a heavy neighbour), and the
+  directions are cleared and drawn again from the labels. Then the old standardization.
+  Hydrogens RDKit keeps by default (an isolated [H+], H2, isotopes) stay as before.
+- **No key moved.** Over every fragment of every step of PMechDB, ReactMech, RMechDB and the human
+  benchmark (126,068, 25,350 of them with explicit hydrogens) the new function gives exactly the
+  old key; on the worker's path (`AddHs` of each of the 38,797 keys) the mismatches fall from 2
+  (the two species above) to 0. The QM records, tokens, spin tables and splits keep their keys.
+  The difference is confined to explicit-H molecules with a stereo ring double bond, which the
+  sources' fragments do not hold.
+- **A guard in the batch.** A record whose SMILES is not the key it was computed for is no longer
+  written as ok: `RECORD_KEY_MISMATCH` (a failure row, the record's SMILES as the detail, no
+  tombstone: a code fix resolves it), so such a bug is counted where it happens, not one stage
+  later in the token build.
+- **The two records** were moved out of the cache (backup in the session's scratchpad) and
+  recomputed from the committed code, then their tokens built.

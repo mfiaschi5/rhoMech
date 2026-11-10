@@ -100,3 +100,26 @@ def test_a_calcium_chelate_embeds_with_relaxed_bounds():
     ethanol = prepare_mol("CCO")
     embed(ethanol, n_conformers=1, seed=0)
     assert str(ReasonCode.EMBED_RELAXED_BOUNDS) not in notes(ethanol)
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        "C1CCC/C=C\\CC1",
+        "O=C1CCC/C=C\\CCCC1",
+        "O=C1CCC/C=C/CCCC1",
+        "C/C1=C/CCC(=O)[C@@H]2CC(C)(C)[C@@H]2CC1",
+    ],
+)
+def test_prepared_molecule_keeps_its_key_through_the_embedding(smiles):
+    """The QM worker names its record `unmapped_canonical` of the embedded explicit-H molecule
+    (`xtb_calc.GFN2Calculator.run`): a ring double bond's E/Z must give the key back (it gave
+    the other isomer's until 2026-11-10, so the record failed its own key)."""
+    key = chem.unmapped_canonical(Chem.MolFromSmiles(smiles))
+    mol = prepare_mol(key)
+    assert chem.unmapped_canonical(mol) == key
+    embed(mol, n_conformers=1, seed=0)
+    assert chem.unmapped_canonical(mol) == key
+    probe = Chem.Mol(mol)
+    Chem.AssignStereochemistryFrom3D(probe)
+    assert chem.unmapped_canonical(probe) == key  # the geometry is the key's isomer

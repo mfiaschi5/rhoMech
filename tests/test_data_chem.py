@@ -4,7 +4,16 @@ import pytest
 from rdkit import Chem
 
 from ksmech.data import chem
-from tests.fixtures.molecules import MOLECULES
+from tests.fixtures.molecules import MOLECULES, OPEN_SHELL
+
+# E/Z on a ring-closure double bond: before 2026-11-10 an explicit-H molecule's key swapped them
+RING_STEREO = {
+    "Z-cyclooctene": "C1CCC/C=C\\CC1",
+    "E-cyclooctene": "C1CCC/C=C/CC1",
+    "Z-cyclodec-5-enone": "O=C1CCC/C=C\\CCCC1",
+    "E-cyclodec-5-enone": "O=C1CCC/C=C/CCCC1",
+    "human benchmark bicycle": "C/C1=C/CCC(=O)[C@@H]2CC(C)(C)[C@@H]2CC1",
+}
 
 
 def _fully_mapped(smiles: str) -> str:
@@ -36,6 +45,61 @@ def test_counts_match_rdkit(name, mols):
 def test_unmapped_canonical_matches_plain_rdkit(name):
     mol = chem.parse_mapped(_fully_mapped(MOLECULES[name]))
     assert chem.unmapped_canonical(mol) == Chem.MolToSmiles(Chem.MolFromSmiles(MOLECULES[name]))
+
+
+def _keep_h(smiles: str) -> Chem.Mol:
+    params = Chem.SmilesParserParams()
+    params.removeHs = False
+    return Chem.MolFromSmiles(smiles, params)
+
+
+@pytest.mark.parametrize(
+    "smiles", sorted(MOLECULES.values()) + sorted(s for s, _ in OPEN_SHELL.values())
+)
+def test_unmapped_canonical_ignores_explicit_hydrogens(smiles):
+    """One molecule, one key, however its hydrogens are held (the QM worker's are explicit)."""
+    key = chem.unmapped_canonical(Chem.MolFromSmiles(smiles))
+    assert chem.unmapped_canonical(Chem.AddHs(Chem.MolFromSmiles(smiles))) == key
+    assert (
+        chem.unmapped_canonical(
+            chem.parse_mapped(Chem.MolToSmiles(Chem.AddHs(Chem.MolFromSmiles(smiles))))
+        )
+        == key
+    )
+
+
+@pytest.mark.parametrize("name", sorted(RING_STEREO))
+def test_ring_double_bond_stereo_survives_explicit_hydrogens(name):
+    key = chem.unmapped_canonical(Chem.MolFromSmiles(RING_STEREO[name]))
+    assert chem.unmapped_canonical(Chem.MolFromSmiles(key)) == key
+    assert chem.unmapped_canonical(Chem.AddHs(Chem.MolFromSmiles(key))) == key
+    h_smiles = Chem.MolToSmiles(Chem.AddHs(Chem.MolFromSmiles(key)))  # stereo on the hydrogens
+    assert chem.unmapped_canonical(_keep_h(h_smiles)) == key
+    assert chem.unmapped_canonical(chem.parse_mapped(h_smiles)) == key
+
+
+def test_ring_e_and_z_keep_distinct_keys():
+    keys = {
+        chem.unmapped_canonical(Chem.AddHs(Chem.MolFromSmiles(s))) for s in RING_STEREO.values()
+    }
+    assert len(keys) == len(RING_STEREO)
+
+
+@pytest.mark.parametrize(
+    "smiles,key",
+    [
+        ("[H+]", "[H+]"),
+        ("[HH]", "[H][H]"),
+        ("[H][H]", "[H][H]"),
+        ("[2H]C([2H])([2H])Cl", "[2H]C([2H])([2H])Cl"),
+        ("[Na+].[H-]", "[H-].[Na+]"),
+        ("[Li][H]", "[LiH]"),
+    ],
+)
+def test_hydrogens_rdkit_keeps_stay_as_before(smiles, key):
+    """An isolated proton or hydride, H2 and isotopes keep the keys their records carry."""
+    assert chem.unmapped_canonical(Chem.MolFromSmiles(smiles)) == key
+    assert chem.unmapped_canonical(_keep_h(smiles)) == key
 
 
 def test_aromatic_input_is_kekulized():
