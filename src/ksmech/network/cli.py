@@ -38,6 +38,10 @@ from `--free-energy` (`network.free_energy.load_thermo_model`, the adapter point
 'none' until item B's provider is wired there: the chain then runs on the model's own
 probabilities, no sink can be declared, and every state counts as NO_FREE_ENERGY).
 
+`search` and `evaluate` with `--backward-run BWD` search from both sides, the forward run from
+the start and the backward run from the whole product pool, meeting on the pool key, the
+pathways ranked by the I5 cost (`network.bidirectional`, `network.bidirectional_cli`).
+
 `species` (item J) grows the species graph of the start pool and reports its hyperpaths and atom
 flux (`network.species_cli`).
 """
@@ -51,7 +55,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ksmech.data import provenance as prov
-from ksmech.network import retro_cli, species_cli
+from ksmech.network import bidirectional_cli, retro_cli, species_cli
 
 SEARCH_VERSION = 1
 SEARCH_KEYS = ("k", "max_expansions", "max_depth", "step_cost", "levels", "beam", "build_missing")
@@ -94,6 +98,7 @@ def _search_options(s) -> None:
     s.add_argument("--build-missing", action="store_true", help="compute missing tokens (GFN2)")
     s.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     s.add_argument("--tokens-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    bidirectional_cli.add_options(s)  # item I1: --backward-run searches from both sides
 
 
 def _evaluate_parser(sub) -> None:
@@ -165,6 +170,9 @@ def cmd_search(args, console: Console) -> int:
     from ksmech.network.towards import pathway_rows, search_towards
 
     ckpt, expander, cfg = _expander(args)
+    if args.backward_run:
+        keys = ("run", "run_source", "checkpoint", "start", "target", *SEARCH_KEYS)
+        return bidirectional_cli.cmd_search(args, console, ckpt, expander, cfg, keys)
     params = SearchParams(args.k, args.max_expansions, args.max_depth, step_cost=args.step_cost)
     caps = (cfg.max_bonds, cfg.max_atoms)
     target = target_from_smiles(args.target)
@@ -213,6 +221,10 @@ def cmd_evaluate(args, console: Console) -> int:
     counts: Counter = Counter()
     cases = _cases(args, counts)
     ckpt, expander, cfg = _expander(args)
+    keys = ("set", "run", "run_source", "checkpoint", "split", "part", "limit", *SEARCH_KEYS)
+    if args.backward_run:
+        return bidirectional_cli.cmd_evaluate(args, console, ckpt, expander, cfg, cases, counts,
+                                              keys)  # fmt: skip
     params = SearchParams(args.k, args.max_expansions, args.max_depth, step_cost=args.step_cost)
     rows = []
     for i, case in enumerate(cases, start=1):
@@ -223,7 +235,6 @@ def cmd_evaluate(args, console: Console) -> int:
                       f"rank {r.get('recorded_rank')}, {r.get('expanded')} expanded")  # fmt: skip
     report = summary(rows, args.k) | {"cases_skipped": dict(counts)}
     console.print(report)
-    keys = ("set", "run", "run_source", "checkpoint", "split", "part", "limit", *SEARCH_KEYS)
     header = prov.stamp("network_evaluate", SEARCH_VERSION, prov.file_input(ckpt),
                         {k: getattr(args, k) for k in keys})  # fmt: skip
     tag = args.set + (f"_{args.part}" if args.part != "all" else "")

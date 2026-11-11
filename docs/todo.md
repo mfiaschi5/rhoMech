@@ -49,8 +49,9 @@ approved 2026-11-10). What is left is compute, data and calibration:
 - QM and tokens for the ReactMech chain steps outside the pilot (17,595), so the benchmarks of
   section 5 can run (the human benchmark's species: done 2026-11-10, 1,056 of 1,072, 19 tombstones);
 - the backward model is trained (3 seeds, 2026-11-10, `docs/decisions.md`); the round-trip
-  reranker (I5) is `ksmech-eval roundtrip`, its evaluation (QM of the beam's child species, the
-  lambda grid on both val sets) and I1 bidirectional come next;
+  reranker (I5) is `ksmech-eval roundtrip` and the bidirectional search (I1) `ksmech-network
+  search --backward-run`; left: the round-trip evaluation (QM of the beam's child species, the
+  lambda grid on both val sets) and the bidirectional search against A* on the ReactMech chains;
 - the calibration of the flags (`step_cost`, epsilon and margin, the climb budget, the mass
   tolerance) and the measures of "Done when".
 

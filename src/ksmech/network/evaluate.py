@@ -37,10 +37,17 @@ def recorded_rank(res, recorded: tuple[str, ...] | None) -> int | None:
 def targets_passed(res, step_targets, skips: Counter) -> int | None:
     """How many recorded step targets the best pathway passes through (None: no target, or no
     pathway); a target RDKit cannot read is counted as STEP_TARGET_UNPARSED."""
-    wanted = [t for t in step_targets if t]
-    if not wanted or not res.search.pathways:
+    if not res.search.pathways:
         return None
     pools = [res.graph.states[n] for n in res.search.pathways[0].nodes]
+    return targets_passed_in(pools, step_targets, skips)
+
+
+def targets_passed_in(pools, step_targets, skips: Counter) -> int | None:
+    """How many recorded step targets some pool of `pools` holds (None: no target)."""
+    wanted = [t for t in step_targets if t]
+    if not wanted:
+        return None
     passed = 0
     for smiles in wanted:
         try:
@@ -82,6 +89,46 @@ def evaluate_case(expander, case: Case, params: SearchParams = DEFAULT_PARAMS, l
         "step_targets_passed": targets_passed(res, case.step_targets, skips),
         "cuts": dict(res.search.cuts),
     }
+    return row | {"skips": dict(skips)}
+
+
+def evaluate_case_bidirectional(
+    forward, backward, case: Case, params: SearchParams = DEFAULT_PARAMS, lam: float = 1.0
+) -> dict:
+    """One case's row of the bidirectional search (`network.bidirectional`), in the keys of
+    `evaluate_case` that `summary` reads: the arrival is EXACT when the trees met, the recorded
+    rank among the pathways ranked by the I5 cost. A target that is not the whole product pool
+    fails the case (TARGET_NOT_FULL_POOL), as an unparsed one does."""
+    from ksmech.network.bidirectional import bidirectional_search
+
+    try:
+        start, target = pool_state(case.start), pool_state(case.target)
+    except Exception as exc:  # noqa: BLE001 - the case is reported, not dropped
+        return {"case": case.case_id, "part": case.part,
+                "failure": f"UNPARSED:{type(exc).__name__}"}  # fmt: skip
+    res = bidirectional_search(forward, backward, start, target, params, lam)
+    if res.reason == "TARGET_NOT_FULL_POOL":
+        return {"case": case.case_id, "part": case.part, "failure": res.reason}
+    best = res.pathways[0] if res.pathways else None
+    skips = Counter(res.skips)
+    pools = [best.steps[0].parent, *(s.child for s in best.steps)] if best else []
+    ranks = [r for r, p in enumerate(res.pathways, 1) if p.nodes == tuple(case.recorded or ())]
+    row = {
+        "case": case.case_id, "part": case.part, "reason": res.reason,
+        "expanded": sum(res.expanded.values()), "expanded_by_side": res.expanded,
+        "meetings": res.meetings, "arrival": EXACT if best else None,
+        "n_pathways": len(res.pathways),
+        "best_rescored": best.rescored if best else None,
+        "best_logp_forward": best.logp_forward if best else None,
+        "best_logp_backward": best.logp_backward if best else None,
+        "best_steps": len(best.steps) if best else None,
+        "best_sides": [s.side for s in best.steps] if best else None,
+        "recorded_steps": len(case.recorded) - 1 if case.recorded else None,
+        "recorded_rank": ranks[0] if ranks and case.recorded else None,
+        "step_targets": len([t for t in case.step_targets if t]),
+        "step_targets_passed": targets_passed_in(pools, case.step_targets, skips) if best else None,
+        "cuts": dict(res.cuts),
+    }  # fmt: skip
     return row | {"skips": dict(skips)}
 
 

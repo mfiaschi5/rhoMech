@@ -471,6 +471,13 @@ Main CLI entry points are added phase by phase and listed here as they land:
   its pool-key sequence, the step targets passed, the expansions; the rates over the cases;
   `network_eval_<set>[_<part>][_n<limit>].json` beside the checkpoint)
 
+  With `--backward-run BWD [--backward-checkpoint best] [--roundtrip-lambda 1]`, `search` and
+  `evaluate` search from both sides (item I1, `network.bidirectional`): the forward run from the
+  start, the backward run from the target, which must be the whole product pool
+  (TARGET_NOT_FULL_POOL), meeting on the pool key, `--max-expansions` over both sides; the
+  pathways ranked by the I5 cost, sum of -(log P_f + lambda log P_b(-R | child)); `evaluate`
+  writes `network_eval_<set>..._bidir_<BWD>.json`
+
   `uv run ksmech-network predict --run NAME [--run-source pmechdb] --start SMILES
   [--temperature-k 298.15] [--max-expansions 50] [--mass-tol 0.01] [--epsilon 0.01] [--margin 5.0]
   [--max-climb 20 | --no-climb-limit] [--rescan-factor 4] [--no-stop-at-turnover]

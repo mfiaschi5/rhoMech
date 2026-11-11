@@ -9503,3 +9503,40 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
   -10, so the backward term can move the top-1 only at lambda of about 1 or more; the run's grid
   is 0.25, 0.5, 1, 2, 4. Lambda is chosen on PMechDB closed_base val, and ReactMech molecule val
   checks the choice out of distribution.
+
+## 2026-11-10: the bidirectional search (network plan I1, with I5)
+
+- **What.** `ksmech-network search` and `evaluate` with `--backward-run BWD`
+  (`network.bidirectional`, `network.bidirectional_cli`): the forward run grows a best-first tree
+  from the start pool, the backward run one from the target pool, each on its own
+  `ImplicitGraph` by its own cost (-log p + `step_cost`), meeting on the pool key. The side whose
+  frontier is cheaper is expanded next; `--max-expansions` counts both sides.
+- **The target is the whole product pool.** Going back starts from every species the step makes,
+  by-products included (plan H, "The full pool"), so a target whose element counts (H included)
+  or total charge differ from the start's is refused as TARGET_NOT_FULL_POOL; the trees meet on
+  the exact pool key, so `--levels` and the remaining-change heuristic do not apply. The human
+  benchmark's targets are final products alone: its cases fail this way, and the bidirectional
+  evaluation is for chains whose last pool is recorded whole (the ReactMech chains).
+- **Stop.** The bidirectional Dijkstra rule: the two frontiers' cheapest costs sum to at least
+  the k-th best meeting. It is exact for one meeting when both sides share one cost; here each
+  side has its own model, so it is a stopping rule, and the ranking is the rescoring's. Only
+  meetings that join a distinct simple path within `max_depth` count: a meeting at Y where the
+  start reaches Y forward and Y's backward path passes the start again is a CYCLE, and one path
+  met at several of its nodes (the split between the sides moved) counts once (DUPLICATE_PATH).
+  Before the first rule, the first real search (methoxide + acetone, 12 expansions) stopped on
+  7 meetings of which 6 joined cycles, with one pathway; the second rule follows from the same
+  argument (a path S-A-T is met at S, A and T) and is checked on the toy network of the tests.
+- **Numbering.** Pools reached forward carry the start's map numbers, those reached backward the
+  target's, so every step of a joined pathway keeps its parent and child in the numbering of the
+  half that proposed it, with R on those numbers (a backward step's child is its proposal's,
+  which the graph's first state with that key need not share).
+- **Rescoring (I5).** Each pathway is ranked by the sum over its steps of -(log P_f(R | parent)
+  + lambda log P_b(-R | child)) + `step_cost`, the forward term the decoder's best anchor and the
+  backward term the marginal over -R's anchors, as `eval.roundtrip` reranks the forward beam;
+  every term the proposing side does not carry is scored by the other model (`step_logp`). A
+  step one model cannot score leaves the pathway unrescored, counted (RESCORE_FAILED), ranked
+  after. `--roundtrip-lambda` is 1 until the round-trip evaluation sets it.
+- **First run.** Methoxide + acetone to the tetrahedral alkoxide (orb_a_s0, bwd_s0, 30
+  expansions): the addition, found by the backward side in one step (log P_b -0.11, log P_f
+  -2.25); the other branches stopped at 18 pools without tokens (no `--build-missing`), the cost
+  every network evaluation shares.
