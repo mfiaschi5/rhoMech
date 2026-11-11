@@ -8,8 +8,10 @@ only in the worker.
   run), NETWORK_ADAPTER_FAILED (every usable checkpoint failed to load in the worker, with the
   error; a failure is recorded per file version in `data/serve/network/adapter_failures.json`
   and retried after RETRY_AFTER_S or when the file changes).
-- **Default checkpoint**: `models.default_checkpoint` (the best usable non-smoke run by
-  validation top-1) among the checkpoints without a recent adapter failure.
+- **Default checkpoint**: `models.default_checkpoint` (a forward run of the development source
+  first, then the best usable non-smoke run by validation top-1) among the checkpoints without
+  a recent adapter failure. A backward run (previous step) is refused by name (422
+  REQUEST_INVALID): its steps are -R on a child pool, not a step forward.
 - **Reference** (`make_ref`, API side): the request's checkpoint ({source?, run, file}) or the
   default, hashed; the `PredictorRef` carries its sha256 and `checkpoint_ref` (run, file,
   file version, epoch, val top-1), and the version `network/<source>/<run>/<file>@<sha12>/
@@ -244,7 +246,13 @@ class NetworkPredictor(Predictor):
 
         if checkpoint is not None and checkpoint.get("run"):
             run, file = str(checkpoint["run"]), str(checkpoint.get("file") or "best")
-            return usable_checkpoint(self.settings, run, file, checkpoint.get("source"))
+            ck = usable_checkpoint(self.settings, run, file, checkpoint.get("source"))
+            if ck.direction != "forward":
+                msg = (f"checkpoint {checkpoint_key(ck)}.pt is a {ck.direction} run: it predicts "
+                       "the previous step, the network predictor needs a forward run")  # fmt: skip
+                raise ServeError(Code.REQUEST_INVALID, msg, status=422,
+                                 detail={"direction": ck.direction})  # fmt: skip
+            return ck
         st = network_status(self.settings)
         if st.default is None:
             detail = {"code": st.code, "reason": st.reason}

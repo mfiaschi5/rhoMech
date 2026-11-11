@@ -10,7 +10,7 @@ from ksmech.serve.core import schemas as S
 from ksmech.serve.core.capabilities import require
 from ksmech.serve.core.http import Svc, check_id
 from ksmech.serve.ml import runs
-from ksmech.serve.ml.checkpoints import list_checkpoints, model_roots
+from ksmech.serve.ml.checkpoints import default_checkpoint, list_checkpoints, model_roots
 
 router = APIRouter(prefix="/api")
 lab = APIRouter(prefix="/api/ml", dependencies=[require("ml")])
@@ -22,10 +22,15 @@ def list_models(svc: Svc) -> S.ModelsOut:
     from ksmech.serve.core import capabilities
 
     on, reason = capabilities.status("embedding", svc.settings)
+    ckpts = list_checkpoints(svc.settings)
+    default = default_checkpoint(ckpts)
     return S.ModelsOut(
         roots=[str(r) for r in model_roots(svc.settings)],
-        checkpoints=[S.CheckpointOut(**c.to_out()) for c in list_checkpoints(svc.settings)],
+        checkpoints=[S.CheckpointOut(**c.to_out()) for c in ckpts],
         embedding=S.CapabilityOut(enabled=on, reason=reason),
+        default_checkpoint=None
+        if default is None
+        else f"{default.source}/{default.run}/{default.file}",
     )
 
 

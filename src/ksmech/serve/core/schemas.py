@@ -637,12 +637,19 @@ class CheckpointOut(_Out):
     reason: str | None
     built_at: str | None
     smoke: bool  # a `--limit` run or a run named smoke*: the default only when nothing else is
+    # run.json's train direction: "backward" predicts the previous step (network plan H); never
+    # the network predictor's default, refused by it
+    direction: Literal["forward", "backward"] = "forward"
 
 
 class ModelsOut(_Out):
     roots: list[str]  # the directories searched, in order
     checkpoints: list[CheckpointOut]
     embedding: CapabilityOut  # the embedding capability with these checkpoints
+    # "source/run/file" of the network predictor's default (`checkpoints.default_checkpoint`:
+    # a forward run of the development source first, then val top-1), null when none is usable;
+    # the predictor also skips a checkpoint that failed to load in the last 10 minutes
+    default_checkpoint: str | None = None
 
 
 # ---- ML runs and reports (serve.ml: lab only; the JSON files are passed through)

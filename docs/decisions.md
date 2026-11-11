@@ -9576,3 +9576,30 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
 - **Not done here.** The bidirectional search (I1) needs the backward checkpoint and a full
   product pool on the web app's side; it stays in the CLI (`ksmech-network search
   --backward-run`) until that is wanted in the browser.
+
+## 2026-11-11: the web app's default network checkpoint: the development source first, never a backward run
+
+- **What was wrong.** The default checkpoint of the network predictor (and the Predict form's
+  preselected one) was the usable non-smoke run with the best validation top-1 over every
+  source. ReactMech's validation part is templated and easy, so `reactmech/sparse_resonance`
+  (val top-1 1.0) beat every PMechDB run (at most 0.70), and on simple polar pools (methoxide +
+  bromoethane) it proposes no valid candidate at all: a user who did not open the picker tested
+  the wrong model. The rule also admitted backward runs (network plan H), which predict the
+  previous step from a child pool.
+- **The rule now** (`serve.ml.checkpoints.default_checkpoint`): among the usable forward
+  checkpoints, a run of `DEFAULT_SOURCE` = pmechdb (the development set) before any other
+  source's, then the best validation top-1, best.pt before last.pt, a smoke run only when
+  nothing else is usable. Validation top-1 is compared only where it means the same thing,
+  within one source; another source's run is the default only where PMechDB has none (a
+  deployment with ReactMech models alone). On this host the default is now
+  `pmechdb/orb_b_s0/best` (0.700).
+- **Backward runs** carry `direction` "backward" (run.json's `config.train.direction`) in the
+  listing; they stay listed (the embedding trace reads them) but the predictor refuses one named
+  explicitly (422 REQUEST_INVALID) and the picker shows them disabled, "backward (previous step)".
+- **One copy of the rule.** The Predict form recomputed the rule in TypeScript
+  (`defaultNetworkCheckpoint`), a second copy that would have drifted; `GET /api/models` now
+  names the server's default (`ModelsOut.default_checkpoint`) and the form takes it
+  (`chooseCheckpoint`). The picker shows each option as source/run/file, since one run name can
+  exist under two sources.
+- `DEFAULT_SOURCE` is a constant, not a setting: a deployment that needs another source can
+  make it one.

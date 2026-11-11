@@ -204,11 +204,13 @@ def _settings(tmp_path, **kw):
     return load_settings({}, data_root=tmp_path, shared_cache_root=tmp_path, **kw)
 
 
-def _run(tmp_path, name, top1=None, limit=0, dirty=False):
-    run_dir = tmp_path / "data" / "models" / "pmechdb" / name
+def _run(tmp_path, name, top1=None, limit=0, dirty=False, source="pmechdb", direction=None):
+    run_dir = tmp_path / "data" / "models" / source / name
     write_fake_run(run_dir, dirty=dirty)
     doc = json.loads((run_dir / "run.json").read_text())
     doc["provenance"]["config"]["train"]["limit"] = limit
+    if direction is not None:
+        doc["provenance"]["config"]["train"]["direction"] = direction
     (run_dir / "run.json").write_text(json.dumps(doc))
     if top1 is not None:
         lines = [{"epoch": 0, "step": 1, "val_top1": top1, "val_loss": 1.0}]
@@ -231,6 +233,24 @@ def test_the_default_checkpoint_is_the_best_real_run(tmp_path):
     only_smoke = [c for c in ckpts if c.smoke]
     assert default_checkpoint(only_smoke).run == "limited"  # nothing else: a smoke run
     assert default_checkpoint([]) is None
+
+
+def test_the_default_prefers_the_development_source_and_never_a_backward_run(tmp_path):
+    """ReactMech's val top-1 of 1.0 does not beat a PMechDB run (top-1 is comparable only
+    within one source); a backward run is listed but never the default, even when best."""
+    from ksmech.serve.ml.checkpoints import default_checkpoint, list_checkpoints
+
+    s = _settings(tmp_path)
+    _run(tmp_path, "rm_easy", top1=1.0, source="reactmech")
+    _run(tmp_path, "pm_fwd", top1=0.65)
+    _run(tmp_path, "pm_bwd", top1=0.9, direction="backward")
+    ckpts = list_checkpoints(s)
+    assert {c.run: c.direction for c in ckpts if c.file == "best"} == {
+        "rm_easy": "forward", "pm_fwd": "forward", "pm_bwd": "backward"}  # fmt: skip
+    assert default_checkpoint(ckpts).run == "pm_fwd"
+    others = [c for c in ckpts if c.source == "reactmech" or c.direction == "backward"]
+    assert default_checkpoint(others).run == "rm_easy"  # no PMechDB forward run: another source
+    assert default_checkpoint([c for c in ckpts if c.direction == "backward"]) is None
 
 
 def test_reason_texts_in_every_state(tmp_path, monkeypatch):
@@ -285,6 +305,12 @@ def test_a_named_checkpoint_resolves_and_a_refused_one_is_409(tmp_path):
     with pytest.raises(ServeError) as exc:
         p.make_ref(None, {"run": "nope"})
     assert exc.value.code == "CHECKPOINT_NOT_FOUND" and exc.value.status == 404
+    _run(tmp_path, "bwd", top1=0.9, direction="backward")
+    with pytest.raises(ServeError) as exc:
+        p.make_ref(None, {"run": "bwd"})
+    assert exc.value.code == "REQUEST_INVALID" and exc.value.status == 422
+    assert "previous step" in exc.value.message and exc.value.detail == {"direction": "backward"}
+    assert p.make_ref(None, None).checkpoint["run"] == "good"
 
 
 # ---- a tiny random checkpoint on the synthetic chemistry
@@ -412,6 +438,8 @@ def test_the_network_predicts_through_the_api(net_app):
     assert net["version"].startswith("network/fake/tiny/best@")  # the smoke run is not default
     models = S.ModelsOut.model_validate(net_app.get("/api/models").json())
     assert {c.run: c.smoke for c in models.checkpoints} == {"smoke_tiny": True, "tiny": False}
+    assert models.default_checkpoint == "fake/tiny/best"  # the predictor's own default
+    assert {c.direction for c in models.checkpoints} == {"forward"}
     job = _job(net_app, net_app.post("/api/predict", json=SN2))
     out = S.NetworkOut.model_validate(job["result"])
     assert out.scores_are_probabilities

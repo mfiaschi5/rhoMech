@@ -495,12 +495,14 @@ export interface CheckpointOut {
   reason: string | null;
   built_at: string | null;
   smoke: boolean;
+  direction: "forward" | "backward";
 }
 
 export interface ModelsOut {
   roots: string[];
   checkpoints: CheckpointOut[];
   embedding: CapabilityOut;
+  default_checkpoint: string | null;
 }
 
 export interface MlRunOut {

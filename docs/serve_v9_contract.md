@@ -125,11 +125,17 @@ lambdarank score); `scores_are_probabilities` is true only for `network`.
 
 - `PredictIn.checkpoint` and `ExpandIn.checkpoint`: `CheckpointRefIn {run, file = "best",
   source?}`, network only (another predictor with a checkpoint is 422 `REQUEST_INVALID`). The
-  default is the best usable non-smoke checkpoint by validation top-1 (`CheckpointOut.smoke`: a
-  `--limit` run or a run named `smoke*`; a smoke run is the default only when nothing else is
-  usable). An unknown checkpoint is 404 `CHECKPOINT_NOT_FOUND`, a dirty one 409
-  `CHECKPOINT_REFUSED`, both at submission. The job's stored `request.checkpoint` names the
-  checkpoint it resolved to.
+  default (since 2026-11-11) is a usable forward checkpoint of the development source
+  (`checkpoints.DEFAULT_SOURCE`, pmechdb) before any other source's, then the best validation
+  top-1 (validation top-1 is comparable only within one source); a non-smoke one before a smoke
+  one (`CheckpointOut.smoke`: a `--limit` run or a run named `smoke*`), never a backward run.
+  `GET /api/models` names it in `ModelsOut.default_checkpoint` ("source/run/file", null when
+  none is usable; the predictor also skips a checkpoint that failed to load in the last 10
+  minutes), and the Predict form takes it from there. An unknown checkpoint is 404
+  `CHECKPOINT_NOT_FOUND`, a dirty one 409 `CHECKPOINT_REFUSED`, a backward one
+  (`CheckpointOut.direction` "backward", run.json's `config.train.direction`: it predicts the
+  previous step) 422 `REQUEST_INVALID` with `detail.direction`, all at submission. The job's
+  stored `request.checkpoint` names the checkpoint it resolved to.
 - `Provenance.checkpoint`: `CheckpointRefOut {source, run, file, sha256, mtime_ns, size_bytes,
   epoch, val_top1, encoder, smoke}` (null for the other predictors); `predictor_version` is
   `network/<source>/<run>/<file>@<sha12>/dec-<decoder code sha8>/<physics fingerprint>` and

@@ -14,6 +14,14 @@ A checkpoint is `data/models/<source>/<run>/<file>.pt` under the shared root
 - A **smoke** run is a `ksmech-train fit --limit N` run (`config.train.limit > 0` in run.json)
   or a run named `smoke*`: listed and usable, the default only when nothing else is usable
   (`default_checkpoint`).
+- The **direction** is run.json's `config.train.direction` ("forward" when absent): a backward
+  run (`ksmech-train fit --direction backward`, network plan H) predicts the previous step from
+  a child pool, so it is listed (the embedding trace reads it) but is never the network
+  predictor's default, and the predictor refuses it (`network_predictor.resolve`).
+- The **default** (`default_checkpoint`) is a forward run of `DEFAULT_SOURCE` when there is one:
+  validation top-1 is comparable only within one source's validation part (ReactMech's
+  templated val gives 1.0, so the best run across sources was a ReactMech run that proposes
+  nothing on simple polar pools; decided 2026-11-11).
 
 `checkpoint_sha256` hashes a checkpoint once per file version (mtime, size).
 """
@@ -39,6 +47,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,99}")  # '+': a joint run's source
+DEFAULT_SOURCE = "pmechdb"  # the development set: the default network comes from its runs
+FORWARD, BACKWARD = "forward", "backward"
 METRIC_KEYS = ("val_top1", "val_top3", "val_top5", "val_r_exact", "val_loss", "val_anchor_nll")
 MODULES = ("torch", "ksmech.model.net", "ksmech.train.loop", "ksmech.eval.embedding")
 _SHA: LRU[tuple[str, int, int], str] = LRU(16)
@@ -62,6 +72,7 @@ class Checkpoint:
     reason: str | None = None  # why it is not usable (a dirty run)
     built_at: str | None = None
     smoke: bool = False  # a --limit run or a run named smoke* (is_smoke)
+    direction: str = FORWARD  # run.json's config.train.direction (module docstring)
 
     @property
     def usable(self) -> bool:
@@ -135,7 +146,7 @@ def is_smoke(run: str, train: dict) -> bool:
 
 
 def run_facts(run_dir: Path) -> dict:
-    """encoder, model, clean, reason, built_at, smoke from `run.json`."""
+    """encoder, model, clean, reason, built_at, smoke, direction from `run.json`."""
     doc = read_json(run_dir / "run.json")
     header = (doc or {}).get("provenance")
     if not isinstance(header, dict):
@@ -153,6 +164,7 @@ def run_facts(run_dir: Path) -> dict:
         "reason": f"STALE_ARTIFACT: trained from a dirty tree (HEAD {head})" if dirty else None,
         "built_at": header.get("built_at"),
         "smoke": is_smoke(run_dir.name, train if isinstance(train, dict) else {}),
+        "direction": str((train if isinstance(train, dict) else {}).get("direction") or FORWARD),
     }
 
 
@@ -219,14 +231,15 @@ def find_checkpoint(
 def _rank_key(c: Checkpoint) -> tuple:
     top1 = c.metrics.get("val_top1")
     top1 = float(top1) if isinstance(top1, int | float) else -1.0
-    return (-top1, c.file != "best", c.source, c.run, c.file)
+    return (c.source != DEFAULT_SOURCE, -top1, c.file != "best", c.source, c.run, c.file)
 
 
 def default_checkpoint(ckpts: list[Checkpoint]) -> Checkpoint | None:
-    """The checkpoint a client gets when it names none: the usable non-smoke one with the best
-    validation top-1 (best.pt before last.pt on a tie, then by name); a usable smoke run only
-    when nothing else is usable; None when no checkpoint is usable."""
-    usable = [c for c in ckpts if c.usable]
+    """The checkpoint a client gets when it names none: among the usable forward ones, a run of
+    `DEFAULT_SOURCE` before any other source's, then the best validation top-1 (best.pt before
+    last.pt on a tie, then by name); a non-smoke run before a smoke run, which is the default
+    only when nothing else is usable; never a backward run; None when none is usable."""
+    usable = [c for c in ckpts if c.usable and c.direction == FORWARD]
     real = [c for c in usable if not c.smoke]
     pool = real or usable
     return min(pool, key=_rank_key) if pool else None

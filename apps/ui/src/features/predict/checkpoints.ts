@@ -1,8 +1,9 @@
 // The network predictor's checkpoint on the Predict page (pure; node --test runs it): the
-// default choice (the server's rule, serve.models.default_checkpoint: the usable non-smoke run
-// with the best validation top-1, best.pt before last.pt; a smoke run only when nothing else is
-// usable), the picker's labels, the {source, run, file} a request names, the job header's line,
-// and the body of an expansion that keeps the network's predictor and checkpoint.
+// choice (the user's, else the server's default, GET /models default_checkpoint: the rule lives
+// only in serve.ml.checkpoints.default_checkpoint), which checkpoints the predictor runs (usable
+// and forward: a backward run predicts the previous step), the picker's labels, the {source,
+// run, file} a request names, the job header's line, and the body of an expansion that keeps
+// the network's predictor and checkpoint.
 
 export interface ListedCheckpoint {
   source: string;
@@ -14,6 +15,7 @@ export interface ListedCheckpoint {
   epoch: number | null;
   metrics: Record<string, number | null>;
   reason: string | null;
+  direction?: string; // "forward" | "backward" (GET /models); absent: forward
 }
 
 export interface CheckpointRef {
@@ -36,23 +38,20 @@ export const checkpointId = (c: CheckpointRef) => `${c.source}/${c.run}/${c.file
 /** {source, run, file} of a listed or recorded checkpoint (what a request names). */
 export const refOf = (c: CheckpointRef): CheckpointRef => ({ source: c.source, run: c.run, file: c.file });
 
-const top1 = (c: ListedCheckpoint) => (typeof c.metrics.val_top1 === "number" ? c.metrics.val_top1 : -1);
+/** A checkpoint the network predictor runs: usable and forward. */
+export const predictable = (c: ListedCheckpoint) => c.usable && (c.direction ?? "forward") === "forward";
 
-function rank(a: ListedCheckpoint, b: ListedCheckpoint): number {
-  return top1(b) - top1(a) || Number(b.file === "best") - Number(a.file === "best") || checkpointId(a).localeCompare(checkpointId(b));
-}
-
-/** The default checkpoint of the network predictor (the server's rule), null when none is usable. */
-export function defaultNetworkCheckpoint<C extends ListedCheckpoint>(list: readonly C[]): C | null {
-  const usable = list.filter((c) => c.usable);
-  const real = usable.filter((c) => !c.smoke);
-  return [...(real.length ? real : usable)].sort(rank)[0] ?? null;
+/** The picker's checkpoint: the chosen id when the predictor can run it, else the server's
+ *  default (`defaultId`, GET /models default_checkpoint), null when neither is listed. */
+export function chooseCheckpoint<C extends ListedCheckpoint>(list: readonly C[], value: string | null, defaultId: string | null | undefined): C | null {
+  const byId = (id: string) => list.find((c) => checkpointId(c) === id && predictable(c)) ?? null;
+  return (value ? byId(value) : null) ?? (defaultId ? byId(defaultId) : null);
 }
 
 const pct = (x: number | null | undefined) => (typeof x === "number" ? `${(100 * x).toFixed(1)}%` : null);
 
 /** One option of the picker: "flex_first/best.pt · flex · epoch 19 · val top-1 60.9%", then
- *  " · smoke" or " (refused)". */
+ *  " · smoke", " · backward (previous step)" or " (refused)". */
 export function pickerLabel(c: ListedCheckpoint): string {
   const parts = [`${c.run}/${c.file}.pt`];
   if (c.encoder) parts.push(c.encoder);
@@ -60,6 +59,7 @@ export function pickerLabel(c: ListedCheckpoint): string {
   const t = pct(c.metrics.val_top1);
   if (t) parts.push(`val top-1 ${t}`);
   if (c.smoke) parts.push("smoke");
+  if (c.direction === "backward") parts.push("backward (previous step)");
   const label = parts.join(" · ");
   return c.usable ? label : `${label} (refused)`;
 }
