@@ -664,14 +664,38 @@ def build_step_samples_parallel(
     """`build_step_samples` in chunks of `CHUNK` consecutive steps, over `n_workers` spawned
     processes when above 1 (`processes.in_processes`). Each process keeps its own token
     memory."""
-    tasks = [(chunk, loader) for chunk in chunked(steps, CHUNK)]
     samples, skipped = {}, {}
-    for done, (s, k) in enumerate(in_processes(_chunk_worker, tasks, n_workers), 1):
+    for s, k in sample_chunks(steps, loader, n_workers):
         samples.update(s)
         skipped.update(k)
-        if done % 20 == 0 or done == len(tasks):
-            log.info("samples: %d / %d chunks, %d samples", done, len(tasks), len(samples))
     return samples, skipped
+
+
+def sample_chunks(steps: list[ElementaryStep], loader: TokenLoader, n_workers: int = 1):
+    """(samples, skipped) of each chunk of `CHUNK` consecutive steps, in step order."""
+    tasks = [(chunk, loader) for chunk in chunked(steps, CHUNK)]
+    n = 0
+    for done, (s, k) in enumerate(in_processes(_chunk_worker, tasks, n_workers), 1):
+        n += len(s)
+        if done % 20 == 0 or done == len(tasks):
+            log.info("samples: %d / %d chunks, %d samples", done, len(tasks), n)
+        yield s, k
+
+
+def build_streaming(
+    steps: list[ElementaryStep], loader: TokenLoader, n_workers: int, out_dir: Path, parquet, config
+) -> tuple[dict[str, MechanismSample], dict[str, SkipReason], Path]:
+    """The store written while the samples are built (`store.StoreWriter`: shards in step order,
+    one shard held at a time): (the light samples, without their cells, for the reports and
+    the splits; the skipped steps; the index). The pair statistics then read the store."""
+    writer = store.StoreWriter(out_dir, parquet, SAMPLE_VERSION, config)
+    light, skipped = {}, {}
+    for s, k in sample_chunks(steps, loader, n_workers):
+        for sid, sample in s.items():
+            writer.add(sample)
+            light[sid] = store.light(sample)
+        skipped.update(k)
+    return light, skipped, writer.close(skipped)
 
 
 def _safe(name: str) -> str:
@@ -934,13 +958,15 @@ def build_all_samples(
     n_workers: int = 1,
     direction: str = FORWARD,
     limit: int = 0,
+    stream: bool = False,
 ) -> dict:
     """Build every step's sample once into the store, then one split file per strategy and one
     view per split. A strategy that cannot run on the source is reported, not raised. With
     `direction` backward each step is seen from its child (`arrows.backward.backward_step`) and
     everything is written to `backward/` (`direction_dir`); `limit` (backward only, a pilot)
     builds that many training steps drawn at random (`pilot_steps`, never the split seed) and keeps
-    the views to them."""
+    the views to them. `stream` writes the store while it builds (`build_streaming`): memory of
+    one shard instead of every sample, shards in step order instead of by step id."""
     if limit and direction == FORWARD:
         raise ValueError("a step limit builds a partial store: backward only (a partial forward "
                          "store would replace the full one)")  # fmt: skip
@@ -949,10 +975,17 @@ def build_all_samples(
     steps = read_training_steps(parquet)
     built = pilot_steps(steps, limit)
     loader = loader or TokenCache()
-    samples, skipped = build_step_samples_parallel(oriented(built, direction), loader, n_workers)
     config = direction_config(direction, limit)
     out_dir = direction_dir(source, processed_dir, direction)
-    index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION, config)
+    if stream:
+        samples, skipped, index = build_streaming(
+            oriented(built, direction), loader, n_workers, out_dir, parquet, config
+        )
+    else:
+        samples, skipped = build_step_samples_parallel(
+            oriented(built, direction), loader, n_workers
+        )
+        index = store.write_store(out_dir, samples, skipped, parquet, SAMPLE_VERSION, config)
     report = store_report(steps, samples, skipped) | config
     report |= {"n_built": len(built)} if limit else {}
     only = {s.step_id for s in built} if limit else None
@@ -1051,13 +1084,22 @@ def _write_split_views(where: tuple, ids: dict, samples, skipped, index, split_f
         store.write_view(view, members, counts, index, split_file, config)
         out[split] = counts
         if split.endswith("_train"):
-            train = [samples[i] for i in members if i in samples]
             for cells in PAIR_CELLS:
+                train = _train_samples(view, members, samples)
                 name = split[: -len("_train")]
                 stats_path = pair_stats_path(source, name, processed_dir, cells, direction)
                 stats = pair_stats(train, cells=cells)
                 write_pair_stats(stats_path, stats, view, index, cells, direction)
     return out
+
+
+def _train_samples(view: Path, members: list[str], samples: dict):
+    """The training part's samples for its pair statistics: from memory, or streamed from the
+    store (shard by shard) when the samples are light (`store.is_light`)."""
+    kept = [samples[i] for i in members if i in samples]
+    if kept and store.is_light(kept[0]):
+        return iter_samples(view)
+    return kept
 
 
 def write_views_from_store(
@@ -1072,7 +1114,7 @@ def write_views_from_store(
     limit) keeps its views to the steps it holds."""
     parquet = steps_path(source, processed_dir)
     samples, skipped, index = store.load_store(
-        direction_dir(source, processed_dir, direction), MechanismSample, SAMPLE_VERSION
+        direction_dir(source, processed_dir, direction), MechanismSample, SAMPLE_VERSION, "none"
     )
     limited = bool(prov.read_header(index).config.get("limit"))
     only = set(samples) | set(skipped) if limited else None
@@ -1099,7 +1141,7 @@ def pair_stats_path(
 
 
 def pair_stats(
-    samples: list[MechanismSample],
+    samples: Iterable[MechanismSample],
     params: KSParams | None = None,
     cells: str = "valid",
     extra: tuple[str, ...] = (),
@@ -1108,16 +1150,19 @@ def pair_stats(
     `extra` (an open-shell run's `stage_a.OPEN_SHELL_BLOCK`), over `samples` at the physical K
     and eps, on the defined entries of those cells (`valid`: the `pair_valid` cells, the v17
     statistics; `all`: every cell), with the values rounded to float16 as stored. The statistics
-    of samples just built therefore equal those refitted from the store."""
+    of samples just built therefore equal those refitted from the store. One pass: `samples`
+    may be a stream (`iter_samples`), and a light sample is made whole (`store.dense`)."""
     params = params or KSParams()
     names = (*cell_features(cells), *extra)
-    stored = samples[0].pair_features if samples else STORED_PAIR_FEATURES
-    if any(s.pair_features != stored for s in samples):
-        raise ValueError("pair statistics over samples with different pair features")
+    first: list = []
 
     def block(s: MechanismSample):
+        s = store.dense(s)
+        first[:] = first or [s.pair_features]
+        if s.pair_features != first[0]:
+            raise ValueError("pair statistics over samples with different pair features")
         z, defined = cell_columns(
-            s.pair_z.astype(np.float16), s.pair_defined, s.pair_valid, stored, names, cells
+            s.pair_z.astype(np.float16), s.pair_defined, s.pair_valid, first[0], names, cells
         )
         return to_params(z, params, names), defined
 
@@ -1163,13 +1208,21 @@ def load_pair_stats(path: Path, allow_stale: bool = False) -> PairStats:
 
 
 def load_samples(
-    path: Path, allow_stale: bool = False, ids: Iterable[str] | None = None
+    path: Path,
+    allow_stale: bool = False,
+    ids: Iterable[str] | None = None,
+    compact: bool = False,
+    workers: int = 1,
 ) -> list[MechanismSample]:
     """The samples of one split view (`samples_<split>.json`), only `ids` when given. The view,
     the store index and every shard read are verified first (parquet, split file, token
     files); StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs
-    only: the mismatch is logged and the store is read anyway."""
-    return store.load_view(Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids)
+    only: the mismatch is logged and the store is read anyway. `compact`: light samples that
+    keep their cells as stored (`store.CompactCells`, ~3x less memory; `store.dense` makes
+    one whole, bit for bit); `workers` > 1 reads the shards in that many forked processes."""
+    return store.load_view(
+        Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids, compact, workers
+    )
 
 
 def sample_ids(path: Path, allow_stale: bool = False) -> list[str]:

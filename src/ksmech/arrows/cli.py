@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write the strategies' views over the store already built, without rebuilding it",
     )
+    s.add_argument(
+        "--stream",
+        action="store_true",
+        help="write the store while building (memory of one shard; shards in step order)",
+    )
     for p in (a, s, c):
         p.add_argument(
             "--workers", type=int, default=1, help="spawned processes (host total <= 15)"
@@ -187,6 +192,7 @@ def cmd_samples(args: argparse.Namespace, path: Path, console: Console) -> int:
         n_workers=args.workers,
         direction=args.direction,
         limit=args.limit,
+        stream=args.stream,
     )
     built = f" (a pilot of {report['n_built']})" if args.limit else ""
     console.print(

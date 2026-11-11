@@ -26,6 +26,7 @@ and sparse encoders all read `KSMech.prepare`, so they read the same switches.
 from __future__ import annotations
 
 import contextlib
+import functools
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -147,12 +148,22 @@ def dropped_columns(cfg, atoms: tuple[str, ...], orbitals: tuple[str, ...]):
 
 
 def select_columns(x, stored, names):
-    """The columns `names` of `x` (last axis in `stored` order), by name."""
+    """The columns `names` of `x` (last axis in `stored` order), by name. On a tensor the index
+    is a cached device tensor: a Python list index is copied to the device on every call, a
+    host sync per batch."""
     stored = tuple(stored)
     missing = [n for n in names if n not in stored]
     if missing:
         raise ValueError(f"input columns {missing} are not stored ({len(stored)} stored)")
-    return x[..., [stored.index(n) for n in names]]
+    index = [stored.index(n) for n in names]
+    if isinstance(x, torch.Tensor):
+        return x.index_select(-1, device_index(tuple(index), x.device))
+    return x[..., index]
+
+
+@functools.lru_cache(maxsize=256)
+def device_index(index: tuple[int, ...], device: torch.device) -> torch.Tensor:
+    return torch.tensor(index, dtype=torch.long, device=device)
 
 
 def _mean_std(x: np.ndarray, keep: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -200,7 +211,16 @@ def to_device(batch: dict, device: torch.device) -> dict:
 
 
 def _t(x, like: torch.Tensor) -> torch.Tensor:
-    return torch.as_tensor(np.asarray(x), dtype=torch.float32, device=like.device)
+    """`x` (statistics, scales: a few numbers) as a float32 tensor on `like`'s device, cached by
+    value: a host array copied to the device every batch is a host sync each time."""
+    values = np.asarray(x, dtype=np.float32)
+    return _device_values(values.tobytes(), values.shape, like.device)
+
+
+@functools.lru_cache(maxsize=256)
+def _device_values(raw: bytes, shape: tuple, device: torch.device) -> torch.Tensor:
+    values = np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
+    return torch.from_numpy(values).to(device)
 
 
 def token_inputs(batch: dict, stats: FeatureStats) -> dict:
@@ -228,6 +248,14 @@ def token_inputs(batch: dict, stats: FeatureStats) -> dict:
 def real_cells(batch: dict) -> torch.Tensor:
     """(B, R, C) the (occupied, virtual) cells of the padded pair block that exist."""
     return (batch["pair_row_pos"] >= 0)[:, :, None] & (batch["pair_col_pos"] >= 0)[:, None, :]
+
+
+def real_cell_index(batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(b, r, s) of the real cells, in `nonzero` order: the collate's `pair_cells` (no host
+    sync), else `nonzero` on the device."""
+    if "pair_cells" in batch:
+        return batch["pair_cells"].unbind(1)
+    return real_cells(batch).nonzero(as_tuple=True)
 
 
 def cell_mask(batch: dict, cells: str = "valid") -> torch.Tensor:
@@ -431,7 +459,7 @@ def pair_channels(batch: dict, z_hat: torch.Tensor, defined: torch.Tensor, n_rbf
     out[:, 1:, 1:, :n_rbf] = rbf(distances(pos), n_rbf, r_max) * same[..., None]
     c = n_rbf
     row, col = batch["pair_row_pos"], batch["pair_col_pos"]
-    b, r, s = ((row[:, :, None] >= 0) & (col[:, None, :] >= 0)).nonzero(as_tuple=True)
+    b, r, s = real_cell_index(batch)
     i, j = row[b, r] + 1, col[b, s] + 1
     vals = torch.cat([z_hat[b, r, s], defined[b, r, s].float()], -1)
     out[b, i, j, c : c + 2 * f] = vals
@@ -452,6 +480,54 @@ def pair_channels(batch: dict, z_hat: torch.Tensor, defined: torch.Tensor, n_rbf
 
 
 @dataclass
+class PairInitParts:
+    """`pair_channels` block by block (`ModelConfig.split_pair_init`): what MLP_P's first layer
+    reads, without the (B, N + 1, N + 1, C) tensor. Every channel of `pair_channels` is here
+    once, on the cells where it can be non-zero; `encoder.split_pair_init` applies the matching
+    columns of the layer's weight to each part and sums them, which is the same linear map."""
+
+    basis: torch.Tensor  # (B, N, N, n_rbf) RBF(distance) x same fragment, the token cells
+    kind: torch.Tensor  # (B, N + 1, N + 1) long: 2 x pair kind (0-4, 5 none) + same fragment
+    atom: torch.Tensor  # (B, A, A, 3) bonded, bond order, capped graph distance on atom slots
+    centre: torch.Tensor  # (B, O, A) centre weight of each orbital on each atom
+    z: torch.Tensor  # (K, 2F) z_hat and its defined mask on the real (occupied, virtual) cells
+    cell: tuple  # (b, i, j) of those cells on the MECH layout (i occupied, j virtual)
+    n_atoms: int
+
+
+def pair_init_parts(batch: dict, z_hat, defined, n_rbf: int, r_max: float) -> PairInitParts:
+    """The parts of `pair_channels` (same values, same cells), for `split_pair_init`."""
+    same = batch["same_fragment"]
+    b_sz, n = same.shape[:2]
+    a = batch["atom_features"].shape[1]
+    pos = torch.cat([batch["atom_positions"], batch["orbital_centroids"]], 1).float()
+    basis = rbf(distances(pos), n_rbf, r_max) * same[..., None]
+    kind = torch.full((b_sz, n + 1, n + 1), 5, dtype=torch.long, device=same.device)
+    atom, orb = batch["is_atom"], batch["is_orbital"]
+    for k, m in enumerate(
+        [atom[:, :, None] & atom[:, None, :], atom[:, :, None] & orb[:, None, :],
+         orb[:, :, None] & atom[:, None, :], orb[:, :, None] & orb[:, None, :]]
+    ):  # fmt: skip
+        kind[:, 1:, 1:] = torch.where(m, k, kind[:, 1:, 1:])
+    kind[:, 0, :] = kind[:, :, 0] = 4
+    kind = 2 * kind
+    kind[:, 1:, 1:] += same.long()
+    order, dist = batch["bond_order"].float(), batch["graph_distance"].float()
+    capped = torch.where(dist < 0, float(GRAPH_CAP), dist.clamp(max=GRAPH_CAP)) / GRAPH_CAP
+    row, col = batch["pair_row_pos"], batch["pair_col_pos"]
+    b, r, s = real_cell_index(batch)
+    return PairInitParts(
+        basis=basis,
+        kind=kind,
+        atom=torch.stack([(order > 0).float(), order, capped], -1),
+        centre=batch["incidence"][:, a:, :].float(),
+        z=torch.cat([z_hat[b, r, s], defined[b, r, s].float()], -1),
+        cell=(b, row[b, r] + 1, col[b, s] + 1),
+        n_atoms=a,
+    )
+
+
+@dataclass
 class PairContext:
     """Per-token lookups on the MECH layout (0 = MECH, then the batch tokens) from which the
     pair inputs of any cell can be built without the N x N grid (`pair_channels_at`)."""
@@ -468,10 +544,10 @@ class PairContext:
 
 def _block_index(pos: torch.Tensor, n: int) -> torch.Tensor:
     """(B, n + 1) the pair-block row (or column) of each MECH-layout token, -1 elsewhere."""
-    out = torch.full((pos.shape[0], n + 1), -1, dtype=torch.long, device=pos.device)
-    b, r = (pos >= 0).nonzero(as_tuple=True)
-    out[b, pos[b, r] + 1] = r
-    return out
+    out = torch.full((pos.shape[0], n + 2), -1, dtype=torch.long, device=pos.device)
+    r = torch.arange(pos.shape[1], device=pos.device).expand_as(pos)
+    out.scatter_(1, torch.where(pos >= 0, pos + 1, n + 1), r)  # padding into a spare column
+    return out[:, : n + 1]
 
 
 def pair_context(batch: dict, z_hat: torch.Tensor, defined: torch.Tensor) -> PairContext:

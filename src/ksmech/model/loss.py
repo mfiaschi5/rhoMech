@@ -16,6 +16,7 @@ import torch
 from torch.nn import functional as F
 
 from ksmech.model.decoder import FORM, EditDecoder
+from ksmech.model.inputs import device_index
 
 
 def _upper(n: int, device) -> torch.Tensor:
@@ -34,7 +35,10 @@ def anchor_log_probs(logits: torch.Tensor) -> torch.Tensor:
 
 def admissible_rows(batch: dict) -> torch.Tensor:
     """(K, 5) rows (sample, variant, i, j, sign) with i < j: every admissible anchor of every
-    real variant of the label class."""
+    real variant of the label class; the collate's `anchor_rows` when the batch has them (the
+    same rows, without a host sync)."""
+    if "anchor_rows" in batch:
+        return batch["anchor_rows"]
     n = batch["r_anchors"].shape[2]
     keep = batch["r_anchors"] & _upper(n, batch["r_anchors"].device)[None, None, :, :, None]
     keep &= batch["variant_mask"][:, :, None, None, None]
@@ -47,35 +51,45 @@ def _segment_logsumexp(x: torch.Tensor, seg: torch.Tensor, n: int) -> torch.Tens
     return top + torch.log(total)
 
 
-def atom_classes(r_atoms: torch.Tensor, values: tuple[int, ...], real: torch.Tensor):
+def atom_classes(r_atoms: torch.Tensor, values: tuple[int, ...], real: torch.Tensor, present=None):
     """Class index of every atom entry in the head's alphabet `values` (the decoder's
     `atom_values`). A real entry outside it raises: an odd entry of a one-electron step is not
-    a class of the 3-class head, and mapping it to one would train on the wrong target."""
-    table = torch.tensor(values, dtype=torch.long, device=r_atoms.device)
+    a class of the 3-class head, and mapping it to one would train on the wrong target.
+    `present`: the values of those real entries, known on the host (the collate's
+    `anchor_atom_values`), checked without a host sync."""
+    table = device_index(tuple(values), r_atoms.device)
     hit = r_atoms.long()[..., None] == table
-    bad = real & ~hit.any(-1)
-    if bad.any():
-        odd = sorted({int(x) for x in r_atoms[bad].tolist()})
+    if present is not None:
+        odd = sorted(set(present) - set(values))
+    else:
+        bad = real & ~hit.any(-1)
+        odd = sorted({int(x) for x in r_atoms[bad].tolist()}) if bad.any() else []
+    if odd:
         raise ValueError(f"atom entries {odd} are outside the head's alphabet {values}")
     return torch.where(hit.any(-1), hit.long().argmax(-1), values.index(0))
 
 
-def _entry_sums(pair_lp, atom_lp, r_pairs, r_atoms, real, i, j, values) -> torch.Tensor:
+def _entry_sums(
+    pair_lp, atom_lp, r_pairs, r_atoms, real, i, j, values, present=None
+) -> torch.Tensor:
     """Sum of the target classes' log-probabilities over the real entries, the anchor (i, j)
     left out. pair_lp (K, A, A, 3), atom_lp (K, A, len(values)); targets (K, A, A) and (K, A);
-    `values` the atom classes' values."""
+    `values` the atom classes' values; `present` as `atom_classes`."""
     n = r_pairs.shape[1]
     lp = pair_lp.gather(-1, (r_pairs.long() + 1)[..., None])[..., 0]
     m = _upper(n, lp.device)[None] & real[:, :, None] & real[:, None, :]
-    m[torch.arange(len(i)), i, j] = False
-    la = atom_lp.gather(-1, atom_classes(r_atoms, values, real)[..., None])
+    m[torch.arange(len(i), device=lp.device), i, j] = False
+    la = atom_lp.gather(-1, atom_classes(r_atoms, values, real, present)[..., None])
     return torch.where(m, lp, 0.0).sum((1, 2)) + torch.where(real, la[..., 0], 0.0).sum(1)
 
 
-def _anchor_nll(lp_anchor: torch.Tensor, b, i, j, sign) -> torch.Tensor:
+def _anchor_nll(lp_anchor: torch.Tensor, b, i, j, sign, unique=None) -> torch.Tensor:
     """(B,) -log P(any admissible anchor). An anchor that several variants share is one
-    choice of the pointer, so it counts once; the loss keeps one path per variant."""
-    ub, ui, uj, us = torch.unique(torch.stack([b, i, j, sign], 1), dim=0).unbind(1)
+    choice of the pointer, so it counts once; the loss keeps one path per variant. `unique`:
+    the distinct (b, i, j, sign) rows when known (the collate's `anchor_unique`)."""
+    if unique is None:
+        unique = torch.unique(torch.stack([b, i, j, sign], 1), dim=0)
+    ub, ui, uj, us = unique.unbind(1)
     return -_segment_logsumexp(lp_anchor[ub, ui, uj, us], ub, lp_anchor.shape[0])
 
 
@@ -103,7 +117,10 @@ def step_loss(
     lp_anchor = anchor_log_probs(dec.anchor_logits(h, p, y, batch))
     rows = admissible_rows(batch)
     b, v, i, j, sign = rows.unbind(1)
-    if torch.unique(b).numel() != lp_anchor.shape[0]:
+    missing = batch.get("anchors_missing")
+    if missing is None:
+        missing = lp_anchor.shape[0] - torch.unique(b).numel()
+    if missing:
         raise ValueError("a sample of the batch has no admissible anchor")
     pair, atom = dec.entry_logits(h, p, batch, torch.stack([b, i, j, sign], 1))
     sums = _entry_sums(
@@ -115,10 +132,11 @@ def step_loss(
         i,
         j,
         dec.atom_values,
+        batch.get("anchor_atom_values"),
     )
     terms = lp_anchor[b, i, j, sign] + sums
     per_sample = -_segment_logsumexp(terms, b, lp_anchor.shape[0])
-    anchor_nll = _anchor_nll(lp_anchor, b, i, j, sign)
+    anchor_nll = _anchor_nll(lp_anchor, b, i, j, sign, batch.get("anchor_unique"))
     stop = dec.stop_logits(h)
     bce = stop_bce(stop, batch) if stop_weight else None
     if bce is not None:
@@ -167,7 +185,7 @@ def greedy_edit(dec: EditDecoder, h, p, lp_anchor: torch.Tensor, batch: dict):
     r_pairs = r_pairs + r_pairs.transpose(1, 2)
     real = _real_atoms(batch)
     r_pairs = r_pairs * (real[:, :, None] & real[:, None, :])
-    values = torch.tensor(dec.atom_values, device=atom.device)
+    values = device_index(tuple(dec.atom_values), atom.device)
     return r_pairs, values[atom.argmax(-1)] * real
 
 

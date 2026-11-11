@@ -95,10 +95,93 @@ def pack(sample: MechanismSample) -> tuple[dict[str, np.ndarray], dict[str, Any]
     return arrays, meta
 
 
+PACKED_CELLS = (*CELL_ARRAYS, "pair_valid", "pair_flags")  # the packed arrays of the cells
+
+
+class CompactCells:
+    """A sample's cell arrays as the shard stores them (float16 byte planes, bit-packed flags
+    and defined masks: ~32 B per cell instead of ~102 dense), expanded by `dense` with the very
+    code `unpack` runs, so a sample materialized later is bit for bit the one `unpack` returns.
+    The trainer keeps these in memory (`load_view(compact=True)`) and expands one batch at a
+    time in its DataLoader workers."""
+
+    __slots__ = ("arrays", "n_feat", "pair_features")
+
+    def __init__(self, arrays: dict[str, np.ndarray], n_feat: int, pair_features):
+        self.arrays = {k: arrays[k] for k in PACKED_CELLS}
+        self.n_feat, self.pair_features = int(n_feat), tuple(pair_features)
+
+    def dense(self) -> dict[str, np.ndarray]:
+        """pair_z, pair_defined, pair_gap_sign and pair_valid, dense."""
+        arrays, n_feat = self.arrays, self.n_feat
+        shape = arrays["pair_valid"].shape
+        binary = _binary_columns(self.pair_features)
+        rest = [k for k in range(n_feat) if k not in binary]
+        z = np.zeros((shape[0] * shape[1], n_feat), dtype=np.float32)
+        z[:, rest] = _from_byte_planes(arrays["pair_z"]).astype(np.float32)
+        z[:, binary] = np.unpackbits(arrays["pair_flags"], axis=-1, count=len(binary))
+        bits = np.unpackbits(arrays["pair_defined"], axis=-1, count=n_feat)
+        return {
+            "pair_z": z.reshape(*shape, n_feat),
+            "pair_defined": bits.astype(bool).reshape(*shape, n_feat),
+            "pair_gap_sign": arrays["pair_gap_sign"].reshape(shape),
+            "pair_valid": arrays["pair_valid"].astype(bool),
+        }
+
+    def nbytes(self) -> int:
+        return sum(a.nbytes for a in self.arrays.values())
+
+
+_ABSENT = object()
+
+
+def _no_cells(n_feat: int) -> dict[str, np.ndarray]:
+    """Zero-size cell arrays: a light sample's (a reader that needs the cells fails loudly on
+    their shape instead of reading wrong values)."""
+    return {
+        "pair_z": np.zeros((0, 0, n_feat), dtype=np.float32),
+        "pair_defined": np.zeros((0, 0, n_feat), dtype=bool),
+        "pair_gap_sign": np.zeros((0, 0), dtype=np.int8),
+        "pair_valid": np.zeros((0, 0), dtype=bool),
+    }
+
+
+def light(sample: MechanismSample, cells: CompactCells | None = None) -> MechanismSample:
+    """The sample without its cell arrays (what the store reports and the splits read), with
+    `cells` attached for `dense` when given."""
+    from dataclasses import replace
+
+    out = replace(sample, **_no_cells(sample.pair_z.shape[-1] if cells is None else cells.n_feat))
+    out._cells = cells
+    return out
+
+
+def is_light(sample: MechanismSample) -> bool:
+    """Whether the sample was stripped of its cells (`light`), compact cells or none."""
+    return getattr(sample, "_cells", _ABSENT) is not _ABSENT
+
+
+def dense(sample: MechanismSample) -> MechanismSample:
+    """A light sample with compact cells made whole again (`CompactCells.dense`); any other
+    sample as it is. A light sample without cells is refused."""
+    from dataclasses import replace
+
+    cells = getattr(sample, "_cells", _ABSENT)
+    if cells is _ABSENT:
+        return sample
+    if cells is None:
+        raise ValueError(f"{sample.step_id}: a light sample without its cells")
+    return replace(sample, **cells.dense())
+
+
 def unpack(
-    arrays: dict[str, np.ndarray], meta: dict[str, Any], cls: type[MechanismSample]
+    arrays: dict[str, np.ndarray],
+    meta: dict[str, Any],
+    cls: type[MechanismSample],
+    compact: bool = False,
 ) -> MechanismSample:
-    """The dense MechanismSample of `pack`'s output (cls: MechanismSample)."""
+    """The dense MechanismSample of `pack`'s output (cls: MechanismSample); with `compact` a
+    light one carrying its `CompactCells` (`dense` expands it, bit for bit the same)."""
     from ksmech.arrows.align import ArrowLabel
     from ksmech.arrows.delta_be import EditLabel
     from ksmech.arrows.drawings import Drawing
@@ -108,20 +191,9 @@ def unpack(
     for name in ("pair_features", "atom_columns", "orbital_columns"):
         if name in meta:
             meta[name] = tuple(meta[name])
-    shape = arrays["pair_valid"].shape
-    binary = _binary_columns(meta["pair_features"])
-    rest = [k for k in range(n_feat) if k not in binary]
-    z = np.zeros((shape[0] * shape[1], n_feat), dtype=np.float32)
-    z[:, rest] = _from_byte_planes(arrays["pair_z"]).astype(np.float32)
-    z[:, binary] = np.unpackbits(arrays["pair_flags"], axis=-1, count=len(binary))
-    bits = np.unpackbits(arrays["pair_defined"], axis=-1, count=n_feat)
-    dense = {
-        "pair_z": z.reshape(*shape, n_feat),
-        "pair_defined": bits.astype(bool).reshape(*shape, n_feat),
-        "pair_gap_sign": arrays["pair_gap_sign"].reshape(shape),
-        "pair_valid": arrays["pair_valid"].astype(bool),
-    }
-    skip = (*CELL_ARRAYS, "pair_valid", "pair_flags", *DRAWING_ARRAYS.values())
+    cells = CompactCells(arrays, n_feat, meta["pair_features"])
+    dense_cells = _no_cells(n_feat) if compact else cells.dense()
+    skip = (*PACKED_CELLS, *DRAWING_ARRAYS.values())
     out = {k: v for k, v in arrays.items() if k not in skip}
     n_drawn = len(arrays["drawing_orders"])
     for name in ("drawing_nonbonding", "drawing_unpaired"):  # a v18 shard's drawings: no N, u
@@ -138,7 +210,10 @@ def unpack(
     meta["labels_all"] = [ArrowLabel.from_dict(x) for x in meta.get("labels_all", [])]
     if meta.get("edit_label") is not None:
         meta["edit_label"] = EditLabel.from_dict(meta["edit_label"])
-    return cls(**out, **dense, **meta)
+    sample = cls(**out, **dense_cells, **meta)
+    if compact:
+        sample._cells = cells
+    return sample
 
 
 def _pack_drawings(sample: MechanismSample) -> dict[str, np.ndarray]:
@@ -180,6 +255,50 @@ def _write_shard(path: Path, samples: list, inputs: dict, version: int, extra: d
     return header.content_sha256
 
 
+class StoreWriter:
+    """The store written as samples arrive (the streaming build): a shard every `SHARD_SIZE`
+    samples, in the order they are added, then the index at `close`. Only one shard's samples
+    are held. `write_store` is this writer over the samples sorted by step id."""
+
+    def __init__(self, view_dir: Path, parquet: Path, version: int, config: dict | None = None):
+        self.root, self.version = store_dir(view_dir), version
+        self.extra, self.inputs = dict(config or {}), prov.file_input(parquet)
+        self.root.mkdir(parents=True, exist_ok=True)
+        for old in self.root.glob("shard_*.npz"):
+            old.unlink()  # a rebuild replaces the whole store; the index names the shards it wrote
+        self.shards: dict[str, list[str]] = {}
+        self.pending: list = []
+
+    def add(self, sample: MechanismSample) -> None:
+        self.pending.append(sample)
+        if len(self.pending) == SHARD_SIZE:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self.pending:
+            return
+        name = f"shard_{len(self.shards):05d}.npz"
+        _write_shard(self.root / name, self.pending, self.inputs, self.version, self.extra)
+        self.shards[name] = [s.step_id for s in self.pending]
+        self.pending = []
+
+    def close(self, skipped: dict) -> Path:
+        """Write the last shard and the index; returns the index path."""
+        self._flush()
+        inputs = {}
+        for name in self.shards:
+            inputs |= prov.file_input(self.root / name)
+        body = {"shards": self.shards, "skipped": {i: str(r) for i, r in sorted(skipped.items())}}
+        header = prov.stamp(
+            "sample_index",
+            self.version,
+            inputs,
+            {"sample_version": self.version, "shard_size": SHARD_SIZE} | self.extra,
+            prov.sha256_text(json.dumps(body, sort_keys=True)),
+        )
+        return prov.write_json(self.root / "index.json", body, header)
+
+
 def write_store(
     view_dir: Path,
     samples: dict[str, MechanismSample],
@@ -191,31 +310,10 @@ def write_store(
     """Write every sample once (sorted by step id) into shards and the index. Returns the
     index path. `config` joins the provenance config of every shard and of the index (the
     backward samples' direction, `arrows.backward.direction_config`)."""
-    extra = dict(config or {})
-    root = store_dir(view_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    for old in root.glob("shard_*.npz"):
-        old.unlink()  # a rebuild replaces the whole store; the index names the shards it wrote
-    ids = sorted(samples)
-    shards: dict[str, list[str]] = {}
-    for k in range(0, len(ids), SHARD_SIZE):
-        name = f"shard_{k // SHARD_SIZE:05d}.npz"
-        chunk = ids[k : k + SHARD_SIZE]
-        shard = [samples[i] for i in chunk]
-        _write_shard(root / name, shard, prov.file_input(parquet), version, extra)
-        shards[name] = chunk
-    inputs = {}
-    for name in shards:
-        inputs |= prov.file_input(root / name)
-    body = {"shards": shards, "skipped": {i: str(r) for i, r in sorted(skipped.items())}}
-    header = prov.stamp(
-        "sample_index",
-        version,
-        inputs,
-        {"sample_version": version, "shard_size": SHARD_SIZE} | extra,
-        prov.sha256_text(json.dumps(body, sort_keys=True)),
-    )
-    return prov.write_json(root / "index.json", body, header)
+    writer = StoreWriter(view_dir, parquet, version, config)
+    for i in sorted(samples):
+        writer.add(samples[i])
+    return writer.close(skipped)
 
 
 def write_view(
@@ -238,7 +336,9 @@ def write_view(
     return prov.write_json(path, body, header)
 
 
-def _load_shard(path: Path, members: list[int], cls, version: int, allow_stale: bool):
+def _load_shard(
+    path: Path, members: list[int], cls, version: int, allow_stale: bool, compact: bool = False
+):
     prov.verify_clean(path, "sample_shard", version, allow_stale=allow_stale)
     with np.load(path, allow_pickle=False) as z:
         metas = json.loads(str(z["meta"]))
@@ -249,8 +349,12 @@ def _load_shard(path: Path, members: list[int], cls, version: int, allow_stale: 
         out = []
         for i in members:
             arrays = {n.split("/", 1)[1]: z[n] for n in names[str(i)]}
-            out.append(unpack(arrays, metas[i], cls))
+            out.append(unpack(arrays, metas[i], cls, compact))
     return out
+
+
+def _load_task(task):
+    return _load_shard(*task)
 
 
 def _view_members(
@@ -288,31 +392,58 @@ def iter_view(
     version: int,
     allow_stale: bool = False,
     ids: Iterable[str] | None = None,
+    compact: bool = False,
+    workers: int = 1,
 ) -> Iterator[MechanismSample]:
     """The samples of one split view (only `ids` when given), one shard at a time in shard
     order, so a caller that reduces each sample never holds the whole view. Verifies the view,
-    the index and every shard read: StaleArtifact names what changed."""
+    the index and every shard read: StaleArtifact names what changed. `compact`: light samples
+    with their `CompactCells` (`dense`); `workers` > 1 reads and verifies the shards in that
+    many forked processes, the order kept."""
     _, by_shard = _view_members(path, version, allow_stale, ids)
-    yield from _iter_shards(path, by_shard, cls, version, allow_stale)
+    yield from _iter_shards(path, by_shard, cls, version, allow_stale, compact, workers)
 
 
-def _iter_shards(path: Path, by_shard: dict[str, list[int]], cls, version: int, allow_stale):
+def _iter_shards(
+    path: Path, by_shard: dict, cls, version: int, allow_stale, compact=False, workers: int = 1
+):
     root = store_dir(Path(path).parent)
-    for name, members in sorted(by_shard.items()):
-        yield from _load_shard(root / name, members, cls, version, allow_stale)
+    tasks = [
+        (root / name, members, cls, version, allow_stale, compact)
+        for name, members in sorted(by_shard.items())
+    ]
+    if workers <= 1 or len(tasks) <= 1:
+        for task in tasks:
+            yield from _load_task(task)
+        return
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    ctx = multiprocessing.get_context("fork")  # numpy only in the children; no CUDA call
+    with ProcessPoolExecutor(min(workers, len(tasks)), mp_context=ctx) as pool:
+        for shard in pool.map(_load_task, tasks):
+            yield from shard
 
 
 def load_store(
-    view_dir: Path, cls: type[MechanismSample], version: int
+    view_dir: Path, cls: type[MechanismSample], version: int, cells: str = "dense"
 ) -> tuple[dict[str, MechanismSample], dict[str, str], Path]:
     """(every stored sample by step id, the skipped steps' reason codes, the index path),
-    verified like a view: the index and every shard."""
+    verified like a view: the index and every shard. `cells`: 'dense' (whole samples),
+    'compact' (light, with their `CompactCells`) or 'none' (light, no cells: the reports and the
+    splits; `is_light`)."""
+    if cells not in ("dense", "compact", "none"):
+        raise ValueError(f"cells {cells!r}: dense, compact or none")
     index_path = store_dir(view_dir) / "index.json"
     prov.verify_clean(index_path, "sample_index", version)
     body = json.loads(index_path.read_text())
     root, samples = store_dir(view_dir), {}
     for name, ids in sorted(body["shards"].items()):
-        for s in _load_shard(root / name, list(range(len(ids))), cls, version, False):
+        for s in _load_shard(
+            root / name, list(range(len(ids))), cls, version, False, cells != "dense"
+        ):
+            if cells == "none":
+                s._cells = None
             samples[s.step_id] = s
     return samples, body["skipped"], index_path
 
@@ -323,9 +454,12 @@ def load_view(
     version: int,
     allow_stale: bool = False,
     ids: Iterable[str] | None = None,
+    compact: bool = False,
+    workers: int = 1,
 ) -> list[MechanismSample]:
     """The samples of one split view (only `ids` when given), in its id order (skipped steps
-    have none). Verifies as `iter_view`."""
+    have none). Verifies as `iter_view`; `compact` and `workers` as there."""
     wanted, by_shard = _view_members(path, version, allow_stale, ids)
-    loaded = {s.step_id: s for s in _iter_shards(path, by_shard, cls, version, allow_stale)}
+    shards = _iter_shards(path, by_shard, cls, version, allow_stale, compact, workers)
+    loaded = {s.step_id: s for s in shards}
     return [loaded[sid] for sid in wanted]

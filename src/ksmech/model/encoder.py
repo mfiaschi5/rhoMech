@@ -14,11 +14,14 @@ from torch.utils.checkpoint import checkpoint
 from ksmech.model.config import ModelConfig
 from ksmech.model.inputs import (
     CHARGE_MAX,
+    KINDS,
     MAX_Z,
     SPIN_MAX,
+    PairInitParts,
     frozen,
     pair_channel_count,
     pair_channels,
+    pair_init_parts,
 )
 
 
@@ -87,33 +90,81 @@ class TokenEmbedding(nn.Module):
 class EncoderLayer(nn.Module):
     """Pre-norm attention with the pair bias w_h^T p_ij and the padding mask, a GELU
     feed-forward block of width 4d, then p_ij <- p_ij + MLP_U([p_ij, h_i, h_j]) (its first
-    linear layer split over the three inputs, which is the same map)."""
+    linear layer split over the three inputs, which is the same map). Without `update`
+    (`ModelConfig.pair_update_every`) the layer reads p for its bias and leaves it as it is.
+    `half_pair_norm` runs the LayerNorm of p in the autocast dtype (`_norm_p`)."""
 
-    def __init__(self, cfg: ModelConfig):
+    def __init__(self, cfg: ModelConfig, update: bool = True):
         super().__init__()
         d, dp, self.heads = cfg.d, cfg.d_pair, cfg.heads
+        self.half_norm, self.update = bool(getattr(cfg, "half_pair_norm", False)), update
         self.norm_h, self.norm_p, self.norm_f = nn.LayerNorm(d), nn.LayerNorm(dp), nn.LayerNorm(d)
-        self.norm_u = nn.LayerNorm(d)
         self.qkv = nn.Linear(d, 3 * d)
         self.bias = nn.Linear(dp, cfg.heads)
         self.out = nn.Linear(d, d)
         self.ffn = mlp(d, 4 * d, d)
-        self.u_p, self.u_i, self.u_j = nn.Linear(dp, dp), nn.Linear(d, dp), nn.Linear(d, dp)
-        self.u_out = nn.Linear(dp, dp)
+        if update:
+            self.norm_u = nn.LayerNorm(d)
+            self.u_p, self.u_i, self.u_j = nn.Linear(dp, dp), nn.Linear(d, dp), nn.Linear(d, dp)
+            self.u_out = nn.Linear(dp, dp)
+
+    def _norm_p(self, p: torch.Tensor) -> torch.Tensor:
+        """LayerNorm of the pair track. Autocast runs layer_norm in float32 and returns float32,
+        so the largest tensor of the model is cast up and back down in every layer; with
+        `half_norm` it is normalized in the autocast dtype instead (the kernel accumulates in
+        float32 all the same). Outside autocast, as before."""
+        kind = p.device.type
+        if not (self.half_norm and torch.is_autocast_enabled(kind)):
+            return self.norm_p(p)
+        dtype = torch.get_autocast_dtype(kind)
+        norm = self.norm_p
+        with torch.autocast(kind, enabled=False):
+            weight, bias = norm.weight.to(dtype), norm.bias.to(dtype)
+            return nn.functional.layer_norm(
+                p.to(dtype), norm.normalized_shape, weight, bias, norm.eps
+            )
 
     def forward(self, h: torch.Tensor, p: torch.Tensor, key_mask: torch.Tensor):
         b, n, d = h.shape
         q, k, v = self.qkv(self.norm_h(h)).view(b, n, 3, self.heads, -1).permute(2, 0, 3, 1, 4)
-        pn = self.norm_p(p)
+        pn = self._norm_p(p)
         logits = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
         logits = logits.float() + self.bias(pn).permute(0, 3, 1, 2).float()
         logits = logits.masked_fill(~key_mask[:, None, None, :], float("-inf"))
         attn = torch.softmax(logits, -1).to(v.dtype)
         h = h + self.out((attn @ v).transpose(1, 2).reshape(b, n, d))
         h = h + self.ffn(self.norm_f(h))
+        if not self.update:
+            return h, p
         hn = self.norm_u(h)
         u = self.u_p(pn) + self.u_i(hn)[:, :, None, :] + self.u_j(hn)[:, None, :, :]
         return h, p + self.u_out(nn.functional.gelu(u))
+
+
+def split_pair_init(lin: nn.Linear, parts: PairInitParts, n_rbf: int) -> torch.Tensor:
+    """`lin(pair_channels(...))` from `inputs.pair_init_parts`: each part times its columns of
+    the weight, summed on the cells where the part is non-zero (`ModelConfig.split_pair_init`).
+    The same linear map; only the summation order, hence the rounding, differs."""
+    w = lin.weight
+    f2 = parts.z.shape[-1]
+    c = n_rbf + f2 + 1  # same fragment, then bonded, order, distance, centre weight, kinds
+    inner = nn.functional.linear(parts.basis, w[:, :n_rbf])  # (B, N, N, d_p), autocast dtype
+    dt = inner.dtype
+    kinds = torch.cat([w[:, c + 5 : c + 5 + KINDS].T, torch.zeros_like(w[:, :1].T)])  # (6, d_p)
+    table = (kinds[:, None, :] + torch.stack([0 * w[:, c], w[:, c]])[None]).reshape(-1, w.shape[0])
+    pre = (table.to(dt)[parts.kind] + lin.bias.to(dt)).contiguous()
+    pre[:, 1:, 1:] += inner
+    a = parts.n_atoms
+    pre[:, 1 : a + 1, 1 : a + 1] += nn.functional.linear(parts.atom, w[:, c + 1 : c + 4]).to(dt)
+    w_c = w[:, c + 4].to(dt)
+    pre[:, a + 1 :, 1 : a + 1] += parts.centre.to(dt)[..., None] * w_c
+    pre[:, 1 : a + 1, a + 1 :] += parts.centre.transpose(1, 2).to(dt)[..., None] * w_c
+    zc = nn.functional.linear(parts.z, w[:, n_rbf : n_rbf + f2]).to(dt)
+    orient = w[:, n_rbf + f2].to(dt)
+    b, i, j = parts.cell
+    pre.index_put_((b, i, j), zc + orient, accumulate=True)
+    pre.index_put_((b, j, i), zc - orient, accumulate=True)
+    return pre
 
 
 def key_mask(batch: dict) -> torch.Tensor:
@@ -135,8 +186,8 @@ class Recompute:
 
 class DenseEncoder(nn.Module):
     """Spec v9: the pair track (B, N + 1, N + 1, d_p) from MLP_P, a pair bias in every head,
-    the pair update in every layer. The decoder reads the symmetrized final pair vectors of
-    the atom pairs."""
+    the pair update in every layer (every `pair_update_every`-th with that ablation). The
+    decoder reads the symmetrized final pair vectors of the atom pairs."""
 
     def __init__(self, cfg: ModelConfig, n_atom_x: int, n_orbital_x: int, n_features: int):
         super().__init__()
@@ -144,16 +195,27 @@ class DenseEncoder(nn.Module):
         self.embed = TokenEmbedding(cfg, n_atom_x, n_orbital_x)
         channels = pair_channel_count(cfg.rbf, n_features)
         self.pair_init = mlp(channels, cfg.d_pair, cfg.d_pair)
-        self.layers = nn.ModuleList(EncoderLayer(cfg) for _ in range(cfg.layers))
+        every = int(getattr(cfg, "pair_update_every", 1))
+        if every < 1:
+            raise ValueError(f"pair_update_every {every}: at least 1")
+        self.layers = nn.ModuleList(
+            EncoderLayer(cfg, update=(k + 1) % every == 0) for k in range(cfg.layers)
+        )
+
+    def _init_split(self, parts: PairInitParts) -> torch.Tensor:
+        pre = split_pair_init(self.pair_init[0], parts, self.cfg.rbf)
+        return self.pair_init[2](self.pair_init[1](pre))
 
     def forward(self, batch: dict, inp: dict, z_hat, defined, dense_warmup: bool = False):
         """(h, p_atoms, aux): token vectors (B, N + 1, d), MECH at 0; symmetrized atom-pair
         vectors (B, A, A, d_p); no auxiliary loss."""
         run = Recompute(self.cfg.checkpoint and self.training)
+        split = getattr(self.cfg, "split_pair_init", False)
         with frozen(z_hat.device.type):
-            channels = pair_channels(batch, z_hat, defined, self.cfg.rbf, self.cfg.rbf_max)
+            make = pair_init_parts if split else pair_channels
+            channels = make(batch, z_hat, defined, self.cfg.rbf, self.cfg.rbf_max)
         h = self.embed(batch, inp)
-        p = run(self.pair_init, channels)
+        p = run(self._init_split, channels) if split else run(self.pair_init, channels)
         keys = key_mask(batch)
         for layer in self.layers:
             h, p = run(layer, h, p, keys)

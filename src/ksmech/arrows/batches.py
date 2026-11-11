@@ -227,6 +227,32 @@ def _edit_tensors(batch: list[MechanismSample], n_atoms: int) -> dict:
     return out
 
 
+def _host_indices(out: dict) -> dict:
+    """The data-dependent index sets the model and the loss would otherwise take with
+    `nonzero` / `unique` on the device (each a host sync), computed here on the CPU tensors by
+    the same expressions, so they are the same rows in the same order: the real (occupied,
+    virtual) cells (`pair_cells`, (K, 3) b r s), the admissible anchor rows of every real
+    variant (`anchor_rows`, (K, 5) b v i j sign, i < j), their distinct (b, i, j, sign)
+    (`anchor_unique`, sorted as `torch.unique`), the samples without an anchor
+    (`anchors_missing`, an int) and the atom entries the loss reads (`anchor_atom_values`)."""
+    cells = (out["pair_row_pos"] >= 0)[:, :, None] & (out["pair_col_pos"] >= 0)[:, None, :]
+    n = out["r_anchors"].shape[2]
+    upper = torch.ones(n, n, dtype=torch.bool).triu(1)
+    keep = out["r_anchors"] & upper[None, None, :, :, None]
+    keep &= out["variant_mask"][:, :, None, None, None]
+    rows = keep.nonzero()
+    b, v, i, j, sign = rows.unbind(1)
+    real = out["is_atom"][:, :n][b]
+    values = out["r_atoms"][b, v][real]
+    return {
+        "pair_cells": cells.nonzero(),
+        "anchor_rows": rows,
+        "anchor_unique": torch.unique(torch.stack([b, i, j, sign], 1), dim=0),
+        "anchors_missing": len(out["variant_mask"]) - int(torch.unique(b).numel()),
+        "anchor_atom_values": tuple(sorted({int(x) for x in values.tolist()})),
+    }
+
+
 def collate_samples(batch: list[MechanismSample]) -> dict:
     """Pad a batch. Token positions: atoms at [0, A), orbitals at [A, A + O), where A and O
     are the largest atom and orbital counts in the batch; sites index atoms directly. The
@@ -256,6 +282,7 @@ def collate_samples(batch: list[MechanismSample]) -> dict:
     out.update(_pair_tensors(batch, n_atoms))
     out.update(_reactant_tensors(batch, n_atoms))
     out.update(_edit_tensors(batch, n_atoms))
+    out.update(_host_indices(out))
     return out
 
 

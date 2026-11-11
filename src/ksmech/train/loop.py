@@ -102,6 +102,9 @@ class TrainConfig:
     drop_domain_class: tuple[str, ...] = ()  # training samples of these classes left out (P4)
     val_cohort: str = ""  # validation restricted to a cohort, per source: pmechdb=closed_base
     direction: str = "forward"  # backward: the previous-step samples (`arrows.backward`)
+    compile: bool = False  # torch.compile every encoder layer (dynamic shapes; docs/model_impl.md)
+    compact_samples: bool = True  # samples kept with their cells as stored, expanded per batch
+    load_workers: int = 1  # forked processes that read and verify the store's shards
 
 
 # PMechDB and rmechdb: isolated steps, no stop labels; the minimum over a joint run's sources is
@@ -294,7 +297,8 @@ def load_source_part(
     split = f"{split_of(cfg, source)}_{part}"
     path = samples_path(source, split, processed_dir, cfg.direction)
     require_direction(path, cfg.direction)
-    samples = load_samples(path, ids=_part_ids(cfg, source, part, path, processed_dir))
+    ids = _part_ids(cfg, source, part, path, processed_dir)
+    samples = load_samples(path, ids=ids, compact=cfg.compact_samples, workers=cfg.load_workers)
     if cfg.limit:
         samples = samples[: cfg.limit]
     skipped, total = {}, len(samples)
@@ -336,7 +340,7 @@ def make_loader(
     """Batches by the cell budget; with `draw` (and `shuffle`) each sample in a random one of
     its resonance drawings every epoch."""
     draws = [s.n_drawings for s in samples] if draw else None
-    sizes = [_size(s) for s in samples]
+    sizes = [(s.n_atoms, s.n_orbitals) for s in samples]  # the collate pads each apart
     sampler = CellBudgetSampler(
         sizes, cfg.cell_budget, cfg.max_batch, shuffle, cfg.seed, drawings=draws
     )
@@ -348,6 +352,16 @@ def make_loader(
         multiprocessing_context="fork" if cfg.workers else None,
         persistent_workers=bool(cfg.workers),
     )
+
+
+def compile_encoder(model: KSMech) -> None:
+    """torch.compile every encoder layer in place (`nn.Module.compile`: the state dict keeps its
+    keys, so checkpoints are unchanged), with dynamic shapes, since every batch has its own N.
+    Train and eval, with and without the sparse warm-up, each compile a variant: dynamo's limit
+    is raised to 32 so none falls back to eager."""
+    torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 32)
+    for layer in model.encoder.layers:
+        layer.compile(dynamic=True)
 
 
 @torch.no_grad()
@@ -402,9 +416,86 @@ def evaluate_sources(model: KSMech, loaders: dict, *args) -> dict:
     return out
 
 
+class StepTrack:
+    """The non-finite batches of a fused-optimizer run, counted on the device and read once
+    per logging interval (`check`), not once per step: a batch whose loss or gradient norm is
+    not finite takes no optimizer step (the fused AdamW skips it on the device, `found_inf`),
+    `MAX_NONFINITE_IN_A_ROW` in a row stop the run, and the fp16 loss scale is checked against
+    `MIN_LOSS_SCALE` at the same time. The losses are summed there too."""
+
+    def __init__(self, device: torch.device):
+        def zero():
+            return torch.zeros((), device=device)
+
+        self.loss, self.n, self.bad, self.row, self.max_row = (zero() for _ in range(5))
+        self.window_loss, self.window_n = zero(), zero()
+        self.recent: list = []  # (flag, step ids, step) since the last check
+
+    def add(self, loss: torch.Tensor, norm, ids, step: int) -> torch.Tensor:
+        """Count one batch; returns its found_inf flag (a 0-d float) for the optimizer. A batch is
+        bad when its loss is not finite, or (`norm` given: no fp16 scaler, whose own overflow
+        check skips those steps and backs off) its gradient norm."""
+        loss = loss.detach().float()
+        bad = ~torch.isfinite(loss)
+        if norm is not None:
+            bad = bad | ~torch.isfinite(norm)
+        f = bad.float()
+        good_loss = torch.where(bad, 0.0, loss)
+        self.loss += good_loss
+        self.window_loss += good_loss
+        self.n += 1 - f
+        self.window_n += 1 - f
+        self.bad += f
+        self.row = (self.row + 1) * f
+        self.max_row = torch.maximum(self.max_row, self.row)
+        self.recent.append((bad, ids, step))
+        return f  # shape (), as the scaler's found_inf
+
+    def check(self, scaler, step: int) -> float:
+        """One host sync: log the skipped batches since the last check, raise `NonFiniteError`
+        on a run of them or a vanished loss scale; returns the window's mean finite loss."""
+        if self.recent:
+            flags = torch.stack([b for b, _, _ in self.recent]).tolist()
+            for flag, (_, ids, at) in zip(flags, self.recent, strict=True):
+                if flag:
+                    log.warning("step %d: non-finite loss or gradient, batch skipped: %s",
+                                at, " ".join(ids))  # fmt: skip
+        self.recent = []
+        if self.max_row.item() >= MAX_NONFINITE_IN_A_ROW:
+            raise NonFiniteError(f"step {step}: {MAX_NONFINITE_IN_A_ROW} non-finite training "
+                                 "batches in a row")  # fmt: skip
+        if scaler.is_enabled() and scaler.get_scale() < MIN_LOSS_SCALE:
+            raise NonFiniteError(f"step {step}: fp16 loss scale {scaler.get_scale():g}")
+        mean = (self.window_loss / self.window_n).item()  # nan when no batch was finite
+        self.window_loss.zero_()
+        self.window_n.zero_()
+        return mean
+
+
+def _optimize(model, opt, scaler, loss, cfg: TrainConfig, track: StepTrack | None, batch, step):
+    """Backward, clip, step: (the gradient norm, the batch's found_inf flag or None). With a
+    tracker the step is skipped on the device when the batch is not finite: the fp16 scaler's
+    own check, or `found_inf` handed to the fused AdamW."""
+    scaler.scale(loss).backward()
+    scaler.unscale_(opt)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+    scaled = scaler.is_enabled()
+    flag = None
+    if track is not None:
+        flag = track.add(loss, None if scaled else norm, batch["step_id"], step + 1)
+    if flag is not None and not scaled:
+        opt.grad_scale, opt.found_inf = None, flag
+    scaler.step(opt)
+    scaler.update()
+    return norm, flag
+
+
 def train_epoch(model, loader, opt, sched, scaler, device, dtype, cfg: TrainConfig, state: dict):
-    """One pass over the training batches; `state` carries the optimizer step and its total."""
+    """One pass over the training batches; `state` carries the optimizer step and its total.
+    With a fused optimizer the step has no host sync (`StepTrack`); otherwise every loss is
+    checked on the host before its backward (`_skip_nonfinite`)."""
     model.train()
+    track = StepTrack(device) if opt.defaults.get("fused") else None
     seen, t0, losses = 0, time.time(), []
     for batch in loader:
         batch = to_device(batch, device)
@@ -413,37 +504,57 @@ def train_epoch(model, loader, opt, sched, scaler, device, dtype, cfg: TrainConf
             loss, parts = step_loss(model.decoder, h, p, y, batch, stop_weight(cfg))
             loss = loss + sum(aux.values())  # the sparse indexer's KL trains the indexer only
         opt.zero_grad(set_to_none=True)
-        if _skip_nonfinite(loss, parts | aux, batch, state):  # takes no optimizer step
+        if track is None and _skip_nonfinite(loss, parts | aux, batch, state):  # no step
             sched.step()
             state["step"] += 1
             continue
-        scaler.scale(loss).backward()
-        scaler.unscale_(opt)
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        scaler.step(opt)
-        scaler.update()
+        norm, _ = _optimize(model, opt, scaler, loss, cfg, track, batch, state["step"])
         sched.step()
         state["step"] += 1
         seen += len(batch["step_id"])
-        losses.append(float(loss.detach()))
-        if scaler.is_enabled() and scaler.get_scale() < MIN_LOSS_SCALE:
-            raise NonFiniteError(f"step {state['step']}: fp16 loss scale {scaler.get_scale():g}")
+        if track is None:
+            losses.append(float(loss.detach()))
+            _check_scale(scaler, state["step"])
         if state["step"] % cfg.log_every == 0:
-            check_finite_weights(model, state["step"])
-            log.info(
-                "step %d / %d epoch %d loss %.4f anchor_nll %.4f grad %.2f lr %.2e %.1f samples/s",
-                state["step"],
-                state["total"],
-                state["epoch"],
-                float(np.mean(losses[-cfg.log_every :])),
-                float(parts["anchor_nll"].mean()),
-                float(norm),
-                sched.get_last_lr()[0],
-                seen / (time.time() - t0),
+            window = (
+                track.check(scaler, state["step"]) if track else np.mean(losses[-cfg.log_every :])
             )
+            _log_step(model, state, window, parts, norm, sched, seen / (time.time() - t0))
+    return _end_train_epoch(model, track, scaler, losses, state, t0)
+
+
+def _check_scale(scaler, step: int) -> None:
+    if scaler.is_enabled() and scaler.get_scale() < MIN_LOSS_SCALE:
+        raise NonFiniteError(f"step {step}: fp16 loss scale {scaler.get_scale():g}")
+
+
+def _log_step(model, state: dict, window: float, parts: dict, norm, sched, rate: float) -> None:
+    check_finite_weights(model, state["step"])
+    log.info(
+        "step %d / %d epoch %d loss %.4f anchor_nll %.4f grad %.2f lr %.2e %.1f samples/s",
+        state["step"],
+        state["total"],
+        state["epoch"],
+        float(window),
+        float(parts["anchor_nll"].mean()),
+        float(norm),
+        sched.get_last_lr()[0],
+        rate,
+    )
+
+
+def _end_train_epoch(model, track, scaler, losses: list, state: dict, t0: float) -> dict:
+    """The epoch's training metrics, after the last check of the non-finite batches."""
+    if track is not None:
+        track.check(scaler, state["step"])
+        n = track.n.item()
+        state["nonfinite_epoch"] = int(track.bad.item())
+        train_loss = track.loss.item() / n if n else float("nan")
+    else:
+        train_loss = float(np.mean(losses)) if losses else float("nan")
     check_finite_weights(model, state["step"])
     return {
-        "train_loss": float(np.mean(losses)) if losses else float("nan"),
+        "train_loss": train_loss,
         "seconds": time.time() - t0,
         "nonfinite_batches": state.pop("nonfinite_epoch", 0),
     }
@@ -509,14 +620,17 @@ def load_model(path: Path, device: torch.device | str = "cpu") -> tuple[KSMech, 
 
 
 def _optimizer(model: KSMech, cfg: TrainConfig) -> torch.optim.AdamW:
-    """AdamW; weight decay on the matrices only (not on biases or norm scales)."""
+    """AdamW; weight decay on the matrices only (not on biases or norm scales). On a GPU the
+    fused kernel: one launch for every parameter, and a step it skips on the device when told
+    the gradients are not finite (`found_inf`, no host sync; `train_epoch`)."""
     decay = [p for p in model.parameters() if p.ndim >= 2]
     rest = [p for p in model.parameters() if p.ndim < 2]
     groups = [
         {"params": decay, "weight_decay": cfg.weight_decay},
         {"params": rest, "weight_decay": 0.0},
     ]
-    return torch.optim.AdamW(groups, lr=cfg.lr)
+    fused = all(p.is_cuda for p in model.parameters())
+    return torch.optim.AdamW(groups, lr=cfg.lr, fused=fused or None)
 
 
 def run_pair_stats(
@@ -674,6 +788,8 @@ def fit(
     stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells, extra)
     feature_stats = fit_feature_stats(train, *token_columns(model_cfg))
     model = KSMech(model_cfg, feature_stats, stats).to(device)
+    if cfg.compile:
+        compile_encoder(model)
     parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})
     header = _run_header(cfg, model_cfg, parts, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)

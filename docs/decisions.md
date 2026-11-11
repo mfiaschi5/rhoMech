@@ -9603,3 +9603,36 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
   exist under two sources.
 - `DEFAULT_SOURCE` is a constant, not a setting: a deployment that needs another source can
   make it one.
+
+## 2026-11-11: training speed (the changes of docs/model_impl.md)
+
+- **What limits it.** Profiled on the RX 6600 XT with the old forward checkpoints of the three
+  encoders: the dense step is bound by GPU memory bandwidth in the (N + 1)^2 x 64 pair track
+  (the 5090 is 7.6x faster, the bandwidth ratio; FLOPs ~40x below the limit), not by I/O, the
+  DataLoader, the batch size or missing mixed precision. Autocast runs the pair track's
+  LayerNorm in float32; with the casts that is ~45% of the GPU time. The pod's ~150 s per
+  PMechDB epoch was a third of a 5090 (three runs per GPU).
+- **What changed, each user-approved** (numbers and options in docs/model_impl.md):
+  `--compile` (layers compiled in place, state dict unchanged), `--half-pair-norm`,
+  `--split-pair-init` (MLP_P's first layer part by part: the same map), the step without host
+  syncs (index sets from the collate, device-cached constants, the non-finite check on the
+  device with the fused AdamW skipping a bad batch by `found_inf`), fused AdamW on a GPU, batches
+  by orbitals then atoms at their true padded cost, `--load-workers`, compact samples in memory
+  (`store.CompactCells`, the shard's own form, expanded per batch) and the streaming store build
+  (`samples --stream`), one run per GPU on the pod, and the ablation option
+  `--pair-update-every`.
+- **Flags off by default where the numbers move**: `half_pair_norm`, `split_pair_init` and
+  `pair_update_every` are ModelConfig fields at their old behaviour, so every checkpoint before
+  them loads and scores bit for bit. The sync-free step and the compact samples are always on:
+  they give the same numbers (the loss bit for bit; the expanded samples equal to `unpack`'s on
+  every PMechDB val sample). Fused AdamW and the new batch order change the training trajectory
+  (rounding, order), so a `--resume` of a run started before is not bit for bit.
+- **No schema v20.** The proposal named a compact store schema; the store already holds float16
+  values and bits, only the trainer expanded them, so keeping the stored form in memory is the
+  same saving without a rebuild. The streaming build writes the shards in step order, not by
+  step id: the same samples, another shard layout.
+- **A non-finite batch under fp16** now runs its backward and the scaler's overflow check
+  skips the step and halves the scale (before: skipped before the backward, scale unchanged).
+  The loss-scale floor and `MAX_NONFINITE_IN_A_ROW` are read once per logging interval.
+- **Found, not changed**: the stop head never trains (no `stop_label` in the samples or the
+  collate), so `--stop-weight` has had no effect on any run.

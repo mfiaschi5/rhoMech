@@ -38,6 +38,12 @@ class ModelConfig:
     spectral_set: bool = True  # False (ablation): no set encoder over an orbital's spectral entries
     inherit_atoms: bool = True  # False (ablation): an orbital token inherits no atom embedding
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
+    half_pair_norm: bool = False  # dense: the pair track's LayerNorm in the autocast dtype (fp32
+    #   accumulation) instead of autocast's float32 output; docs/model_impl.md, item 3
+    split_pair_init: bool = False  # dense: MLP_P's first layer applied block by block, without
+    #   the (B, N + 1, N + 1, C) channel tensor (the same map); docs/model_impl.md, item 9
+    pair_update_every: int = 1  # dense: the pair update in every k-th layer only (the bias from
+    #   p in every layer); ablation, docs/model_impl.md, item 18
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)
     topk: int = 64  # sparse: keys per query, besides MECH and itself

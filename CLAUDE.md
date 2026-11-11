@@ -299,7 +299,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   and `flower_given`, FlowER's own parts); the per-step `random_leaky` split and `loco_all` (the
   class held out as test, the unlabelled steps in train and val) only when named with
   `--strategy`; `--views-only` writes
-  the named strategies' views over the store already built; `--workers N`
+  the named strategies' views over the store already built; `--stream` writes the store while
+  it builds (one shard of samples in memory instead of all; shards in step order); `--workers N`
   spawned processes, up to 15 heavy processes on the host in total; re-run both after a token rebuild), `uv run ksmech-arrows edit-labels --source pmechdb` (the spec-v8 reaction-matrix
   labels: parsimonious class, anchors, coverage gate >= 95%, `edit_labels_report.json`).
   The previous step (reaction-network plan, item H; `arrows.backward`): `samples --direction
@@ -363,7 +364,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
   [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy|open_shell]
-  [--drop-domain-class C...] [--val-cohort pmechdb=closed_base]` (the spec-v9 model on one split;
+  [--drop-domain-class C...] [--val-cohort pmechdb=closed_base] [--compile] [--half-pair-norm]
+  [--split-pair-init] [--load-workers N] [--no-compact-samples] [--pair-update-every K]` (the spec-v9 model on one split;
   `--preset` sets the flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
   orbital extras, legacy = the v17 inputs, open_shell = general with the atom head over
   {-2,-1,0,+1,+2}, the pair features of `OPEN_SHELL_BLOCK` (statistics fitted on the run's training
@@ -387,7 +389,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
   e.g. `--drop-pair-features g log_abs_g` for the G ablation, `--no-somo-channels`,
   `--no-own-pair-channel`; the orbital-token ablation `--drop-token-features orbital` (or column
   names), `--no-spectral-set`, `--no-inherit-atoms` (its runs: `scripts/orbital_ablation.sh`); metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
-  pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run; `--direction
+  pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run; the speed options of
+  `docs/model_impl.md`: `--compile` (every encoder layer compiled in place, dynamic shapes),
+  `--half-pair-norm` and `--split-pair-init` (the dense pair track's LayerNorm in the autocast
+  dtype, MLP_P part by part; both off by default, so older checkpoints score bit for bit),
+  `--load-workers` (shards read in forked processes), samples held compact in memory and
+  expanded per batch (on by default), a GPU run with fused AdamW and no host sync per step
+  (non-finite batches skipped on the device, read every `--log-every` steps), batches by
+  orbitals then atoms at their padded cost; `--pair-update-every K` is an ablation; `--direction
   backward` trains the previous-step model on the backward store, views and pair statistics
   checked to be backward, the direction in run.json, which a forward run leaves out)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]
