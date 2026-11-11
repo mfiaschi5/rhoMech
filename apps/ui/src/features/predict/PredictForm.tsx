@@ -1,22 +1,24 @@
 // PredictForm: the inputs of the Predict page (spec v9 "Inference"): reactant rows with
 // stoichiometry, live depictions, a Draw button (the workbench sketcher) and the /normalize
 // preflight; the predictor (the network with its checkpoint picker, CheckpointPicker); beam
-// (default 5) and max steps (default 8). Submit creates the job and opens #/predict/job/<id>. Rows can be prefilled by #/predict?r=<smiles>&n=<count>&...
+// (default 5) and max steps (default 8); the optional target product (TargetFields: with one, the
+// job searches the pathways to it). Submit creates the job and opens #/predict/job/<id>. Rows can
+// be prefilled by #/predict?r=<smiles>&n=<count>&..., the target by &t=<smiles>.
 // "Correct from scratch" opens the Correct page on the same reactants with no prediction.
 //
 // Props:
 //   route   Route     the #/predict route (its r / n params prefill the rows)
 //
 // DOM: predict-form, the ReactantRows ids, predict-conditions, the PredictorSelect ids, the
-// CheckpointPicker ids (network only), predict-beam, predict-max-steps, predict-submit, predict-correct-scratch, predict-error,
-// predict-recent.
+// CheckpointPicker ids (network only), predict-beam, predict-max-steps, the TargetFields ids
+// (predict-target ...), predict-submit, predict-correct-scratch, predict-error, predict-recent.
 import { useState } from "react";
 import type { CheckpointOut } from "../../api/types.gen";
 import { toApiError, type ApiError } from "../../api/http";
 import { listJobs, predict } from "../../api/predict";
 import { useCached } from "../../api/cache";
 import { ErrorBanner } from "../../components/ErrorBanner";
-import { formatRoute, jobHash, navigate, parsePredictPrefill, type Route } from "../../router";
+import { formatRoute, jobHash, navigate, parsePredictPrefill, parsePredictTarget, type Route } from "../../router";
 import { metaStore, useStore } from "../../state/store";
 import { CheckpointPicker, useNetworkCheckpoint } from "./CheckpointPicker";
 import { refOf } from "./checkpoints";
@@ -25,6 +27,8 @@ import { Panel } from "../../components/Panel";
 import { defaultPredictor, PredictorSelect } from "./PredictorSelect";
 import { ReactantRows, usePreflight, type ReactantRow } from "./ReactantRows";
 import { usePredictors } from "./hooks";
+import { DEFAULT_TARGET, targetRequest, type TargetSettings } from "./target";
+import { TargetFields } from "./TargetFields";
 import type { PredictIn } from "@ksmech/viz/v9types";
 
 export const DEFAULT_BEAM = 5;
@@ -75,8 +79,9 @@ function usePredictSubmit() {
   return { busy, error, submit };
 }
 
-function requestOf(rows: ReactantRow[], s: Settings, predictor: string, checkpoint: CheckpointOut | null): PredictIn {
+function requestOf(rows: ReactantRow[], s: Settings, predictor: string, checkpoint: CheckpointOut | null, target: TargetSettings): PredictIn {
   return {
+    ...targetRequest(target),
     reactants_smiles: rows.map((r) => r.smiles.trim()),
     stoichiometry: rows.map((r) => r.count),
     conditions: s.conditions.trim() || null,
@@ -102,6 +107,8 @@ export function PredictForm({ route }: { route: Route }) {
   const prefill = parsePredictPrefill(route);
   const [rows, setRows] = useState<ReactantRow[]>(prefill.length ? prefill : [{ smiles: "", count: 1 }]);
   const [s, setS] = useState<Settings>(INITIAL);
+  const [target, setTarget] = useState<TargetSettings>(() => ({ ...DEFAULT_TARGET, smiles: parsePredictTarget(route) }));
+  const searching = target.smiles.trim().length > 0;
   const { busy, error, submit } = usePredictSubmit();
   const preflight = usePreflight(rows);
   const meta = useStore(metaStore, (m) => m.data);
@@ -130,9 +137,10 @@ export function PredictForm({ route }: { route: Route }) {
             <NumberField label="beam" testId="predict-beam" value={s.beam} min={1} max={meta?.limits.max_beam ?? 10} onChange={(beam) => set({ beam })} />
             <NumberField label="max steps" testId="predict-max-steps" value={s.maxSteps} min={1} max={meta?.limits.max_steps ?? 12} onChange={(maxSteps) => set({ maxSteps })} />
           </div>
+          <TargetFields value={target} onChange={(p) => setTarget((prev) => ({ ...prev, ...p }))} />
           <div className="row pv-inline-row">
-            <button type="button" className="btn btn-primary" data-testid="predict-submit" disabled={busy || !!blocked} title={blocked ?? undefined} onClick={() => void submit(requestOf(filled, s, predictor, network ? ck : null))}>
-              {busy ? "submitting…" : "Predict"}
+            <button type="button" className="btn btn-primary" data-testid="predict-submit" disabled={busy || !!blocked} title={blocked ?? undefined} onClick={() => void submit(requestOf(filled, s, predictor, network ? ck : null, target))}>
+              {busy ? "submitting…" : searching ? "Search" : "Predict"}
             </button>
             <a className={`btn${filled.length ? "" : " pv-link-disabled"}`} data-testid="predict-correct-scratch" href={filled.length ? correctScratchHash(filled) : undefined} title="draw the steps yourself on these reactants, without a prediction">
               Correct from scratch

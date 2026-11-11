@@ -302,6 +302,16 @@ class PredictIn(NormalizeIn):
     # network only: the checkpoint (default: the best usable non-smoke run by validation
     # top-1); the job's stored request names the one it resolved to
     checkpoint: CheckpointRefIn | None = None
+    # a search towards a product (`serve.predict.search`) instead of the beam expansion: the
+    # n_pathways best pathways from the reactants to a pool holding the target (one SMILES,
+    # '.' between species; by-products allowed), at most max_steps steps, within
+    # max_expansions node expansions; arrival EXACT (the species keys) or SKELETON (the
+    # heavy-atom skeletons, up to protons), tried in the order given. Not for predictor "user"
+    target_smiles: str | None = Field(None, min_length=1, max_length=2000)
+    target_levels: list[Literal["EXACT", "SKELETON"]] = Field(
+        default_factory=lambda: ["EXACT", "SKELETON"], min_length=1, max_length=2
+    )
+    max_expansions: int = Field(50, ge=1, le=300)
 
 
 class JobCreatedOut(_Out):
@@ -491,6 +501,22 @@ class NetParamsOut(_Out):
     n_pathways: int
 
 
+class NetSearchOut(_Out):
+    """The search of a network built towards a target (PredictIn.target_smiles)."""
+
+    target_smiles: str
+    target_species: dict[str, int]  # species key -> count
+    target_skeletons: dict[str, int] | None  # null: not readable, EXACT only
+    levels: list[str]
+    max_expansions: int
+    arrivals: dict[str, str]  # node id -> the level it arrived at (arrived nodes only)
+    # K_FOUND | EXHAUSTED | POP_BUDGET | START_IS_GOAL | CANCELLED; null while it runs
+    reason: str | None
+    expanded: int  # model expansions
+    pops: int  # partial paths popped
+    cuts: dict[str, int]  # DEPTH_CUT, EXPANSION_BUDGET, CYCLE
+
+
 class NetworkOut(_Out):
     network_id: str
     revision: int
@@ -506,6 +532,7 @@ class NetworkOut(_Out):
     request: PredictIn
     provenance: Provenance
     scores_are_probabilities: bool
+    search: NetSearchOut | None = None  # a network built towards a target; null for the others
 
 
 # ---- jobs

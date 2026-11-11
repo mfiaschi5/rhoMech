@@ -24,6 +24,7 @@ import { useNetHeight } from "./netview/prefs";
 import { NodePanel } from "./NodePanel";
 import { PathwayList } from "./PathwayList";
 import { PredictForm } from "./PredictForm";
+import { SearchLine } from "./TargetFields";
 import { scoreBadge } from "./PredictorSelect";
 import { parseSelection, useSelect, type JobSelection, type SelectionUpdate } from "./selection";
 import { StepPanel } from "./step/StepPanel";
@@ -35,7 +36,7 @@ export function PredictPage({ route }: PageProps) {
   if (cap.known && !cap.enabled) return <CapabilityNotice name="predict" title="Predict is disabled" />;
   // ?rev= changes after an expansion: the job view remounts and reads the grown network
   if (route.parts[0] === "job" && route.parts[1]) return <JobView key={`${route.parts[1]}|${route.params.get("rev") ?? ""}`} jobId={route.parts[1]} route={route} />;
-  const prefillKey = route.params.getAll("r").join("|") + "#" + route.params.getAll("n").join("|");
+  const prefillKey = route.params.getAll("r").join("|") + "#" + route.params.getAll("n").join("|") + "#" + (route.params.get("t") ?? "");
   return <PredictForm key={prefillKey} route={route} />;
 }
 
@@ -43,8 +44,9 @@ function JobHeader({ job, net, probabilities, badge }: { job: JobOut | null; net
   const req = net?.request;
   return (
     <div className="row pv-inline-row pv-job-header" data-testid="predict-job-header" data-probabilities={probabilities ? "true" : "false"}>
-      <h2>Prediction</h2>
+      <h2>{net?.search ? "Search" : "Prediction"}</h2>
       {req && <span className="pv-wrap">{req.reactants_smiles.map((smi, i) => `${(req.stoichiometry?.[i] ?? 1) > 1 ? `${req.stoichiometry?.[i]} ` : ""}${smi}`).join(" + ")}</span>}
+      {net && <SearchLine net={net} />}
       {net && (
         <span className="muted">
           {net.provenance.predictor}, beam {net.params.beam}, max steps {net.params.max_steps}
@@ -54,8 +56,8 @@ function JobHeader({ job, net, probabilities, badge }: { job: JobOut | null; net
       <CheckpointLine provenance={net?.provenance ?? job?.provenance ?? null} />
       <ProvenanceBadge provenance={net?.provenance ?? job?.provenance} compact />
       {req && (
-        <a className="btn btn-small" href={predictPrefillHash(req.reactants_smiles.map((smiles, i) => ({ smiles, count: req.stoichiometry?.[i] ?? 1 })))}>
-          new prediction from these reactants
+        <a className="btn btn-small" href={predictPrefillHash(req.reactants_smiles.map((smiles, i) => ({ smiles, count: req.stoichiometry?.[i] ?? 1 })), req.target_smiles)}>
+          {req.target_smiles ? "new search from these species" : "new prediction from these reactants"}
         </a>
       )}
     </div>
@@ -108,7 +110,7 @@ function JobView({ jobId, route }: { jobId: string; route: Route }) {
   return (
     <div className="pv-page stack" data-testid="predict-job" data-job-id={jobId}>
       <JobHeader job={job} net={net} probabilities={probabilities} badge={scoreBadge(info)} />
-      <JobProgress job={job} pollError={error} title="Prediction job" />
+      <JobProgress job={job} pollError={error} title={net?.search ? "Search job" : "Prediction job"} />
       {net ? <NetworkSection jobId={jobId} net={net} sel={sel} select={select} probabilities={probabilities} onChanged={() => select({ rev: Date.now() })} /> : job && <div className="muted">no network yet</div>}
     </div>
   );

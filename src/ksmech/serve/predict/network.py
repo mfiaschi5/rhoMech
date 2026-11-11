@@ -17,6 +17,11 @@ paths) live in `ksmech.network.graph`; this module keeps the data model and the 
   (kind "corrected", predictor "user") contributes 0.
 - `revision` grows with every mutation (each node expansion, each layer, each override and the
   end of a build), so a client polling with `since_revision` sees every change.
+- A network built by a search towards a target (`serve.predict.search`) carries its `Search`:
+  the target's keys, the budget, the outcome and the arrival level of every node tested. Its
+  pathways are then the best simple paths from the root that end on an arrived node
+  (`target_pathways`), whoever grows the network later (an expansion, a user step); the JSON
+  form holds `search` only for such a network, so every other one is unchanged byte for byte.
 """
 
 from __future__ import annotations
@@ -242,6 +247,39 @@ class NetParams:
 
 
 @dataclass
+class Search:
+    """A search towards a target pool (`serve.predict.search`): the target as given, its
+    species keys and heavy-atom skeleton keys with their counts (None: the skeletons could not
+    be read, so only EXACT is tested), the arrival levels tried in order, the budget, the
+    outcome of the best-first search (`ksmech.network.search.k_best_pathways`: K_FOUND,
+    EXHAUSTED, POP_BUDGET, START_IS_GOAL, or CANCELLED), and node id -> the level it arrived at
+    (None: tested, not arrived)."""
+
+    target_smiles: str
+    target_species: dict[str, int]
+    target_skeletons: dict[str, int] | None
+    levels: list[str]
+    max_expansions: int
+    arrivals: dict[str, str | None] = field(default_factory=dict)
+    reason: str | None = None
+    expanded: int = 0
+    pops: int = 0
+    cuts: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return to_jsonable(asdict(self))
+
+    @classmethod
+    def from_dict(cls, d: Mapping) -> Search:
+        kw = {k: d[k] for k in cls.__dataclass_fields__ if k in d}
+        kw["target_species"] = {str(k): int(v) for k, v in kw["target_species"].items()}
+        sk = kw.get("target_skeletons")
+        kw["target_skeletons"] = None if sk is None else {str(k): int(v) for k, v in sk.items()}
+        kw["cuts"] = {str(k): int(v) for k, v in (kw.get("cuts") or {}).items()}
+        return cls(**kw)
+
+
+@dataclass
 class Network:
     network_id: str
     revision: int
@@ -256,6 +294,7 @@ class Network:
     predictor: PredictorRef
     chemistry: str
     complete: bool
+    search: Search | None = None
 
     @classmethod
     def new(
@@ -732,7 +771,10 @@ def _pathway(net: Network, rank: int, nodes, eids, logp: float, ends: str) -> Pa
 
 def rank_pathways(net: Network, limit: int = 20, include_pruned: bool = False) -> list[Pathway]:
     """Best-first simple paths from the root over active edges (a final recurrence edge may
-    revisit one node), by log-probability desc, then fewer edges, then edge ids."""
+    revisit one node), by log-probability desc, then fewer edges, then edge ids. A network
+    with a search ranks the paths to its target instead (`target_pathways`)."""
+    if net.search is not None:
+        return target_pathways(net, limit, include_pruned)
     out = _active_out(net, include_pruned)
     ops = PathOps(
         target=lambda e: e.target,
@@ -740,6 +782,34 @@ def rank_pathways(net: Network, limit: int = 20, include_pruned: bool = False) -
         edge_id=lambda e: e.id,
         admissible=lambda x, on_path: _admissible(out, x, on_path),
         ends=lambda e, nodes: _ends_with(net, out, e, nodes),
+    )
+    found = best_simple_paths(net.root, ops, limit, MAX_PATHWAY_POPS)
+    return [
+        _pathway(net, rank, nodes, eids, logp, ends)
+        for rank, (nodes, eids, logp, ends) in enumerate(found, start=1)
+    ]
+
+
+def target_pathways(net: Network, limit: int = 20, include_pruned: bool = False) -> list[Pathway]:
+    """The best-first simple paths from the root that end on the first node arrived at the
+    search's target (ends_with TARGET_EXACT or TARGET_SKELETON), at most `max_steps` steps,
+    by the weights and ties of `rank_pathways`; no recurrence closes such a path."""
+    assert net.search is not None
+    out = _active_out(net, include_pruned)
+    arrived = net.search.arrivals
+    depth = int(net.params.max_steps)
+
+    def admissible(x: str, on_path: Sequence[str]) -> list[Edge]:
+        if len(on_path) > depth:  # on_path holds x: len - 1 steps taken
+            return []
+        return [e for e in out[x] if e.target not in on_path]
+
+    ops = PathOps(
+        target=lambda e: e.target,
+        weight=lambda e: e.path_logp,
+        edge_id=lambda e: e.id,
+        admissible=admissible,
+        ends=lambda e, nodes: f"TARGET_{arrived[e.target]}" if arrived.get(e.target) else None,
     )
     found = best_simple_paths(net.root, ops, limit, MAX_PATHWAY_POPS)
     return [
@@ -790,8 +860,9 @@ def _alias_view(parent: Node, source: PoolState) -> Node:
 
 def network_to_dict(net: Network) -> dict:
     """The network as JSON-able data (no timestamps; nodes and edges in insertion order), so
-    `json.dumps(network_to_dict(net), sort_keys=True)` is byte-deterministic."""
-    return {
+    `json.dumps(network_to_dict(net), sort_keys=True)` is byte-deterministic; `search` only
+    when the network has one."""
+    out = {
         "format": NETWORK_FORMAT,
         "network_id": net.network_id,
         "revision": int(net.revision),
@@ -807,6 +878,9 @@ def network_to_dict(net: Network) -> dict:
         "failed_proposals": to_jsonable(net.failed_proposals),
         "skipped": {k: int(v) for k, v in sorted(net.skipped.items())},
     }
+    if net.search is not None:
+        out["search"] = net.search.to_dict()
+    return out
 
 
 def network_from_dict(d: Mapping) -> Network:
@@ -829,4 +903,5 @@ def network_from_dict(d: Mapping) -> Network:
         predictor=PredictorRef.from_dict(d["predictor"]),
         chemistry=str(d.get("chemistry") or ""),
         complete=bool(d.get("complete", False)),
+        search=Search.from_dict(d["search"]) if d.get("search") else None,
     )

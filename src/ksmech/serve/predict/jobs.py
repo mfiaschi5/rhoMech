@@ -649,13 +649,15 @@ class _NetworkWriter:
 
 
 def predict_handler(chem: Chemistry, ref_of: Callable[..., PredictorRef]) -> Handler:
-    """The `predict` job: root, `build_network`, `network.json`. `ref_of(name, T, checkpoint)`
-    gives the predictor reference (`PredictorRegistry.ref`; the checkpoint is the network's).
+    """The `predict` job: root, `build_network` (or, with `target_smiles`, the search towards
+    the target, `search.search_network`), `network.json`. `ref_of(name, T, checkpoint)` gives
+    the predictor reference (`PredictorRegistry.ref`; the checkpoint is the network's).
     Predictor "user" builds the root alone (a network the user extends with steps and
     expansions)."""
 
     def handle(ctx: JobContext, request: dict) -> dict:
         from ksmech.serve.predict.network import NetHooks, Network, build_network
+        from ksmech.serve.predict.search import new_search, search_network
 
         ctx.progress(phase="normalize", message="building the root pool")
         root = chem.root(species_inputs(request))
@@ -668,8 +670,13 @@ def predict_handler(chem: Chemistry, ref_of: Callable[..., PredictorRef]) -> Han
             net.complete = True
             net.touch()
         else:
+            hooks = NetHooks(ctx, writer)
             try:
-                net = build_network(chem, root, ref, params, NetHooks(ctx, writer))
+                if request.get("target_smiles"):
+                    search = new_search(chem, request)
+                    net = search_network(chem, root, ref, params, search, hooks)
+                else:
+                    net = build_network(chem, root, ref, params, hooks)
             except BaseException:
                 writer.flush()  # keep the partial network viewable
                 raise
@@ -688,12 +695,8 @@ def expand_handler(
     def handle(ctx: JobContext, request: dict) -> dict:
         from dataclasses import replace
 
-        from ksmech.serve.predict.network import (
-            NetHooks,
-            continue_from,
-            network_from_dict,
-            rank_pathways,
-        )
+        from ksmech.serve.predict.network import NetHooks, continue_from, network_from_dict
+        from ksmech.serve.predict.search import refresh_pathways
 
         net_id, body = str(request["network_id"]), dict(request["expand"])
         with runner.network_lock(net_id):
@@ -715,7 +718,7 @@ def expand_handler(
             except BaseException:
                 writer.flush()
                 raise
-            net.pathways = rank_pathways(net, net.params.n_pathways)
+            net.pathways = refresh_pathways(net)
             net.touch()
             writer.write(net, force=True)
         return {

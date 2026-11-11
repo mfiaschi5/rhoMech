@@ -325,6 +325,12 @@
   color: #186b3b;
 }
 
+.nv-chip-target {
+  background: color-mix(in srgb, #c28a00 22%, white);
+  color: #7a5600;
+  font-weight: 600;
+}
+
 .nv-chip-cycle {
   background: color-mix(in srgb, #7b3fb8 14%, white);
   color: #5f2f90;

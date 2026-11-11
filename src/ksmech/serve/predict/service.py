@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from ksmech.serve.chem.pools import SpeciesInput
 from ksmech.serve.core.contracts import LRU, USER_PREDICTOR
 from ksmech.serve.core.errors import Code, ServeError
 from ksmech.serve.core.schemas import (
@@ -60,6 +61,7 @@ from ksmech.serve.predict.network import (
     node_of_state,
     rank_pathways,
 )
+from ksmech.serve.predict.search import refresh_pathways
 
 PUBLIC_JOB_KINDS = frozenset({JobKind.PREDICT, JobKind.OVERRIDE, JobKind.EXPAND})
 EVERY_JOB = 10**9  # a list limit above any job count
@@ -236,8 +238,17 @@ def network_out(
             "request": dict(request),
             "provenance": network_provenance(net, provenance),
             "scores_are_probabilities": bool(probabilities),
+            "search": _search_out(net),
         }
     )
+
+
+def _search_out(net: Network) -> dict | None:
+    if net.search is None:
+        return None
+    d = net.search.to_dict()
+    d["arrivals"] = {k: v for k, v in d["arrivals"].items() if v}
+    return d
 
 
 # ---- the service
@@ -280,13 +291,29 @@ class JobService:
         elif body.checkpoint is not None:
             msg = "a checkpoint applies only to the network predictor, not 'user'"
             raise ServeError(Code.REQUEST_INVALID, msg, status=422)
+        if body.target_smiles is not None and body.predictor == USER_PREDICTOR:
+            msg = "a target is searched by a predictor, not 'user'"
+            raise ServeError(Code.REQUEST_INVALID, msg, status=422)
         self.chemistry.root(inputs)
+        if body.target_smiles is not None:
+            self._target_preflight(body.target_smiles)
         prov = self._provenance(body.predictor, body.temperature, body.candidate_scope, ref)
         label = f"{_predictor_label(body.predictor, ref)}: " + " + ".join(
             s if n == 1 else f"{n} {s}" for s, n in ((i.smiles, i.count) for i in inputs)
         )
+        if body.target_smiles is not None:
+            label += f" → {body.target_smiles.strip()}"
         job = self.runner.submit(JobKind.PREDICT, request, label=label, provenance=prov)
         return JobCreatedOut(**job.created_out())
+
+    def _target_preflight(self, smiles: str) -> None:
+        """The target through the reactants' input checks; its errors name the target."""
+        try:
+            self.chemistry.root([SpeciesInput(smiles.strip(), 1)])
+        except ServeError as exc:
+            detail = dict(exc.detail or {}) | {"field": "target_smiles"}
+            raise ServeError(exc.code, f"target: {exc.message}", status=exc.status,
+                             upstream=exc.upstream, detail=detail) from exc  # fmt: skip
 
     def get(self, job_id: str, *, since_revision: int | None = None) -> JobOut:
         job = self._job(job_id)
@@ -346,7 +373,7 @@ class JobService:
             net = self._network(owner.id)
             parent = node_of_state(net, state.state_id)
             e = add_user_edge(net, parent, state, child, rec)
-            net.pathways = rank_pathways(net, net.params.n_pathways)
+            net.pathways = refresh_pathways(net)
             net.touch()
             self.runner.store.write_network(owner.id, network_to_dict(net))
         node = net.nodes[e.target]

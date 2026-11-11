@@ -1,5 +1,6 @@
 // StateCard: one pool state as the scheme (A) and the pathway explorer (C) draw it: a header of
-// subtle chips (reactants, the terminal reason, pruned, failed, "↺ n" cycles closing here), the
+// subtle chips (reactants, the terminal reason (chip "target" for a state at a search's target),
+// pruned, failed, "↺ n" cycles closing here), the
 // species at one bond length with "+" between them (cardThumb), and the SMILES caption (ellipsis,
 // the full text on hover). The size comes from cardSize, so layouts can place cards before they
 // render.
@@ -32,7 +33,7 @@ export interface Chip {
 export function stateChips(n: NodeOut, root: boolean, cycles: number): Chip[] {
   const out: Chip[] = [];
   if (root) out.push({ key: "root", text: "reactants" });
-  if (n.status === "terminal") out.push({ key: "terminal", text: (n.terminal_reason ?? "terminal").toLowerCase().replace(/_/g, " ") });
+  if (n.status === "terminal") out.push({ key: n.terminal_reason?.startsWith("TARGET_") ? "target" : "terminal", text: (n.terminal_reason ?? "terminal").toLowerCase().replace(/_/g, " ") });
   if (n.status === "pruned") out.push({ key: "pruned", text: "pruned" });
   if (n.status === "failed") out.push({ key: "failed", text: n.failure?.code ?? "failed" });
   if (n.status === "frontier") out.push({ key: "frontier", text: "frontier" });

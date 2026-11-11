@@ -7,6 +7,8 @@
 //   value     string                the SMILES
 //   onChange  (smiles) => void
 //   width, height  number           depiction size (default 200 x 130)
+//   label     string                the field label (default "SMILES <index + 1>")
+//   placeholder string              (default a reactant example)
 import { SmilesDepiction } from "@ksmech/viz/components/SmilesDepiction";
 import { useDebounced } from "../api/hooks";
 
@@ -17,23 +19,25 @@ export interface SmilesInputProps {
   prefix?: string;
   width?: number;
   height?: number;
+  label?: string;
+  placeholder?: string;
 }
 
 export const DEPICTION_DEBOUNCE_MS = 250;
 
-export function SmilesInput({ index, value, onChange, prefix = "predict", width = 200, height = 130 }: SmilesInputProps) {
+export function SmilesInput({ index, value, onChange, prefix = "predict", width = 200, height = 130, label, placeholder }: SmilesInputProps) {
   const settled = useDebounced(value, DEPICTION_DEBOUNCE_MS);
   return (
     <div className="smiles-input stack">
       <label className="field">
-        <span className="field-label">SMILES {index + 1}</span>
+        <span className="field-label">{label ?? `SMILES ${index + 1}`}</span>
         <input
           type="text"
           data-testid={`${prefix}-smiles-${index}`}
           value={value}
           spellCheck={false}
           autoComplete="off"
-          placeholder={index === 0 ? "e.g. C[O-]" : "e.g. CCl"}
+          placeholder={placeholder ?? (index === 0 ? "e.g. C[O-]" : "e.g. CCl")}
           className="pv-smiles-field"
           onChange={(e) => onChange(e.target.value)}
         />

@@ -954,3 +954,16 @@ input[type="number"] {
 .pv-readings-pending {
   color: var(--warn);
 }
+
+/* the optional target product of the Predict form (TargetFields) */
+.pv-target {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px 12px;
+  margin: 0;
+  min-width: 0;
+}
+
+.pv-target > legend {
+  padding: 0 4px;
+}

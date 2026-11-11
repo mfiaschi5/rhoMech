@@ -204,6 +204,9 @@ export interface PredictIn {
   max_nodes?: number;
   n_pathways?: number;
   checkpoint?: CheckpointRefIn | null;
+  target_smiles?: string | null;
+  target_levels?: ("EXACT" | "SKELETON")[];
+  max_expansions?: number;
 }
 
 export interface JobCreatedOut {
@@ -376,6 +379,19 @@ export interface NetParamsOut {
   n_pathways: number;
 }
 
+export interface NetSearchOut {
+  target_smiles: string;
+  target_species: Record<string, number>;
+  target_skeletons: Record<string, number> | null;
+  levels: string[];
+  max_expansions: number;
+  arrivals: Record<string, string>;
+  reason: string | null;
+  expanded: number;
+  pops: number;
+  cuts: Record<string, number>;
+}
+
 export interface NetworkOut {
   network_id: string;
   revision: number;
@@ -391,6 +407,7 @@ export interface NetworkOut {
   request: PredictIn;
   provenance: Provenance;
   scores_are_probabilities: boolean;
+  search: NetSearchOut | null;
 }
 
 export interface TaskInfoOut {

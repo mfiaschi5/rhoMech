@@ -9540,3 +9540,39 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
   expansions): the addition, found by the backward side in one step (log P_b -0.11, log P_f
   -2.25); the other branches stopped at 18 pools without tokens (no `--build-missing`), the cost
   every network evaluation shares.
+
+## 2026-11-11: the search towards a product in the web app (network plan D, on Predict)
+
+- **What.** Predict takes an optional target product (`PredictIn.target_smiles`, the form's
+  "target product" field). With one, the predict job runs `serve.predict.search.search_network`
+  instead of the beam expansion: the k = `n_pathways` best pathways from the reactants to a pool
+  that holds the target, each at most `max_steps` steps, within `max_expansions` node
+  expansions. The network the job writes is the part of the space the search looked at, in the
+  same format, so the canvas, the pathway list, the step and state panels, expansion by hand,
+  correction and curation work on it unchanged.
+- **The engine's search, not a copy.** The job calls `ksmech.network.search.k_best_pathways`
+  with an adapter (`search._NetExpander`) whose `expand` is the web app's `network.expand_node`
+  through its chemistry (featurize, QM for new molecules, the predictor). The costs are the
+  summed -log beam weights, the weights `rank_pathways` already ranks by (log P(R) for the
+  network predictor), so the search's order and the list's order agree. No heuristic: a target
+  drawn in the browser is not atom-mapped on the reactants, so the remaining-change bound of
+  `target.steps_lower_bound` does not apply; the search is uniform-cost and still exact. Each
+  popped node gets the predictor's `beam` proposals and no beam cut beyond them (the cut that
+  makes the beam expansion miss a low first step is exactly what a search must not do);
+  `max_nodes` still caps the nodes.
+- **Arrival** is `ksmech.network.target.arrival` on the web app's keys: EXACT on the species
+  keys (identity key v2) with their counts, then SKELETON on the heavy-atom skeletons, the CLI's
+  defaults; the form's "also up to protons" box drops SKELETON. SKELETON matters more here than in
+  the benchmarks: a chemist draws the product neutral (the hemiketal), the model reaches its
+  ion (the alkoxide). The target is checked like a reactant at submission.
+- **Why the pathways stay the target's after the job.** `network.rank_pathways` dispatches to
+  `target_pathways` when the network has a `Search`, so the three places that re-rank (an
+  expansion, a user step, `GET /jobs/{id}/pathways`) need no special case; `refresh_pathways`
+  tests the new nodes first. The arrival test needs RDKit and `network.py` stays pure, so the
+  levels are stored per node in `Search.arrivals`, written only by `search.py`.
+- **The JSON form** carries `search` only for a network that has one, so every other network
+  is unchanged byte for byte (the determinism tests). Nodes the search left unexpanded are
+  TERMINAL NODE_BUDGET (expandable), arrived ones TERMINAL TARGET_<level>.
+- **Not done here.** The bidirectional search (I1) needs the backward checkpoint and a full
+  product pool on the web app's side; it stays in the CLI (`ksmech-network search
+  --backward-run`) until that is wanted in the browser.

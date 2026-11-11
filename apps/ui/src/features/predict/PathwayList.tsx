@@ -50,7 +50,7 @@ export function PathwayList(props: PathwayListProps) {
   const pathways = [...net.pathways].sort((a, b) => a.rank - b.rank);
   return (
     <Panel title="Pathways" note={`${pathways.length} ranked`} className="pv-pathways-panel">
-      {pathways.length === 0 && <p className="muted">No pathway yet: the root has no outgoing step.</p>}
+      {pathways.length === 0 && <p className="muted">{net.search ? "No pathway reaches the target yet: expand a state by hand, or search again with a larger budget." : "No pathway yet: the root has no outgoing step."}</p>}
       <ol className="pathway-list" data-testid="predict-pathways">
         {pathways.map((p) => {
           const selected = current?.id === p.id;

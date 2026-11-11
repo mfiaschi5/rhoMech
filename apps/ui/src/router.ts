@@ -137,11 +137,17 @@ export interface PrefillSpecies {
 }
 
 /** "#/predict?r=C[O-]&n=1&r=CCl&n=1"; counts default to 1. */
-export function predictPrefillHash(species: PrefillSpecies[]): string {
+export function predictPrefillHash(species: PrefillSpecies[], target?: string | null): string {
+  const t = target?.trim() ? { t: [target.trim()] } : {};
   return formatRoute({
     page: "predict",
-    params: { r: species.map((s) => s.smiles), n: species.map((s) => s.count) },
+    params: { r: species.map((s) => s.smiles), n: species.map((s) => s.count), ...t },
   });
+}
+
+/** The prefilled target product of a #/predict route ("" when there is none). */
+export function parsePredictTarget(route: Route): string {
+  return route.page === "predict" ? (route.params.get("t") ?? "").trim() : "";
 }
 
 /** The prefilled reactant rows of a #/predict route (empty when there is none). */

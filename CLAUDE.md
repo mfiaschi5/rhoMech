@@ -332,7 +332,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `serve` dependency group; seventeen sub-packages in layers, map in `docs/serve_architecture.md`,
   checked by `tests/test_serve_layers.py`): `uv run ksmech-serve --port 8000` (web app on 127.0.0.1 only, `--host 0.0.0.0` for the
   LAN; data under `data/serve/`, curation DB `data/curation/curation.sqlite`; one compute worker;
-  `--chemistry real|cached|synthetic`, `--dev`, `--no-ui`, `--index-on-start`), `uv run
+  `--chemistry real|cached|synthetic`, `--dev`, `--no-ui`, `--index-on-start`; Predict takes
+  an optional target product, `PredictIn.target_smiles`: the job then searches the k best
+  pathways to it, EXACT or up to protons (SKELETON), within `max_expansions` node expansions,
+  `serve.predict.search`), `uv run
   ksmech-serve schema-ts` (regenerate `apps/ui/src/api/types.gen.ts`), `uv run ksmech-serve
   probe-cache --smiles 'C[O-]'` (exit 0 when the shared token cache holds every species),
   `uv run ksmech-serve users list | add LOGIN --name N --role admin --generate | set LOGIN

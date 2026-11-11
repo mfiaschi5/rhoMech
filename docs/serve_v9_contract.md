@@ -204,3 +204,31 @@ Additive: `MetaOut.capabilities` gains `ocr` and `wiki`, both in the `public` pr
 - A wiki page's HTML holds `<figure class="wiki-scene" data-scene-src="scenes/....json">`
   for each scene (a path relative to `apps/ui/public`) and `<a class="wiki-link"
   href="#/wiki/slug">` for each wiki link. `docs/ocr.md` and `docs/wiki.md` have the details.
+
+## Search towards a product (2026-11-11)
+
+Additive: `PredictIn` gains three fields and `NetworkOut` one; a request without
+`target_smiles` builds the same network as before, and its JSON has no `search` key.
+
+- `PredictIn.target_smiles` (one SMILES, `.` between species), `target_levels` (`["EXACT",
+  "SKELETON"]` by default, tried in that order) and `max_expansions` (50, at most 300). With a
+  target the predict job searches the `n_pathways` best pathways from the reactants to a pool
+  that holds the target (by-products allowed), each at most `max_steps` steps, instead of the
+  beam expansion (`serve.predict.search`): the engine's best-first search over simple paths
+  (`ksmech.network.search.k_best_pathways`, uniform cost: the summed -log beam weight) with the
+  web app's chemistry as its expander, each popped node expanded once with the predictor's `beam`
+  proposals. EXACT compares the species keys (identity key v2) with their counts; SKELETON the
+  heavy-atom skeletons with their bond orders (`ksmech.network.target.skeleton_key`), so a
+  product drawn after work-up is reached up to protons. The target goes through the reactants'
+  input checks at submission (422 with `detail.field = "target_smiles"`); a target with
+  predictor `user` is 422 `REQUEST_INVALID`.
+- `NetworkOut.search`: `NetSearchOut {target_smiles, target_species, target_skeletons (null:
+  unreadable, EXACT only), levels, max_expansions, arrivals (node id -> level, arrived nodes
+  only), reason (K_FOUND | EXHAUSTED | POP_BUDGET | START_IS_GOAL | CANCELLED), expanded, pops,
+  cuts (DEPTH_CUT, EXPANSION_BUDGET, CYCLE)}`; null for every other network.
+- In a network with a search the pathways are the paths to arrived nodes (`ends_with`
+  `TARGET_EXACT` or `TARGET_SKELETON`), also after `expand`, `override` and in
+  `GET /api/jobs/{id}/pathways`; an arrived node that was not expanded is `terminal` with
+  `terminal_reason` `TARGET_<level>`, and the nodes the search left unexpanded are `terminal`
+  `NODE_BUDGET` (expandable). A pool whose skeletons cannot be read is tested at EXACT only and
+  counted in `skipped` as `SKELETON_UNREADABLE`.
