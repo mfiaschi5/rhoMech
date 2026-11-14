@@ -42,8 +42,12 @@ class ModelConfig:
     #   accumulation) instead of autocast's float32 output; docs/model_impl.md, item 3
     split_pair_init: bool = False  # dense: MLP_P's first layer applied block by block, without
     #   the (B, N + 1, N + 1, C) channel tensor (the same map); docs/model_impl.md, item 9
+    pair_linear_splitk: bool = False  # dense: the pair track's Linear layers with a split-K weight
+    #   gradient (same forward); docs/model_impl.md, item 21
     pair_update_every: int = 1  # dense: the pair update in every k-th layer only (the bias from
     #   p in every layer); ablation, docs/model_impl.md, item 18
+    last_update_atoms: bool = False  # dense: the last layer's pair update on the atom block only,
+    #   the one block the decoder reads (the same map; GEMM shapes, hence rounding, differ); item 22
     encoder: str = "dense"  # dense (pair track, spec v9) | flex | sparse
     flex_kernel: bool = True  # flex: FlexAttention on the GPU (else the dense reference)
     topk: int = 64  # sparse: keys per query, besides MECH and itself

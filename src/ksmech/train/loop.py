@@ -42,7 +42,7 @@ import math
 import os
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -105,6 +105,10 @@ class TrainConfig:
     compile: bool = False  # torch.compile every encoder layer (dynamic shapes; docs/model_impl.md)
     compact_samples: bool = True  # samples kept with their cells as stored, expanded per batch
     load_workers: int = 1  # forked processes that read and verify the store's shards
+    pin_memory: bool = False  # GPU runs: batches collated into page-locked memory, so the
+    #   copies to the device are asynchronous (numbers unchanged; no gain measured on ROCm)
+    eval_cell_budget: int = 0  # cells per validation/test batch; 0: cell_budget (no backward and
+    #   no recompute there, so more fit; another batching changes rounding only)
 
 
 # PMechDB and rmechdb: isolated steps, no stop labels; the minimum over a joint run's sources is
@@ -351,6 +355,7 @@ def make_loader(
         num_workers=cfg.workers,
         multiprocessing_context="fork" if cfg.workers else None,
         persistent_workers=bool(cfg.workers),
+        pin_memory=bool(cfg.pin_memory) and torch.cuda.is_available(),
     )
 
 
@@ -373,9 +378,7 @@ def evaluate(
     P(END_MECH); and the anchor top-1 and greedy R over the pools with an unpaired electron
     (`open_n` of them, an odd N), the subset the pooled numbers hide."""
     model.eval()
-    sums = {"loss": 0.0, "anchor_nll": 0.0, "top1": 0, "top3": 0, "top5": 0, "r_exact": 0}
-    sums["p_stop"], n = 0.0, 0
-    opened = dict.fromkeys(OPEN_METRICS, 0)
+    acc, n = None, 0
     for batch in loader:
         batch = to_device(batch, device)
         with torch.autocast(device.type, dtype=dtype or torch.float32, enabled=dtype is not None):
@@ -384,20 +387,41 @@ def evaluate(
             lp = parts["lp_anchor"]
             rank = anchor_ranks(lp, batch)
             exact = edit_matches(*greedy_edit(model.decoder, h, p, lp, batch), batch)
-        sums["loss"] += float(parts["loss"].sum())
-        sums["anchor_nll"] += float(parts["anchor_nll"].sum())
-        sums["p_stop"] += float(parts["p_stop"].sum())
-        for k in (1, 3, 5):
-            sums[f"top{k}"] += int((rank < k).sum())
-        sums["r_exact"] += int(exact.sum())
-        n += len(rank)
         pools = (batch["nonbonding"] % 2 != 0).any(1)
-        opened["open_top1"] += int((rank[pools] < 1).sum())
-        opened["open_r_exact"] += int(exact[pools].sum())
-        opened["open_n"] += int(pools.sum())
-    m = opened.pop("open_n")
-    rates = {k: v / max(m, 1) for k, v in opened.items()}
-    return {k: v / max(n, 1) for k, v in sums.items()} | {"n": n, "open_n": m} | rates
+        if acc is None:
+            assert rank.shape == pools.shape, (rank.shape, pools.shape)
+        row = _eval_row(parts, rank, exact, pools)
+        acc = row if acc is None else acc + row
+        n += len(rank)
+    v = acc.tolist() if acc is not None else [0.0] * 10
+    sums = {"loss": v[0], "anchor_nll": v[1]}
+    sums |= {"top1": int(v[3]), "top3": int(v[4]), "top5": int(v[5]), "r_exact": int(v[6])}
+    sums["p_stop"] = v[2]
+    m = int(v[9])
+    opened = {"open_top1": int(v[7]), "open_r_exact": int(v[8])}
+    rates = {k: x / max(m, 1) for k, x in opened.items()}
+    return {k: x / max(n, 1) for k, x in sums.items()} | {"n": n, "open_n": m} | rates
+
+
+def _eval_row(parts: dict, rank, exact, pools) -> torch.Tensor:
+    """One batch's ten sums as float64 on the device (loss, anchor NLL, P(stop), top-1/3/5,
+    exact R, open top-1, open exact R, open pools): the per-batch sums the host used to read
+    one by one, added in the same order in the same IEEE double, read once per `evaluate`."""
+    top1 = rank < 1
+    zero = torch.zeros_like(exact)
+    terms = [
+        parts["loss"].sum(),
+        parts["anchor_nll"].sum(),
+        parts["p_stop"].sum(),
+        top1.sum(),
+        (rank < 3).sum(),
+        (rank < 5).sum(),
+        exact.sum(),
+        (top1 & pools).sum(),
+        torch.where(pools, exact, zero).sum(),
+        pools.sum(),
+    ]
+    return torch.stack([t.double() for t in terms])
 
 
 def evaluate_sources(model: KSMech, loaders: dict, *args) -> dict:
@@ -598,10 +622,14 @@ def checkpoint_payload(model: KSMech, header: prov.Provenance, **extra) -> dict:
     }
 
 
-def save_checkpoint(path: Path, payload: dict) -> None:
+def checkpoint_bytes(payload: dict) -> bytes:
     buf = io.BytesIO()
     torch.save(payload, buf)
-    prov.atomic_write(path, buf.getvalue())
+    return buf.getvalue()
+
+
+def save_checkpoint(path: Path, payload: dict) -> None:
+    prov.atomic_write(path, checkpoint_bytes(payload))
 
 
 def load_model(path: Path, device: torch.device | str = "cpu") -> tuple[KSMech, dict]:
@@ -763,9 +791,10 @@ def _end_epoch(run_dir: Path, model, header, opt, sched, scaler, state: dict, me
         best=state["best"],
         metrics=metrics,
     )
-    save_checkpoint(run_dir / "last.pt", payload)
+    data = checkpoint_bytes(payload)  # serialized once, written under both names
+    prov.atomic_write(run_dir / "last.pt", data)
     if is_best:
-        save_checkpoint(run_dir / "best.pt", payload)
+        prov.atomic_write(run_dir / "best.pt", data)
 
 
 def fit(
@@ -794,8 +823,9 @@ def fit(
     header = _run_header(cfg, model_cfg, parts, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)
     train_loader = make_loader(train, cfg, True, cfg.resonance_draws)
-    val_loaders = {s: make_loader(part, cfg, False) for s, part in val.items()}
-    test_loaders = {s: make_loader(part, cfg, False) for s, part in held[0].items()}
+    eval_cfg = replace(cfg, cell_budget=cfg.eval_cell_budget or cfg.cell_budget)
+    val_loaders = {s: make_loader(part, eval_cfg, False) for s, part in val.items()}
+    test_loaders = {s: make_loader(part, eval_cfg, False) for s, part in held[0].items()}
     total = cfg.epochs * len(train_loader.batch_sampler)
     opt = _optimizer(model, cfg)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, cfg.warmup, total))

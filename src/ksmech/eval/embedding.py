@@ -125,7 +125,7 @@ def attention_terms(model: KSMech, call: LayerCall, batch: dict, z_hat, defined)
     content = (q @ k.transpose(-1, -2)).float() / math.sqrt(q.shape[-1])
     kind = model.cfg.encoder
     if kind == "dense":
-        _, p, keys = call.args
+        p, keys = call.args[1], call.args[2]
         bias = layer.bias(layer.norm_p(p)).permute(0, 3, 1, 2).float()
         read = keys[:, None, None, :]
     elif kind == "flex":

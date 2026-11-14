@@ -23,6 +23,7 @@ from ksmech.model.inputs import (
     pair_channels,
     pair_init_parts,
 )
+from ksmech.model.pair_linear import PairLinear, pair_linear
 
 
 def mlp(n_in: int, hidden: int, n_out: int) -> nn.Sequential:
@@ -92,12 +93,17 @@ class EncoderLayer(nn.Module):
     feed-forward block of width 4d, then p_ij <- p_ij + MLP_U([p_ij, h_i, h_j]) (its first
     linear layer split over the three inputs, which is the same map). Without `update`
     (`ModelConfig.pair_update_every`) the layer reads p for its bias and leaves it as it is.
-    `half_pair_norm` runs the LayerNorm of p in the autocast dtype (`_norm_p`)."""
+    `half_pair_norm` runs the LayerNorm of p in the autocast dtype (`_norm_p`). With `atoms`
+    (a tensor (B, A, A) of the batch, only its shape is read; the last layer under
+    `ModelConfig.last_update_atoms`) the update runs on the atom block p[:, 1:A+1, 1:A+1] alone
+    and returns that block: the one the decoder reads, the same values as the full update.
+    A tensor, not an int, so that a compiled layer with dynamic shapes never specializes on A."""
 
     def __init__(self, cfg: ModelConfig, update: bool = True):
         super().__init__()
         d, dp, self.heads = cfg.d, cfg.d_pair, cfg.heads
         self.half_norm, self.update = bool(getattr(cfg, "half_pair_norm", False)), update
+        self.splitk = bool(getattr(cfg, "pair_linear_splitk", False))
         self.norm_h, self.norm_p, self.norm_f = nn.LayerNorm(d), nn.LayerNorm(dp), nn.LayerNorm(d)
         self.qkv = nn.Linear(d, 3 * d)
         self.bias = nn.Linear(dp, cfg.heads)
@@ -124,12 +130,14 @@ class EncoderLayer(nn.Module):
                 p.to(dtype), norm.normalized_shape, weight, bias, norm.eps
             )
 
-    def forward(self, h: torch.Tensor, p: torch.Tensor, key_mask: torch.Tensor):
+    def forward(self, h, p, key_mask, atoms: torch.Tensor | None = None):
         b, n, d = h.shape
         q, k, v = self.qkv(self.norm_h(h)).view(b, n, 3, self.heads, -1).permute(2, 0, 3, 1, 4)
         pn = self._norm_p(p)
         logits = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
-        logits = logits.float() + self.bias(pn).permute(0, 3, 1, 2).float()
+        logits = (
+            logits.float() + pair_linear(self.bias, pn, self.splitk).permute(0, 3, 1, 2).float()
+        )
         logits = logits.masked_fill(~key_mask[:, None, None, :], float("-inf"))
         attn = torch.softmax(logits, -1).to(v.dtype)
         h = h + self.out((attn @ v).transpose(1, 2).reshape(b, n, d))
@@ -137,22 +145,40 @@ class EncoderLayer(nn.Module):
         if not self.update:
             return h, p
         hn = self.norm_u(h)
-        u = self.u_p(pn) + self.u_i(hn)[:, :, None, :] + self.u_j(hn)[:, None, :, :]
-        return h, p + self.u_out(nn.functional.gelu(u))
+        pn_u = pn
+        if atoms is not None:  # last layer, `last_update_atoms`: only the atom block is read
+            a = atoms.shape[1]
+            pn_u, p, hn = pn[:, 1 : a + 1, 1 : a + 1], p[:, 1 : a + 1, 1 : a + 1], hn[:, 1 : a + 1]
+        u = (
+            pair_linear(self.u_p, pn_u, self.splitk)
+            + self.u_i(hn)[:, :, None, :]
+            + self.u_j(hn)[:, None, :, :]
+        )
+        return h, p + pair_linear(self.u_out, nn.functional.gelu(u), self.splitk)
 
 
-def split_pair_init(lin: nn.Linear, parts: PairInitParts, n_rbf: int) -> torch.Tensor:
+def split_pair_init(
+    lin: nn.Linear, parts: PairInitParts, n_rbf: int, splitk: bool = False
+) -> torch.Tensor:
     """`lin(pair_channels(...))` from `inputs.pair_init_parts`: each part times its columns of
     the weight, summed on the cells where the part is non-zero (`ModelConfig.split_pair_init`).
-    The same linear map; only the summation order, hence the rounding, differs."""
+    The same linear map; only the summation order, hence the rounding, differs. The kind table
+    is gathered with F.embedding for its backward."""
     w = lin.weight
     f2 = parts.z.shape[-1]
     c = n_rbf + f2 + 1  # same fragment, then bonded, order, distance, centre weight, kinds
-    inner = nn.functional.linear(parts.basis, w[:, :n_rbf])  # (B, N, N, d_p), autocast dtype
+    # (B, N, N, d_p), autocast dtype
+    inner = (
+        PairLinear.apply(parts.basis, w[:, :n_rbf], None)
+        if splitk
+        else nn.functional.linear(parts.basis, w[:, :n_rbf])
+    )
     dt = inner.dtype
     kinds = torch.cat([w[:, c + 5 : c + 5 + KINDS].T, torch.zeros_like(w[:, :1].T)])  # (6, d_p)
     table = (kinds[:, None, :] + torch.stack([0 * w[:, c], w[:, c]])[None]).reshape(-1, w.shape[0])
-    pre = (table.to(dt)[parts.kind] + lin.bias.to(dt)).contiguous()
+    # F.embedding, not table[kind]: the same gather (a copy, bit for bit), but its backward is a
+    # sorted segment sum; index_put's accumulate serialized the 12 rows' collisions (50 ms/step)
+    pre = (nn.functional.embedding(parts.kind, table.to(dt)) + lin.bias.to(dt)).contiguous()
     pre[:, 1:, 1:] += inner
     a = parts.n_atoms
     pre[:, 1 : a + 1, 1 : a + 1] += nn.functional.linear(parts.atom, w[:, c + 1 : c + 4]).to(dt)
@@ -195,6 +221,7 @@ class DenseEncoder(nn.Module):
         self.embed = TokenEmbedding(cfg, n_atom_x, n_orbital_x)
         channels = pair_channel_count(cfg.rbf, n_features)
         self.pair_init = mlp(channels, cfg.d_pair, cfg.d_pair)
+        self.splitk = bool(getattr(cfg, "pair_linear_splitk", False))
         every = int(getattr(cfg, "pair_update_every", 1))
         if every < 1:
             raise ValueError(f"pair_update_every {every}: at least 1")
@@ -203,8 +230,12 @@ class DenseEncoder(nn.Module):
         )
 
     def _init_split(self, parts: PairInitParts) -> torch.Tensor:
-        pre = split_pair_init(self.pair_init[0], parts, self.cfg.rbf)
-        return self.pair_init[2](self.pair_init[1](pre))
+        pre = split_pair_init(self.pair_init[0], parts, self.cfg.rbf, self.splitk)
+        return pair_linear(self.pair_init[2], self.pair_init[1](pre), self.splitk)
+
+    def _init_dense(self, channels: torch.Tensor) -> torch.Tensor:
+        lin1, act, lin2 = self.pair_init
+        return pair_linear(lin2, act(pair_linear(lin1, channels, True)), True)
 
     def forward(self, batch: dict, inp: dict, z_hat, defined, dense_warmup: bool = False):
         """(h, p_atoms, aux): token vectors (B, N + 1, d), MECH at 0; symmetrized atom-pair
@@ -215,12 +246,18 @@ class DenseEncoder(nn.Module):
             make = pair_init_parts if split else pair_channels
             channels = make(batch, z_hat, defined, self.cfg.rbf, self.cfg.rbf_max)
         h = self.embed(batch, inp)
-        p = run(self._init_split, channels) if split else run(self.pair_init, channels)
+        if split:
+            p = run(self._init_split, channels)
+        else:
+            p = run(self._init_dense if self.splitk else self.pair_init, channels)
         keys = key_mask(batch)
-        for layer in self.layers:
-            h, p = run(layer, h, p, keys)
+        atoms_only = bool(getattr(self.cfg, "last_update_atoms", False)) and self.layers[-1].update
+        last = len(self.layers) - 1
+        for k, layer in enumerate(self.layers):
+            extra = (batch["bond_order"],) if atoms_only and k == last else ()
+            h, p = run(layer, h, p, keys, *extra)
         a = batch["bond_order"].shape[1]
-        pa = p[:, 1 : a + 1, 1 : a + 1]
+        pa = p if atoms_only else p[:, 1 : a + 1, 1 : a + 1]
         return h, (pa + pa.transpose(1, 2)) / 2, {}
 
 

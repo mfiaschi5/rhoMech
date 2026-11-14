@@ -101,6 +101,15 @@ def test_every_rebuilt_layer_equals_the_model(samples, encoder):
             assert ((tr["attn"] > 0).sum(-1) <= k + 2).all()
 
 
+def test_a_last_atoms_update_model_is_traced(samples):
+    """`last_update_atoms` hands the last dense layer a fourth argument; the trace still
+    rebuilds every layer."""
+    model = make(samples, last_update_atoms=True)
+    for s in samples:
+        tr = trace(model, s)
+        assert max(tr["errors"]["layers"]) < 1e-4
+
+
 def test_the_anchor_terms_sum_to_the_logits(samples):
     model = make(samples)
     batch = collate_samples(samples)

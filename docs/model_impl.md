@@ -37,6 +37,13 @@ the changes under; deferred and rejected items are listed at the end.
 | 13 | Samples kept in memory with their cells as the shard stores them (float16 byte planes, bit-packed flags and defined masks: `store.CompactCells`), expanded one batch at a time in the DataLoader workers (`store.dense`); the sample build can write the store while it builds | `--compact-samples` (training), `ksmech-arrows samples --stream` (build) | compact on, stream off | none: the expansion is `unpack`'s own code, bit for bit (checked on all 1,241 PMechDB val samples); stream: the shards hold the samples in step order instead of by step id |
 | 15 | One run per GPU on a pod | `PER_GPU` in `rhoMech-hf-staging/pod_orb/start.sh` | 1 (was 3) | - |
 | 18 | The pair update in every k-th layer only, the bias from p in every layer (ablation) | `--pair-update-every K` (ModelConfig `pair_update_every`) | 1 | a different model; k = 1 is the model as before, bit for bit |
+| 20 | Kind table of the split MLP_P gathered by F.embedding (backward: sorted segment sum, not index_put) | under `--split-pair-init` | - | forward bit for bit; the table gradient's fp32 summation order |
+| 21 | Pair-track Linear layers with a split-K weight gradient (forward unchanged) | `--pair-linear-splitk` (ModelConfig `pair_linear_splitk`) | off | eager forward bit for bit (compiled: rounding); weight gradients summed in fp32 by parts |
+| 22 | The last layer's pair update on the atom block (the one block the decoder reads) | `--last-update-atoms` (ModelConfig `last_update_atoms`) | off | the same map; rounding of the GEMM shapes |
+| 23 | Batches collated into page-locked memory, so `to_device`'s non-blocking copies are asynchronous (a GPU run only) | `--pin-memory/--no-pin-memory` | off (no gain measured on ROCm) | none |
+| 24 | `evaluate` accumulates its ten sums as float64 on the device (the same per-batch sums, added in the same order) and reads them once per call, not ~13 syncs per batch | always on | - | none: exact dict equality with the old host sums (test) |
+| 25 | A cell budget for the validation and test batches (no backward, no recompute: more fit per launch) | `--eval-cell-budget N` | 0 (the training budget) | 0: none; N: other batches, rounding only |
+| 26 | `last.pt` and `best.pt` written from one serialization of the payload (`checkpoint_bytes`) | always on | - | none: the same bytes |
 
 Item 13 replaces the "schema v20" of the proposal: the store already keeps `pair_z` as float16
 and the 0/1 features and the defined masks as bits; only the trainer expanded them to float32 on
@@ -98,6 +105,31 @@ the long one.
   the state dict, and the streaming build giving the same reports, views, samples and
   statistics as the whole build.
 
+## Round 2 (2026-11-13): items 20-26, measured together
+
+Found by a profile of the eager `--half-pair-norm --split-pair-init` step (485 ms of GPU time):
+the kind table's index backward (50 ms, item 20), the pair-track weight-gradient GEMM, which
+reduces ~5.5e5 rows into a 64 x 64 output on one or two tiles (2.7 ms per call, 16% of the GPU
+time, item 21), the last layer's update over every cell when the decoder reads the atom block
+(item 22), and host overheads in the loop (items 23-26). Details and per-item numbers in
+`docs/decisions.md` (2026-11-13).
+
+`bench_train.py` (session scratchpad): the same pre-collated batches (550k cells, fixed seed, no
+resonance draws), the second pass timed, two runs per arm, interleaved; spread under 0.5%.
+"Round 1" = `--half-pair-norm --split-pair-init`, "+ round 2" adds
+`--pair-linear-splitk --last-update-atoms` (item 20 is inside `--split-pair-init`).
+
+| arm (RX 6600 XT, fp16) | main 547d1e4 | this branch | gain |
+|---|---|---|---|
+| PMechDB, no flags | 23.4 samples/s, 1673 MB | 23.4, 1673 MB, first losses and parameters identical | 0 |
+| PMechDB, round 1 + `--compile` | 31.3, 1362 MB | 43.6 (+ round 2), 1352 MB | +39% |
+| PMechDB, round 1 + `--compile --no-checkpoint` | 37.6, 3668 MB | 54.9 (+ round 2), 3581 MB | +46% |
+| ReactMech pilot, round 1 + `--compile --no-checkpoint` | 21.5, 3294 MB | 32.8 (+ round 2), 3161 MB | +53% |
+
+Against the model as trained (23.4 samples/s), every option on is 2.3x on PMechDB. The two new
+flags change rounding only (first losses within 3e-5 relative). `--pin-memory` (item 23) gave
+nothing on this card and stays off.
+
 ## Item 14: the largest samples (a measurement, nothing changed)
 
 | | tokens median / p95 / max | cell share of the top 1% / 5% / 10% | `--max-tokens 512` drops / saves | 768 |
@@ -115,7 +147,8 @@ On ReactMech a lower cap buys at most 2%; on PMechDB 512 tokens would save 9% of
 ksmech-arrows samples --source reactmech --workers 8 --stream
 # a run with every approved option
 ksmech-train fit --run rm_dense_s0 --source reactmech --preset general \
-    --compile --half-pair-norm --split-pair-init --load-workers 8
+    --compile --half-pair-norm --split-pair-init --pair-linear-splitk --last-update-atoms \
+    --load-workers 8
 ```
 
 `--compact-samples` is on by default; `--no-compact-samples` keeps whole samples in memory.
@@ -127,7 +160,7 @@ ksmech-train fit --run rm_dense_s0 --source reactmech --preset general \
 
 ## Deferred
 
-1 `--no-checkpoint` on the pod; 5 `pin_memory`; 7 fixed N buckets and CUDA graphs; 10 a fused
+1 `--no-checkpoint` on the pod; 7 fixed N buckets and CUDA graphs; 10 a fused
 Triton kernel of the pair update; 11 attention without the float32 logits; 17 the pair track
 without the occupied-occupied and virtual-virtual cells; 19 an atom-pair-only pair track.
 

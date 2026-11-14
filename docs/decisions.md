@@ -9636,3 +9636,90 @@ threshold is now followed downhill, and xtb's rule applies only to what is left.
   The loss-scale floor and `MAX_NONFINITE_IN_A_ROW` are read once per logging interval.
 - **Found, not changed**: the stop head never trains (no `stop_label` in the samples or the
   collate), so `--stop-weight` has had no effect on any run.
+
+## 2026-11-13: training loop host overheads (pinned batches, device-side evaluate, eval budget, one serialization)
+
+Four changes in `train/loop.py`, none altering a number at the defaults (docs/model_impl.md,
+items 23-26). (1) `make_loader` can pin the collated batches on a GPU run (`--pin-memory`,
+default off; `to_device` already copies non-blocking, which is a no-op on pageable memory); the
+loader is unpinned without CUDA. Measured on the RX 6600 XT (PMechDB, 550k cells): +0.1% eager,
++0.3% compiled per step, make_loader + to_device 25.5 -> 23.5 ms per batch with 2 workers (the
+workers already overlap it), +25-58 MB host RSS; so it stays off, an option for a 5090 host. (2) `evaluate` sums on the device in float64: each term is the same
+per-batch `.sum()` the host used to convert with `float()`/`int()`, added in the same order in
+the same IEEE double, counts exact, so the result equals the old one exactly, key order
+included (`test_evaluate_on_the_device_gives_the_host_numbers` keeps a verbatim copy of the old
+function); one sync per call instead of ~13 per batch. (3) `eval_cell_budget` (default 0 = the
+training budget) lets validation and test use larger batches; another batching changes
+rounding only, so it is opt-in. (4) `_end_epoch` serializes the payload once and writes the
+bytes to `last.pt` and, when the epoch improves, `best.pt`. `comparable_config` treats the two
+new fields at their defaults, so older runs still `--resume`. The evaluate and serialization
+changes are bit for bit and were not timed (the benchmark has no validation pass).
+## 2026-11-13: the kind table of the split MLP_P gathered by F.embedding
+
+- **Why.** The profile of the dense step under `--half-pair-norm --split-pair-init` had
+  `indexing_backward_kernel_many_indices<Half>` at 49.5 ms per step (10.2% of GPU time): the
+  backward of `table.to(dt)[parts.kind]`, a (12, d_pair) table gathered at every one of the
+  B (N + 1)^2 cells, so tens of thousands of indices collide on each of 12 rows.
+- **What.** `split_pair_init` gathers with `nn.functional.embedding(parts.kind, table.to(dt))`.
+  The forward is the same copy, bit for bit (`torch.equal` in
+  `test_split_pair_init_kind_table_by_embedding`); the backward is embedding_dense_backward
+  (sorted indices, partial-segment sums in fp32), so only the summation order of the table
+  gradient changes, inside the opt-in path. The default path is untouched.
+- **Profile** (RX 6600 XT, fp16, PMechDB, 550k cells, 10 steps). Before:
+  `indexing_backward_kernel_many_indices` 50.6 ms per step. After: that kernel is gone, the
+  table's backward is `compute_grad_weight_atomic_accumulate` at 14.5 ms per step; the GPU time
+  per step 483.8 -> 448.7 ms. Step time (A/B/A/B, 2 runs per arm): eager 23.55 -> 25.51
+  samples/s (+8.3%), compiled 31.32 -> 34.72 (+10.8%); first five losses identical. The
+  `_KindGather` fallback was not needed.
+## 2026-11-13 Last layer's pair update on the atom block (`last_update_atoms`, speed item 22)
+
+- The decoder reads only `p[:, 1:A+1, 1:A+1]` of the final pair track, yet the last layer's
+  update (u_p GEMM, the two broadcast adds, GELU, u_out GEMM, residual) ran on all
+  B (N+1)^2 cells, forward, recompute and backward. With `last_update_atoms` the update runs on
+  the A x A block alone (A/(N+1) is about 0.15-0.25). The attention bias still needs the
+  LayerNorm of p on every cell and keeps it; h is computed before the update and is bit for bit
+  unchanged. The update is cell-local, so it is the same function and gradient; only the GEMM
+  shapes, hence the rounding, differ. Off by default, so the default path and every existing
+  checkpoint stay bit for bit; the flag may also evaluate old checkpoints (outputs agree to
+  rounding). With `pair_update_every` leaving the last layer without an update, nothing changes.
+- `atoms` is passed as the batch's `bond_order` tensor, not an int: under `compile(dynamic=True)`
+  its shape is symbolic, so a new A cannot trigger a recompile per value.
+- **Measured** (RX 6600 XT, fp16, 550k cells, with `--half-pair-norm --split-pair-init`): PMechDB
+  eager 23.66 -> 24.41 samples/s (+3.2%), compiled 31.32 -> 33.04 (+5.5%); ReactMech pilot eager
+  13.76 -> 14.18 (+3.1%); peak memory unchanged (checkpointing sets the peak); first five losses
+  differ by at most 2.9e-5 relative (rounding). Compiled: no graph break, 5 recompiles instead
+  of 3 (the last layer's variant). `eval.embedding.attention_terms` reads the dense layer's
+  arguments by position, so a model with the flag is traced too (review fix, tested).
+## 2026-11-13: pair-track Linear layers with a split-K weight gradient (`pair_linear_splitk`)
+
+- **Why**: the weight-gradient GEMM of the pair track's Linear layers (X^T dY over R = B(N+1)^2
+  ~ 5.5e5 rows into a 64 x 64 or 64 x 8 output) was 2.72 ms per call, 16% of GPU time: one or
+  two macro-tiles, so few of the 32 CUs work. `model.pair_linear.weight_grad` splits the rows
+  into `SPLIT_K` batched products (torch.bmm) and sums the partials in float32.
+- **Same forward**: `PairLinear` runs F.linear on the operands autocast would cast, so h and p
+  are equal bit for bit with the flag on (tested in fp32 and CPU bf16, both `split_pair_init`
+  values). Only the training-time weight-gradient rounding changes, hence opt-in
+  (`--pair-linear-splitk`, off); the default path calls the nn.Linear modules as before.
+- **Layers**: `bias`, `u_p`, `u_out` of each EncoderLayer, MLP_P's two layers (and the basis
+  block of the split first layer). qkv, out, ffn, u_i, u_j (token track) are unchanged.
+- **Microbenchmark gate** (RX 6600 XT, fp16, R = 550000 rows; ms per call, `g.t() @ x` against
+  `weight_grad`; the error against an fp32 reference is lower than the stock GEMM's at every s):
+
+  | shape | g.t() @ x | s = 16 | s = 32 | s = 64 |
+  |---|---|---|---|---|
+  | 64 x 64 | 3.625 | 2.124 (1.71x) | 1.236 (2.93x) | 1.295 (2.80x) |
+  | 64 x 8 | 3.602 | 2.210 (1.63x) | 1.263 (2.85x) | 1.260 (2.86x) |
+
+  `SPLIT_K = 32`.
+- **A custom op, not an autograd.Function.** As an inlined Function, the compiled layer under
+  activation checkpointing crashed at the second batch shape (CheckpointError: the recompute ran
+  on the dynamic graph compiled after the first recompile, whose saved tensors differ from the
+  static graph's forward). `PairLinear` is now `torch.library.custom_op("ksmech::pair_linear")`
+  with `register_fake` and `register_autograd`, the autocast dtype read outside the op and
+  passed in; the compiler sees an opaque op with a fixed saved set. A compiled, checkpointed
+  tiny layer over four batch shapes is tested against eager. Eager forwards are bit for bit
+  with the flag on and off; compiled ones differ by rounding (inductor fuses nn.Linear with its
+  neighbours, not the opaque op).
+- **Measured** (PMechDB n = 400, `--half-pair-norm --split-pair-init`, samples/s, flag off ->
+  on): eager 25.5 -> 27.8 (+9%); compiled with checkpointing 34.7 -> 41.4 (+19%); compiled
+  without checkpointing 42.5 -> 52.5 (+23%); no graph break, 5 recompiles.
