@@ -188,7 +188,7 @@ uv run pytest -n 14 -m "not realdata"  # unit tests in 14 processes (pytest-xdis
 uv run pytest -m realdata     # real-data tests one at a time, each pass in 14 spawned processes
 uv run ruff check .           # lint
 uv run ruff format .          # format
-uv run pre-commit install     # enable the commit hook: ruff, then the two pytest runs above with -x
+uv run pre-commit install     # enable both hooks: commit = ruff + the unit tests, push = the real-data tests (-x)
 ```
 
 Main CLI entry points are added phase by phase and listed here as they land:

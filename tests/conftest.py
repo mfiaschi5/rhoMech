@@ -11,7 +11,13 @@ if os.environ.get("PYTEST_XDIST_WORKER"):
 import pytest
 from rdkit import Chem
 
+from ksmech.train.loop import rocm_override
 from tests.fixtures.molecules import MOLECULES
+
+# an RDNA2 card (the RX 6600 XT) under the ROCm build: HSA_OVERRIDE_GFX_VERSION=10.3.0 before the
+# first CUDA call, as `ksmech-train` sets it; without it a compiled GPU kernel segfaults the worker
+# (test_compiled_checkpointed_pair_linear_survives_a_second_batch_shape[cuda])
+rocm_override()
 
 
 @pytest.fixture(scope="session")

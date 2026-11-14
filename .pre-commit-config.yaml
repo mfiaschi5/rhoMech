@@ -1,3 +1,6 @@
+# The commit hook runs ruff and the unit tests; the real-data tests (about 9 minutes) run before
+# a push (docs/decisions.md, 2026-11-14). `uv run pre-commit install` installs both hooks.
+default_install_hook_types: [pre-commit, pre-push]
 repos:
   - repo: local
     hooks:
@@ -7,12 +10,14 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+        stages: [pre-commit]
       - id: ruff-format
         name: ruff format
         entry: uv run ruff format
         language: system
         types: [python]
         pass_filenames: false
+        stages: [pre-commit]
       - id: pytest
         name: pytest -x, not realdata (14 processes)
         entry: uv run pytest -x -q -n 14 -m "not realdata"
@@ -20,6 +25,7 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-commit]
       - id: pytest-realdata
         name: pytest -x, realdata (one at a time, 14-process passes)
         entry: uv run pytest -x -q -m realdata
@@ -27,3 +33,4 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-push]

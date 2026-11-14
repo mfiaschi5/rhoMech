@@ -9752,3 +9752,21 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   the P5 digests (61 s), the open-shell token checks (59 + 49 + 28 s) and the alignment (45 s).
 - **Not done (a policy for the user)**: running the real-data stage only when a commit touches
   the data, arrows, orbitals or QM code, or at pre-push.
+
+## 2026-11-14: the real-data tests run before a push, not a commit
+
+- **What.** In `.pre-commit-config.yaml` ruff and the unit tests keep the `pre-commit` stage and
+  `pytest -x -q -m realdata` moves to `pre-push`; `default_install_hook_types: [pre-commit,
+  pre-push]`, so `uv run pre-commit install` installs both hooks. A commit takes about 1.5
+  minutes, a push about 9 more.
+- **Why.** The user's choice of the two options left open above. Gating the stage by touched
+  paths would need a list of the paths each real-data test reads (data, arrows, orbitals, QM,
+  eval, model) and would miss a test whose inputs change through an untracked artifact; at push
+  every commit that leaves the machine has passed the full suite once.
+- **Consequence.** A local commit no longer proves the real-data tests pass; run `uv run pytest
+  -m realdata` before saying a task touching the data pipeline is done (CLAUDE.md's rule to run
+  pytest still applies). `git push --no-verify` skips them, as `git commit --no-verify` did.
+- **Found on the first commit through it.** `test_compiled_checkpointed_pair_linear_survives_a_
+  second_batch_shape[cuda]` (round 2) crashed its xdist worker when the shell had no
+  `HSA_OVERRIDE_GFX_VERSION`: the Inductor kernels built for gfx1032 segfault. `tests/conftest.py`
+  now calls `train.loop.rocm_override()` before any test touches the GPU, as `ksmech-train` does.
