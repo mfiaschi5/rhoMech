@@ -4,6 +4,7 @@ samples' source, the open-shell metrics and the paired comparison of decode file
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -93,6 +94,18 @@ def test_the_validation_cohort_restricts_only_its_sources_val(monkeypatch, tmp_p
     assert [s.step_id for s in load_source_part(cfg, "pmechdb", "val", tmp_path)[0]] == ["b"]
     assert len(load_source_part(cfg, "rmechdb", "val", tmp_path)[0]) == 3
     assert len(load_source_part(cfg, "pmechdb", "test", tmp_path)[0]) == 3
+
+
+def test_the_train_subset_is_random_fixed_and_only_trains(monkeypatch, tmp_path):
+    ids = [f"s{i:03d}" for i in range(100)]
+    _patched(monkeypatch, ids=ids, held=())
+    cfg = TrainConfig(source="reactmech", split="scaffold", train_subset=30)
+    keep = [s.step_id for s in load_source_part(cfg, "reactmech", "train", tmp_path)[0]]
+    again = replace(cfg, seed=7)
+    assert keep == [s.step_id for s in load_source_part(again, "reactmech", "train", tmp_path)[0]]
+    assert len(keep) == 30 and keep == sorted(keep) and keep != ids[:30]
+    assert len(load_source_part(cfg, "reactmech", "val", tmp_path)[0]) == 100
+    assert loop.train_subset(ids, 500) == ids
 
 
 def test_a_joint_run_has_no_stop_term():

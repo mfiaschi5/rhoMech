@@ -95,6 +95,8 @@ class TrainConfig:
     seed: int = 0
     workers: int = 2  # forked DataLoader workers that collate
     limit: int = 0  # use only the first n training and validation samples (smoke runs)
+    train_subset: int = 0  # > 0: that many training samples per source, drawn at random by a
+    #   fixed seed (not `seed`) before the store is read, so a part larger than RAM still trains
     log_every: int = 20  # optimizer steps
     stop_weight: float = -1.0  # lambda_stop; < 0: the source's (0.5, 0 on PMechDB)
     resonance_draws: bool = True  # each epoch, every training sample in a random drawing
@@ -270,9 +272,23 @@ def leak_guarded(samples: list, cfg: TrainConfig, source: str, processed_dir: Pa
     return [s for s in samples if s.step_id not in held]
 
 
+TRAIN_SUBSET_SEED = 0  # every seed of a run trains on the same subset
+
+
+def train_subset(ids: list[str], n: int) -> list[str]:
+    """`n` of `ids` drawn without replacement by TRAIN_SUBSET_SEED, in their view order (so the
+    shards are read in order); all of them when `n` is not smaller."""
+    if n >= len(ids):
+        return list(ids)
+    pick = np.random.default_rng(TRAIN_SUBSET_SEED).choice(len(ids), size=n, replace=False)
+    return [ids[i] for i in sorted(pick)]
+
+
 def _part_ids(cfg: TrainConfig, source: str, part: str, path: Path, processed_dir: Path):
-    """The ids to read of a part: all (None), or for a validation part with a cohort in
-    `cfg.val_cohort`, the cohort's."""
+    """The ids to read of a part: all (None); for the training part with `cfg.train_subset`,
+    that random subset; for a validation part with a cohort in `cfg.val_cohort`, the cohort's."""
+    if part == "train" and cfg.train_subset:
+        return train_subset(sample_ids(path), cfg.train_subset)
     name = _source_map(cfg.val_cohort).get(source)
     if part != "val" or not name:
         return None

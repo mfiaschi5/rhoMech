@@ -9776,3 +9776,14 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   idle `git-receive-pack` connection held 10 minutes is closed without a keepalive and survives
   with `-o ServerAliveInterval=30`. The repository's `core.sshCommand` carries it (local git
   config, so every clone that pushes over SSH sets it once).
+
+## 2026-11-14: `--train-subset N`, a random training subset read before the store
+
+- **Why**: the full ReactMech scaffold split (85,219 training + 10,511 validation samples) holds
+  about 34 GiB in compact form (the shards' 38.7 GiB uncompressed, 68% `pair_z`); this host has
+  31 GB. `--limit` cannot help: it cuts after the whole part is loaded, and keeps the view's
+  first samples. The user chose a subset over a lazy loader.
+- **Rule**: `TrainConfig.train_subset` > 0 draws that many training ids per source without
+  replacement by a fixed seed (`TRAIN_SUBSET_SEED` = 0, not the run's `seed`, so every seed of an
+  arm trains on the same samples), kept in view order, and only they are read from the shards.
+  Validation and test are untouched. run.json records it under `train`.

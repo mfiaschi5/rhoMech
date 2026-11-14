@@ -366,7 +366,9 @@ Main CLI entry points are added phase by phase and listed here as they land:
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
   [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy|open_shell]
   [--drop-domain-class C...] [--val-cohort pmechdb=closed_base] [--compile] [--half-pair-norm]
-  [--split-pair-init] [--load-workers N] [--no-compact-samples] [--pair-update-every K]` (the spec-v9 model on one split;
+  [--split-pair-init] [--load-workers N] [--no-compact-samples] [--pair-update-every K]
+  [--train-subset N]` (the spec-v9 model on one split; `--train-subset` reads only N random training
+  samples per source, a fixed seed, for a part larger than RAM;
   `--preset` sets the flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
   orbital extras, legacy = the v17 inputs, open_shell = general with the atom head over
   {-2,-1,0,+1,+2}, the pair features of `OPEN_SHELL_BLOCK` (statistics fitted on the run's training
