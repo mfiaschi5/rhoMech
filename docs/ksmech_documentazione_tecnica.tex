@@ -79,8 +79,8 @@
   {\large Documentazione tecnica: struttura del programma, impostazioni,\\
   scelte progettuali, risultati dei training e scoperte}}
 \author{Progetto \ksm\ (ChemRho)}
-\date{9 novembre 2026\\[4pt]\small Stato del codice: ramo \code{main} (\code{a023e58}), specifica v10,
-\code{SAMPLE_VERSION} 19;\\ risultati fino al passo 9 della fase P9 del piano open-shell}
+\date{11 novembre 2026 (seconda edizione)\\[4pt]\small Stato del codice: ramo \code{main} (\code{f57a41f}), specifica v10.1,
+\code{SAMPLE_VERSION} 19;\\ risultati fino all'ablazione dei token orbitali e al modello all'indietro (10 novembre)}
 
 \begin{document}
 \maketitle
@@ -100,14 +100,18 @@ avvicinamento (il fattore spettrale di gap $G$, il suo analogo a due livelli $g_
 tra centri). Un decodificatore ancorato su un legame che si forma predice $\vb{R}$; il prodotto è
 $\vb{B}+\vb{R}$, che viene ri-featurizzato per il passo successivo.
 
-Questo documento descrive in dettaglio la struttura del programma (234 moduli Python e circa
-55\,000 righe, di cui 28\,600 nel motore e 26\,100 nell'applicazione web), tutte le impostazioni con i loro valori di
-default e il motivo di ciascuna scelta, la storia delle decisioni (dal 19 ottobre al 9 novembre
-2026), i risultati di tutti i training eseguiti (68 run, di cui 62 complete, su una GPU locale AMD e su
-pod NVIDIA in cloud) e le scoperte fatte lungo il percorso: dalla bocciatura della geometria di contatto,
+Questo documento descrive in dettaglio la struttura del programma (271 moduli Python e circa
+64\,000 righe, di cui 38\,200 nel motore e 26\,100 nell'applicazione web), tutte le impostazioni con i loro valori di
+default e il motivo di ciascuna scelta, la storia delle decisioni (dal 19 ottobre al 10 novembre
+2026), i risultati di tutti i training eseguiti (83 run, su una GPU locale AMD e su pod NVIDIA in
+cloud) e le scoperte fatte lungo il percorso: dalla bocciatura della geometria di contatto,
 all'equivalenza tra configurazione \emph{general} e \emph{legacy}, al costo di circa 2 punti sul
-dominio a guscio chiuso dell'addestramento congiunto con i passi radicalici, fino al confondimento
-hardware scoperto nelle ablazioni finali.
+dominio a guscio chiuso dell'addestramento congiunto con i passi radicalici, al confondimento
+hardware scoperto nelle ablazioni, fino all'ablazione dei token orbitali (le loro colonne non servono
+sul dominio di training ma portano 1--1{,}7 punti fuori distribuzione). La seconda edizione aggiunge
+la rete di reazione (\code{ksmech.network}, specifica v10.1): la ricerca verso un prodotto, la catena
+di Markov con lo stop termodinamico, il grafo delle specie, la retrosintesi meccanicistica, le energie
+libere GFN2 con quasi-RRHO, il modello del passo precedente e il suo uso come riordinatore del beam.
 \end{abstract}
 
 \tableofcontents
@@ -244,7 +248,12 @@ Data & Tappa\\
 8 nov & Training P4 passo 7 (Release A, ablazione metalli) e P9 passo 8 (\code{pm_control},
   \code{joint}, \code{pm_v19}) su 2$\times$RTX 3090.\\
 9 nov & P9 passo 9 (ablazioni, RTX 5090); importanza per permutazione; tblite su OpenBLAS e
-  ottimizzatore ANC/RFO per il QM.\\
+  ottimizzatore ANC/RFO per il QM; sul ramo \code{claude/network} l'intero piano delle reti di reazione
+  (elementi A--L): \code{ksmech.network}, \code{ksmech-qm thermo}, campioni all'indietro, dati di pathway.\\
+10 nov & Merge di \code{claude/network}; decisioni dell'utente sui punti aperti, \textbf{spec v10.1
+  approvata} (la rete di reazione); QM per le specie del benchmark umano; ri-ottimizzazione lungo i modi
+  immaginari; ablazione dei token orbitali e modello all'indietro addestrati su RTX 5090; riordinamento
+  del beam per andata e ritorno.\\
 \bottomrule
 \end{longtable}
 
@@ -253,7 +262,7 @@ Il capitolo~\ref{ch:fisica} richiama i fondamenti fisici. Il capitolo~\ref{ch:so
 l'architettura del software. I capitoli~\ref{ch:dati}--\ref{ch:etichette} seguono la pipeline dei
 dati: sorgenti e leggi di dominio, calcolo quantistico, token, feature di coppia, etichette. I
 capitoli~\ref{ch:modello}--\ref{ch:valutazione} descrivono il modello, il training e la
-valutazione. Il capitolo~\ref{ch:risultati} raccoglie tutti i risultati sperimentali e il
+valutazione, il capitolo~\ref{ch:rete} la rete di reazione costruita sopra il modello. Il capitolo~\ref{ch:risultati} raccoglie tutti i risultati sperimentali e il
 capitolo~\ref{ch:scoperte} le scoperte e le lezioni apprese. Seguono l'applicazione web
 (capitolo~\ref{ch:serve}), il lavoro futuro (capitolo~\ref{ch:futuro}) e le appendici (codici di
 motivo, versioni, comandi).
@@ -477,34 +486,40 @@ Pacchetto & File & Righe & Contenuto\\
 \endfirsthead
 \toprule Pacchetto & File & Righe & Contenuto\\ \midrule
 \endhead
-\code{data} & 23 & 6\,265 & Loader delle sorgenti (\code{pmechdb}, \code{reactmech}, \code{rmechdb},
+\code{data} & 26 & 7\,625 & Loader delle sorgenti (\code{pmechdb}, \code{reactmech}, \code{rmechdb},
   \code{mech_uspto}, \code{qmugs}), validazione e ingest, leggi di dominio (\code{domain.py}, 955 righe:
   13 codici, 16 classi, \code{DomainPolicy}), ridisegni di spin (\code{pairing.py}), spin
   (\code{spin.py}, \code{spin_table.py}, \code{spin_theory.py}), risonanza e chiavi d'identità,
-  split, audit di leakage, statistiche, indagine open-shell, provenienza.\\
-\code{qm} & 19 & 4\,161 & \code{QMConfig} e calcolatore GFN2, ottimizzatori (L-BFGS-B, ANC/RFO),
+  split, audit di leakage, statistiche, indagine open-shell, provenienza; catene di pathway ReactMech
+  (\code{pathways.py}) e benchmark umano (\code{human_benchmark.py}, \code{benchmark_checks.py}).\\
+\code{qm} & 25 & 6\,191 & \code{QMConfig} e calcolatore GFN2, ottimizzatori (L-BFGS-B, ANC/RFO),
   embedding, batch con manifest e tombstone, record e cache, tag di spin, Fukui, indici di Wiberg,
   $V^{\mathrm{bur}}$, layout AO, preload OpenBLAS, single point QMugs, indice SQLite, rilevatore del
-  gruppo puntuale (704 righe).\\
+  gruppo puntuale (704 righe); Hessiane, termochimica quasi-RRHO, sidecar e batch termici,
+  ri-ottimizzazione lungo i modi immaginari, liste di specie.\\
 \code{orbitals} & 10 & 3\,262 & Localizzazione IBO/PM, descrittori, classificatore diagnostico,
   pesi di frontiera, token (\code{tokens.py}, 1\,068 righe: \code{CandidateConfig}, esclusioni,
   lacune), build del dataset, chiralità, gruppi funzionali.\\
-\code{arrows} & 16 & 5\,134 & Frecce come modifica BE, allineamento diagnostico, \code{ReactionMatrix}
+\code{arrows} & 17 & 5\,581 & Frecce come modifica BE, allineamento diagnostico, \code{ReactionMatrix}
   ed etichette (\code{delta_be.py}), disegni di risonanza, chiusura per simmetria, struttura di Lewis,
   indice globale dei token, campioni (\code{steps.py}, 1\,106 righe), store a shard, collazione dei
-  batch, round trip, H mobili di ReactMech.\\
+  batch, round trip, H mobili di ReactMech, campioni all'indietro (\code{backward.py}).\\
 \code{physics} & 10 & 2\,166 & Parametri (\code{K}, \code{BETA_INTER}), $G$ e $g_2$, accoppiamento WH,
   feature di coppia geometry-free, flag di coppia, statistiche, ranker LightGBM, casi da manuale.\\
-\code{model} & 10 & 1\,851 & \code{ModelConfig} e preset, input non appresi, encoder denso/flex/sparse,
-  decodificatore, loss, beam decoder.\\
-\code{train} & 4 & 890 & \code{TrainConfig}, ciclo di training, batching a budget di celle, CLI.\\
-\code{eval} & 10 & 2\,197 & Floor, decodifica, confronto appaiato, importanza per permutazione, coorti,
-  pinning, traccia degli embedding come pagina HTML.\\
+\code{model} & 10 & 1\,967 & \code{ModelConfig} e preset, input non appresi, encoder denso/flex/sparse,
+  decodificatore, loss, beam decoder, $\log P$ di una $\vb R$ data (\code{matrix_logp}).\\
+\code{train} & 4 & 938 & \code{TrainConfig}, ciclo di training, batching a budget di celle, CLI.\\
+\code{eval} & 13 & 2\,843 & Floor, decodifica, confronto appaiato, importanza per permutazione, coorti,
+  pinning, traccia degli embedding come pagina HTML, esiti fratelli (\code{siblings.py}), riordinamento
+  per andata e ritorno (\code{roundtrip.py}).\\
+\code{network} & 24 & 4\,887 & Rete di reazione (capitolo~\ref{ch:rete}): chiavi di pool, grafo implicito
+  e ricerca $k$-best, bersagli, espansore sul modello, catena di Markov, stop termodinamico, TPT,
+  serbatoi, energie libere, grafo delle specie e iper-cammini, flusso atomico, retrosintesi, benchmark.\\
 \code{client} & 8 & 1\,831 & Client HTTP \code{KsmechClient} e CLI \code{ksmech}.\\
 \code{mcp} & 9 & 768 & Server MCP (FastMCP) sopra il client.\\
 \code{processes.py} & 1 & 49 & Pool \emph{spawned} con un thread BLAS per processo.\\
 \midrule
-Totale motore & & 28\,577 & (l'app web \code{serve}: 113 moduli, 26\,101 righe; capitolo~\ref{ch:serve})\\
+Totale motore & & 38\,192 & (l'app web \code{serve}: 113 moduli, 26\,101 righe; capitolo~\ref{ch:serve})\\
 \bottomrule
 \end{longtable}
 
@@ -519,15 +534,18 @@ Totale motore & & 28\,577 & (l'app web \code{serve}: 113 moduli, 26\,101 righe; 
 Comando & Sottocomandi principali\\
 \midrule
 \code{ksmech-data} & \code{ingest}, \code{stats}, \code{open-shell-survey}, \code{freeze-sample},
-  \code{leakage-audit}, \code{provenance}\\
-\code{ksmech-qm} & \code{run}, \code{qmugs}, \code{bond-index}, \code{index refresh|stats}\\
+  \code{leakage-audit}, \code{provenance}, \code{pathways}, \code{human-benchmark}\\
+\code{ksmech-qm} & \code{run} (anche \code{--species-from}, \code{--solvent}), \code{thermo}, \code{qmugs},
+  \code{bond-index}, \code{index refresh|stats}\\
 \code{ksmech-orbitals} & \code{build}, \code{show}, \code{fg-vocab}\\
-\code{ksmech-arrows} & \code{roundtrip}, \code{align}, \code{samples}, \code{edit-labels},
-  \code{freeze-splits}\\
+\code{ksmech-arrows} & \code{roundtrip}, \code{align}, \code{samples}, \code{edit-labels}
+  (entrambi con \code{--direction backward}), \code{coverage}, \code{freeze-splits}\\
 \code{ksmech-physics} & \code{gbdt}, \code{textbook} (anche \code{--radical})\\
 \code{ksmech-train} & \code{fit}\\
-\code{ksmech-eval} & \code{floor}, \code{decode}, \code{compare}, \code{importance}, \code{pin},
-  \code{cohort}, \code{embedding}\\
+\code{ksmech-eval} & \code{floor}, \code{decode}, \code{compare} (\code{--metric own|any}),
+  \code{importance}, \code{pin}, \code{cohort}, \code{embedding}, \code{roundtrip}\\
+\code{ksmech-network} & \code{search}, \code{evaluate}, \code{predict}, \code{species}, \code{retro},
+  \code{retro-eval}\\
 \code{ksmech-serve} & server web e amministrazione (utenti, OCR, re-key, export)\\
 \code{ksmech} / \code{ksmech-mcp} & client HTTP / server MCP\\
 \bottomrule
@@ -571,9 +589,10 @@ più 15 processi pesanti.
 \end{itemize}
 
 \section{Test}
-145 file \code{tests/test_*.py} (48 dell'app web), circa 1\,561 funzioni di test e 30\,158 righe;
-l'ultimo conteggio registrato nel registro delle decisioni (codice P9) è di 2\,338 test di unità superati e
-67 test su dati reali. Marcatori: \code{realdata} (file grezzi reali, saltati se assenti; 22 file),
+165 file \code{tests/test_*.py} (48 dell'app web), circa 1\,770 funzioni di test e 34\,300 righe;
+l'ultima esecuzione (11 novembre, \code{f57a41f}) ha dato 2\,877 test di unità superati in 6 minuti e 23
+secondi con 14 processi (12 saltati, 2 \emph{xfail} documentati); i test su dati reali erano 67 all'ultimo
+commit verificato dall'hook. Marcatori: \code{realdata} (file grezzi reali, saltati se assenti; 22 file),
 \code{slow} (ottimizzazioni GFN2), \code{diagnostic} (etichette del classificatore), \code{serve}
 (app web con chimica sintetica o stub, mai xTB), \code{e2e} (Playwright, solo con \code{KSMECH_E2E=1}).
 Test notevoli: invarianza per rotazione delle feature di coppia; nessun tensore di input del modello
@@ -1144,6 +1163,86 @@ geometrie di fila). End-to-end: da 8\,084 a 3\,202 energie ($2{,}5\times$), da 1
 30\,s; l'energia ANC è minore o uguale in 32 casi su 33 (mediana $-0{,}21$\,kcal/mol). Il suo
 \code{--maxiter} conta energie. Il default resta \code{tblite-lbfgs}: cambiarlo cambierebbe la chiave di
 cache di ogni record e imporrebbe il ricalcolo completo del QM.
+
+\section{Energie libere (\texttt{ksmech-qm thermo})}
+\label{sec:thermo}
+Elemento B del piano delle reti: ogni record in cache può ricevere un sidecar con le frequenze
+armoniche, i momenti principali, il numero di simmetria e la molteplicità, così $G(T)$ si valuta a ogni
+temperatura senza ricalcolare l'Hessiana (\code{qm.hessian}, \code{qm.thermo}, \code{qm.thermo_cache},
+\code{qm.thermo_batch}).
+
+\paragraph{Hessiana da tblite.} Differenze centrali dei gradienti analitici GFN2,
+$H_k=[g(x+he_k)-g(x-he_k)]/2h$, come fa \code{xtb --hess}: $h=0{,}005$\,Bohr, accuratezza SCC 0{,}2,
+simmetrizzata (avviso \code{HESSIAN_ASYMMETRIC} oltre $10^{-2}$); $6N+1$ gradienti per molecola, ogni SCF
+spostato parte dalla funzione d'onda convergente del punto di riferimento. Il calcolatore è quello del
+record: GFN2, il solvente ALPB del suo metodo, la carica e il numero di elettroni spaiati assegnati
+(una specie che \code{qm.spin} riassegna gira al suo $u$), quindi la superficie è quella solvatata.
+Traslazioni e rotazioni sono proiettate fuori dall'Hessiana pesata per le masse (sei vettori, cinque per
+una molecola lineare); il numero di simmetria è il numero di rotazioni proprie del gruppo puntuale a
+0{,}1\,Å (benzene $D_{6h}$ 12, etano $D_{3d}$ 6, clorometano $C_{3v}$ 3).
+
+\paragraph{Termochimica.} In numpy con le convenzioni di xtb (verificate su \code{thermo.f90}): gas
+ideale a 1\,atm, rotore rigido, vibrazioni armoniche con il quasi-RRHO di Grimme per la sola entropia,
+$S=wS_{\mathrm{HO}}+(1-w)S_{\mathrm{rotore\ libero}}$, $w=1/[1+(\nu_0/\nu)^4]$, $\nu_0=50$\,cm$^{-1}$, il
+momento del rotore libero ridotto con il momento medio della molecola; in più l'entropia elettronica
+$R\ln(2S+1)$. Verifica: l'acqua alla geometria e alle fondamentali sperimentali dà
+$S=188{,}7$\,J/(mol\,K) (188{,}83 tabulato); le frequenze GFN2 dei record di etano, benzene e clorometano
+danno 54{,}4, 64{,}7, 56{,}1\,cal/(mol\,K) (misurati 54{,}85, 64{,}34, 56{,}04). Lo stato standard è
+1\,M in soluzione: l'ALPB di tblite include già la solvatazione 1\,M$\to$1\,M, e $G$ riceve
+$RT\ln(V_m/1\,\mathrm{L})=+1{,}894$\,kcal/mol a 298{,}15\,K.
+
+\paragraph{Il $G$ di un pool.} $G=\sum_i n_i\mu_i$, $\mu_i=G_i(T)+RT\ln(c_i/c^\circ)$, funzione pura
+(\code{qm.thermo.pool_free_energy}); una specie di serbatoio (solvente, reagente in eccesso) ha un
+$\mu$ fisso (acqua come solvente: 55{,}3\,M) e un conteggio negativo indica una specie presa dal
+serbatoio, così $A+\mathrm{H_2O}\to B$ si confronta come $G(B)-G(A)-\mu(\mathrm{H_2O})$.
+
+\paragraph{Modi immaginari: ri-ottimizzazione (10 novembre).} I record sono ottimi L-BFGS-B a
+\code{fmax} $3\cdot10^{-4}$ partiti da una geometria simmetrica, e alcuni sono punti di sella di una
+torsione metilica (acetone $-76$\,cm$^{-1}$, butanone $-64$, metossiacetone $-59$). La regola di xtb
+(invertire sopra $-20$\,cm$^{-1}$, scartare sotto) fa saltare $G$ quando un modo soffice attraversa la
+soglia: per l'acetato di metile $G-E_{\mathrm{el}}$ variava di 0{,}75\,kcal/mol su sei orientazioni.
+Ora (\code{qm.thermo_reopt.follow_imaginary}, \code{--reopt-threshold -10 --reopt-rounds 3}) un modo
+sotto $-10$\,cm$^{-1}$ viene seguito in discesa: spostamento di 0{,}2\,Å lungo la somma dei modi
+immaginari in entrambe le direzioni, ottimizzazione ANC/RFO a \code{fmax} $10^{-4}$ sulla superficie del
+record, scarto di una direzione che rompe un legame disegnato ($1{,}3\times$) o forma un contatto nuovo
+($1{,}2\times$), tenuta quella di energia minore, nuova Hessiana; al più tre giri. Esiti
+\code{MINIMUM}, \code{REOPTIMIZED}, \code{PERSISTENT} (con codici di stop). Il record non viene
+mai riscritto (i token sono costruiti sulla sua geometria): il sidecar contiene il minimo, l'energia
+del record resta come \code{record_energy_ha}. Sul pilota di 58 sidecar: 47 minimi (invariati), 9
+ri-ottimizzati in un giro ($\Delta G$ da $-0{,}37$ a $-1{,}80$\,kcal/mol), 2 persistenti (un'ammide
+N-protonata che non è un minimo su GFN2/ALPB e un modo al livello del rumore); costo $+14\%$; la
+dispersione su orientazioni dell'acetato di metile scende da 0{,}88 a 0{,}27\,kcal/mol.
+
+\paragraph{Costo e politica.} Tempo per Hessiana $t\approx1{,}8\cdot10^{-4}N^{2{,}93}$\,s (0{,}3\,s fino a
+9 atomi, 54\,s a 60--79, 932\,s a 180). Su tutti i 33\,532 record in acqua sarebbero circa 208 ore di CPU:
+per decisione dell'utente la termochimica si calcola \emph{su richiesta}, per le specie che una rete
+raggiunge. L'indice della cache passa alla versione 3 (tipi \code{thermo} e \code{thermo_failure}).
+
+\scoperta{ALPB non è invariante per rotazione}{La griglia di superficie di ALPB è fissa nel sistema di
+riferimento, non sulla molecola: su sei orientazioni casuali $G-E_{\mathrm{el}}$ varia di 0{,}15\,kcal/mol
+per l'etanolo e 0{,}10 per il TEMPO, e i modi rigidi fino a 6\,cm$^{-1}$, qualunque sia il passo
+dell'Hessiana; in fase gas la stessa dispersione è 0{,}002. Si tiene l'Hessiana solvatata (un record
+ha un'orientazione sola, quindi il suo $G$ è riproducibile, e 0{,}1--0{,}2\,kcal/mol è molto sotto
+l'errore di GFN2).}
+
+\section{Liste di specie e solvente}
+\code{ksmech-qm run --species-from FILE} e \code{ksmech-orbitals build --species-from FILE}
+(\code{qm.species}) calcolano record e token per le specie di un file JSON invece che per i frammenti
+dei passi di una sorgente: così le 1\,072 specie del benchmark umano che nessuna sorgente contiene sono
+state calcolate (1\,056 riuscite, 19 tombstone, 10 novembre). Una lista non ha esenzioni dal censimento
+di spin; il manifest va in \code{data/processed/species/<nome>/}. Il solvente è un parametro della run
+(\code{--solvent}, uno dei 25 solventi ALPB di GFN2 con un solo nome ciascuno): un secondo solvente scrive
+record accanto a quelli in acqua con altre chiavi di cache; i lettori a valle (token, campioni, app web)
+usano ancora solo l'acqua.
+
+\scoperta{la stereo E/Z degli anelli si perdeva togliendo gli idrogeni}{Due specie del benchmark umano
+(un ciclodecenone e un chetone biciclico con un cicloottene) erano scritte come riuscite e poi rifiutate dal build dei
+token (\code{STALE_ARTIFACT}): con gli idrogeni espliciti RDKit mette la stereo del doppio legame sugli H,
+e togliendoli le direzioni rimaste su un legame di chiusura d'anello erano obsolete, così E diventava Z.
+\code{chem._without_hydrogens} ora assegna le etichette dalle direzioni, toglie gli H spostando la stereo
+su un vicino pesante e ridisegna le direzioni. Su tutti i 126\,068 frammenti delle quattro sorgenti la
+chiave è identica a prima; nel batch un record con la chiave sbagliata è ora un fallimento contato
+(\code{RECORD_KEY_MISMATCH}).}
 % =====================================================================
 \chapter{Token orbitali e atomici (\texttt{ksmech.orbitals})}
 \label{ch:token}
@@ -1575,6 +1674,35 @@ modello ReactMech \code{stop0} passa da 85{,}0\% a 91{,}1\% full-R top-1 e quell
 a 91{,}9\% senza alcun riaddestramento: 61 campioni con Kekulé più vicino diventano hit. La validazione
 ReactMech di P0 era sottostimata di circa 6 punti di rumore delle etichette.}
 
+\section{Campioni all'indietro (il passo precedente)}
+\label{sec:backward}
+Elemento H del piano delle reti. Se $\vb B_{\mathrm{figlio}}=\vb B_{\mathrm{padre}}+\vb R$, il passo
+precedente visto dal figlio è $-\vb R$, un passo elementare sugli stessi atomi e sotto le stesse leggi.
+Un campione all'indietro è il costruttore in avanti (\code{arrows.steps.sample_for_step}) applicato al
+passo con i lati scambiati (\code{arrows.backward.backward_step}): token, struttura di Lewis, feature di
+coppia e disegni di risonanza del pool figlio, la classe di etichette del passo scambiato chiusa per
+simmetria, e la chiave del padre come chiave del prodotto. Le frecce sono scartate (disegnano il flusso in
+avanti): $\vb R$ viene dai due lati mappati, come per ReactMech.
+
+\paragraph{La classe è $-\vb R$ a meno di risonanza.} Sul pilota di 500 passi la classe all'indietro è
+la classe in avanti negata in 399 casi, disgiunta in 51, con un membro su un atomo non mappato in 50; mai
+una sovrapposizione parziale. I 51 disgiunti sono risonanza: la classe in avanti raggiunge un'altra forma
+del prodotto (addizione coniugata a un enone: il carbanione in 4 voci contro l'enolato disegnato in 6),
+oppure il padre ha un'altra forma con altrettante cariche raggiungibile in meno voci (l'inverso
+dell'addizione a un ossocarbenio è etichettato come eterolisi verso il carbocatione, 2 voci, non come
+spinta dal doppietto dell'O, 4 voci). Un'addizione pura in avanti dà una classe all'indietro con sole
+ancore di rottura (7{,}4\% contro 5{,}9\% in avanti), che loss e decoder già gestiscono.
+
+\paragraph{Store e split.} Uno store a parte (\code{data/processed/<source>/backward/}) con gli stessi
+nomi di file, così nessun artefatto in avanti viene sovrascritto o reso obsoleto; gli artefatti
+all'indietro portano \code{direction} nella configurazione e il training rifiuta un file dell'altra
+direzione. Le parti sono quelle in avanti passo per passo (uno split solo, necessario per un encoder
+condiviso e per il controllo di andata e ritorno); lo split per molecola raggruppa le molecole di
+entrambi i lati, quindi nessun input all'indietro di val o test contiene una molecola di training.
+PMechDB: 12\,473 campioni da 12\,512 passi di training (39 \code{MISSING_TOKENS}), divisi
+10\,014 / 1\,243 / 1\,189; nessun nuovo QM servito, perché il build dei token copriva già entrambi i lati.
+\code{SAMPLE_VERSION} resta 19.
+
 \section{Il campione e lo store}
 Un \code{MechanismSample} contiene: gli input di tutti i frammenti reagenti in un unico spazio di
 indici (token atomici e orbitali), la struttura di Lewis sui token atomici (legami, doppietti, $N$ e $u$
@@ -1646,6 +1774,10 @@ Campo & Default & Significato\\
 \code{drop_pair_features} & () & feature di coppia rese indefinite (ablazioni)\\
 \code{pair_cells} & \code{valid} & \code{valid} (legacy) o \code{all} (con i flag)\\
 \code{orbital_extra} & () & \code{retained_fraction}, \code{energy_ev}\\
+\code{drop_token_features} & () & colonne dei token tolte per nome; \code{orbital} toglie tutte le colonne
+  orbitali (ablazione del 10 novembre)\\
+\code{spectral_set} / \code{inherit_atoms} & vero / vero & encoder dell'insieme spettrale / embedding
+  ereditati dagli atomi centro\\
 \code{frontier_blocks} & \code{window} & finestra 0{,}05\,eV o \code{exact} ($10^{-4}$\,eV)\\
 \code{atom_fukui} & \code{frozen} & \code{frozen}, \code{fd}, \code{both}\\
 \code{atom_spin_input} & \code{none} & \code{none}, \code{categorical_u} (max 7), \code{somo_population}\\
@@ -1701,6 +1833,23 @@ appreso è anteposto: la sequenza è [MECH, atomi, orbitali], lunghezza $N+1$.
 \paragraph{Standardizzazione.} Statistiche (\code{FeatureStats}) adattate sui campioni di training
 della run, per nome di colonna, salvate in ogni checkpoint; deviazione nulla sostituita da 1; le colonne
 \code{somo_population} e \code{spin_role} hanno scala fissa (media 0, deviazione 1).
+
+\paragraph{Interruttori dell'ablazione orbitale.} Tre selezioni al momento del batch sulle colonne
+salvate, come ogni ablazione di P9: \code{--drop-token-features orbital} toglie le 23 colonne orbitali
+della v17, i due \code{orbital_extra} e \code{spin_role} (occupazione inclusa); \code{--no-spectral-set}
+toglie l'encoder dell'insieme spettrale; \code{--no-inherit-atoms} toglie gli embedding ereditati. Senza
+colonne MLP$_O$ diventa un vettore appreso: nel braccio più spoglio un orbitale legante e il suo
+antilegante sugli stessi atomi sono uguali allo strato 0, e solo la traccia delle coppie (righe occupate,
+colonne virtuali) li distingue. Un'unica funzione costruisce il token orbitale
+(\code{TokenEmbedding.orbital_terms}); un test verifica che perturbare un input tolto lasci
+$\vb h^{(0)}$ invariato. Una run precedente legge i default e si riproduce bit per bit; \code{--resume}
+confronta i campi che una run precede ai loro default (\code{comparable_config}).
+
+\paragraph{Ordine dei frammenti.} Il modello legge un indice di frammento, quindi lo stesso pool
+scritto in due ordini dà punteggi diversi (con il modello minimo dei test, CH$_3$Cl + OH$^-$: $\log P$
+migliore $-24{,}58$ con il clorometano primo, $-28{,}11$ con l'idrossido primo). La rete scrive i
+frammenti nell'ordine delle loro chiavi d'identità; i dati di training restano nell'ordine del disegno
+e l'ordine non è augmentato (questione aperta).
 
 \section{La traccia delle coppie (encoder denso)}
 I canali sulla griglia $(N+1)\times(N+1)$ sono $2F+43$:
@@ -1946,9 +2095,15 @@ decodifiche usano \code{OMP_NUM_THREADS=4}, e un test di riproduzione lo verific
   producevano [Cl$^{2-}$], [O$^{2-}$], [C$^{2+}$]; in PMechDB solo 11 prodotti su 13\,090 hanno un atomo
   con $|q|\ge2$, tutti metalli o un perclorato), RDKit deve scrivere il prodotto, e la chiave mappata
   deve cambiare (altrimenti \code{RESONANCE_ONLY_STEP});
-\item per ogni ancora si ferma a 5 prodotti distinti; unisce tra ancore per chiave d'identità del
+\item per ogni ancora si ferma a 5 prodotti distinti; unisce tra ancore per \emph{chiave di pool} del
   prodotto tenendo il miglior $\log P$ (\code{DECODE_MERGED}).
 \end{enumerate}
+La chiave di pool (\code{data.resonance.pool_key}) è la chiave d'identità v2 di ogni frammento, ordinata
+e unita da \enquote{.}. Fino a \code{DECODE_VERSION} 4 il decoder usava la chiave d'identità dell'intero
+pool, che azzera le cariche su tutti i frammenti prima di aggiungere il totale: le due eterolisi di un
+legame (CH$_3^+$ + Br$^-$ e CH$_3^-$ + Br$^+$) avevano la stessa chiave e il decoder teneva solo la più
+probabile. Lo ha trovato il pilota del modello all'indietro, dove l'inverso di ogni addizione di un anione
+a un catione è un'eterolisi.
 Il punteggio è la probabilità del cammino attraverso la sua ancora, non la marginale su tutte le
 ancore ammissibili (che richiederebbe una chiamata per ancora di ogni completazione).
 
@@ -1957,6 +2112,19 @@ ancore ammissibili (che richiederebbe una chiamata per ancora di ogni completazi
 contiene top-1/3/5, \code{not_found}, \code{odd_top1}, il tempo medio, i conteggi dei salti, la frazione
 coperta, il dettaglio per forma di $\vb R$ e per campione (\code{decode_hits_*.json}, per i confronti
 appaiati). Tempo tipico: 0{,}6--1{,}2\,s per campione su un thread di CPU.
+
+\paragraph{Esiti multipli (\code{rank_any}, versione 5).} Ogni completazione porta la chiave di pool del
+suo prodotto. \code{rank_any} è il rango della prima completazione che è l'etichetta propria \emph{o} un
+prodotto che la sorgente registra per lo stesso pool reagente (\code{eval.siblings}: i passi di training
+raggruppati per chiave di pool dei reagenti); \code{top\{k\}_any} e \code{compare --metric own|any}. Su
+PMechDB v19: 901 dei 12\,512 passi di training stanno in 436 pool con più di un prodotto registrato. Con
+la chiave di pool, $\vb B+\vb R$ della prima variante dell'etichetta dà esattamente la chiave dei prodotti
+registrati su tutti i 1\,241 campioni etichettati di val.
+
+\paragraph{La $\log P$ di una $\vb R$ data.} \code{model.decode.matrix_logp} valuta una matrice nota per
+ogni ancora che il decoder userebbe: \code{best} (il massimo, come ordina il beam) e \code{marginal}
+(log-sum-exp sulle ancore); una $\vb R$ che la testa non può scrivere vale $-\infty$. Serve agli archi
+inversi della rete, al punteggio di un pathway noto e al riordinamento per andata e ritorno.
 
 \paragraph{Caps.} \code{--caps legacy} (8 legami, 2 atomi, 48 candidati) o \code{labels} (i massimi
 delle etichette di training della sorgente: 6/2 su PMechDB, 8/3 su ReactMech, 12/5 su rmechdb). Su
@@ -2004,12 +2172,228 @@ pagina HTML autonoma con un campione attraverso il modello: i token sulla strutt
 di $\vb{h}^{(0)}$, attenzione e aggiornamenti di ogni strato (ricostruiti dagli input registrati e
 verificati contro il forward del modello), e i logit delle ancore divisi in termini di sito, di coppia e
 di fisica.
+
+\section{Andata e ritorno come riordinatore (\texttt{ksmech-eval roundtrip})}
+\label{sec:roundtrip}
+Elementi H e I5 del piano: le completazioni del decoder in avanti, esattamente come le dà
+\code{decode}, e per le prime 5 la $\log P$ che il modello all'indietro assegna a $-\vb R$ nel figlio
+($\vb B+\vb R$ sulla struttura di Lewis del campione, letto come \code{PoolState}); le prime 5 riordinate
+per $\log P_f+\lambda\log P_b$ per ogni $\lambda$ della griglia (0, 0{,}25, 0{,}5, 1, 2, 4). Il termine in
+avanti è quello del decoder (la sua ancora migliore), quello all'indietro la marginale sulle ancore di
+$-\vb R$. Una completazione senza punteggio all'indietro tiene il suo posto e solo quelle con punteggio
+sono permutate tra i posti che occupano, così $\lambda=0$ riproduce \code{decode} campione per campione e
+il riordinatore misura solo ciò che il modello all'indietro aggiunge. I motivi sono contati
+(\code{CHILD_INVALID}: 4{,}6--7\% del beam, alogenuri ipervalenti; \code{MISSING_TOKENS}). Il costo è il QM
+dei figli: su 200 campioni il beam (13{,}5 completazioni a campione) ha 1\,878 specie figlie senza token,
+631 nelle prime 5, 62 al top-1; \code{--species-file} le elenca per \code{ksmech-qm run --species-from}.
+Primo sguardo su 6 campioni: il top-1 in avanti sta a $\log P\approx0$ e le alternative sotto $-10$, quindi
+il termine all'indietro può spostare il top-1 solo da $\lambda\approx1$. $\lambda$ si sceglie su
+\code{closed_base} val e si verifica su ReactMech val; la valutazione non è ancora stata eseguita.
+% =====================================================================
+\chapter{La rete di reazione (\texttt{ksmech.network})}
+\label{ch:rete}
+% =====================================================================
+Il modello predice un passo. Il piano delle reti (\code{docs/reaction_network_plan.md}, scritto l'8--9
+novembre, implementato il 9 sul ramo \code{claude/network}, unito in \code{main} il 10; la sezione
+\enquote{The reaction network} della specifica v10.1 è approvata il 10 novembre) ne fa un grafo implicito
+che i modelli generano su richiesta, e vi risponde a quattro domande, ciascuna con il suo algoritmo:
+come si arriva a un prodotto dato, che cosa succede senza prodotto, come si uniscono rami fatti
+separatamente, e da quali reagenti viene un prodotto. Il punto di partenza era l'app web, la cui rete
+cresceva con un beam cieco rispetto al bersaglio, senza stop (la testa \code{END_MECH} non è
+addestrata) né passi inversi, con un QM privo di energie libere.
+
+\paragraph{Motivazione.} Il metossido con l'acetone dà sia l'emichetale sia l'enolato; in acqua la
+deprotonazione è in salita di circa 4 unità di pK$_a$ (acetone 19{,}3 contro metanolo 15{,}5), in DMSO in
+discesa (26{,}5 contro 29{,}0). Sui pool di \code{closed_base} val con più prodotti registrati il top-1
+colpisce l'etichetta propria nel 44--50\% dei casi e \emph{un} esito registrato nel 72--83\%: la domanda
+\enquote{quale passo} non ha una sola risposta, e chi decide dove finisce la reazione è la termodinamica.
+
+\paragraph{Decisioni di principio.} La massima verosimiglianza resta la loss per esiti distinti; lo stop
+è termodinamico, agisce sugli stati e non taglia mai un passo in salita; il nucleo sta nel motore e l'app
+web ne importa gli algoritmi (chiave di pool, regola del turnover, cammini semplici migliori: i suoi 872
+test passano invariati, il JSON della rete resta identico byte per byte).
+
+\section{Stati, chiavi e classi di meccanismo}
+Uno stato di pool è un disegno Kekulé con H espliciti e un numero di mappa su ogni atomo: i numeri seguono
+ogni atomo lungo un pathway, quindi un passo si scrive allo stesso modo in ogni pool in cui compare.
+$\vb B+\vb R$ è scritto sulla molecola mappata con gli stessi controlli dei campioni (\code{lewis_apply}).
+I pool si uniscono per chiave di pool. Due passi sono indipendenti se non toccano atomi comuni; la
+\emph{classe di meccanismo} di un pathway è l'estensione lineare canonica del suo DAG di dipendenze
+(algoritmo di Kahn, firma minore prima), e $p(\text{classe}\mid\text{arriva})$ è la somma delle probabilità
+dei suoi pathway sui pathway trovati.
+
+\section{Verso un prodotto (\texttt{ksmech-network search})}
+Un \code{Expander} propone i passi da uno stato con la loro $\log P$; \code{ImplicitGraph} espande ogni
+nodo una sola volta (la chiamata costosa al modello) e ogni algoritmo è misurato dai nodi che espande.
+\code{k_best_pathways} è una ricerca best-first su cammini semplici con priorità $g+h$, $g$ la somma di
+$-\log p+$\code{step_cost}: con costi non negativi ed euristica ammissibile i cammini al bersaglio escono
+in costo non decrescente, quindi $k=1$ è A* (I1) e i primi $k$ sono i $k$ pathway semplici migliori (I2),
+pigramente sul grafo implicito come farebbe K*. Verificato contro l'enumerazione esaustiva su 12 grafi
+casuali. Tagli contati: \code{DEPTH_CUT}, \code{CYCLE}, \code{EXPANSION_BUDGET}, \code{POP_BUDGET}.
+
+\paragraph{Euristica.} Un limite inferiore ai passi rimanenti (\code{target.steps_lower_bound}: il
+$\Delta\vb B$ residuo sugli atomi pesanti mappati del bersaglio contro i caps del decoder, al più 8 voci di
+legame e 2 atomiche per passo). In unità di $-\log p$ un passo può costare quasi 0, quindi il limite in
+passi non dice nulla sul costo se ogni passo non paga almeno \code{step_cost}: l'euristica è
+\code{step_cost} $\times$ il limite. Con il default 0 la ricerca è a costo uniforme ed esatta su $-\log p$.
+Una similarità senza mappa non è un limite inferiore e renderebbe A* inesatto: non è usata
+(\code{MAPPING_FAILED}, contato); la via per i bersagli non mappati è un atom mapper, non ancora aggiunto.
+
+\paragraph{Arrivo su due livelli.} \code{EXACT}: le specie del bersaglio (chiave d'identità v2) sono nel
+pool con la loro molteplicità, sottoprodotti ammessi. \code{SKELETON}: lo sono i loro scheletri pesanti con
+gli ordini di legame (H, cariche e radicali tolti, aromaticità percepita), così un prodotto disegnato dopo
+il work-up è raggiunto a meno dei trasferimenti di protone che non spostano legami; un acido e il suo
+carbossilato coincidono, un chetone e il suo alcol o due tautomeri no. La prima versione usava la sola
+connettività, che univa anche chetone e alcol; l'utente ha deciso il 10 novembre di tenere gli ordini.
+Il livello è sempre riportato con il pathway.
+
+\section{Senza prodotto: catena di Markov e stop termodinamico (\texttt{predict})}
+\paragraph{Archi inversi e tassi.} Ogni arco esplorato $\vb R$ ($i\to j$) implica $-\vb R$ ($j\to i$),
+valutato dal modello in avanti in $j$ (\code{matrix_logp}, ancora \code{best}) quando l'arco viene
+trovato. Il tasso di transizione è
+\begin{equation}
+w_{ij}=s_{ij}\,e^{-\Delta G_{ij}/2RT},\qquad s_{ij}=\sqrt{p(i\to j)\,p(j\to i)},
+\end{equation}
+simmetrico in $s$, quindi $\pi_iw_{ij}$ è simmetrico per $\pi=e^{-\phi/RT}/Z$ e la catena a tempo
+continuo ha Boltzmann come distribuzione stazionaria (verificato coppia per coppia e con la soluzione
+sparsa di $\pi Q=0$): il modello dà forma ai pathway, le energie libere fissano dove finiscono. Le
+probabilità di assorbimento si calcolano sulla catena dei salti con una fattorizzazione LU sparsa. Un
+inverso mancante (figlio non featurizzabile, $-\vb R$ senza ancora ammissibile) lascia l'arco a senso
+unico (\code{ONE_WAY}), senza inventare una probabilità; senza energie libere la coppia gira sulle
+probabilità del modello ed è marcata \code{unbalanced}.
+
+\paragraph{Serbatoi.} Specie di serbatoio (solvente, reagenti in eccesso), nominate per chiave
+d'identità, sono tenute in ogni pool perché il modello le veda; una copia consumata è rimpiazzata e una
+rilasciata in eccesso rimossa. Il potenziale di uno stato è $\phi=G(\text{stato})-\sum_xD_x\mu_x$ con
+$D_x$ le copie prese dall'inizio, così $A+\mathrm{H_2O}\to B$ costa $G(B)-G(A)-\mu(\mathrm{H_2O})$.
+
+\paragraph{Energie libere.} \code{--free-energy qm} (\code{network.thermo_provider}) cerca ogni frammento
+nei sidecar termici (sezione~\ref{sec:thermo}) e somma $G$ a 1\,M più $RT\ln(c/1\,\mathrm{M})$ per i
+serbatoi; $H$ e $S$ arrivano con $G$ e danno $T^*=\Delta H/\Delta S$ (\enquote{sopra}: un rilascio di
+H$_2$O, CO$_2$ o N$_2$ guadagna col calore; \enquote{sotto}: un'associazione perde). Un frammento senza
+sidecar lascia il pool senza $G$ (\code{NO_FREE_ENERGY}).
+
+\paragraph{Stati assorbenti.} \code{SINK_AT_T}: ogni passo in uscita, comprese le reverse degli archi
+entranti, sale più di $\delta(T)=RT\ln(1/\varepsilon)+m$, dopo una \emph{riscansione} con 4 volte le ancore,
+i prodotti per ancora e i nodi di ricerca (i caps fisici restano); un passo senza $\Delta G$ non è noto
+salire, quindi senza energie libere nessun pool è un pozzo. \code{TURNOVER}: il pool chiude un ciclo
+catalitico (regola dell'app web), assorbente per default (\code{--no-stop-at-turnover}).
+\code{NO_OUTGOING_STEP}: il modello non propone nulla. \code{EXPAND_FAILED}: la featurizzazione è fallita;
+non è chimica, quindi la sua massa va nella massa inesplorata e non è mai uno stato finale (in una prima
+run l'alcossido dell'emichetale, senza token, prendeva l'88\% della massa come \enquote{vicolo cieco}).
+Una regione esplorata che non raggiunge nulla di assorbente è una classe \code{EQUILIBRIUM}, con la massa
+distribuita secondo Boltzmann. \code{NO_NET_REACTION} solo quando ogni pool esplorato ha un $G$: il pool
+di partenza è un pozzo, oppure i reagenti tengono più di $1-\varepsilon$ della popolazione.
+
+\paragraph{Esplorazione per massa.} Con ogni pool non espanso assorbente, la probabilità che la catena vi
+arrivi per primo è la massa che spiegherebbe; si espande il più probabile. Lo stop è sulla massa
+\code{UNEXPLORED} (\code{--mass-tol}); la massa dei pool oltre il budget di salita (\code{CLIMB_CUT},
+$G(\text{pool})-G(\text{inizio})$ oltre 20\,kcal/mol) è riportata come incertezza ma non ferma la ricerca.
+Nessun arco è tagliato perché in salita.
+
+\paragraph{Teoria dei cammini di transizione.} Committori $q^+$ e $q^-$ con LU sparse sulla componente
+fortemente connessa della sorgente, $\pi$ di Boltzmann quando bilanciata; il flusso reattivo netto è
+scomposto estraendo ripetutamente il cammino più largo. Su una catena bilanciata il flusso netto sale lungo
+il committore, quindi è aciclico e le quote sommano a 1 (verificato con la conservazione del flusso su sei
+grafi casuali).
+
+\begin{table}[H]
+\centering
+\caption{Parametri provvisori della rete (da calibrare sui benchmark: nessuna reazione registrata deve
+essere un falso pozzo). L'utente li ha tenuti così il 10 novembre.}
+\label{tab:rete-param}
+\small
+\begin{tabular}{@{}p{4.6cm}p{2.6cm}p{8.2cm}@{}}
+\toprule
+Parametro & Default & Motivo\\
+\midrule
+temperatura & 298{,}15\,K & \\
+\code{step_cost} & 0 & ricerca a costo uniforme, esatta su $-\log p$\\
+$\varepsilon$ & 0{,}01 & $RT\ln(1/\varepsilon)=2{,}73$\,kcal/mol a 25\,°C\\
+margine $m$ & 5\,kcal/mol & errore di GFN2 sulle energie di reazione; RRHO sovrastima il costo entropico
+  dell'associazione in soluzione: meglio pochi falsi pozzi\\
+budget di salita & 20\,kcal/mol & altezza sopra l'inizio\\
+tolleranza di massa & 0{,}01 & massa inesplorata a cui fermarsi\\
+fattore di riscansione & 4 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Rami che si uniscono: il grafo delle specie (\texttt{species})}
+Quando due rami fatti separatamente si incontrano, il grafo dei pool contiene un cammino per ogni
+intercalazione. Il grafo delle specie li tiene distinti: i nodi OR sono specie (chiave d'identità v2), i
+nodi AND passi dalle specie che toccano a quelle in cui finiscono i loro atomi, uniti per (reagenti,
+prodotti) così due H di un metile cadono insieme. Gli atomi di una specie sono numerati dai ranghi
+canonici del suo scheletro sigma con ogni H come atomo, quindi ogni disegno di una specie dà lo stesso
+grafo etichettato a meno di automorfismi.
+
+\paragraph{Espansione pseudo-primo-ordine.} Quando una specie entra nel nucleo reagisce da sola, con sé
+stessa e con ogni specie già presente (il serbatoio in ogni pool); i partner sono a concentrazione fissa.
+La massa di una specie è la sua quantità più i flussi dei passi che la fanno: un sistema lineare sul
+nucleo, tagliato dopo 64 termini quando il guadagno di anello è almeno 1 (\code{MASS_DIVERGED}). Entra la
+specie di frontiera di massa maggiore finché supera la tolleranza.
+
+\paragraph{Iper-cammini.} Il grafo è un B-ipergrafo con pesatura additiva, $W(v)=w(\text{arco})+
+\sum_{\text{coda}}\text{molteplicità}\times W(u)$, $w=-\log p$: l'iper-cammino più corto con SBT (Gallo,
+Longo, Pallottino e Nguyen, 1993) e i $k$ più corti (Nielsen, Andersen e Pretolani, 2005), con il
+bersaglio come nodo virtuale GOAL che richiede ogni specie con la sua molteplicità. Un iper-cammino è un
+insieme di passi, quindi enumera meccanismi a meno dell'ordine dei passi indipendenti; si srotola in eventi
+con gli atomi numerati una volta, e ogni ordine ammesso è un pathway del grafo dei pool con la stessa classe
+di meccanismo (verificato su 20 ordini casuali). Un passo con due prodotti entrambi usati è pagato due
+volte: il costo additivo è lì un limite superiore (il costo esatto è un problema di iper-flusso intero,
+lasciato aperto).
+
+\paragraph{Flusso atomico.} Ogni atomo del bersaglio è tracciato all'indietro attraverso un pool ben
+mescolato per specie fino a \code{START}, \code{RESERVOIR} o \code{PARTNER} (un intermedio a concentrazione
+fissa, artefatto dell'approssimazione, riportato); il bilancio prodotto + fornito = consumato + terminale
+vale a ogni specie e a ogni atomo.
+
+\section{Da un prodotto soltanto (\texttt{retro}, \texttt{retro-eval})}
+Il punto di partenza è la sola molecola bersaglio. Un nodo OR è una specie da fare; un passo all'indietro
+(il modello all'indietro, sezione~\ref{sec:backward}, sulla specie o sulla specie con un sottoprodotto) è
+un nodo AND i cui genitori vanno fatti a loro volta. Un ramo finisce su un blocco di partenza, una specie di
+serbatoio o una specie stabile a $T$. I sottoprodotti sono contati dai dati (su PMechDB: acqua in 973
+passi, Br$^-$ in 643, Cl$^-$ in 440), e un passo sulla specie più un sottoprodotto conta solo se lo tocca.
+La ricerca è AO* con un valore ammissibile (0 per default, così il costo della via trovata è l'ottimo;
+verificato su 25 istanze AND-OR casuali); il valore appreso di Retro* si inserisce lì. Una via è
+\emph{verificata} quando la ricerca in avanti dalle sue foglie raggiunge il bersaglio. Per decisione
+dell'utente il catalogo dei blocchi di partenza sono i reagenti registrati di ogni caso del benchmark
+(nessun catalogo esterno come ZINC per ora): un caso è \emph{risolto} se la via finisce sul catalogo,
+\emph{recuperato} se le sue foglie sono esattamente i reagenti registrati.
+
+\section{Dati di pathway e benchmark}
+\paragraph{Catene ReactMech (\code{ksmech-data pathways}).} Un sidecar \code{pathways.parquet}, non colonne
+di \code{steps.parquet} (cambierebbero il suo hash e renderebbero obsoleti tutti gli store; e il
+raggruppamento per molecola sposterebbe lo split). Ogni passo di catena è trovato per i suoi lati canonici
+senza mappa. Sui 5\,550 confini di catena tutte le mappe sono coerenti, l'80{,}3\% solo dopo una
+rinumerazione e il 5{,}0\% con numeri invariati: i numeri del dataset compongono solo dentro un passo. Il
+pilota contiene poco: 1\,653 dei 19\,250 passi di catena, 11 catene intere.
+
+\paragraph{Benchmark umano (\code{ksmech-data human-benchmark}).} Solo valutazione: non è una
+\code{Source}, ogni riga porta \code{evaluation_only} e il training ne rifiuta il nome. 350 pathway e
+1\,034 passi; delle 1\,421 specie distinte il train per molecola di PMechDB ne contiene 295 per SMILES
+(326 per chiave), ma solo 60 pathway hanno un passo trovato in training e 11 tutti: il benchmark condivide
+il disegno di PMechDB, non i suoi passi. Proposta: riportare i risultati su tutti i 350 e sui pathway senza
+passi in training (290 per SMILES).
+
+\paragraph{Prima prova (\code{ksmech-network evaluate}).} Con \code{dense_plain_general_s0} (pilota
+ReactMech), 30 espansioni, profondità 6, sulle 12 catene che il pilota contiene intere: arrivo in 9 (5
+\code{EXACT}, 4 \code{SKELETON}), il pathway registrato al rango 1 in 5 ed entro 5 in 6. Ma 9 delle 12
+catene stanno nel training, e 180 delle 208 espansioni fallivano per \code{MISSING_TOKENS}: la ricerca
+raggiunge specie che nessun batch QM ha visto. È un controllo del meccanismo, non un benchmark.
+
+\paragraph{Prova del grafo delle specie.} \code{pm_control_s0}, acetone + metossido, bersaglio
+l'emichetale: con 2 specie nel nucleo, 5 pool e 23\,s, l'alcossido dell'emichetale a livello
+\code{SKELETON} in un evento; con 4 specie, 14 pool e due unioni tra i tre iper-cammini (il metanolo fatto
+da un trasferimento di protone al metossido, poi addizionato all'acetone). Nella prova della catena di
+Markov (4 espansioni, senza energie libere) il 66\% della massa andava all'enolo catalizzato da base: il
+metanolo riprotona l'enolato all'O e rigenera il metossido, cosa che chiude un turnover.
 % =====================================================================
 \chapter{Risultati sperimentali}
 \label{ch:risultati}
 % =====================================================================
 Questo capitolo raccoglie i risultati di tutti i training e delle valutazioni eseguite tra il 26
-ottobre e il 9 novembre 2026. Salvo dove indicato, i numeri sono stati ricalcolati per questo
+ottobre e il 10 novembre 2026. Salvo dove indicato, i numeri sono stati ricalcolati per questo
 documento direttamente dai file \code{decode_report_*.json}, \code{metrics.jsonl},
 \code{anchor_floor_report_*.json} e \code{gbdt_lgbm_report_*.json} sotto \code{data/models/} e
 \code{data/processed/}.
@@ -2545,6 +2929,119 @@ informazione è già presente), e la fisica orbitale entra soprattutto attravers
 ($G$, $g_2$), che questo esperimento non permuta. La misura dice quindi che, nella forma attuale, i
 token orbitali agiscono soprattutto come supporto delle feature di coppia, non come portatori
 autonomi di informazione.}
+
+% ---------------------------------------------------------------------
+\section{Ablazione dei token orbitali (10 novembre)}
+\label{sec:ris-ablazione-orb}
+L'importanza per permutazione non distingue un input ridondante da uno inutile: un modello riaddestrato
+può spostare il lavoro su un altro input. Per questo l'ablazione è stata addestrata. Quattro bracci, 3 seed
+ciascuno, split per molecola, preset general, encoder denso, senza augmentation di risonanza, 30 epoche,
+selezione su \code{closed_base} val: (a) come \code{pm_v19_s0}; (b) senza le 25 colonne orbitali
+(\code{--drop-token-features orbital}, occupazione inclusa); (c) come (b) e senza insieme spettrale; (d)
+come (c) e senza embedding ereditati. Un solo pod vast.ai con una RTX 5090 (torch 2.14.1+cu130, codice
+\code{79a402f}), 3 fit per GPU, circa 80 minuti ciascuno; il braccio (a) è stato riaddestrato lì perché
+un riferimento deve girare sulla stessa GPU e la stessa torch dei suoi bracci (la lezione del passo 9 di
+P9). Il riferimento coincide con quello locale: \code{orb_a_s0} 63{,}2/81{,}2/86{,}5 contro i
+62{,}4/81{,}4/86{,}0 di \code{pm_v19_s0}. Decodifica con beam 5, caps legacy, \code{DECODE_VERSION} 5.
+
+\begin{table}[H]
+\centering
+\caption{Ablazione orbitale, full-R top-1/3/5 per seed e media (\%). PMechDB \code{closed_base} val
+($n=1\,238$) e ReactMech molecule val fuori distribuzione ($n=911$, i checkpoint PMechDB decodificati sui
+campioni ReactMech). \enquote{any}: un esito registrato qualsiasi.}
+\label{tab:ablazione-orb}
+\small
+\begin{tabular}{@{}lllrr@{}}
+\toprule
+Braccio & Set & seed 0 / 1 / 2 (top-1/3/5) & media top-1 / 3 & top-1 any\\
+\midrule
+a & PMechDB & 63{,}2/81{,}2/86{,}5; 65{,}8/82{,}3/86{,}3; 66{,}2/85{,}1/87{,}9 & 65{,}05 / 82{,}88 & 67{,}56\\
+b & PMechDB & 66{,}6/85{,}6/89{,}5; 63{,}4/84{,}9/88{,}2; 61{,}5/84{,}1/86{,}6 & 63{,}81 / 84{,}87 & 66{,}48\\
+c & PMechDB & 63{,}7/80{,}5/86{,}1; 63{,}0/80{,}5/86{,}0; 66{,}5/81{,}9/84{,}2 & 64{,}38 / 80{,}96 & 67{,}29\\
+d & PMechDB & 63{,}9/83{,}2/86{,}8; 65{,}2/84{,}0/88{,}8; 67{,}4/85{,}5/87{,}9 & 65{,}48 / 84{,}22 & 68{,}09\\
+\midrule
+a & ReactMech & 54{,}1/71{,}0/73{,}7; 52{,}3/72{,}8/75{,}7; 49{,}6/69{,}6/72{,}0 & 51{,}99 / 71{,}13 & 53{,}71\\
+b & ReactMech & 49{,}2/71{,}2/74{,}0; 51{,}4/69{,}8/72{,}4; 52{,}6/69{,}0/73{,}4 & 51{,}04 / 70{,}03 & 52{,}58\\
+c & ReactMech & 56{,}5/73{,}8/76{,}9; 46{,}7/69{,}2/73{,}1; 49{,}2/67{,}4/70{,}8 & 50{,}79 / 70{,}11 & 51{,}99\\
+d & ReactMech & 54{,}8/71{,}7/74{,}3; 48{,}7/70{,}3/73{,}8; 53{,}6/69{,}0/71{,}4 & 52{,}36 / 70{,}33 & 53{,}82\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Confronti appaiati con il braccio (a) (\code{ksmech-eval compare}): differenza delle medie in
+punti, tra parentesi il $p$ di McNemar unilaterale \enquote{il braccio è peggiore} quando è sotto 0{,}25.
+Nessun braccio supera la tolleranza della regola U20.}
+\label{tab:ablazione-orb-cmp}
+\small
+\begin{tabular}{@{}llrrrrl@{}}
+\toprule
+Set & Braccio & top-1 own & top-1 any & top-3 own & top-3 any & tolleranza\\
+\midrule
+PMechDB & b & $-1{,}24$ (0{,}11) & $-1{,}08$ (0{,}17) & $+1{,}99$ & $+1{,}67$ & 3{,}0--4{,}3\\
+PMechDB & c & $-0{,}67$ & $-0{,}27$ & $-1{,}91$ (0{,}053) & $-1{,}83$ (0{,}036) & 2{,}9--3{,}4\\
+PMechDB & d & $+0{,}43$ & $+0{,}54$ & $+1{,}35$ & $+1{,}32$ & 3{,}3--3{,}4\\
+\midrule
+ReactMech & b & $-0{,}95$ (0{,}050) & $-1{,}13$ (0{,}054) & $-1{,}10$ (0{,}13) & $-1{,}61$ (0{,}030) & 2{,}5--4{,}0\\
+ReactMech & c & $-1{,}21$ (0{,}063) & $-1{,}72$ (0{,}040) & $-1{,}02$ (0{,}013) & $-1{,}61$ (0{,}003) & 5{,}2--8{,}2\\
+ReactMech & d & $+0{,}37$ & $+0{,}11$ & $-0{,}80$ (0{,}24) & $-1{,}10$ (0{,}22) & 2{,}7--5{,}5\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Importanza a blocchi dei tre \code{orb_a}.} Su PMechDB il blocco Fukui costa 19--22 punti di
+top-1 e i pesi di frontiera 4--7; ogni blocco orbitale sposta il top-1 al più di 1{,}6 punti e la NLL tra
+$-0{,}12$ e $+0{,}05$. Su ReactMech il blocco Fukui costa 13--17 punti, e le quote $s/p/d$, le quote $p$, le
+quote $d$ e i pesi sui centri alzano la NLL in tutti i 12 casi blocco-seed (top-1 fino a $-2{,}0$); i
+blocchi energia, coppia di centri e quota $s$ restano a circa 0. Sui cinque casi da manuale il seed
+sposta i ranghi quanto il braccio, e nessun braccio trova l'addizione 1,4 del cianuro all'acroleina.
+
+\scoperta{le colonne orbitali servono fuori distribuzione}{Alla lettera della regola nessun braccio
+fallisce, quindi le colonne sarebbero ridondanti. Ma la regola non vede un effetto sotto circa 3 punti
+(deviazione standard tra seed 1{,}4--2{,}1, per (c) fino a 4 su ReactMech), e due misure indipendenti
+concordano fuori distribuzione: i bracci senza colonne perdono 1--1{,}7 punti su ReactMech, e il modello
+completo legge proprio i blocchi di forma (quote $s/p/d$, pesi sui centri) su ReactMech mentre li ignora
+su PMechDB. Le colonne portano un piccolo pezzo di ciò che si trasferisce a molecole nuove, come il token
+orbitale della specifica intende. \textbf{Decisione dell'utente (10 novembre)}: il token orbitale tiene
+le sue 25 colonne per ora; quali togliere si decide più avanti.}
+
+\scoperta{i pesi di frontiera si trasferiscono male}{Su ReactMech permutare i pesi di frontiera degli
+atomi \emph{alza} il top-1 in due seed su tre ($+5{,}5$ e $+3{,}8$ punti), mentre su PMechDB costa 4--7
+punti: il modello impara da quei pesi una regola che vale nel dominio di training e non fuori.}
+
+% ---------------------------------------------------------------------
+\section{Il modello all'indietro (10 novembre)}
+\label{sec:ris-backward}
+\code{bwd_s0}--\code{bwd_s2}: sullo stesso pod e con lo stesso codice, \code{--direction backward} con
+le opzioni del braccio (a). Lo store all'indietro è stato costruito in locale (un pod non ha i record QM,
+e ogni file di token verifica il suo record: costruito sul pod lo store aveva 0 campioni); i token del
+lato prodotto non presenti nello store 19 (3\,565) sono stati spediti prima dei fit.
+
+\begin{table}[H]
+\centering
+\caption{Modello all'indietro su \code{closed_base} val dei campioni all'indietro ($n=1\,233$), full-R
+(\%). \enquote{any}: un qualsiasi pool padre registrato.}
+\label{tab:backward}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Run & top-1 & top-3 & top-5 & top-1 any & top-3 any\\
+\midrule
+\code{bwd_s0} & 61{,}4 & 78{,}8 & 82{,}3 & 63{,}0 & 80{,}8\\
+\code{bwd_s1} & 57{,}8 & 74{,}9 & 80{,}0 & 59{,}9 & 78{,}2\\
+\code{bwd_s2} & 59{,}0 & 77{,}9 & 80{,}9 & 61{,}2 & 80{,}3\\
+\midrule
+media & 59{,}4 & 77{,}2 & 81{,}1 & 61{,}4 & 79{,}8\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Il passo precedente è predetto quasi bene quanto il successivo: il braccio (a) in avanti fa 63{,}2--66{,}2
+al top-1 sulla propria \code{closed_base} val, il modello all'indietro 57{,}8--61{,}4, con la stessa
+architettura e gli stessi input. La migliore epoca per l'ancora è la 24 (\code{bwd_s0}, top-1
+dell'ancora 63{,}2\%) contro la 26 di \code{orb_a_s0} (65{,}3\%). Il modello all'indietro è l'espansore
+della retrosintesi e il secondo termine del riordinatore per andata e ritorno (sezione~\ref{sec:roundtrip}),
+la cui valutazione è il passo successivo.
 % =====================================================================
 \chapter{Scoperte e lezioni}
 \label{ch:scoperte}
@@ -2629,6 +3126,36 @@ capitoli precedenti ne danno il contesto e i numeri.
   sovrascritto \code{best.pt}; da qui le regole di arresto sui valori non finiti.
 \item \textbf{Due metriche diverse}: il top-1 full-R della decodifica supera il top-1 dell'ancora del
   training perché valuta l'intera classe e cinque ancore.
+\item \textbf{I token orbitali contano fuori distribuzione, non dentro}: tolte le 25 colonne orbitali
+  nessun braccio peggiora su PMechDB, ma su ReactMech si perdono 1--1{,}7 punti (McNemar
+  $p=0{,}003$--$0{,}06$) e il modello completo legge lì le quote $s/p/d$ e i pesi sui centri. La regola di
+  tolleranza non vede effetti sotto circa 3 punti: per un input fisico serve anche un set fuori
+  distribuzione.
+\item \textbf{Il passo precedente è imparabile quasi quanto il successivo}: stesso modello, 59\% contro
+  65\% al top-1 full-R.
+\item \textbf{Un riferimento va rieseguito sulla macchina dei bracci}: rifatto sulla 5090, il braccio (a)
+  dell'ablazione orbitale coincide con il riferimento locale (63{,}2 contro 62{,}4), e i confronti
+  diventano leggibili.
+\end{enumerate}
+
+\section{Sulla rete di reazione e sulla termochimica}
+\begin{enumerate}[resume]
+\item \textbf{Una chiave che azzera le cariche unisce prodotti diversi}: le due eterolisi di un legame
+  avevano la stessa chiave di pool nel decoder, che ne teneva una sola; lo ha rivelato il modello
+  all'indietro, per cui ogni inversa di un'addizione catione--anione è un'eterolisi.
+\item \textbf{Un fallimento di featurizzazione non è chimica}: un pool senza token prendeva l'88\% della
+  massa come vicolo cieco; ora è \code{EXPAND_FAILED} e la sua massa conta come incertezza.
+\item \textbf{L'ordine dei frammenti cambia la previsione}: lo stesso pool scritto in due ordini dà
+  $\log P$ diverse di 3{,}5 unità; la rete ordina i frammenti per chiave, il training no.
+\item \textbf{Alcuni record QM sono selle}: ottimi L-BFGS-B partiti da geometrie simmetriche restano su
+  torsioni metiliche immaginarie; seguire il modo abbassa $G$ fino a 1{,}8\,kcal/mol e toglie i salti della
+  regola di xtb.
+\item \textbf{ALPB dipende dall'orientazione}: 0{,}02--0{,}15\,kcal/mol su $G-E_{\mathrm{el}}$, irrilevante
+  rispetto all'errore di GFN2 ma visibile nei test.
+\item \textbf{Il benchmark umano condivide il disegno di PMechDB, non i suoi passi}: 326 specie in comune
+  per chiave, ma solo 11 pathway su 350 con ogni passo nel training.
+\item \textbf{RDKit perde l'E/Z dei doppi legami d'anello} quando toglie idrogeni espliciti: la correzione
+  alla radice non ha spostato nessuna chiave su 126\,068 frammenti.
 \end{enumerate}
 
 \section{Sull'ingegneria}
@@ -2768,63 +3295,44 @@ HTTP è l'unico contratto.
   (224 ritorni di P5 sono \code{SPLIT_CONFLICT}), uno split ReactMech per classi.
 \item Calibrazione: early stopping o regolarizzazione sulla NLL (sovra-confidenza dopo l'epoca
   10--14); il modello non ha dropout.
-\item Infrastruttura: caricare i checkpoint dei passi 8 e 9 sul dataset privato, pubblicare \code{main},
+\item Infrastruttura: caricare i checkpoint dei passi 8 e 9 sul dataset privato, pubblicare \code{main}
+  (deciso dall'utente il 10 novembre, solo codice, dopo il controllo \code{tests/test_p8_no_flower_lines.py}),
   decidere se passare a \code{tblite-anc} come ottimizzatore di default (ricalcolo completo del QM),
   regola dei plateau anche per i gusci chiusi, un arbitro DFT per gli stati di spin.
 \item Differiti dal piano open-shell: D1 (il CSV ufficiale di RMechDB), D2 (spGFN2 per $u>0$, ablazione
-  dopo P9), D3 (catene radicaliche USPTO di FlowER e una testa \code{END_MECH} addestrata); le fasi
+  dopo P9), D3 (catene radicaliche USPTO di FlowER e una testa \code{END_MECH} addestrata: oggi nessuna
+  sorgente produce \code{stop_label}); le fasi
   dell'app web S1--S3.
 \item Pre-addestramento dell'encoder su QMugs: dati in preparazione, obiettivo non ancora definito dalla
   specifica.
 \end{itemize}
 
-\section[I token orbitali servono al modello?]{I token orbitali servono al modello? (\texttt{docs/todo.md})}
-L'importanza per permutazione (sezione~\ref{sec:ris-importance}) suggerisce che le colonne dei token
-orbitali e l'insieme spettrale non portino informazione marginale. Piano: un interruttore di
-\code{ModelConfig} per togliere le colonne orbitali e uno per l'insieme spettrale; tre bracci sullo
-split per molecola, \code{closed_base} val, 3 seed, preset general: (a) riferimento, (b) senza colonne
-orbitali, (c) senza colonne orbitali né insieme spettrale, eventualmente (d) senza embedding ereditati;
-confronto appaiato con la regola U20.
+\section[Quali colonne orbitali togliere]{Quali colonne orbitali togliere (\texttt{docs/todo.md})}
+L'ablazione (sezione~\ref{sec:ris-ablazione-orb}) ha tenuto le 25 colonne. I blocchi energia, coppia di
+centri e quota $s$ non mostrano uso su nessuno dei due set; le quote $s/p/d$ e i pesi sui centri servono
+su ReactMech. Prossimo passo: un braccio con solo le colonne scelte tolte (\code{--drop-token-features
+NOME...}), 3 seed, giudicato su ReactMech val oltre che su \code{closed_base} val, con la regola di
+tolleranza e con McNemar.
 
-\section[Reti di reazione]{Reti di reazione (\texttt{docs/reaction\_network\_plan.md})}
-\paragraph{Motivazione.} Il metossido con l'acetone dà sia l'emichetale sia l'enolato; in acqua la
-deprotonazione è in salita di circa 4 unità di pK$_a$ (acetone 19{,}3 contro metanolo 15{,}5), in DMSO in
-discesa (26{,}5 contro 29{,}0). 474 pool di PMechDB hanno più di un prodotto (973 passi, 7{,}7\%): sui loro
-36 campioni di \code{closed_base} val il top-1 colpisce l'etichetta propria nel 44--50\% dei casi e
-\emph{un} esito registrato nel 72--83\%. Oggi la rete vive nell'app web, cresce con un beam cieco
-rispetto al bersaglio, non ha stop (la testa \code{END_MECH} non è addestrata) né passi inversi, e il QM
-non contiene energie libere.
-
-\paragraph{Decisioni.} La massima verosimiglianza resta la loss per esiti distinti (una loss
-\enquote{any} solo per insiemi definiti da leggi); lo stop è termodinamico, agisce sugli stati e non
-taglia mai un passo in salita; sono consentiti pacchetti come xtb, CREST, un atom mapper.
-
-\paragraph{Elementi del piano (in ordine).}
-\begin{description}[style=nextline]
-\item[A] valutazione multi-riferimento: \code{rank_any} per chiave del pool prodotto,
-  \code{compare --metric own|any}. È in corso su un ramo di lavoro (\code{claude/network}):
-  \code{DECODE_VERSION} 5, con la misura di 901 passi di training PMechDB in 436 pool multi-esito, e il
-  punto d'ingresso \code{model.decode.matrix_logp} per la $\log P$ di una $\vb R$ data.
-\item[B] energia libera: \code{xtb --hess}, quasi-RRHO, solvente come parametro, CREST per le specie
-  raggiunte; $G(\text{pool})=\sum G+RT\ln(c/c^0)$.
-\item[C] il nucleo della rete nel motore (\code{ksmech.network}).
-\item[D] ricerca verso un prodotto: arrivo per chiave d'identità o per scheletro a meno di protoni;
-  $\Delta\vb B=\vb B_{\mathrm{target}}-\vb B_{\mathrm{corrente}}$ da una mappatura atomica.
-\item[E] senza prodotto: archi inversi $-\vb R$, bilancio dettagliato con peso
-  $s_{ij}\exp(-\Delta G_{ij}/2RT)$, assorbimento di una catena di Markov.
-\item[F] stop termodinamico a temperatura fisica: \code{SINK_AT_T} quando ogni passo sale più di
-  $\delta=RT\ln(1/\varepsilon)$ + margine (con $\varepsilon=1\%$: 2{,}7\,kcal/mol a 25\,°C, 3{,}5 a
-  110\,°C).
-\item[G] dati di pathway: il benchmark umano (solo valutazione), le catene ReactMech \code{ID_CRM} con
-  etichette di stop, ORD/USPTO, mech-USPTO-31K.
-\item[H] modello inverso (da prodotto a reagente).
-\item[I] ricerca su grafo: A* con costo $-\log p$ ed euristica $\Delta\vb B$ residuo, ricerca
-  bidirezionale (con $b=20$, $d=6$: circa 16\,000 espansioni invece di 64 milioni), $k$ cammini migliori,
-  teoria dei cammini di transizione, espansione per massa di probabilità.
-\item[J] grafo delle specie AND-OR (iper-cammini), analisi del flusso atomico.
-\item[K] retrosintesi meccanicistica da un prodotto soltanto (Retro*, proof-number search o MCTS con il
-  modello inverso).
-\end{description}
+\section{La rete di reazione: ciò che resta}
+Il codice di ogni elemento del piano (A--L) è in \code{main} con test e voci del registro; resta calcolo,
+dati e calibrazione:
+\begin{itemize}
+\item la termochimica delle specie che una rete raggiunge (\code{ksmech-qm thermo}, su richiesta);
+\item QM e token per i 17\,595 passi di catena ReactMech fuori dal pilota, perché i benchmark della
+  sezione 5 del piano possano girare (le specie del benchmark umano sono fatte: 1\,056 su 1\,072);
+\item la valutazione del riordinatore per andata e ritorno: QM delle specie figlie del beam, griglia di
+  $\lambda$ su entrambi i set di val; poi la ricerca bidirezionale (I1);
+\item la calibrazione dei parametri (\code{step_cost}, $\varepsilon$ e margine, budget di salita,
+  tolleranza di massa: nessuna reazione registrata deve essere un falso pozzo) e le misure del
+  \enquote{fatto quando} del piano, tra cui i nodi espansi dal grafo delle specie contro quello dei pool;
+\item questioni lasciate aperte: se un turnover resta assorbente una volta che le energie libere esistono;
+  se una classe all'indietro debba ammettere anche i membri in avanti negati (l'unione); il costo esatto
+  dei passi con due prodotti usati (iper-flusso intero); un atom mapper per i bersagli non mappati; un
+  valore appreso alla Retro*, proof-number search o MCTS; l'invarianza del modello all'ordine dei
+  frammenti come augmentation di training; i lettori a valle per un solvente diverso dall'acqua; se
+  ingerire le catene ReactMech in \code{steps.parquet} (cambierebbe lo split).
+\end{itemize}
 
 \paragraph{Note di ricerca.} Una rassegna dell'utente (\code{reports/Deep learning ricerca
 combinatoria.md}, 8 novembre) su deep learning e ottimizzazione combinatoria conclude che, per \ksm, il
@@ -2892,6 +3400,25 @@ Codice & Significato\\
 \code{DECODE_DROPPED:*} & \code{CHARGE_NOT_CONSERVED}, \code{OCTET_EXCEEDED}, \code{FORMAL_CHARGE_RANGE},
   \code{ODD_OFF_BROKEN_BOND}, \code{CLOSED_MINUS1}, \code{RESONANCE_ONLY_STEP}\dots\\
 \code{DECODE_MERGED}, \code{DECODE_ANCHOR_UNCOMPLETED} & completazione già trovata; ancora senza completazione\\
+\code{OWN_KEY_MISMATCH}, \code{SIBLING_KEY_FAILED} & hit proprio con chiave diversa; passo illeggibile per i fratelli\\
+\code{CHILD_INVALID} & figlio illeggibile da RDKit nel riordinamento per andata e ritorno\\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Termochimica}}\\
+\code{IMAGINARY_INVERTED}, \code{_DROPPED} & regola di xtb sui modi immaginari residui (avvisi)\\
+\code{IMAGINARY_REOPTIMIZED}, \code{_PERSISTENT} & ri-ottimizzazione riuscita; modo rimasto\\
+\code{REOPT_ROUNDS}, \code{REOPT_NO_LOWER_MINIMUM}, \code{REOPT_BUDGET} & motivi di stop della ri-ottimizzazione\\
+\code{HESSIAN_ASYMMETRIC}, \code{SYMMETRY_FAILED} & $|H-H^T|>10^{-2}$; gruppo puntuale non trovato ($\sigma=1$)\\
+\code{UNKNOWN_METHOD}, \code{RECORD_KEY_MISMATCH} & metodo senza solvente; SMILES del record diverso dalla chiave\\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Rete di reazione}}\\
+\code{DEPTH_CUT}, \code{CYCLE}, \code{EXPANSION_BUDGET}, \code{POP_BUDGET} & tagli della ricerca\\
+\code{MAPPING_FAILED} & bersaglio non mappato sull'inizio: ricerca a costo uniforme\\
+\code{SINK_AT_T}, \code{TURNOVER}, \code{NO_OUTGOING_STEP}, \code{EXPAND_FAILED} & stati assorbenti\\
+\code{UNEXPLORED}, \code{CLIMB_CUT}, \code{EQUILIBRIUM} & massa inesplorata; oltre il budget di salita; classe senza assorbimento\\
+\code{ONE_WAY}, \code{REVERSE_MISSING}, \code{NO_FREE_ENERGY} & arco senza inverso; inverso non valutabile; pool senza $G$\\
+\code{NO_NET_REACTION}, \code{START_IS_GOAL} & nessuna reazione netta; bersaglio già nel pool iniziale\\
+\code{SELF_LOOP}, \code{PARTNER_ONLY}, \code{MASS_DIVERGED} & grafo delle specie: scambio degenere; passo dei soli partner; massa infinita\\
+\code{NOT_USING_BYPRODUCT} & retrosintesi: passo che non tocca il sottoprodotto\\
 \bottomrule
 \end{longtable}
 
@@ -2908,14 +3435,16 @@ Codice & Significato\\
 \toprule
 Costante & Valore & Storia\\
 \midrule
-specifica & v10 & v3 $\to$ v7.2 (IBO) $\to$ v8 ($\vb R$) $\to$ v8.1 (chiave sigma) $\to$ v9 (niente stage B) $\to$ v9.1/9.2 $\to$ v10\\
+specifica & v10.1 & v3 $\to$ v7.2 (IBO) $\to$ v8 ($\vb R$) $\to$ v8.1 (chiave sigma) $\to$ v9 (niente stage B) $\to$ v9.1/9.2 $\to$ v10 $\to$ v10.1 (rete di reazione)\\
 \code{SAMPLE_VERSION} & 19 & tabella~\ref{tab:sampleversion}\\
 token \code{SCHEMA_VERSION} & 10 & 7$\to$8 (degeneri), 9 (IBO), 10 (extra, P0a)\\
 record QM \code{SCHEMA_VERSION} & 1 & invariato\\
 \code{FLOOR_VERSION} & 4 & 2 (P0), 3 (celle), 4 (\code{own_break})\\
-\code{DECODE_VERSION} & 4 & 2 (P0), 3 (caps), 4 (schermo); 5 in corso (\code{rank_any})\\
+\code{DECODE_VERSION} & 5 & 2 (P0), 3 (caps), 4 (schermo), 5 (\code{rank_any}, chiave di pool)\\
 \code{FROZEN_SPLIT_SCHEMA} & 1 & \\
-indice QM \code{INDEX_VERSION} & 2 & 2 dal P4 (spin)\\
+indice QM \code{INDEX_VERSION} & 3 & 2 dal P4 (spin), 3 (sidecar termici)\\
+\code{THERMO_VERSION} & 1 & la ri-ottimizzazione aggiunge chiavi alla configurazione, non cambia la versione\\
+\code{network_predict} & 1 & formato JSON di \code{ksmech-network predict --out}\\
 \code{SPIN_RULE_VERSION} & \code{spin-rule-v2} & \\
 tabelle di spin & \code{spin_table_v2}, \code{spin_theory_v2}, \code{metal_v1} & \\
 \code{OPEN_SHELL_RULE} & \code{occ-plateau-v1} & P2b\\
@@ -2952,6 +3481,18 @@ uv run ksmech-eval decode --run NOME --part val --beam 5 --cohort closed_base
 uv run ksmech-eval compare --a A_s*/decode_hits_*.json --b B_s*/decode_hits_*.json
 uv run ksmech-eval importance --run NOME --part val
 uv run ksmech-serve --port 8000
+
+uv run ksmech-arrows samples --source pmechdb --direction backward --workers 8
+uv run ksmech-train fit --run bwd_s0 --direction backward --preset general
+uv run ksmech-eval roundtrip --run orb_a_s0 --backward-run bwd_s0
+uv run ksmech-qm run --species-from \
+    data/processed/human_benchmark/qm_species.json
+uv run ksmech-qm thermo --reopt-threshold -10 --reopt-rounds 3
+uv run ksmech-network search --run NOME \
+    --start 'CC(C)=O.C[O-]' --target 'CC(C)(O)OC'
+uv run ksmech-network predict --run NOME \
+    --start 'CC(C)=O.C[O-]' --free-energy qm
+uv run ksmech-network retro-eval --run bwd_s0 --set human_benchmark
 \end{verbatim}
 
 % =====================================================================
@@ -2966,11 +3507,19 @@ uv run ksmech-serve --port 8000
 \item[\code{closed_base}] la coorte di riferimento a guscio chiuso (PMechDB, split per molecola).
 \item[Coppia di risonanza] un passo che interconverte due disegni della stessa specie, escluso dal
   bersaglio e conservato come esempio di equivalenza.
+\item[Chiave di pool] le chiavi d'identità v2 dei frammenti di un pool, ordinate e unite da
+  \enquote{.}: l'identità con cui decoder, rete e app web uniscono i pool.
+\item[EXACT / SKELETON] i due livelli di arrivo della ricerca: le specie del bersaglio, oppure i loro
+  scheletri pesanti con gli ordini di legame (a meno di protoni).
 \item[Floor fisico] l'ordinamento delle ancore per $|G^{\mathrm{atom}}|$ senza parametri appresi.
 \item[full-R top-$k$] frazione di campioni per cui una delle prime $k$ completazioni del beam è una
   variante della classe di etichette.
+\item[Iper-cammino] un insieme di passi del grafo delle specie che produce il bersaglio da specie
+  iniziali; un meccanismo a meno dell'ordine dei passi indipendenti.
 \item[GENERAL / LEGACY] preset del modello: tutte le celle con flag ed extra orbitali, oppure gli
   input della v17.
+\item[Modello all'indietro] lo stesso modello addestrato a predire $-\vb R$ dal pool figlio: il passo
+  precedente.
 \item[Lacuna (hole)] il gemello virtuale di un token a guscio aperto, che fa da accettore.
 \item[Pool] il multiinsieme di tutte le specie presenti, scritto come una matrice $\vb B$.
 \item[Release A / B] gli insiemi di fasi P1--P5 e P6--P8 (+P9) del piano open-shell.
