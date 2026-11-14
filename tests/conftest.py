@@ -1,6 +1,13 @@
 import os
 from pathlib import Path
 
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    # one thread per xdist worker, set before torch or numpy start their pools: 14 workers with
+    # every core's threads each oversubscribed the host (the unit stage 240 s at -n 14, 146 s at
+    # -n 10); an explicit setting wins
+    for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(_var, "1")
+
 import pytest
 from rdkit import Chem
 

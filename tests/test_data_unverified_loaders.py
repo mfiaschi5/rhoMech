@@ -30,10 +30,10 @@ def test_modules_flag_untested():
     reason="ReactMech raw files not in data/raw/reactmech (untested_on_real_data); download "
     "needs approval",
 )
-def test_reactmech_real_files():
-    """The two val files only (2 min; all six files take 12 min and give 114,199 steps, 9,948
+def test_reactmech_real_files(realdata_workers):
+    """The two val files only (4 min in one process; all six files give 114,199 steps, 9,948
     of them classified): the ID and OOD splits, each step read once."""
-    result = reactmech.load(parts=("val.txt",))
+    result = reactmech.load(parts=("val.txt",), n_workers=realdata_workers)
     assert result.n_records == 19_730 and result.notes["repeat_across_files"] == 929
     assert result.rejected_fraction < 0.02
     classes = {s.mechanism_class for s in result.steps} - {None}

@@ -8,6 +8,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -25,8 +26,26 @@ from ksmech.data.io import source_dir, write_resonance_pairs, write_steps
 from ksmech.data.schema import ElementaryStep, Source
 from ksmech.data.spin import spin_config
 from ksmech.data.validation import Rejection, RejectReason, StepRejected
+from ksmech.processes import in_processes
 
 log = logging.getLogger(__name__)
+
+
+def _attempt(make: Callable[[], ElementaryStep]) -> ElementaryStep | StepRejected:
+    """`make()`, or the rejection it raised (a worker task of `IngestResult.add_records`)."""
+    try:
+        return make()
+    except StepRejected as exc:
+        return exc
+
+
+def _replay(made: ElementaryStep | StepRejected | None) -> ElementaryStep:
+    if isinstance(made, StepRejected):
+        raise made
+    if made is None:  # only a repeated step id, which `add` rejects before calling make
+        raise RuntimeError("a record without a precomputed step")
+    return made
+
 
 FROZEN_SAMPLE_SCHEMA = 1  # `sample_frozen.json`: a pilot's step ids, independent of every version
 
@@ -56,6 +75,21 @@ class IngestResult:
             self.reject(step_id, raw, exc)
             return
         self.steps.append(step)
+
+    def add_records(self, records: list[tuple[str, str, Callable]], n_workers: int = 1) -> None:
+        """`add` on every (step_id, raw, make) in order. With `n_workers` > 1 the first make of
+        each step id runs ahead in spawned processes (`make` picklable) and `add` replays its
+        step or its rejection, so the steps, rejections and counts are the same."""
+        if n_workers <= 1:
+            for record in records:
+                self.add(*record)
+            return
+        first: dict[str, int] = {}
+        todo = [k for k, (sid, _, _) in enumerate(records) if first.setdefault(sid, k) == k]
+        makes = [records[k][2] for k in todo]
+        made = dict(zip(todo, in_processes(_attempt, makes, n_workers, chunksize=64), strict=True))
+        for k, (sid, raw, _) in enumerate(records):
+            self.add(sid, raw, partial(_replay, made.get(k)))
 
     def reject(self, step_id: str, raw: str, exc: StepRejected) -> None:
         log.warning("rejected %s [%s] %s", step_id, exc.reason, exc.detail)

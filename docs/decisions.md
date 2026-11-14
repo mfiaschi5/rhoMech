@@ -9723,3 +9723,32 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
 - **Measured** (PMechDB n = 400, `--half-pair-norm --split-pair-init`, samples/s, flag off ->
   on): eager 25.5 -> 27.8 (+9%); compiled with checkpointing 34.7 -> 41.4 (+19%); compiled
   without checkpointing 42.5 -> 52.5 (+23%); no graph break, 5 recompiles.
+
+## 2026-11-14: commit hook from 22.5 to about 10.5 minutes
+
+- **Why.** On commit 1863c8f the hook took 22.5 minutes: the unit stage 4:00, the real-data
+  stage 18:36 (2 minutes in October). Six single-process real-data tests took 650 s of it: the
+  ReactMech val ingest (244 s; its docstring said 2 min before the P1-P8 laws), the domain
+  re-screen of every stored step built three times (96 + 78 + 78 s, and once more, 78 s, in
+  `test_open_shell_admission`'s setup) and the PMechDB ingest (79 s). The unit stage ran 14
+  xdist workers with every core's torch and BLAS threads each (load 54 on 16 cores): 240 s at
+  `-n 14`, 146 s at `-n 10`.
+- **What.**
+  - `IngestResult.add_records(records, n_workers)`: the first make of each step id runs in
+    spawned processes (`processes.in_processes`), and `add` replays its step or its
+    `StepRejected` in record order, so the steps, rejections and counts are those of one
+    process (`test_parsing_in_processes_gives_the_same_result`, with a repeat, a malformed row
+    and a parse failure). `pmechdb.load` and `reactmech.load` take `n_workers` (default 1:
+    as before); ReactMech's per-record lambda became a `partial`, to be picklable. The two
+    ingest tests pass `realdata_workers`.
+  - `_rescreened_store(source, n_workers)` (tests/test_data_domain.py) is cached for the
+    session and re-screens in `realdata_workers` processes; the domain tests and the admission
+    fixture share it.
+  - `tests/conftest.py`: inside an xdist worker, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and
+    `MKL_NUM_THREADS` default to 1 (an explicit setting wins).
+- **Measured** (quiet host, as the hook runs them): unit stage 240 -> 81 s; real-data stage
+  18:36 -> 9:08 (ReactMech ingest 244 -> 43 s, PMechDB ingest 79 -> 10 s, the re-screen
+  96 + 78 + 78 + 78 -> 12 + 11 s and the cache). The real-data stage's slowest tests are now
+  the P5 digests (61 s), the open-shell token checks (59 + 49 + 28 s) and the alignment (45 s).
+- **Not done (a policy for the user)**: running the real-data stage only when a commit touches
+  the data, arrows, orbitals or QM code, or at pre-push.

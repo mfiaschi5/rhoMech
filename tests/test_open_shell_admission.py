@@ -32,10 +32,10 @@ BIRCH = "pmechdb-4bda5440edfee13c"
 
 
 @pytest.fixture(scope="module")
-def steps():
+def steps(realdata_workers):
     from tests.test_data_domain import _rescreened_store
 
-    return {s.step_id: s for s in _rescreened_store("pmechdb")}
+    return {s.step_id: s for s in _rescreened_store("pmechdb", realdata_workers)}
 
 
 RADICAL = {str(domain.DomainClass.RADICAL_SPECTATOR), str(domain.DomainClass.RADICAL_REACTIVE)}

@@ -36,6 +36,7 @@ from __future__ import annotations
 import ast
 import csv
 import logging
+from functools import partial
 from pathlib import Path
 
 from ksmech.data import chem
@@ -108,14 +109,18 @@ def parse_line(text: str, step_id: str, classes: dict | None = None) -> Elementa
     )
 
 
-def load(raw: Path | None = None, parts: tuple[str, ...] = SPLIT_FILES) -> IngestResult:
+def load(
+    raw: Path | None = None, parts: tuple[str, ...] = SPLIT_FILES, n_workers: int = 1
+) -> IngestResult:
     """Every step of the `parts` files of both splits, each once, with the classes of the
-    classified mechanisms."""
+    classified mechanisms; `n_workers` spawned processes parse them (the same result,
+    `IngestResult.add_records`)."""
     inputs = resolve_inputs(raw, parts)
     classes, clashes = class_index(raw)
     result = IngestResult(Source.REACTMECH, inputs=[str(p) for p in inputs])
     result.notes["class_pairs_claimed_twice"] = clashes
     seen: set[str] = set()
+    records = []
     for path in inputs:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -129,7 +134,8 @@ def load(raw: Path | None = None, parts: tuple[str, ...] = SPLIT_FILES) -> Inges
                 seen.add(text)
                 result.notes["extra_tokens_ignored"] += len(text.split()) > 1
                 step_id = make_step_id(Source.REACTMECH, text)
-                result.add(step_id, text, lambda t=text, s=step_id: parse_line(t, s, classes))
+                records.append((step_id, text, partial(parse_line, text, step_id, classes)))
+    result.add_records(records, n_workers)
     result.notes["with_mechanism_class"] = sum(s.mechanism_class is not None for s in result.steps)
     result.notes["arrows_pending_alignment"] = len(result.steps)
     return result

@@ -95,9 +95,12 @@ def read_records(path: Path) -> Iterator[list[str]]:
         yield from csv.reader(fh)
 
 
-def load(raw: Path | None = None) -> IngestResult:
+def load(raw: Path | None = None, n_workers: int = 1) -> IngestResult:
+    """Every record of the raw files; `n_workers` spawned processes parse them (the same
+    result, `IngestResult.add_records`)."""
     inputs = resolve_inputs(raw)
     result = IngestResult(Source.PMECHDB, inputs=[str(p) for p in inputs])
+    records = []
     for path in inputs:
         log.info("reading %s", path)
         for row in read_records(path):
@@ -108,9 +111,10 @@ def load(raw: Path | None = None) -> IngestResult:
             step_id = make_step_id(Source.PMECHDB, text)
             result.notes["stray_trailing_comma"] += strip_stray_comma(text)[1]
             if len(row) == 1:
-                result.add(step_id, text, partial(parse_record, text, step_id))
+                records.append((step_id, text, partial(parse_record, text, step_id)))
             else:
-                result.add(step_id, text, partial(_malformed, len(row)))
+                records.append((step_id, text, partial(_malformed, len(row))))
+    result.add_records(records, n_workers)
     return result
 
 

@@ -3,6 +3,7 @@ the placeholder law and the METAL_SUSPECT flag (open-shell plan P0a step 6), and
 repairs V1, A1 and the named beta-lactam repair (P1), on two PMechDB steps the repairs once
 touched and on hand-written fixtures, never other dataset SMILES."""
 
+import functools
 import json
 from dataclasses import replace
 
@@ -730,23 +731,32 @@ LEFT_AS_DRAWN = {
 }
 
 
-def _rescreened_store(source: str) -> list[ElementaryStep]:
+def _rescreened_quietly(step: ElementaryStep) -> ElementaryStep:
     from rdkit import RDLogger
 
-    from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
-
     RDLogger.DisableLog("rdApp.*")
-    return [_rescreened(s) for s in read_steps(steps_path(source, DEFAULT_PROCESSED_DIR))]
+    return _rescreened(step)
+
+
+@functools.cache
+def _rescreened_store(source: str, n_workers: int) -> list[ElementaryStep]:
+    """Every stored step of `source` re-screened, in `n_workers` spawned processes; built once
+    per session for the tests that read it."""
+    from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
+    from ksmech.processes import in_processes
+
+    steps = read_steps(steps_path(source, DEFAULT_PROCESSED_DIR))
+    return list(in_processes(_rescreened_quietly, steps, n_workers, chunksize=64))
 
 
 @pytest.mark.realdata
 @pytest.mark.parametrize("source", sorted(P4_COUNTS))
-def test_the_domain_laws_give_the_p4_counts(source):
+def test_the_domain_laws_give_the_p4_counts(source, realdata_workers):
     from collections import Counter
 
     from ksmech.data.ingest import repair_rule_counts
 
-    steps = _rescreened_store(source)
+    steps = _rescreened_store(source, realdata_workers)
     codes, rules, classes = P4_COUNTS[source]
     assert dict(Counter(s.domain_exclusion for s in steps)) == codes
     assert dict(repair_rule_counts(steps)) == rules
@@ -754,8 +764,8 @@ def test_the_domain_laws_give_the_p4_counts(source):
 
 
 @pytest.mark.realdata
-def test_p1_leaves_the_tin_placeholders_and_the_other_drawings_as_they_were():
-    steps = {s.step_id: s for s in _rescreened_store("pmechdb")}
+def test_p1_leaves_the_tin_placeholders_and_the_other_drawings_as_they_were(realdata_workers):
+    steps = {s.step_id: s for s in _rescreened_store("pmechdb", realdata_workers)}
     sn = [
         s for s in steps.values()
         if s.domain_exclusion == DomainCode.METAL_PLACEHOLDER

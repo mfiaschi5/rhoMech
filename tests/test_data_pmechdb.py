@@ -143,6 +143,21 @@ def test_duplicate_record_rejected(tmp_path):
     assert [r.reason for r in result.rejections] == [RejectReason.DUPLICATE_STEP]
 
 
+def test_parsing_in_processes_gives_the_same_result(tmp_path):
+    """`n_workers` > 1: the same steps, rejections (a parse failure, a repeat, a malformed row)
+    and counts, in the same order, as one process."""
+    lines = MINI_PMECHDB.read_text().splitlines()
+    path = tmp_path / "mix.txt"
+    path.write_text("\n".join([*lines, lines[0], f'"{SN2} 10=20",unexpected', "", *lines[:2]]))
+    one, two = pmechdb.load(path), pmechdb.load(path, n_workers=2)
+    assert two.steps == one.steps
+    assert two.rejections == one.rejections
+    assert (two.n_records, two.notes) == (one.n_records, one.notes)
+    reasons = {r.reason for r in one.rejections}
+    assert {RejectReason.DUPLICATE_STEP, RejectReason.MALFORMED_RECORD} <= reasons
+    assert len(reasons) >= 3  # the mini fixture's own parse failure too
+
+
 def test_multi_field_csv_row_rejected(tmp_path):
     path = tmp_path / "bad.txt"
     path.write_text(f'"{SN2} 10=20",unexpected\n')
@@ -160,7 +175,7 @@ def test_missing_raw_dir(tmp_path):
 
 @pytest.mark.realdata
 @pytest.mark.skipif(not REAL_RAW.is_dir(), reason="PMechRP raw files not in data/raw/pmechrp")
-def test_real_pmechdb_rejection_rate_below_2_percent():
-    result = pmechdb.load(REAL_RAW)
+def test_real_pmechdb_rejection_rate_below_2_percent(realdata_workers):
+    result = pmechdb.load(REAL_RAW, n_workers=realdata_workers)
     assert result.n_records == 13104
     assert result.rejected_fraction < 0.02
