@@ -9770,3 +9770,9 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   second_batch_shape[cuda]` (round 2) crashed its xdist worker when the shell had no
   `HSA_OVERRIDE_GFX_VERSION`: the Inductor kernels built for gfx1032 segfault. `tests/conftest.py`
   now calls `train.loop.rocm_override()` before any test touches the GPU, as `ksmech-train` does.
+- **The SSH connection.** git opens the connection to the remote before the pre-push hook runs,
+  and GitHub closes an idle one before the 9 minutes are up ("Connection to github.com closed by
+  remote host": the first push through the hook passed its tests and sent nothing). Measured: an
+  idle `git-receive-pack` connection held 10 minutes is closed without a keepalive and survives
+  with `-o ServerAliveInterval=30`. The repository's `core.sshCommand` carries it (local git
+  config, so every clone that pushes over SSH sets it once).

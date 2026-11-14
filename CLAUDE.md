@@ -189,6 +189,7 @@ uv run pytest -m realdata     # real-data tests one at a time, each pass in 14 s
 uv run ruff check .           # lint
 uv run ruff format .          # format
 uv run pre-commit install     # enable both hooks: commit = ruff + the unit tests, push = the real-data tests (-x)
+git config core.sshCommand "ssh -o ServerAliveInterval=30"  # else GitHub drops the push during its 9-minute hook
 ```
 
 Main CLI entry points are added phase by phase and listed here as they land:
