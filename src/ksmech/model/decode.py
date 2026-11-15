@@ -313,18 +313,20 @@ def top_anchors(lp: np.ndarray, k: int, allowed: np.ndarray | None = None) -> li
 
 
 def encode_pool(model, sample):
-    """(batch, h, p, log P(anchor) as an (A, A, 2) float64 array) of one sample on the CPU."""
+    """(batch, h, p, log P(anchor) as an (A, A, 2) float64 array) of one sample, computed on the
+    model's device (the NumPy result is always on the host)."""
     import torch
 
     from ksmech.arrows.batches import collate_samples
     from ksmech.model.inputs import to_device
     from ksmech.model.loss import anchor_log_probs
 
-    batch = to_device(collate_samples([sample]), torch.device("cpu"))
+    device = next(model.parameters()).device
+    batch = to_device(collate_samples([sample]), device)
     with torch.no_grad():
         h, p, y, _ = model.encode(batch)
         lp = anchor_log_probs(model.decoder.anchor_logits(h, p, y, batch))
-    return batch, h, p, lp[0].double().numpy()
+    return batch, h, p, lp[0].double().cpu().numpy()
 
 
 def entry_table(model, batch, h, p, anchor: tuple[float, int, int, int]) -> EntryTable:
@@ -333,11 +335,11 @@ def entry_table(model, batch, h, p, anchor: tuple[float, int, int, int]) -> Entr
     import torch
 
     logp, a, b, sign = anchor
-    rows = torch.tensor([[0, a, b, sign]], dtype=torch.long)
+    rows = torch.tensor([[0, a, b, sign]], dtype=torch.long, device=h.device)
     with torch.no_grad():
         pair, atom = model.decoder.entry_logits(h, p, batch, rows)
-        pair_lp = torch.log_softmax(pair[0].double(), -1).numpy()
-        atom_lp = torch.log_softmax(atom[0].double(), -1).numpy()
+        pair_lp = torch.log_softmax(pair[0].double(), -1).cpu().numpy()
+        atom_lp = torch.log_softmax(atom[0].double(), -1).cpu().numpy()
     closed = not bool((batch["nonbonding"][0] % 2).any())
     values = tuple(int(v) for v in model.decoder.atom_values)
     return EntryTable((a, b, sign), float(logp), pair_lp, atom_lp, values, closed)

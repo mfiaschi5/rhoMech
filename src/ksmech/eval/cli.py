@@ -188,6 +188,8 @@ def decode_args(d) -> None:
     d.add_argument("--part", default="val", choices=["train", "val", "test"])
     d.add_argument("--limit", type=int, help="the first N samples of the part")
     d.add_argument("--beam", type=int, default=5, help="anchors completed and products kept each")
+    d.add_argument("--device", default="cpu", choices=["cpu", "auto", "cuda"],
+                   help="the model's device: auto uses a GPU when one works")  # fmt: skip
     d.add_argument("--scope", default="all", choices=["all", "inter"], help="inter: anchors "
                    "between two molecules only")  # fmt: skip
     d.add_argument("--caps", default="legacy", choices=CAPS, help="legacy: 8 bond, 2 atom "
@@ -344,12 +346,12 @@ def cmd_decode(args, console: Console) -> int:
     from ksmech.eval.decode import decode_report, sample_decoder
     from ksmech.eval.siblings import outcome_summary
     from ksmech.model.decode import DecodeConfig
-    from ksmech.train.loop import load_model
+    from ksmech.train.loop import load_model, select_device
 
     caps, caps_input = _decode_caps(args)
     run_source = args.run_source or args.source
     ckpt = args.models_dir / run_source / args.run / f"{args.checkpoint}.pt"
-    model, payload = load_model(ckpt, "cpu")
+    model, payload = load_model(ckpt, select_device(args.device))
     path = samples_path(
         args.source, f"{args.split}_{args.part}", args.processed_dir, args.direction
     )
