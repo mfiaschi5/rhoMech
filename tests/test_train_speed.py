@@ -459,6 +459,30 @@ def test_pair_linear_gradcheck():
         assert torch.allclose(weight_grad(g2, x2, s), g2.t() @ x2)
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_compiled_weight_grad_is_right_for_every_remainder(device):
+    """Compiled with dynamic shapes (as `--compile` runs it), weight_grad on fp16 rows equals
+    g^T x for every row count: on ROCm a K = 1 GEMM (R % 32 == 1 in the remainder, R // 32 == 1
+    in the batched part) gave non-finite values and collapsed the fp16 loss scale."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("no GPU")
+    dt = torch.float16 if device == "cuda" else torch.float32
+    wg = torch.compile(weight_grad, dynamic=True)
+    gen = torch.Generator(device=device).manual_seed(0)
+    try:
+        for r in (1, 2, 31, 33, 40, 63, 64, 65, 97, 2049, 4096 + 1, 4096 + 17):
+            g = torch.randn(r, 8, device=device, generator=gen).to(dt)
+            x = torch.randn(r, 16, device=device, generator=gen).to(dt)
+            ref = g.double().t() @ x.double()
+            got = wg(g, x).double()
+            assert torch.isfinite(got).all(), r
+            assert torch.allclose(got, ref, rtol=2e-3, atol=2e-3 * ref.abs().max().item()), r
+    except torch._dynamo.exc.BackendCompilerFailed as e:  # no C++ compiler on this host
+        pytest.skip(f"inductor unavailable: {str(e)[:80]}")
+    finally:
+        torch._dynamo.reset()
+
+
 @pytest.mark.parametrize("split", [False, True])
 def test_pair_linear_splitk_same_forward_close_gradients(samples, split):
     b = collate_samples(samples)

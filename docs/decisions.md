@@ -9787,3 +9787,26 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   replacement by a fixed seed (`TRAIN_SUBSET_SEED` = 0, not the run's `seed`, so every seed of an
   arm trains on the same samples), kept in view order, and only they are read from the shards.
   Validation and test are untouched. run.json records it under `train`.
+
+## 2026-11-15: `--pair-linear-splitk` under `--compile`: no K = 1 GEMM, and a versioned op name
+
+- **Symptom**: on the RX 6600 XT (ROCm 7.2, fp16) every full-ReactMech run with
+  `--compile --pair-linear-splitk` stopped with NONFINITE (fp16 loss scale 0.5) by step 80-100;
+  every run without split-K, and split-K in eager, trained.
+- **Cause**: compiled with dynamic shapes, `weight_grad`'s remainder product
+  `g2[main:].t() @ x2[main:]` returned non-finite values whenever R % 32 == 1, a GEMM with
+  K = 1 (the batched part likewise when R // 32 == 1). Found by recomputing each overflowing
+  batch eagerly with the same weights and loss scale (finite) and then one encoder layer at the
+  run's shapes: B 9 x N 347 (R = 1,083,681) and B 1 x N 751 (R = 564,001), both R % 32 == 1,
+  failed; every other shape passed. Not an fp16 overflow: the eager partials stayed below the
+  totals (largest ratio 2.6 over 228 steps).
+- **Fix**: each split takes an even number of rows (`per = R // 64 * 2`, so 0 or >= 2) and the
+  remainder (< 64 rows) is a broadcast product summed in float32, not a matmul. Checked on the
+  GPU against float64 for R = 1..199, 550,016..550,079 and the two failing sizes, eager and
+  compiled; the weight gradient still takes 1.25 ms against the stock GEMM's 3.2 ms
+  (R = 550,017). `tests/test_train_speed.py::test_compiled_weight_grad_is_right_for_every_remainder`
+  fails on the old code on the GPU.
+- **Cache hazard**: the fix took effect only with inductor's caches off: the on-disk FX graph and
+  AOT autograd caches key the traced graph, and they kept serving the compiled backward of the
+  old `weight_grad`. The op is renamed `ksmech::pair_linear_v2`; the name is in every graph, so
+  the key changes. Any later change to `weight_grad` or the op's backward must bump it.

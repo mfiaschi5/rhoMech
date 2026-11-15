@@ -21,15 +21,20 @@ def _accumulate_dtype(dt: torch.dtype) -> torch.dtype:
 def weight_grad(g2: torch.Tensor, x2: torch.Tensor, splits: int = SPLIT_K) -> torch.Tensor:
     """g2^T x2 (O, I) for g2 (R, O), x2 (R, I): the row sum in `splits` batched products plus
     the remainder rows, in float32 (float64 stays float64). No branch on R, so dynamic shapes
-    add no guard."""
+    add no guard. No product has K = 1: compiled with dynamic shapes on ROCm, a K = 1 GEMM
+    returned non-finite values (the remainder whenever R % splits == 1, the batched part when
+    R // splits == 1), which collapsed the fp16 loss scale (docs/decisions.md, 2026-11-15).
+    So each split takes an even number of rows (0 or >= 2) and the remainder (< 2 x `splits`
+    rows) is a broadcast product summed in the accumulation dtype, not a matmul."""
     r, o, i = g2.shape[0], g2.shape[1], x2.shape[1]
-    per = r // splits
+    per = r // (2 * splits) * 2
     main = per * splits
     part = torch.bmm(
         g2[:main].reshape(splits, per, o).transpose(1, 2), x2[:main].reshape(splits, per, i)
     )
     acc = _accumulate_dtype(g2.dtype)
-    return part.to(acc).sum(0) + (g2[main:].t() @ x2[main:]).to(acc)
+    rest = (g2[main:].to(acc)[:, :, None] * x2[main:].to(acc)[:, None, :]).sum(0)
+    return part.to(acc).sum(0) + rest
 
 
 def _compute_dtype(x: torch.Tensor) -> torch.dtype | None:
@@ -42,7 +47,11 @@ def _cast(x, w, b, dt):
     return x.to(dt), w.to(dt), (None if b is None else b.to(dt))
 
 
-@torch.library.custom_op("ksmech::pair_linear", mutates_args=())
+# the version in the name is part of every compiled graph's cache key: inductor's on-disk caches
+# key the graph, not the source of the backward registered below, so after a change to
+# `weight_grad` or `_pair_linear_backward` they would keep serving the old compiled backward
+# (2026-11-15: the K = 1 fix took effect only with the caches off). Bump it with such a change.
+@torch.library.custom_op("ksmech::pair_linear_v2", mutates_args=())
 def _pair_linear_op(
     x: torch.Tensor, w: torch.Tensor, b: torch.Tensor | None, dt: torch.dtype | None
 ) -> torch.Tensor:
