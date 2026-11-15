@@ -82,8 +82,12 @@ class CellBudgetSampler(torch.utils.data.Sampler):
         seed: int = 0,
         pool: int = 1024,
         drawings=None,
+        weights=None,
     ):
         self.sizes = np.asarray(sizes, dtype=np.int64)
+        self.weights = None if weights is None else np.asarray(weights, dtype=np.float64)
+        if self.weights is not None and len(self.weights) != len(self.sizes):
+            raise ValueError(f"{len(self.weights)} weights for {len(self.sizes)} samples")
         self.drawings = None if drawings is None else np.asarray(drawings, dtype=np.int64)
         totals = self.sizes.sum(1) if self.sizes.ndim == 2 else self.sizes
         too_big = int((totals + 1).max(initial=0) ** 2)
@@ -100,7 +104,11 @@ class CellBudgetSampler(torch.utils.data.Sampler):
             order = size_order(self.sizes, np.arange(len(self.sizes)))
             return pack(order, self.sizes, self.cell_budget, self.max_batch)
         rng = np.random.default_rng((self.seed, self.epoch))
-        order = rng.permutation(len(self.sizes))
+        n = len(self.sizes)
+        if self.weights is None:
+            order = rng.permutation(n)
+        else:  # an epoch of n draws with replacement: a frequent kind of sample counts less
+            order = rng.choice(n, size=n, replace=True, p=self.weights)
         out = []
         for start in range(0, len(order), self.pool):
             chunk = size_order(self.sizes, order[start : start + self.pool])
@@ -115,3 +123,17 @@ class CellBudgetSampler(torch.utils.data.Sampler):
 
     def __len__(self) -> int:
         return len(self.batches())
+
+
+def balance_weights(keys: list, power: float) -> np.ndarray | None:
+    """The sampling probability of each sample, proportional to (the number of samples with
+    its key) ** -power: 0 is uniform (None: the sampler's plain permutation), 1 gives every key
+    the same total mass, 0.5 lies between. A sample without a key (None) is a kind of its own."""
+    if power <= 0:
+        return None
+    keys = [("", i) if k is None else k for i, k in enumerate(keys)]
+    counts: dict = {}
+    for k in keys:
+        counts[k] = counts.get(k, 0) + 1
+    w = np.array([counts[k] ** -float(power) for k in keys], dtype=np.float64)
+    return w / w.sum()

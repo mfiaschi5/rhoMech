@@ -32,9 +32,10 @@ def mlp(n_in: int, hidden: int, n_out: int) -> nn.Sequential:
 
 class TokenEmbedding(nn.Module):
     """h^(0) of atom tokens (E_Z + E_charge + MLP_A) and orbital tokens (MLP_O + set encoder over
-    the spectral entries + the centre-weighted atom embeddings), the fragment embedding, and the
-    learned MECH token prepended at position 0. The ablations of the orbital token
-    (`ModelConfig.drop_token_features`, `spectral_set`, `inherit_atoms`) remove a term: with no
+    the spectral entries + the centre-weighted atom embeddings), the fragment embedding (absent
+    with `ModelConfig.fragment_embedding=False`), and the learned MECH token prepended at
+    position 0. `ModelConfig.element_dropout` masks E_Z (`elements`). The ablations of the
+    orbital token (`drop_token_features`, `spectral_set`, `inherit_atoms`) remove a term: with no
     orbital column MLP_O is a learned vector (the MLP of an empty input), without the set encoder
     or the inherited embeddings their term is absent (`orbital_terms`)."""
 
@@ -49,7 +50,12 @@ class TokenEmbedding(nn.Module):
             self.orbital_base = nn.Parameter(torch.randn(d) / math.sqrt(d))
         self.spectral = mlp(2, d, d) if getattr(cfg, "spectral_set", True) else None
         self.inherit = bool(getattr(cfg, "inherit_atoms", True))
-        self.fragment = nn.Embedding(cfg.fragments, d)
+        self.fragment = None
+        if getattr(cfg, "fragment_embedding", True):
+            self.fragment = nn.Embedding(cfg.fragments, d)
+        self.element_dropout = float(getattr(cfg, "element_dropout", 0.0))
+        if not 0.0 <= self.element_dropout <= 1.0:
+            raise ValueError(f"element_dropout {self.element_dropout}: a probability")
         if getattr(cfg, "atom_spin_input", "none") == "categorical_u":  # P7, P9's ablation arm
             self.spin = nn.Embedding(SPIN_MAX + 1, d)
         self.mech = nn.Parameter(torch.randn(1, 1, d) / math.sqrt(d))
@@ -59,15 +65,28 @@ class TokenEmbedding(nn.Module):
         cat = batch["atom_categorical"]
         n_atoms = cat.shape[1]
         charge = cat[..., 1].clamp(-CHARGE_MAX, CHARGE_MAX) + CHARGE_MAX
-        h_atom = self.z(cat[..., 0].clamp(0, MAX_Z)) + self.charge(charge)
+        h_atom = self.z(self.elements(cat[..., 0])) + self.charge(charge)
         if hasattr(self, "spin"):
             h_atom = h_atom + self.spin(cat[..., 2].clamp(0, SPIN_MAX))
         h_atom = (h_atom + self.atom(inp["atom_x"])) * batch["is_atom"][:, :n_atoms, None]
         h_orb = sum(self.orbital_terms(batch, inp, h_atom).values())
         h = torch.cat([h_atom, h_orb], 1)
-        h = h + self.fragment(batch["fragment"].clamp(min=0) % self.n_fragments)
+        if self.fragment is not None:
+            h = h + self.fragment(batch["fragment"].clamp(min=0) % self.n_fragments)
         h = h * batch["token_mask"][..., None]
         return torch.cat([self.mech.expand(h.shape[0], -1, -1).to(h.dtype), h], 1)
+
+    def elements(self, z: torch.Tensor) -> torch.Tensor:
+        """The rows of E_Z the atoms read: their atomic numbers, or row 0 (no element has it:
+        the unknown element) for the atoms `element_dropout` masks: each with that probability
+        in training, none in evaluation, and every atom when it is 1."""
+        z = z.clamp(0, MAX_Z)
+        p = self.element_dropout
+        if p >= 1.0:
+            return torch.zeros_like(z)
+        if p > 0.0 and self.training:
+            return torch.where(torch.rand(z.shape, device=z.device) < p, 0, z)
+        return z
 
     def orbital_terms(self, batch: dict, inp: dict, h_atom: torch.Tensor) -> dict:
         """The additive terms of the orbital tokens' h^(0), each (B, O, d): `orbital_inputs`

@@ -86,3 +86,41 @@ calibrated probabilities; the stop with about zero false sinks on recorded react
 product alone, top-k recovery of the recorded reactants and the share verified forward. Each
 item's outcome goes to `docs/decisions.md` as it lands; the plan's section 6 (stop head,
 target-conditioned policy, value function, START head) needs training and comes after.
+
+## A model that holds out of distribution (2026-11-15)
+
+**Why.** A model trained on ReactMech ranks PMechDB's anchors barely above the untrained floor,
+and the measurements of `docs/decisions.md`, 2026-11-15 (the `ksmech-eval ood` reference
+matrix) say why: the ranking reads the Lewis-structure channels and the element, not the
+orbital-pair physics (permuting G moves the top anchor of about one sample in ten), it depends on
+the order the reactants are written in, and nothing in the architecture confines a candidate's
+score to the molecules that react. The user's go-ahead of 2026-11-15 ("procedi con il piano")
+covers the plan below as proposed; the pair locality of phase 2 was put to the user as the one
+choice hard to undo and is confirmed again before its build.
+
+**What.**
+
+- Phase 1, the cheap arms on the model as it is (switches of 2026-11-15, each with `--probe` for
+  the out-of-distribution curve of every epoch): the control; `--no-fragment-embedding`; that and
+  `--element-dropout 0.5`; that and `--element-dropout 1`; then the joint PMechDB + ReactMech
+  run with `--balance-power 0.5`. They say how much data and regularization recover alone.
+  Open: on which held-out set `best.pt` is chosen (a set that is neither the training
+  distribution nor the test: a ReactMech class left out, `loco`), and all recorded products of a
+  pool as positives of the anchor loss.
+- Phase 2, the local selector: every molecule encoded alone (order invariance by construction,
+  encodings cached per species); the anchor logit a sum over the (occupied, virtual) orbital
+  pairs of the two atoms, initialized at the |G^atom| floor, so no atom-only path exists; an
+  intermolecular candidate scored from its two molecules only, the pool entering through the
+  softmax; the site selector's inputs physical and size-consistent (no fragment index, E_Z and
+  the formal charge dropped or masked, the charge term q_i q_j of Klopman-Salem as a feature);
+  the completion of R on the Lewis structure as now. Ablations: a low-capacity context channel,
+  E_Z, the canonical frontier inputs.
+- Phase 3, after phase 2: QM pretraining (QMugs), and, if the completion still limits the decode,
+  R generated as an alternating path, valid by construction.
+
+**Done when.** Phase 1: the arms' `ood_report` files and their comparison are in
+`docs/decisions.md`, with the choice of what phase 2 starts from. Phase 2: its
+out-of-distribution top-1 is above the best phase-1 arm on the same sets (or the thesis that the
+localized orbitals transfer is recorded as not holding). Risks, to measure and not to assume:
+PMechDB in distribution may fall (part of its 66% is the source's conventions), and a
+molecule-pair-local score has no third-body effect.

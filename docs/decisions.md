@@ -9810,3 +9810,109 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   AOT autograd caches key the traced graph, and they kept serving the compiled backward of the
   old `weight_grad`. The op is renamed `ksmech::pair_linear_v2`; the name is in every graph, so
   the key changes. Any later change to `weight_grad` or the op's backward must bump it.
+
+## 2026-11-15: the anchor ranking out of distribution: what was measured, `ksmech-eval ood`, the phase-1 switches
+
+- **Symptom.** rm_sub30k_s0 (ReactMech scaffold, 30k training samples, preset general) decodes
+  ReactMech scaffold val at 96.8 / 98.1 / 98.2 (full R, top-1/3/5, n 911) and PMechDB scaffold
+  val at 20.7 / 34.0 / 37.9 (n 1,239; beam 5, caps legacy). An earlier analysis placed the
+  failure in the anchor ranking (the label anchor outside the beam for two misses in three) and
+  proposed, without measuring it, that the logit's additive site terms were the cause.
+- **That hypothesis does not hold.** With the logit's terms apart (`eval.embedding.anchor_terms`)
+  the site terms alone rank the anchor first in 6.1% of PMechDB scaffold val and leaving them
+  out changes nothing (24.4% against 24.1%); the pair term `u_sign(p_ij)` alone gives the whole
+  ranking (24.1%). The physics term MLP_Y(y_ij) (the pooled G^atom, the Wiberg index) is inert
+  as well: 3.8% alone, 24.0% without it. The same in every cell of the matrix below (top-1 with
+  the site terms left out / with the physics term left out: 98.4 / 96.3 against 98.2 on
+  ReactMech; 62.0 / 63.7 against 65.6 and 67.8 / 67.2 against 67.8 for the two PMechDB
+  checkpoints on PMechDB).
+- **Reference matrix** (`ksmech-eval ood`, anchor top-1 / top-5 on whole validation parts, one
+  pass per probe, seed 0; the greedy R in brackets):
+
+  | trained on | scored on | n | top-1 | top-5 | fragment order | distances | Lewis | gap G |
+  |---|---|---|---|---|---|---|---|---|
+  | ReactMech 30k (rm_sub30k_s0) | ReactMech scaffold val | 911 | 98.2 (95.5) | 99.8 | -20.4 | -27.6 | -70.8 | 0.0 |
+  | ReactMech 30k (rm_sub30k_s0) | PMechDB scaffold val | 1,239 | 24.1 (18.2) | 50.0 | -0.4 | -6.2 | -16.7 | -0.1 |
+  | PMechDB 10k (pm_v19_s0) | PMechDB molecule val | 1,241 | 65.6 (58.8) | 91.1 | -4.1 | -19.3 | -25.0 | -1.0 |
+  | PMechDB 10k (pm_v19_s0) | ReactMech molecule val | 911 | 54.2 (47.7) | 79.8 | -4.9 | -21.5 | -37.2 | 0.0 |
+  | PMechDB 10k (orb_a_s1) | PMechDB molecule val | 1,241 | 67.8 (63.1) | 89.4 | -4.2 | -18.9 | -30.4 | -0.2 |
+  | PMechDB 10k (orb_a_s1) | ReactMech molecule val | 911 | 55.1 (47.4) | 82.1 | -1.6 | -17.1 | -42.7 | 0.0 |
+
+  The last four columns are the change of top-1, in points, under the probe of that name.
+- **What the ranking reads** (the `reads` section, permutation of one input between like
+  positions): the Lewis channels of the atom pairs carry the ranking (17 to 71 points of top-1,
+  the top anchor another one in 60-89% of the samples), the distances within a molecule come
+  second (6 to 28 points). The orbital-pair features carry almost none of it: permuting the gap
+  group (g, log|g|, and where read g2 and the own-pair columns) costs at most 1.0 point in any
+  cell and moves the top anchor of 9-23% of the samples; the pair geometry (cross-centre
+  coupling, centroid distance, alignment) at most 0.7 points and 5-10%; the pair connectivity at
+  most 2.7 points and 6-12%. The model has connectivity and intramolecular geometry, and uses
+  them; it has the Klopman-Salem quantities, and does not.
+- **A symmetry the model breaks.** `TokenEmbedding.fragment` embeds the fragment index, the
+  order the source writes its reactants in. Relabelling the fragments of ReactMech val (the same
+  pools) takes the ReactMech checkpoint from 98.2% to 77.8% top-1 (top-5 99.8 to 92.3) and
+  changes its top anchor in 31.5% of the samples; the PMechDB checkpoints lose 4 points in
+  distribution and 2-5 on ReactMech. On PMechDB the ReactMech checkpoint's top anchor changes in
+  48% of the samples while its top-1 stays (24.1 to 23.7): the order decides between wrong
+  answers there.
+- **Not only unseen reactions.** By edit signature (`eval.ood.signature`: the elements and the
+  entries of R of the label class, no atoms; the smallest text over the class's variants)
+  against the run's own 30k training samples (237 signatures): 61% of PMechDB scaffold val has
+  a signature seen at least 20 times in training and is ranked first in 29.1% (top-5 55.6%);
+  8% seen 1-19 times, 24.3%; 31% never seen, 14.2%. The model picks the wrong site of reactions
+  it knows. The PMechDB checkpoints on ReactMech: 57-59% on the 65% seen often, 59-61% on the
+  19% seen rarely, 34-35% on the 16% never seen.
+- **Reading.** The transfer is asymmetric: 10k curated PMechDB steps carry to ReactMech far
+  better than 30k steps of 67 templates carry to PMechDB, and PMechDB's own ceiling is about 66%
+  top-1, so the comparison is 24 against 66, not against 98. Nothing in the architecture makes
+  the orbital-pair physics the path of the decision: the label is on atom pairs, the atom-level
+  inputs (E_Z, the formal charge, the Lewis channels, the atom Fukui block of the 2026-11-10
+  importance) explain the training set, and the gradient never has to pass through the orbital
+  tokens (the orbital-token ablation of 2026-11-10 found the same from the other side). Every
+  logit also depends on the whole pool (full attention, the MECH query), so a template can be
+  recognized from its context. The completion of R is a second, smaller loss: the label anchor
+  is among the first five for about half of PMechDB val, the decode's top-5 is 38%.
+- **`ksmech-eval ood`** (`eval.ood`, `eval.ood_cli`) keeps these measurements as a command, so
+  every later arm is read on the same sections: `baseline`; `terms` (each logit term alone and
+  left out); `symmetry` (`fragment_order`: a cyclic shift of every pool's fragment labels by a
+  random non-zero offset); `reads` (`distances`: positions and centroids permuted within a
+  molecule; `lewis`: bond order, graph distance and Wiberg index of the atom pairs under a
+  relabelling of the atoms within each molecule, a real graph on the wrong atoms; `pair:gap`,
+  `pair:geometry`, `pair:connectivity`: the orbital-pair features of PAIR_GROUPS with their
+  defined flags, permuted among the intramolecular cells and among the intermolecular cells of a
+  batch; `geometry` and `connectivity`: both levels at once); `coverage` (signature seen >= 20
+  times, 1-19 times, never in the run's training part, its `--train-subset` reproduced). A
+  probe changes only what the encoder reads: the decoder's masks and the labels are the stored
+  sample's, so the label stays reachable and the anchor NLL stays finite. Permuting rather than
+  zeroing keeps every value inside its training distribution, as `eval.importance` does for the
+  token inputs; the pair-level inputs were the part it left untouched. The signature counts are
+  cached beside the training view and rebuilt when the view changed or the cache came from a
+  dirty tree.
+- **Switches for phase 1** (defaults unchanged: a checkpoint written before them loads and
+  scores as before, `tests/test_model_robustness.py`):
+  - `ModelConfig.fragment_embedding` (default True). False: no fragment-index embedding; the
+    encoders still know which tokens share a molecule from the same-fragment channel. The three
+    encoders are then exactly invariant to `fragment_order`.
+  - `ModelConfig.element_dropout` p (default 0). In training each atom reads row 0 of E_Z (no
+    element has it) with probability p; evaluation reads the element. At p = 1 the element is
+    never read, in training or evaluation: the arm without E_Z.
+  - `TrainConfig.balance_power` a (default 0). An epoch is n draws with replacement, a sample
+    with probability proportional to (samples of its edit signature)^-a: 1 gives every
+    signature the same mass, 0.5 lies between. With replacement because the alternative, an
+    epoch that repeats rare samples a fixed number of times, changes the epoch's length with a.
+  - `TrainConfig.probe` (`reactmech=molecule,...`). Validation parts of sources outside the run,
+    scored every epoch as `probe_<source>_*` and never used for `best.pt`: the
+    out-of-distribution curve of a run, which says whether the epoch chosen in distribution is
+    also the best one away from it. A source of the run is refused.
+- **Not decided here.** On which held-out set `best.pt` should be chosen (it must be neither the
+  training distribution nor the final test: a ReactMech class left out is the candidate), all
+  recorded products of a pool as positives of the anchor loss, and the phase-2 architecture
+  (`docs/todo.md`, "A model that holds out of distribution").
+- **Limits of these numbers.** The six `ood_report` files were written from the uncommitted
+  tree that added the command (their headers say `code_dirty`), and their `terms` section was
+  computed apart, by `eval.ood.term_ranks` in a scratch script; after the commit the same
+  commands rewrite them in a few minutes each. The coverage of rm_sub30k_s0 reads the full
+  ReactMech store of the rm-v19 worktree with `--allow-stale` (provenance resolves paths under
+  the repository root), and its ReactMech val is the pilot store's 911 samples of the main
+  checkout, as its decode. One pass per probe: the permutation noise was not measured, the
+  effects read here are either above 5 points or below 1.

@@ -10,6 +10,7 @@
         --domain-class RADICAL_SPECTATOR RADICAL_REACTIVE
     ksmech-eval compare --a <GENERAL hit files> --b <LEGACY hit files> --out FILE
     ksmech-eval roundtrip --run orb_a_s0 --backward-run bwd_s0 --cohort closed_base
+    ksmech-eval ood --run rm_sub30k_s0 --run-source reactmech --source pmechdb --split scaffold
 
 `floor` ranks each step's anchor by |G^atom| (no learned parameter) on the validation and test
 parts and writes `anchor_floor_report_<split>.json`, the reference every trained model is
@@ -32,6 +33,12 @@ the file names carry `_backward`.
 
 `roundtrip` reranks the forward beam of `decode` by the backward model's log P of -R at each
 child (`eval.roundtrip`, `eval.roundtrip_cli`): one `decode_hits` file per lambda for `compare`.
+
+`ood` scores a checkpoint's anchor ranking on any source's part (`eval.ood`, `eval.ood_cli`):
+the baseline, the fragment-order symmetry probe, the permutation importance of the pair-level
+inputs (distances, Lewis channels, the orbital-pair feature groups) and the metrics by how
+often the edit signature occurs in the run's training part; `ood_report_<split>_<part>...json`
+next to the checkpoint.
 
 `importance` permutes each token input column, and each block of related columns, across the
 tokens of a part and scores the part again with the training metrics (`eval.importance`): how
@@ -129,6 +136,9 @@ def build_parser() -> argparse.ArgumentParser:
     from ksmech.eval.roundtrip_cli import add_parser as roundtrip_parser
 
     roundtrip_parser(sub)
+    from ksmech.eval.ood_cli import add_parser as ood_parser
+
+    ood_parser(sub)
     c = sub.add_parser("compare", help="two arms of decode runs, paired: tolerance and McNemar")
     c.add_argument("--a", nargs="+", type=Path, required=True, help="arm A's hit files (GENERAL)")
     c.add_argument("--b", nargs="+", type=Path, required=True, help="arm B's hit files (LEGACY)")
@@ -669,7 +679,7 @@ def _print_trace(console: Console, tr: dict, sample: MechanismSample) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from ksmech.eval import roundtrip_cli
+    from ksmech.eval import ood_cli, roundtrip_cli
 
     args = build_parser().parse_args(argv)
     commands = {
@@ -681,6 +691,7 @@ def main(argv: list[str] | None = None) -> int:
         "cohort": cmd_cohort,
         "compare": cmd_compare,
         "roundtrip": roundtrip_cli.cmd_roundtrip,
+        "ood": ood_cli.cmd_ood,
     }
     return commands[args.command](args, Console())
 

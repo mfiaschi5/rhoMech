@@ -63,13 +63,14 @@ from ksmech.data import provenance as prov
 from ksmech.data.human_benchmark import refuse_training
 from ksmech.data.io import DEFAULT_PROCESSED_DIR, read_steps, steps_path
 from ksmech.eval.cohorts import load_cohort, restrict
+from ksmech.eval.ood import signature
 from ksmech.model.config import ModelConfig
 from ksmech.model.inputs import FeatureStats, fit_feature_stats, to_device, token_columns
 from ksmech.model.loss import anchor_ranks, edit_matches, greedy_edit, step_loss
 from ksmech.model.net import KSMech
 from ksmech.physics.pairs import PairStats
 from ksmech.physics.stage_a import OPEN_SHELL_BLOCK
-from ksmech.train.batching import CellBudgetSampler, DrawnSamples
+from ksmech.train.batching import CellBudgetSampler, DrawnSamples, balance_weights
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +112,11 @@ class TrainConfig:
     #   copies to the device are asynchronous (numbers unchanged; no gain measured on ROCm)
     eval_cell_budget: int = 0  # cells per validation/test batch; 0: cell_budget (no backward and
     #   no recompute there, so more fit; another batching changes rounding only)
+    balance_power: float = 0.0  # > 0: an epoch draws the training samples with replacement, each
+    #   with probability ~ (samples sharing its edit signature) ** -power (`eval.ood.signature`),
+    #   so a source of few templates does not outweigh a varied one; 0: every sample once
+    probe: str = ""  # validation parts of other sources scored every epoch and never used for
+    #   best.pt, e.g. reactmech=molecule,rmechdb=rc_molecule: the out-of-distribution curve
 
 
 # PMechDB and rmechdb: isolated steps, no stop labels; the minimum over a joint run's sources is
@@ -354,15 +360,67 @@ def load_part(cfg: TrainConfig, part: str, processed_dir: Path) -> tuple[dict[st
     }
 
 
+def load_probes(cfg: TrainConfig, processed_dir: Path) -> tuple[dict[str, list], dict]:
+    """(source -> the samples of its validation part, `probe_<source>` -> the counts) of
+    `cfg.probe`: parts of sources outside the run, scored every epoch and never selected on.
+    A source of the run is refused: its validation part is already scored."""
+    named = _source_map(cfg.probe)
+    inside = sorted(set(named) & set(sources(cfg)))
+    if inside:
+        raise ValueError(f"--probe names sources of the run: {inside}")
+    samples, infos = {}, {}
+    for source, split in named.items():
+        one = replace(cfg, source=source, split=split, val_cohort="", train_subset=0)
+        samples[source], infos[f"probe_{source}"] = load_source_part(
+            one, source, "val", processed_dir
+        )
+    return samples, infos
+
+
+def eval_loaders(cfg: TrainConfig, val: dict, test: dict, probes: dict) -> dict[str, dict]:
+    """The evaluation loaders of a run, `val`, `test` and `probe`, each source -> its loader,
+    batched by `cfg.eval_cell_budget`."""
+    eval_cfg = replace(cfg, cell_budget=cfg.eval_cell_budget or cfg.cell_budget)
+    parts = {"val": val, "test": test, "probe": probes}
+    return {
+        name: {s: make_loader(x, eval_cfg, False) for s, x in part.items()}
+        for name, part in parts.items()
+    }
+
+
+def eval_metrics(model: KSMech, loaders: dict, device, dtype, warm: bool, lam: float) -> dict:
+    """An epoch's `val_*` metrics, `test_*` with --eval-test and `probe_<source>_*` with
+    --probe; the last two are reported only: best.pt is chosen on val."""
+    res = evaluate_sources(model, loaders["val"], device, dtype, warm, lam)
+    out = {f"val_{k}": v for k, v in res.items()}
+    if loaders["test"]:
+        res = evaluate_sources(model, loaders["test"], device, dtype, warm, lam)
+        out |= {f"test_{k}": v for k, v in res.items()}
+    return out | probe_metrics(model, loaders["probe"], device, dtype, warm)
+
+
+def probe_metrics(model: KSMech, loaders: dict, device, dtype, warm: bool) -> dict:
+    """`probe_<source>_<metric>` of `evaluate` on each probe loader (no stop term)."""
+    out = {}
+    for source, loader in loaders.items():
+        res = evaluate(model, loader, device, dtype, warm)
+        out |= {f"probe_{source}_{k}": v for k, v in res.items()}
+    return out
+
+
 def make_loader(
-    samples: list, cfg: TrainConfig, shuffle: bool, draw: bool = False
+    samples: list, cfg: TrainConfig, shuffle: bool, draw: bool = False, balance: bool = False
 ) -> torch.utils.data.DataLoader:
     """Batches by the cell budget; with `draw` (and `shuffle`) each sample in a random one of
-    its resonance drawings every epoch."""
+    its resonance drawings every epoch; with `balance` (the training loader) the epoch is drawn
+    by `cfg.balance_power` over the samples' edit signatures (`batching.balance_weights`)."""
     draws = [s.n_drawings for s in samples] if draw else None
     sizes = [(s.n_atoms, s.n_orbitals) for s in samples]  # the collate pads each apart
+    weights = None
+    if balance and shuffle and cfg.balance_power > 0:
+        weights = balance_weights([signature(s) for s in samples], cfg.balance_power)
     sampler = CellBudgetSampler(
-        sizes, cfg.cell_budget, cfg.max_batch, shuffle, cfg.seed, drawings=draws
+        sizes, cfg.cell_budget, cfg.max_batch, shuffle, cfg.seed, drawings=draws, weights=weights
     )
     return torch.utils.data.DataLoader(
         DrawnSamples(samples),
@@ -828,6 +886,7 @@ def fit(
     by_source, train_info = load_part(cfg, "train", processed_dir)
     val, val_info = load_part(cfg, "val", processed_dir)
     held = load_part(cfg, "test", processed_dir) if cfg.eval_test else ({}, None)
+    probes, probe_info = load_probes(cfg, processed_dir)
     train = [s for part in by_source.values() for s in part]
     extra = OPEN_SHELL_BLOCK if model_cfg.open_shell else ()
     stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells, extra)
@@ -836,12 +895,11 @@ def fit(
     if cfg.compile:
         compile_encoder(model)
     parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})
+    parts |= probe_info
     header = _run_header(cfg, model_cfg, parts, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)
-    train_loader = make_loader(train, cfg, True, cfg.resonance_draws)
-    eval_cfg = replace(cfg, cell_budget=cfg.eval_cell_budget or cfg.cell_budget)
-    val_loaders = {s: make_loader(part, eval_cfg, False) for s, part in val.items()}
-    test_loaders = {s: make_loader(part, eval_cfg, False) for s, part in held[0].items()}
+    train_loader = make_loader(train, cfg, True, cfg.resonance_draws, balance=True)
+    loaders = eval_loaders(cfg, val, held[0], probes)
     total = cfg.epochs * len(train_loader.batch_sampler)
     opt = _optimizer(model, cfg)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, cfg.warmup, total))
@@ -865,11 +923,7 @@ def fit(
         train_loader.batch_sampler.set_epoch(epoch)
         metrics = train_epoch(model, train_loader, opt, sched, scaler, device, dtype, cfg, state)
         warm = state["step"] < cfg.warmup
-        res = evaluate_sources(model, val_loaders, device, dtype, warm, stop_weight(cfg))
-        metrics |= {f"val_{k}": v for k, v in res.items()}
-        if test_loaders:  # reported only: best.pt is chosen on val
-            res = evaluate_sources(model, test_loaders, device, dtype, warm, stop_weight(cfg))
-            metrics |= {f"test_{k}": v for k, v in res.items()}
+        metrics |= eval_metrics(model, loaders, device, dtype, warm, stop_weight(cfg))
         metrics |= {"epoch": epoch, "step": state["step"], "skipped": skipped}
         _end_epoch(run_dir, model, header, opt, sched, scaler, state, metrics)
     return state["best"]

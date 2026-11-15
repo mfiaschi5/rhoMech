@@ -367,8 +367,15 @@ Main CLI entry points are added phase by phase and listed here as they land:
   [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy|open_shell]
   [--drop-domain-class C...] [--val-cohort pmechdb=closed_base] [--compile] [--half-pair-norm]
   [--split-pair-init] [--load-workers N] [--no-compact-samples] [--pair-update-every K]
-  [--train-subset N]` (the spec-v9 model on one split; `--train-subset` reads only N random training
-  samples per source, a fixed seed, for a part larger than RAM;
+  [--train-subset N] [--no-fragment-embedding] [--element-dropout P] [--balance-power A]
+  [--probe reactmech=molecule]` (the spec-v9 model on one split; `--train-subset` reads only N random training
+  samples per source, a fixed seed, for a part larger than RAM; the out-of-distribution switches
+  (decisions.md, 2026-11-15): `--no-fragment-embedding` removes the fragment-index embedding, so
+  the order of the reactants changes nothing; `--element-dropout P` reads the unknown-element row
+  of E_Z for each atom with probability P in training (1: never the element); `--balance-power A`
+  draws an epoch with replacement, a sample with probability ~ (samples of its edit signature)^-A;
+  `--probe S=split,...` scores other sources' validation parts each epoch (`probe_<S>_*`, never
+  for `best.pt`);
   `--preset` sets the flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
   orbital extras, legacy = the v17 inputs, open_shell = general with the atom head over
   {-2,-1,0,+1,+2}, the pair features of `OPEN_SHELL_BLOCK` (statistics fitted on the run's training
@@ -466,6 +473,15 @@ Main CLI entry points are added phase by phase and listed here as they land:
   part's tokens of its kind and the part scored again; the rise of the anchor NLL and the fall of
   top-1/3 and greedy R against the baseline; pair features untouched, `spin_role` left out;
   `token_importance_<split>_<part>[...].json` beside the checkpoint, `eval.importance`);
+  `uv run ksmech-eval ood --run NAME [--run-source S] --source T [--split molecule] [--part val]
+  [--repeats 1] [--limit N] [--cohort C] [--no-coverage] [--train-processed-dir DIR
+  --allow-stale]` (a checkpoint's anchor ranking away from its training distribution,
+  `eval.ood`: the baseline; the symmetry probe `fragment_order` (the reactants written in
+  another order: any change is a defect of the model); the permutation importance of the
+  pair-level inputs (distances, the Lewis channels of the atom pairs, the orbital-pair groups
+  gap / geometry / connectivity), the encoder alone reading the probed batch; the metrics by how
+  often the sample's edit signature occurs in the run's training part (>= 20, 1-19, never);
+  `ood_report_<split>_<part>[_<source>][...].json` beside the checkpoint);
   `uv run ksmech-eval embedding --run NAME
   [--step-id ID | --index K [--part val] | --smiles 'CC(=O)C.[OH-]'] [--drawing k]
   [--checkpoint best|last]` (one sample through a trained model as a self-contained HTML page

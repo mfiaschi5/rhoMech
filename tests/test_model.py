@@ -848,13 +848,16 @@ def test_a_run_names_its_sources_and_the_smallest_stop_weight():
     assert stop_weight(cfg) == 0.0  # PMechDB's: neither source has stop labels
 
 
-def _two_source_stores(samples, root, names=("train", "val")) -> None:
-    """The fixture samples as two sources' stores under `root`, split `x`, each sample in
-    every view of `names` (the training and the validation view by default)."""
+def _two_source_stores(
+    samples, root, names=("train", "val"), sources=("pmechdb", "reactmech")
+) -> None:
+    """The fixture samples as two sources' stores (or those of `sources`) under `root`, split
+    `x`, each sample in every view of `names` (the training and the validation view by
+    default)."""
     from ksmech.arrows import store
     from ksmech.arrows.steps import SAMPLE_VERSION, write_split_file
 
-    for source in ("pmechdb", "reactmech"):
+    for source in sources:
         d = root / source
         d.mkdir()
         parquet = d / "steps.parquet"

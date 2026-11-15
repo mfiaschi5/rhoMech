@@ -33,7 +33,7 @@ from ksmech.arrows.lewis import reactant_lewis
 from ksmech.arrows.reactants import ReactantTokens, TokenCache
 from ksmech.arrows.steps import MechanismSample, reactant_sample, with_lewis
 from ksmech.model.encoder import TokenEmbedding
-from ksmech.model.inputs import CHARGE_MAX, MAX_Z, pair_channels, to_device
+from ksmech.model.inputs import CHARGE_MAX, pair_channels, to_device
 from ksmech.model.loss import anchor_log_probs, anchor_ranks, greedy_edit
 from ksmech.model.net import KSMech
 from ksmech.model.sparse import select_keys
@@ -62,7 +62,7 @@ def embedding_parts(embed: TokenEmbedding, batch: dict, inp: dict) -> dict[str, 
     on_atom = batch["is_atom"][:, :n_atoms, None]
     charge = cat[..., 1].clamp(-CHARGE_MAX, CHARGE_MAX) + CHARGE_MAX
     atom = {
-        "element": embed.z(cat[..., 0].clamp(0, MAX_Z)) * on_atom,
+        "element": embed.z(embed.elements(cat[..., 0])) * on_atom,
         "charge": embed.charge(charge) * on_atom,
         "atom_inputs": embed.atom(inp["atom_x"]) * on_atom,
     }
@@ -71,7 +71,9 @@ def embedding_parts(embed: TokenEmbedding, batch: dict, inp: dict) -> dict[str, 
     no_atom, no_orbital = torch.zeros_like(h_atom), torch.zeros_like(orbital["spectral"])
     tokens = {k: torch.cat([v, no_orbital], 1) for k, v in atom.items()}
     tokens |= {k: torch.cat([no_atom, v], 1) for k, v in orbital.items()}
-    tokens["fragment"] = embed.fragment(batch["fragment"].clamp(min=0) % embed.n_fragments)
+    tokens["fragment"] = torch.zeros_like(tokens["charge"])  # a model without the embedding
+    if embed.fragment is not None:
+        tokens["fragment"] = embed.fragment(batch["fragment"].clamp(min=0) % embed.n_fragments)
     mask = batch["token_mask"][..., None]
     first = torch.zeros_like(tokens["fragment"][:, :1])
     mech = embed.mech.expand(first.shape[0], -1, -1).to(first.dtype)

@@ -37,6 +37,12 @@ class ModelConfig:
     #   or orbital column names; 'orbital' every orbital column, the occupation included)
     spectral_set: bool = True  # False (ablation): no set encoder over an orbital's spectral entries
     inherit_atoms: bool = True  # False (ablation): an orbital token inherits no atom embedding
+    fragment_embedding: bool = True  # False: no embedding of the fragment index, so the order the
+    #   reactants are written in changes nothing (docs/decisions.md, 2026-11-15); True is the
+    #   model as trained until then, whose anchors depend on that order
+    element_dropout: float = 0.0  # probability, per atom and training step, that E_Z is the
+    #   unknown-element row instead of the element's; at 1 the element is never read, in training
+    #   or evaluation (the same decisions entry)
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     half_pair_norm: bool = False  # dense: the pair track's LayerNorm in the autocast dtype (fp32
     #   accumulation) instead of autocast's float32 output; docs/model_impl.md, item 3
