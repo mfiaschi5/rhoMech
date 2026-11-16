@@ -9908,14 +9908,13 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   training distribution nor the final test: a ReactMech class left out is the candidate), all
   recorded products of a pool as positives of the anchor loss, and the phase-2 architecture
   (`docs/todo.md`, "A model that holds out of distribution").
-- **Limits of these numbers.** The six `ood_report` files were written from the uncommitted
-  tree that added the command (their headers say `code_dirty`), and their `terms` section was
-  computed apart, by `eval.ood.term_ranks` in a scratch script; after the commit the same
-  commands rewrite them in a few minutes each. The coverage of rm_sub30k_s0 reads the full
-  ReactMech store of the rm-v19 worktree with `--allow-stale` (provenance resolves paths under
-  the repository root), and its ReactMech val is the pilot store's 911 samples of the main
-  checkout, as its decode. One pass per probe: the permutation noise was not measured, the
-  effects read here are either above 5 points or below 1.
+- **Limits of these numbers.** The six `ood_report` files were rewritten on 2026-11-15 from the
+  committed tree (94b657a, `code_dirty` false), `terms` section included: every number above is
+  the same. The coverage of rm_sub30k_s0 reads the full ReactMech store of the rm-v19 worktree
+  with `--allow-stale` (provenance resolves paths under the repository root), and its ReactMech
+  val is the pilot store's 911 samples of the main checkout, as its decode. One pass per probe:
+  the permutation noise was not measured, the effects read here are either above 5 points or
+  below 1.
 
 ## 2026-11-16: the fp16 loss-scale guard at 2^-4, not 1
 
@@ -9942,3 +9941,58 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   2^10; it changes every run, so it is a comparison of its own (docs/todo.md). In phase 1 the
   dropout arms run at half the control's scale: a difference between the arms that is not the
   switch.
+
+## 2026-11-16: phase 1 out of distribution, the control and the arm without the fragment embedding
+
+- **The arms** (`scripts/ood_phase1.sh`, docs/todo.md): PMechDB molecule, preset general, dense,
+  30 epochs, no resonance draws, seed 0, the speed options `--compile --half-pair-norm
+  --split-pair-init --last-update-atoms`, RX 6600 XT, fp16, from the committed tree (94b657a);
+  ReactMech molecule val (911 samples, never trained on) scored every epoch (`--probe`).
+  a = control (`ood1_a_s0`), b = `--no-fragment-embedding` (`ood1_b_s0`). The arms c and d
+  (b with `--element-dropout` 0.5 and 1) stopped at step 20 on the loss-scale guard (entry
+  above) and were started again on 2026-11-16 from d58a5b5; their rows are added when they end.
+- **Numbers** (`ksmech-eval ood` at `best.pt`, and the mean of the last ten epochs with the
+  standard deviation over those epochs; one seed):
+
+  | | a control | b no fragment embedding |
+  |---|---|---|
+  | best epoch (PMechDB val top-1) | 24 | 15 |
+  | PMechDB val (closed_base, 1,238) top-1 / top-5 at best | 66.4 / 88.6 | 66.3 / 89.2 |
+  | ReactMech val top-1 / top-5 at best | 55.9 / 77.9 | 56.6 / 79.7 |
+  | ReactMech anchor NLL at best | 3.57 | 2.56 |
+  | PMechDB val top-1, epochs 20-29 | 65.7 (0.4) | 65.4 (0.3) |
+  | PMechDB val top-5, epochs 20-29 | 88.3 (0.5) | 91.1 (0.3) |
+  | ReactMech val top-1, epochs 20-29 | 55.0 (1.4) | 57.7 (1.1) |
+  | ReactMech val top-5, epochs 20-29 | 77.7 (0.5) | 78.7 (0.4) |
+  | fragment order: top-1 change, PMechDB / ReactMech | -6.4 / -5.5 | 0.0 / 0.0 |
+  | fragment order: top anchor changed | 27% / 41% | 0% / 0% |
+  | Lewis channels permuted: top-1 change | -23.5 / -40.8 | -31.2 / -42.2 |
+  | distances permuted | -22.7 / -21.8 | -19.1 / -18.7 |
+  | gap group permuted | -1.1 / -1.1 | -1.5 / -1.6 |
+  | ReactMech val, signature never in training (16%) | 38.5 | 44.8 |
+
+- **The control is the model we had.** It reproduces pm_v19_s0 (65.6 in distribution, 54.2 on
+  ReactMech) within what two seeds of that configuration differ by (orb_a_s1: 67.8, 55.1).
+- **The fragment embedding goes.** Without it the order of the reactants changes no logit, on
+  either set (the probe moves no top anchor), PMechDB in distribution is the same (65.4 against
+  65.7 over the last ten epochs) and ReactMech is not lower (57.7 against 55.0; one seed, and
+  ReactMech top-1 moves by up to 10 points between two epochs of the same run, so the 2.7 points
+  are not read as a gain). It costs nothing and removes a defect: phase 2 and every later arm
+  start from `fragment_embedding=False`. The default of `ModelConfig` stays True so the stored
+  checkpoints load as trained.
+- **It does not change what the ranking reads.** The Lewis channels and the intramolecular
+  distances carry it in both arms, the orbital-pair gap group at most 1.6 points. The order
+  defect was a separate fault, not the reason for the transfer gap.
+- **What the curve says** (both arms). ReactMech top-1 reaches its plateau (55 to 58%) by
+  epoch 7-8 and top-5 its maximum near there (81.7% at epoch 7 in a, 80.8% at epoch 9 in b);
+  from there to
+  epoch 29 PMechDB val rises from about 60 to 66% while ReactMech top-5 falls to 77-79% and the
+  ReactMech anchor NLL doubles (minimum 2.05 at epoch 8 in a, 1.85 at epoch 5 in b; 4.1 and 3.7
+  at epoch 29). Two thirds of the training after the plateau buys in-distribution points only
+  and confidence in wrong anchors away from it. `best.pt`, chosen on PMechDB val, is therefore
+  not the best checkpoint out of distribution: the open question of the held-out selection set
+  (2026-11-15, "Not decided here") is a real one: at `best.pt` ReactMech top-5 is 3.8 (a) and
+  1.1 (b) points below its maximum and the NLL 1.7 and 1.4 times its minimum.
+- **Limits.** One seed per arm. The epoch-to-epoch spread of ReactMech top-1 (sd 1.1-1.4 over
+  the last ten epochs, single jumps of 5-10 points earlier) is the scale below which two arms
+  are not told apart.
