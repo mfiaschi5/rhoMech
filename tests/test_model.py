@@ -712,9 +712,11 @@ def test_non_finite_weights_or_a_collapsed_loss_scale_stop_the_run(samples):
     model = make(samples, "sparse", topk=8)
     cfg = TrainConfig(workers=0, log_every=1, grad_clip=1e9)
     loader = [collate_samples(samples)]
-    low = torch.amp.GradScaler("cpu", init_scale=0.25, growth_interval=10**6)
-    with pytest.raises(NonFiniteError, match="loss scale 0.25"):
+    low = torch.amp.GradScaler("cpu", init_scale=2.0**-5, growth_interval=10**6)
+    with pytest.raises(NonFiniteError, match="loss scale 0.03125"):
         _one_epoch(model, loader, cfg, low)
+    settled = torch.amp.GradScaler("cpu", init_scale=0.5, growth_interval=10**6)
+    _one_epoch(model, loader, cfg, settled)  # where a healthy run's scale sits after its start
     with torch.no_grad():
         next(model.parameters()).fill_(math.nan)
     with pytest.raises(NonFiniteError, match="non-finite parameters"):

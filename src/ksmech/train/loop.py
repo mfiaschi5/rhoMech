@@ -124,8 +124,9 @@ class TrainConfig:
 STOP_WEIGHT, SOURCE_STOP_WEIGHT = 0.5, {"pmechdb": 0.0, "rmechdb": 0.0}
 # a non-finite run stops (docs/decisions.md, 2026-10-28): at a loss scale of 0 the unscaled
 # gradients are NaN and the scaler's inf check misses them (0 * inf); so many skipped batches
-# in a row is no glitch
-MIN_LOSS_SCALE, MAX_NONFINITE_IN_A_ROW = 1.0, 50
+# in a row is no glitch. 2^-4, not 1 (2026-11-16): the untrained loss, a sum over every entry,
+# is thousands of nats, and a healthy run's scale settles at 1 or 0.5 within its first 15 steps
+MIN_LOSS_SCALE, MAX_NONFINITE_IN_A_ROW = 2.0**-4, 50
 
 
 class NonFiniteError(RuntimeError):

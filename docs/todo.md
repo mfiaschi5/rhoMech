@@ -107,6 +107,10 @@ choice hard to undo and is confirmed again before its build.
   Open: on which held-out set `best.pt` is chosen (a set that is neither the training
   distribution nor the test: a ReactMech class left out, `loco`), and all recorded products of a
   pool as positives of the anchor loss.
+  Found on the way (decisions.md, 2026-11-16): every fp16 run starts with a loss of thousands of
+  nats, a sum over every entry of an untrained head, and its loss scale falls from 2^10 to about
+  1 in fifteen steps and stays near there. An arm of its own: the entry heads initialized
+  towards "no change", so the first loss is tens of nats and the scale holds.
 - Phase 2, the local selector: every molecule encoded alone (order invariance by construction,
   encodings cached per species); the anchor logit a sum over the (occupied, virtual) orbital
   pairs of the two atoms, initialized at the |G^atom| floor, so no atom-only path exists; an

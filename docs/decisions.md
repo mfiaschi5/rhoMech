@@ -9916,3 +9916,29 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   the repository root), and its ReactMech val is the pilot store's 911 samples of the main
   checkout, as its decode. One pass per probe: the permutation noise was not measured, the
   effects read here are either above 5 points or below 1.
+
+## 2026-11-16: the fp16 loss-scale guard at 2^-4, not 1
+
+- **Symptom.** The phase-1 arms with `--element-dropout` (0.5 and 1) stopped at their first
+  check, step 20: NONFINITE, fp16 loss scale 0.5. The control and the arm without the fragment
+  embedding, started the same way, trained.
+- **Measured** (the first 60 steps of each arm with the guard off, the same batches, RX 6600 XT):
+  no arm diverges. The untrained loss is a sum over every entry of R, thousands of nats (first
+  batch: 3,457 without the fragment embedding, 7,723 with the element masked for half the
+  atoms, 12,925 with every atom masked; why masking raises it was not looked into: atoms reading
+  the same random row of E_Z may push every entry's logits the same way), and the scaled backward overflows until the scaler has halved
+  from 2^10 often enough: 10 times without the dropout (scale 1), 11 times with it (scale 0.5),
+  all within the first 15 steps. From there every arm's loss falls the same way (15 to 25 nats
+  at step 50) and the scale stays where it is.
+- **So the guard had no margin.** It stopped a run below a scale of 1, the value every healthy
+  run of the general preset sits at after its start. What it protects from is a scale that
+  keeps halving towards 0 (2026-10-28) or a kernel that returns non-finite values
+  (2026-11-15, split-K). `MIN_LOSS_SCALE` is 2^-4: three more halvings than the worst healthy
+  start measured, and a run that halves on every step still stops within a few steps of it.
+- **Not changed, and a weakness of its own.** Every fp16 run of the general preset trains its
+  first 2,000 steps at a scale near 1 (the scaler doubles it every 2,000 steps without an
+  overflow), where the small gradients of the float16 layers lose precision. Initializing the
+  entry heads towards "no change" would start the loss at tens of nats and leave the scale at
+  2^10; it changes every run, so it is a comparison of its own (docs/todo.md). In phase 1 the
+  dropout arms run at half the control's scale: a difference between the arms that is not the
+  switch.
