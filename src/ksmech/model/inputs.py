@@ -406,6 +406,37 @@ def atom_pair_physics(batch: dict, z_hat: torch.Tensor, defined: torch.Tensor, c
     return torch.cat([mean, *extra], -1), g_atom
 
 
+KERNEL_FLOOR = 1e-6  # 1/eV: the gap factor of an orbital pair is clipped there before its log
+
+
+def floor_kernels(batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """(log k, on), both (B, R, C, 2), last axis ANCHOR_SIDE: the log of the physics floor's
+    kernel on each (occupied, virtual) orbital pair, and where it is defined. Form: |g| on the
+    valid cells, the cells of |G^atom| (`pooled_gap`). Break: |own_g| where it is defined, the
+    cells of |B^own| (`pooled_own`; none in a batch without that column). 0 where undefined."""
+    names = tuple(batch["pair_features"])
+    z, defined = batch["pair_z"], batch["pair_defined"]
+    k = names.index("g")
+    cells = [(z[..., k], cell_mask(batch, "valid") & defined[..., k])]
+    if "own_g" in names:
+        k = names.index("own_g")
+        cells.append((z[..., k], defined[..., k]))
+    else:
+        cells.append((torch.zeros_like(z[..., 0]), torch.zeros_like(defined[..., 0])))
+    on = torch.stack([m for _, m in cells], -1)
+    value = torch.stack([v.float().abs().clamp(min=KERNEL_FLOOR).log() for v, _ in cells], -1)
+    return torch.where(on, value, 0.0), on
+
+
+def charge_product(batch: dict) -> torch.Tensor:
+    """(B, A, A, 1) the product of the two atoms' Mulliken charges, the charge term of
+    Klopman-Salem without its distance (0 where a charge is missing): the atom-pair physics
+    y_ij of the orbital-pair anchor head."""
+    k = tuple(batch["atom_columns"]).index("mulliken_charge")
+    q = torch.where(batch["atom_missing"][..., k], 0.0, batch["atom_features"][..., k].float())
+    return (q[:, :, None] * q[:, None, :])[..., None]
+
+
 def _kind_channels(batch: dict, n: int) -> torch.Tensor:
     """(B, n + 1, n + 1, KINDS) one-hot pair kind on the MECH layout."""
     atom, orb = batch["is_atom"], batch["is_orbital"]

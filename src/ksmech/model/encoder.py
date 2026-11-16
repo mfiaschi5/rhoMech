@@ -6,6 +6,7 @@ learned; no categorical orbital type is embedded."""
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import torch
 from torch import nn
@@ -18,6 +19,7 @@ from ksmech.model.inputs import (
     MAX_Z,
     SPIN_MAX,
     PairInitParts,
+    floor_kernels,
     frozen,
     pair_channel_count,
     pair_channels,
@@ -34,7 +36,8 @@ class TokenEmbedding(nn.Module):
     """h^(0) of atom tokens (E_Z + E_charge + MLP_A) and orbital tokens (MLP_O + set encoder over
     the spectral entries + the centre-weighted atom embeddings), the fragment embedding (absent
     with `ModelConfig.fragment_embedding=False`), and the learned MECH token prepended at
-    position 0. `ModelConfig.element_dropout` masks E_Z (`elements`). The ablations of the
+    position 0. `ModelConfig.element_dropout` masks E_Z (`elements`), and without
+    `charge_embedding` E_charge is absent. The ablations of the
     orbital token (`drop_token_features`, `spectral_set`, `inherit_atoms`) remove a term: with no
     orbital column MLP_O is a learned vector (the MLP of an empty input), without the set encoder
     or the inherited embeddings their term is absent (`orbital_terms`)."""
@@ -43,7 +46,9 @@ class TokenEmbedding(nn.Module):
         super().__init__()
         d = cfg.d
         self.z = nn.Embedding(MAX_Z + 1, d)
-        self.charge = nn.Embedding(2 * CHARGE_MAX + 1, d)
+        self.charge = None
+        if getattr(cfg, "charge_embedding", True):
+            self.charge = nn.Embedding(2 * CHARGE_MAX + 1, d)
         self.atom = mlp(n_atom_x, d, d)
         self.orbital = mlp(n_orbital_x, d, d) if n_orbital_x else None
         if self.orbital is None:
@@ -65,7 +70,9 @@ class TokenEmbedding(nn.Module):
         cat = batch["atom_categorical"]
         n_atoms = cat.shape[1]
         charge = cat[..., 1].clamp(-CHARGE_MAX, CHARGE_MAX) + CHARGE_MAX
-        h_atom = self.z(self.elements(cat[..., 0])) + self.charge(charge)
+        h_atom = self.z(self.elements(cat[..., 0]))
+        if self.charge is not None:
+            h_atom = h_atom + self.charge(charge)
         if hasattr(self, "spin"):
             h_atom = h_atom + self.spin(cat[..., 2].clamp(0, SPIN_MAX))
         h_atom = (h_atom + self.atom(inp["atom_x"])) * batch["is_atom"][:, :n_atoms, None]
@@ -116,7 +123,9 @@ class EncoderLayer(nn.Module):
     (a tensor (B, A, A) of the batch, only its shape is read; the last layer under
     `ModelConfig.last_update_atoms`) the update runs on the atom block p[:, 1:A+1, 1:A+1] alone
     and returns that block: the one the decoder reads, the same values as the full update.
-    A tensor, not an int, so that a compiled layer with dynamic shapes never specializes on A."""
+    A tensor, not an int, so that a compiled layer with dynamic shapes never specializes on A.
+    `key_mask` is (B, N + 1), the keys of every query, or (B, N + 1, N + 1), the keys of each
+    query (`attention_keys`)."""
 
     def __init__(self, cfg: ModelConfig, update: bool = True):
         super().__init__()
@@ -157,7 +166,8 @@ class EncoderLayer(nn.Module):
         logits = (
             logits.float() + pair_linear(self.bias, pn, self.splitk).permute(0, 3, 1, 2).float()
         )
-        logits = logits.masked_fill(~key_mask[:, None, None, :], float("-inf"))
+        keys = key_mask[:, None, None, :] if key_mask.dim() == 2 else key_mask[:, None]
+        logits = logits.masked_fill(~keys, float("-inf"))
         attn = torch.softmax(logits, -1).to(v.dtype)
         h = h + self.out((attn @ v).transpose(1, 2).reshape(b, n, d))
         h = h + self.ffn(self.norm_f(h))
@@ -218,6 +228,64 @@ def key_mask(batch: dict) -> torch.Tensor:
     return torch.cat([mech, batch["token_mask"]], 1)
 
 
+def attention_keys(batch: dict, scope: str = "pool") -> torch.Tensor:
+    """The keys of the attention. `pool`: `key_mask`, (B, N + 1), every query reads every real
+    token. `molecule` (`ModelConfig.attention_scope`): (B, N + 1, N + 1), a token reads the
+    real tokens of its own molecule; MECH reads every real token and no token reads MECH, so
+    nothing of another molecule reaches a token; every position reads itself, so that a padded
+    query has a key."""
+    keys = key_mask(batch)
+    if scope == "pool":
+        return keys
+    same = batch["same_fragment"]
+    b, n = same.shape[:2]
+    out = torch.zeros(b, n + 1, n + 1, dtype=torch.bool, device=same.device)
+    out[:, 1:, 1:] = same
+    out[:, 0, :] = keys
+    every = torch.arange(n + 1, device=same.device)
+    out[:, every, every] = True
+    return out
+
+
+class PairVectors(NamedTuple):
+    """What the decoder of `anchor_head='orbital_pairs'` reads of the pair track: `atoms`
+    (B, A, A, d_p), the symmetrized atom-pair vectors (the entry heads); `cells`
+    (B, R, C, d_p), the vectors of the (occupied, virtual) orbital pairs in the layout of the
+    pair block, the mean of the two orientations; `read` (B, R, C), the cells the model reads
+    (`ModelConfig.pair_cells`, without the cells an ablation takes away); `log_kernel` and
+    `kernel_on` (B, R, C, 2), `inputs.floor_kernels` on the cells read."""
+
+    atoms: torch.Tensor
+    cells: torch.Tensor
+    read: torch.Tensor
+    log_kernel: torch.Tensor
+    kernel_on: torch.Tensor
+
+
+def atom_pairs(p) -> torch.Tensor:
+    """(B, A, A, d_p) the atom-pair vectors of an encoder's pair output."""
+    return p.atoms if isinstance(p, PairVectors) else p
+
+
+def orbital_pair_cells(p: torch.Tensor, batch: dict) -> torch.Tensor:
+    """(B, R, C, d_p) the pair track (B, N + 1, N + 1, d_p) on the (occupied, virtual) cells of
+    the pair block, the mean of the cell and its transpose; a padded row or column reads MECH's
+    cells, which no reader keeps (`PairVectors.read`)."""
+    i = (batch["pair_row_pos"] + 1).clamp(min=0)[:, :, None]
+    j = (batch["pair_col_pos"] + 1).clamp(min=0)[:, None, :]
+    b = torch.arange(p.shape[0], device=p.device)[:, None, None]
+    return (p[b, i, j] + p[b, j, i]) / 2
+
+
+def pair_vectors(pa: torch.Tensor, p: torch.Tensor, batch: dict, defined) -> PairVectors:
+    """`PairVectors` from the symmetrized atom block `pa`, the pair track `p` and the defined
+    flags of the pair features (a cell is read when any of them is)."""
+    read = defined.any(-1)
+    with frozen(p.device.type):
+        log_kernel, on = floor_kernels(batch)
+    return PairVectors(pa, orbital_pair_cells(p, batch), read, log_kernel, on & read[..., None])
+
+
 class Recompute:
     """Run a block directly, or recompute it in the backward pass (activation checkpointing)
     when `on`."""
@@ -232,7 +300,11 @@ class Recompute:
 class DenseEncoder(nn.Module):
     """Spec v9: the pair track (B, N + 1, N + 1, d_p) from MLP_P, a pair bias in every head,
     the pair update in every layer (every `pair_update_every`-th with that ablation). The
-    decoder reads the symmetrized final pair vectors of the atom pairs."""
+    decoder reads the symmetrized final pair vectors of the atom pairs, and with
+    `anchor_head='orbital_pairs'` those of the (occupied, virtual) orbital pairs too
+    (`PairVectors`; `last_update_atoms` then has no effect: the last update is needed on the
+    orbital cells). `attention_scope='molecule'` restricts every layer's keys
+    (`attention_keys`)."""
 
     def __init__(self, cfg: ModelConfig, n_atom_x: int, n_orbital_x: int, n_features: int):
         super().__init__()
@@ -241,6 +313,8 @@ class DenseEncoder(nn.Module):
         channels = pair_channel_count(cfg.rbf, n_features)
         self.pair_init = mlp(channels, cfg.d_pair, cfg.d_pair)
         self.splitk = bool(getattr(cfg, "pair_linear_splitk", False))
+        self.scope = getattr(cfg, "attention_scope", "pool")
+        self.orbital_pairs = getattr(cfg, "anchor_head", "pointer") == "orbital_pairs"
         every = int(getattr(cfg, "pair_update_every", 1))
         if every < 1:
             raise ValueError(f"pair_update_every {every}: at least 1")
@@ -258,7 +332,8 @@ class DenseEncoder(nn.Module):
 
     def forward(self, batch: dict, inp: dict, z_hat, defined, dense_warmup: bool = False):
         """(h, p_atoms, aux): token vectors (B, N + 1, d), MECH at 0; symmetrized atom-pair
-        vectors (B, A, A, d_p); no auxiliary loss."""
+        vectors (B, A, A, d_p), or `PairVectors` for the orbital-pair anchor head; no
+        auxiliary loss."""
         run = Recompute(self.cfg.checkpoint and self.training)
         split = getattr(self.cfg, "split_pair_init", False)
         with frozen(z_hat.device.type):
@@ -269,15 +344,19 @@ class DenseEncoder(nn.Module):
             p = run(self._init_split, channels)
         else:
             p = run(self._init_dense if self.splitk else self.pair_init, channels)
-        keys = key_mask(batch)
+        keys = attention_keys(batch, self.scope)
         atoms_only = bool(getattr(self.cfg, "last_update_atoms", False)) and self.layers[-1].update
+        atoms_only = atoms_only and not self.orbital_pairs
         last = len(self.layers) - 1
         for k, layer in enumerate(self.layers):
             extra = (batch["bond_order"],) if atoms_only and k == last else ()
             h, p = run(layer, h, p, keys, *extra)
         a = batch["bond_order"].shape[1]
         pa = p if atoms_only else p[:, 1 : a + 1, 1 : a + 1]
-        return h, (pa + pa.transpose(1, 2)) / 2, {}
+        pa = (pa + pa.transpose(1, 2)) / 2
+        if self.orbital_pairs:
+            return h, pair_vectors(pa, p, batch, defined), {}
+        return h, pa, {}
 
 
 class AtomPairHead(nn.Module):

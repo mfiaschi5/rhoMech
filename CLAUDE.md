@@ -368,7 +368,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   [--drop-domain-class C...] [--val-cohort pmechdb=closed_base] [--compile] [--half-pair-norm]
   [--split-pair-init] [--load-workers N] [--no-compact-samples] [--pair-update-every K]
   [--train-subset N] [--no-fragment-embedding] [--element-dropout P] [--balance-power A]
-  [--probe reactmech=molecule]` (the spec-v9 model on one split; `--train-subset` reads only N random training
+  [--probe reactmech=molecule] [--preset local | --attention-scope molecule --anchor-head
+  orbital_pairs --no-charge-embedding]` (the spec-v9 model on one split; `--train-subset` reads only N random training
   samples per source, a fixed seed, for a part larger than RAM; the out-of-distribution switches
   (decisions.md, 2026-11-15): `--no-fragment-embedding` removes the fragment-index embedding, so
   the order of the reactants changes nothing; `--element-dropout P` reads the unknown-element row
@@ -376,6 +377,13 @@ Main CLI entry points are added phase by phase and listed here as they land:
   draws an epoch with replacement, a sample with probability ~ (samples of its edit signature)^-A;
   `--probe S=split,...` scores other sources' validation parts each epoch (`probe_<S>_*`, never
   for `best.pt`);
+  the local selector (decisions.md, 2026-11-16; its arms: `scripts/ood_phase2.sh`), preset
+  `local` = general with `--attention-scope molecule` (dense: a token attends its own molecule
+  only, MECH reads the pool and is read by none, so every molecule is encoded alone),
+  `--anchor-head orbital_pairs` (the probability of an atom pair a sum over its (occupied,
+  virtual) orbital pairs with the centre weights of G^atom, started at the physics floor;
+  `--no-anchor-charge-term` leaves its Klopman-Salem charge term out), no fragment embedding,
+  `--element-dropout 1` and `--no-charge-embedding` (no embedding of the formal charge);
   `--preset` sets the flags of `model.config.PRESETS` as option defaults: general = every pair cell and the
   orbital extras, legacy = the v17 inputs, open_shell = general with the atom head over
   {-2,-1,0,+1,+2}, the pair features of `OPEN_SHELL_BLOCK` (statistics fitted on the run's training

@@ -433,13 +433,14 @@ function renderReadout() {
     ? `Label class: ${R.label.length} variant(s). Rank of its best anchor: ${R.label_rank} (0 = top-1). P(any of its anchors) = ${pct(R.label_probability)}.`
     : 'No label: the pool was given as SMILES.';
   el.append(h('p', { text: `${R.n_candidates} candidate anchors. ${lab}` }));
-  const tb = h('table', {}, h('tr', {}, ...['#', 'anchor', 'side', 'P', 'logit', '= site', '+ pair', '+ physics', 'in label'].map((x, i) => h('th', { class: i > 2 && i < 8 ? 'num' : '', text: x }))));
+  const terms = R.term_names || ['site', 'pair', 'physics'];
+  const heads = ['#', 'anchor', 'side', 'P', 'logit', ...terms.map((x, k) => (k ? '+ ' : '= ') + x.replace('_', ' ')), 'in label'];
+  const tb = h('table', {}, h('tr', {}, ...heads.map((x, i) => h('th', { class: i > 2 && i < 8 ? 'num' : '', text: x }))));
   R.top.forEach((r, n) => {
     const on = S.pair && S.pair[0] === r.i && S.pair[1] === r.j && S.pair[2] === r.side;
     const tr = h('tr', { class: 'pick' + (on ? ' on' : '') }, h('td', { class: 'mono', text: n + 1 }), h('td', { class: 'mono', text: `${atomName(r.i)}–${atomName(r.j)}` }),
       h('td', { class: r.side === 'form' ? 'ok' : 'bad', text: r.side }), h('td', { class: 'num mono', text: pct(r.p) }),
-      h('td', { class: 'num mono', text: fmt(r.logit, 2) }), h('td', { class: 'num mono', text: fmt(r.site, 2) }),
-      h('td', { class: 'num mono', text: fmt(r.pair, 2) }), h('td', { class: 'num mono', text: fmt(r.physics, 2) }),
+      h('td', { class: 'num mono', text: fmt(r.logit, 2) }), ...terms.map(k => h('td', { class: 'num mono', text: fmt(r[k], 2) })),
       h('td', { text: r.in_label ? '✓' : '' }));
     tr.onclick = () => { S.pair = [r.i, r.j, r.side]; S.sel = r.i + 1; sync(); };
     tb.append(tr);

@@ -43,6 +43,19 @@ class ModelConfig:
     element_dropout: float = 0.0  # probability, per atom and training step, that E_Z is the
     #   unknown-element row instead of the element's; at 1 the element is never read, in training
     #   or evaluation (the same decisions entry)
+    charge_embedding: bool = True  # False: no embedding of the formal charge (the Mulliken
+    #   charge stays an atom input); the local selector's inputs, docs/decisions.md, 2026-11-16
+    attention_scope: str = "pool"  # pool (spec v9: every token attends every token) | molecule
+    #   (dense: a token attends the tokens of its own molecule only, and MECH reads every token
+    #   and is read by none, so a token vector depends on its molecule and a pair vector on the
+    #   molecules of its two tokens: the encoding of each molecule alone, order invariant)
+    anchor_head: str = "pointer"  # pointer (spec v9: site terms + u(p_ij) + MLP_Y(y_ij)) |
+    #   orbital_pairs (dense: the probability of an atom pair is a sum over its (occupied,
+    #   virtual) orbital pairs, weighted like G^atom, of exp(a score of the pair's final vector),
+    #   starting at the physics floor: no term reads an atom token or an atom-pair vector;
+    #   `decoder.OrbitalPairAnchor`)
+    anchor_charge_term: bool = True  # orbital_pairs: the Klopman-Salem charge term, c q_i q_j
+    #   on the Mulliken charges with one learned coefficient per sign, 0 at the start
     checkpoint: bool = True  # recompute each encoder layer in the backward pass (memory)
     half_pair_norm: bool = False  # dense: the pair track's LayerNorm in the autocast dtype (fp32
     #   accumulation) instead of autocast's float32 output; docs/model_impl.md, item 3
@@ -83,6 +96,18 @@ class ModelConfig:
 PRESETS: dict[str, dict[str, Any]] = {
     "general": {"pair_cells": "all", "orbital_extra": ("retained_fraction", "energy_ev")},
     "legacy": {"pair_cells": "valid", "orbital_extra": ()},
+    # Phase 2 of the out-of-distribution plan (docs/decisions.md, 2026-11-16): GENERAL, each
+    # molecule encoded alone, the anchor from its orbital pairs, and no input that names the
+    # atom or its place in the pool (no fragment index, no E_Z, no formal-charge embedding).
+    "local": {
+        "pair_cells": "all",
+        "orbital_extra": ("retained_fraction", "energy_ev"),
+        "attention_scope": "molecule",
+        "anchor_head": "orbital_pairs",
+        "fragment_embedding": False,
+        "element_dropout": 1.0,
+        "charge_embedding": False,
+    },
     # P9's joint and pm_control arms: GENERAL, the 5-class head, the P7 inputs. Every physically
     # motivated input starts in and leaves only by its ablation (plan P9, step 9), so g and g2 are
     # both read; `--drop-pair-features g log_abs_g` or `g2 log_abs_g2` are the two other arms.
@@ -94,3 +119,18 @@ PRESETS: dict[str, dict[str, Any]] = {
         "spin_role": True,
     },
 }
+
+ATTENTION_SCOPES = ("pool", "molecule")
+ANCHOR_HEADS = ("pointer", "orbital_pairs")
+
+
+def check_local(cfg: ModelConfig) -> None:
+    """ValueError for an `attention_scope` or `anchor_head` that is no option, or that the
+    configuration's encoder does not have: both are of the dense encoder."""
+    scope, head = cfg.attention_scope, cfg.anchor_head
+    if scope not in ATTENTION_SCOPES or head not in ANCHOR_HEADS:
+        raise ValueError(
+            f"attention_scope {scope!r} / anchor_head {head!r}: {ATTENTION_SCOPES} / {ANCHOR_HEADS}"
+        )
+    if cfg.encoder != "dense" and (scope, head) != ("pool", "pointer"):
+        raise ValueError(f"attention_scope {scope!r} and anchor_head {head!r} need encoder dense")

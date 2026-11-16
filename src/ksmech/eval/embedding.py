@@ -32,6 +32,7 @@ from ksmech.arrows.batches import ANCHOR_SIDE, collate_samples
 from ksmech.arrows.lewis import reactant_lewis
 from ksmech.arrows.reactants import ReactantTokens, TokenCache
 from ksmech.arrows.steps import MechanismSample, reactant_sample, with_lewis
+from ksmech.model.decoder import ORBITAL_TERMS
 from ksmech.model.encoder import TokenEmbedding
 from ksmech.model.inputs import CHARGE_MAX, pair_channels, to_device
 from ksmech.model.loss import anchor_log_probs, anchor_ranks, greedy_edit
@@ -61,11 +62,14 @@ def embedding_parts(embed: TokenEmbedding, batch: dict, inp: dict) -> dict[str, 
     n_atoms = cat.shape[1]
     on_atom = batch["is_atom"][:, :n_atoms, None]
     charge = cat[..., 1].clamp(-CHARGE_MAX, CHARGE_MAX) + CHARGE_MAX
+    element = embed.z(embed.elements(cat[..., 0])) * on_atom
     atom = {
-        "element": embed.z(embed.elements(cat[..., 0])) * on_atom,
-        "charge": embed.charge(charge) * on_atom,
+        "element": element,
+        "charge": torch.zeros_like(element),  # a model without the formal-charge embedding
         "atom_inputs": embed.atom(inp["atom_x"]) * on_atom,
     }
+    if embed.charge is not None:
+        atom["charge"] = embed.charge(charge) * on_atom
     h_atom = atom["element"] + atom["charge"] + atom["atom_inputs"]
     orbital = embed.orbital_terms(batch, inp, h_atom)
     no_atom, no_orbital = torch.zeros_like(h_atom), torch.zeros_like(orbital["spectral"])
@@ -129,7 +133,7 @@ def attention_terms(model: KSMech, call: LayerCall, batch: dict, z_hat, defined)
     if kind == "dense":
         p, keys = call.args[1], call.args[2]
         bias = layer.bias(layer.norm_p(p)).permute(0, 3, 1, 2).float()
-        read = keys[:, None, None, :]
+        read = keys[:, None, None, :] if keys.dim() == 2 else keys[:, None]
     elif kind == "flex":
         x = call.args[1]
         bias = layer.bias.dense(x, layer.bias.z(x.ctx.z)).float()
@@ -170,11 +174,21 @@ def layer_trace(model: KSMech, call: LayerCall, batch: dict, z_hat, defined) -> 
     }
 
 
-def anchor_terms(model: KSMech, h, p, y) -> torch.Tensor:
-    """(B, A, A, 2, 3) the terms of `EditDecoder.anchor_logits` (TERMS): site, the two atoms'
-    token vectors against the step query of h_MECH; pair, u_sign of the atom-pair vector;
-    physics, MLP_Y(y_ij). Their sum is the logit on every candidate."""
+def term_names(model: KSMech) -> tuple[str, ...]:
+    """The names of `anchor_terms`' last axis: TERMS for the pointer, `decoder.ORBITAL_TERMS`
+    for the orbital-pair anchor head."""
+    return TERMS if model.decoder.orbital is None else ORBITAL_TERMS
+
+
+def anchor_terms(model: KSMech, h, p, y, batch: dict | None = None) -> torch.Tensor:
+    """(B, A, A, 2, 3) the terms of `EditDecoder.anchor_logits` (`term_names`). The pointer
+    (TERMS): site, the two atoms' token vectors against the step query of h_MECH; pair, u_sign
+    of the atom-pair vector; physics, MLP_Y(y_ij). The orbital-pair head (`batch` needed, for
+    the centre weights): the floor, the pooled orbital-pair scores, the charge term. Their sum
+    is the logit on every candidate."""
     dec = model.decoder
+    if dec.orbital is not None:
+        return dec.orbital.terms(h, p, y, batch)
     n_atoms = y.shape[1]
     u = dec.w_sign(dec.step_query(h[:, 0])).view(h.shape[0], 2, -1)
     site = torch.einsum("bad,bsd->bas", h[:, 1 : n_atoms + 1], u)
@@ -201,7 +215,8 @@ def anchor_readout(model: KSMech, h, p, y, batch: dict, top: int = 10) -> dict:
     with a label class, the label's rank and the probability of its anchors."""
     logits = model.decoder.anchor_logits(h, p, y, batch)
     lp = anchor_log_probs(logits)
-    terms = anchor_terms(model, h, p, y)[0]
+    terms = anchor_terms(model, h, p, y, batch)[0]
+    names = term_names(model)
     prob = lp[0].exp()
     labelled = bool(batch["variant_mask"][0].any())
     label = _label_anchors(batch) if labelled else torch.zeros_like(prob, dtype=torch.bool)
@@ -213,10 +228,11 @@ def anchor_readout(model: KSMech, h, p, y, batch: dict, top: int = 10) -> dict:
         i, j, s = f // (len(SIDE) * n), (f % (len(SIDE) * n)) // len(SIDE), f % len(SIDE)
         row = {"i": i, "j": j, "side": SIDE[s], "p": float(prob[i, j, s])}
         row |= {"logit": float(logits[0, i, j, s]), "in_label": bool(label[i, j, s])}
-        rows.append(row | dict(zip(TERMS, terms[i, j, s].tolist(), strict=True)))
+        rows.append(row | dict(zip(names, terms[i, j, s].tolist(), strict=True)))
     r_pairs, r_atoms = greedy_edit(model.decoder, h, p, lp, batch)
     out = {
         "top": rows,
+        "term_names": list(names),
         "atom_probability": (prob.sum((1, 2)) + prob.sum((0, 2))).tolist(),
         "greedy": r_changes(r_pairs[0].cpu().numpy(), r_atoms[0].cpu().numpy()),
         "n_candidates": int(torch.isfinite(flat).sum()),

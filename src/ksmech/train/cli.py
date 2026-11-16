@@ -10,10 +10,11 @@
 `--direction backward` reads the backward store (`arrows.backward`, `<source>/backward/`) and
 records the direction in run.json; the default, forward, is unchanged.
 
-`--preset general|legacy|open_shell` sets the flags of `model.config.PRESETS` as the defaults of
-their options (GENERAL: every pair cell, the orbital extras; LEGACY: the v17 inputs; open_shell:
-GENERAL, the 5-class atom head, the P7 inputs); an option given explicitly wins. run.json records
-the resulting flags.
+`--preset general|legacy|open_shell|local` sets the flags of `model.config.PRESETS` as the
+defaults of their options (GENERAL: every pair cell, the orbital extras; LEGACY: the v17 inputs;
+open_shell: GENERAL, the 5-class atom head, the P7 inputs; local: GENERAL, every molecule encoded
+alone and the anchor from its orbital pairs, docs/decisions.md 2026-11-16); an option given
+explicitly wins. run.json records the resulting flags.
 
 On the ROCm build an RDNA2 card without kernels of its own (the RX 6600 XT, gfx1032) gets
 HSA_OVERRIDE_GFX_VERSION=10.3.0 unless the variable is already set (`train.loop.rocm_override`).

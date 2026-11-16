@@ -111,6 +111,12 @@ choice hard to undo and is confirmed again before its build.
   nats, a sum over every entry of an untrained head, and its loss scale falls from 2^10 to about
   1 in fifteen steps and stays near there. An arm of its own: the entry heads initialized
   towards "no change", so the first loss is tens of nats and the scale holds.
+- Phase 2, state (2026-11-16): built as the preset `local` (decisions.md, "phase 2, the local
+  selector"): the molecule-scoped attention, the orbital-pair anchor head (a sum over the
+  orbital pairs in probability, not in the logit: the floor is worse than uniform as a linear
+  logit), the inputs. Its arms g, h, i, j are `scripts/ood_phase2.sh`; none has trained yet.
+  Not built: encodings cached per species, the low-capacity context channel, the ablation of
+  the canonical frontier inputs (`--drop-token-features fmo_homo ...` exists).
 - Phase 2, the local selector: every molecule encoded alone (order invariance by construction,
   encodings cached per species); the anchor logit a sum over the (occupied, virtual) orbital
   pairs of the two atoms, initialized at the |G^atom| floor, so no atom-only path exists; an

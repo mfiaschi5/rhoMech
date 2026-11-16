@@ -9950,7 +9950,8 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   ReactMech molecule val (911 samples, never trained on) scored every epoch (`--probe`).
   a = control (`ood1_a_s0`), b = `--no-fragment-embedding` (`ood1_b_s0`). The arms c and d
   (b with `--element-dropout` 0.5 and 1) stopped at step 20 on the loss-scale guard (entry
-  above) and were started again on 2026-11-16 from d58a5b5; their rows are added when they end.
+  above) and were started again on 2026-11-16 from d58a5b5; their rows are at the end of this
+  entry.
 - **Numbers** (`ksmech-eval ood` at `best.pt`, and the mean of the last ten epochs with the
   standard deviation over those epochs; one seed):
 
@@ -9996,3 +9997,121 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
 - **Limits.** One seed per arm. The epoch-to-epoch spread of ReactMech top-1 (sd 1.1-1.4 over
   the last ten epochs, single jumps of 5-10 points earlier) is the scale below which two arms
   are not told apart.
+- **The element arms** (added the same day; c = b with `--element-dropout 0.5`, d = b with
+  `--element-dropout 1`, from d58a5b5, their loss scale half the control's from the start):
+
+  | | b | c dropout 0.5 | d element never read |
+  |---|---|---|---|
+  | best epoch | 15 | 16 | 15 |
+  | PMechDB val top-1 / top-5 at best | 66.3 / 89.2 | 67.9 / 92.2 | 67.0 / 90.5 |
+  | ReactMech val top-1 / top-5 at best | 56.6 / 79.7 | 57.3 / 80.4 | 55.0 / 78.9 |
+  | PMechDB val top-1, epochs 20-29 | 65.4 (0.3) | 65.5 (0.4) | 65.3 (0.7) |
+  | PMechDB val top-5, epochs 20-29 | 91.1 (0.3) | 93.0 (0.3) | 90.3 (0.5) |
+  | ReactMech val top-1, epochs 20-29 | 57.7 (1.1) | 56.0 (1.2) | 53.4 (0.8) |
+  | ReactMech val top-5, epochs 20-29 | 78.7 (0.4) | 80.5 (0.6) | 79.4 (0.6) |
+  | Lewis channels permuted: top-1 change | -31.2 / -42.2 | -24.4 / -33.2 | -26.0 / -33.8 |
+  | distances permuted | -19.1 / -18.7 | -26.6 / -27.0 | -25.1 / -24.8 |
+  | gap group permuted | -1.5 / -1.6 | -0.5 / -1.0 | -0.3 / -0.9 |
+  | ReactMech val, signature never in training (16%) | 44.8 | 44.1 | 46.9 |
+
+  The element is not needed in distribution: a model that never reads E_Z is at 65.3 against
+  65.4. Masking it does not buy the transfer either: ReactMech top-1 is 56.0 with the dropout
+  and 53.4 without the element, against 57.7; top-5 gains about 2 points with the dropout.
+  With the element masked the ranking leans less on the Lewis channels and more on the
+  distances, and still not on the orbital-pair gap group (at most 1.0 point). So neither the
+  order of the reactants nor the element identity is where the transfer is lost. The fp16
+  guard (entry above) was the only reason these two arms had stopped.
+
+## 2026-11-16: phase 2, the local selector (preset `local`)
+
+- **Why.** Phase 1 so far (entry above, and the arms c and d as far as they have trained): no
+  cheap switch moves the transfer. Without the fragment embedding, with the element masked for
+  half the atoms, and with the element never read, ReactMech top-1 stays between 53 and 58%
+  while PMechDB val stays at 65-66% over the last ten epochs. What is left is where the decision is taken: a logit that
+  reads atom tokens and atom-pair vectors (the Lewis channels) with the whole pool in every
+  token. The user confirmed the pair locality on 2026-11-16 ("Sì, inizia la fase 2").
+- **What it is.** Three switches of the dense model, off by default (a stored checkpoint loads
+  and scores as trained), on together in the preset `local`:
+  - `attention_scope='molecule'`. A token attends the tokens of its own molecule only; MECH
+    reads every token and no token reads MECH (`encoder.attention_keys`). A token vector then
+    depends on its molecule alone and a pair vector p_ij on the molecules of i and j alone
+    (its update reads p_ij, h_i, h_j): the function is the encoding of each molecule by
+    itself, written as a mask on the pool's attention, so the batching, the pair track and the
+    speed are those of the dense encoder. Encodings are not cached per species; that needs
+    per-molecule batches and is not built. MECH feeds only the stop head.
+  - `anchor_head='orbital_pairs'` (`decoder.OrbitalPairAnchor`):
+
+        l_sigma(i, j) = log sum_rs (w_i^r w_j^s + w_j^r w_i^s) exp(phi_sigma(r, s)) + c_sigma q_i q_j
+        phi_sigma(r, s) = kappa_sigma(r, s) + f_sigma(p_rs) + d_sigma . h_r + e_sigma . h_s
+
+    over the (occupied r, virtual s) orbital pairs the model reads, with the centre weights of
+    G^atom. Before the candidate mask the probability of an atom pair is a mixture over the
+    pool's orbital pairs: an orbital pair is chosen, its centres say which atoms. kappa is the
+    physics floor of that orbital pair (b + a log|g| on the valid cells for form, b + a
+    log|own_g| on the own-pair cells for break, a learned level u on the other cells), f an MLP
+    of the pair track's final vector of the orbital pair, d and e linear in the final vectors
+    of the occupied and the virtual orbital token (how good a donor, how good an acceptor), all
+    three zero at the start, c the coefficient
+    of the Klopman-Salem charge term on the Mulliken charges, zero at the start
+    (`anchor_charge_term`). No term reads an atom token, an atom-pair vector or h_MECH: the
+    site terms, u(p_ij) and MLP_Y are not built. The entry heads and the stop head are
+    unchanged; given the anchor they read the atoms of the pool as before.
+  - the inputs: `fragment_embedding=False`, `element_dropout=1` (E_Z never read) and
+    `charge_embedding=False` (no embedding of the formal charge; the Mulliken charge stays an
+    atom input). Nothing names the atom or its place in the pool.
+- **Why a sum of probabilities and not of logits** (the plan said "the anchor logit a sum over
+  the orbital pairs, initialized at the |G^atom| floor"). Measured on 1,499 random PMechDB
+  training samples (median 702 candidates): as a linear logit the floor is worse than no model,
+  anchor NLL 7.56 for |G^atom| + |B^own| against 6.18 uniform, and worse at every positive
+  scale (6.72 at 0.5, 9.58 at 2), although it ranks the label first in 11%. The label's form
+  anchor sits at the 87th percentile of the candidates' |G^atom| (median; above the 99th in
+  22%, below the median in 1%), so the rank carries the information and a few large wrong
+  values carry the softmax. In log scale the same floor is 5.75. A log of a sum over orbital
+  pairs is a sum in probability, which is also the Klopman-Salem reading: each orbital pair
+  adds its own stabilization, and exp(f) is the coupling the geometry-free kernel does not
+  have.
+- **The sign of g.** On the valid cells of 400 PMechDB training samples g is negative on
+  1,684,264 cells and positive on 403, every one of them intermolecular (an occupied level
+  above the other molecule's virtual level, the gap clipped); own_g is negative on all 23,034.
+  |G^atom|, the absolute value of the pooled sum, lets a positive cell cancel the others. The
+  head sums |g| pair by pair, so its untrained form is the floor of `eval.floor` except on
+  those cells, which it counts as the strong interactions they are.
+- **Where it starts.** a = (1.75, 3.5), b = (0, -1.4), u = (-4.2, -4.1) for (form, break)
+  (`decoder.KERNEL_SCALE`, `KERNEL_BIAS`, `OFF_LEVEL`), fitted by L-BFGS on the anchor NLL of
+  the head without f and c over 2,000 random PMechDB training samples (those under 700 tokens;
+  NLL 5.61 at a = 1, b = 0, u = -6, 5.41 fitted), and learned from there. That start, no
+  encoder involved: PMechDB molecule val (1,241) anchor NLL 4.78 against 5.99 uniform, top-1
+  18.1% (the floor report's 15.6%); ReactMech molecule val (910 under 700 tokens) 6.81 against
+  7.39, top-1 4.5%.
+- **Limits known at the build.** A break anchor reads only the orbital pairs with a centre on
+  each of its two atoms: its own bond and antibond and the neighbours' tails, nothing of a
+  partner molecule; break anchors are the pure dissociations (6% of PMechDB's labels), every
+  other break is an entry given a form anchor. An atom pair without an orbital pair has no
+  logit to speak of (`decoder.TINY`); every label anchor of the 1,499 samples has one, and the
+  count on ReactMech was not taken. Two centres of one orbital share its score and differ by
+  their centre weights only. A pair-local score has no third-body effect; the ablation with a
+  low-capacity context channel (docs/todo.md) is not built. `last_update_atoms` has no effect
+  with this head (the last pair update is needed on the orbital cells), so a step costs one
+  full pair update more than phase 1's arms. The flex and sparse encoders refuse both
+  switches. `docs/ksmech_architecture.tex` is not amended: the selector is an experiment
+  until its arms are read.
+- **A check that it learns** (CPU, a model of 0.2M parameters: d 64, d_p 16, 3 layers; 480
+  PMechDB training samples, 8 epochs, 184 steps; 480 samples of each validation part; not a
+  result). The pointer at that size, without the fragment embedding, goes from an anchor NLL
+  of 5.19 to 3.77 on PMechDB val (top-1 20.6%, top-5 42.3%; ReactMech 5.49, 3.7%, 14.8%). The
+  local selector starts at its floor (4.78; 6.84 on ReactMech) and reaches 4.42 (18.5%,
+  31.2%; ReactMech 6.33, 5.6%, 11.7%). Without the terms d . h_r and e . h_s it had moved from
+  4.80 to 4.76 only: with f zero at the start the encoder gets no gradient from the anchor
+  until the output layer has grown, and the two linear terms on the orbital tokens are the
+  short path. The head learns more slowly than the pointer over these few steps; whether it
+  ends higher, and where, is what the arms measure.
+- **Arms** (`scripts/ood_phase2.sh`, runs `ood2_<arm>_s<seed>`, against phase 1's arm b): g the
+  preset; h with `--attention-scope pool`; i with `--anchor-head pointer`; j with E_Z and the
+  formal-charge embedding back.
+- **Tests.** `tests/test_model_local.py`: changing every token input of one molecule leaves the
+  token vectors, the atom-pair vectors, the anchor logits and the entry logits of the pairs
+  that do not touch it unchanged (and changes them with the pool's attention); relabelling the
+  fragments and batching change nothing; the untrained head with a = 1, b = 0, u = -inf is
+  the sum of |g| and |B^own| and ranks as `own_break` does on them; the terms `floor`,
+  `orbital_pairs`, `charge` (`eval.embedding.term_names`, read by `ksmech-eval ood` and the
+  embedding page) sum to the logit; a run fits, saves and loads.

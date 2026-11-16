@@ -14,7 +14,8 @@ Five sections, all on the anchor (NLL, top-1/3/5 with set marginalization) and t
   like positions (the atoms or orbitals of one molecule; the intra- or the intermolecular
   cells of a batch), so every value stays inside its training distribution.
 - `terms`: the three terms of the anchor logit (`eval.embedding.anchor_terms`: site, pair,
-  physics), each alone and each left out: which of them ranks the anchor.
+  physics; for the orbital-pair anchor head floor, orbital_pairs, charge), each alone and each
+  left out: which of them ranks the anchor.
 - `coverage`: the samples by how often their edit signature (`signature`: the elements and
   the entries of R, no atom indices) occurs in the run's training part: >= 20 times, 1-19
   times, never. A model that fails on the seen signatures picks the wrong site of a reaction
@@ -196,21 +197,24 @@ def score(model, loader, device, dtype, probe: Probe | None = None, seed: int = 
 
 @torch.no_grad()
 def term_ranks(model, loader, device, dtype) -> dict[str, list[int]]:
-    """Per sample, the 0-based rank of the best admissible anchor when the logit is one term
-    of TERMS alone (`site`, `pair`, `physics`) and when that term is left out (`no_site`, ...)."""
-    from ksmech.eval.embedding import TERMS, anchor_terms
+    """Per sample, the 0-based rank of the best admissible anchor when the logit is one of
+    its terms alone (`eval.embedding.term_names`: `site`, `pair`, `physics` for the pointer;
+    `floor`, `orbital_pairs`, `charge` for the orbital-pair head) and when that term is left
+    out (`no_site`, ...)."""
+    from ksmech.eval.embedding import anchor_terms, term_names
 
     model.eval()
-    out: dict[str, list[int]] = {f"{pre}{t}": [] for t in TERMS for pre in ("", "no_")}
+    names = term_names(model)
+    out: dict[str, list[int]] = {f"{pre}{t}": [] for t in names for pre in ("", "no_")}
     for batch in loader:
         batch = to_device(batch, device)
         with torch.autocast(device.type, dtype=dtype or torch.float32, enabled=dtype is not None):
             h, p, y, _ = model.encode(batch)
-            terms = anchor_terms(model, h, p, y)  # (B, A, A, 2, 3)
+            terms = anchor_terms(model, h, p, y, batch)  # (B, A, A, 2, 3)
         a = terms.shape[1]
         upper = torch.ones(a, a, dtype=torch.bool, device=terms.device).triu(1)
         ok = torch.stack([batch["can_form"], batch["can_break"]], -1) & upper[None, :, :, None]
-        for k, name in enumerate(TERMS):
+        for k, name in enumerate(names):
             alone, rest = terms[..., k], terms.sum(-1) - terms[..., k]
             for key, logits in ((name, alone), (f"no_{name}", rest)):
                 lp = anchor_log_probs(logits.masked_fill(~ok, float("-inf")))
