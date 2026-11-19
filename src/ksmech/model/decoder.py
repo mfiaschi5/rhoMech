@@ -91,13 +91,17 @@ class OrbitalPairAnchor(nn.Module):
         return torch.where(p.kernel_on, on_kernel, self.off_level.float())
 
     def pooled(self, phi: torch.Tensor, p: PairVectors, batch: dict) -> torch.Tensor:
-        """(B, A, A, 2) log sum_rs W_rs(i, j) exp(phi_rs) over the cells read, in float32."""
-        phi = phi.float().masked_fill(~p.read[..., None], NEG)
-        top = phi.detach().flatten(1, 2).amax(1)  # (B, 2)
-        top = torch.where(torch.isfinite(top), top, 0.0)[:, None, None, :]
-        w_occ, w_virt = centre_weights(batch)
-        mass = _pool(w_occ, torch.exp(phi - top), w_virt)
-        return torch.log(mass.clamp(min=TINY)) + top
+        """(B, A, A, 2) log sum_rs W_rs(i, j) exp(phi_rs) over the cells read, in float32:
+        autocast is off here, because it runs the sums of `_pool` in its own dtype whatever
+        their inputs, and a float16 sum drops every atom pair under 6e-8 of the largest term
+        (-inf logits, a NaN loss when the label is one of them; decisions.md, 2026-11-17)."""
+        with torch.autocast(phi.device.type, enabled=False):
+            phi = phi.float().masked_fill(~p.read[..., None], NEG)
+            top = phi.detach().flatten(1, 2).amax(1)  # (B, 2)
+            top = torch.where(torch.isfinite(top), top, 0.0)[:, None, None, :]
+            w_occ, w_virt = centre_weights(batch)
+            mass = _pool(w_occ, torch.exp(phi - top), w_virt)
+            return torch.log(mass.clamp(min=TINY)) + top
 
     def learned(self, h: torch.Tensor, p: PairVectors, batch: dict) -> torch.Tensor:
         """(B, R, C, 2) f(p_rs) + d . h_r + e . h_s, in float32."""

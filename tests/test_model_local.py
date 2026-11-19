@@ -231,6 +231,24 @@ def test_the_terms_sum_to_the_logit_and_no_orbital_pair_means_no_logit(samples):
         assert not anchor_terms(plain, *_logits(plain, batch)[:3], batch)[..., 2].any()
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_the_pooled_sum_stays_in_float32_under_autocast(samples, dtype):  # noqa: F811
+    """Autocast runs an einsum in its own dtype whatever the inputs: in float16 the sum lost
+    every atom pair under 6e-8 of the largest term (arms g and j of phase 2, 2026-11-17)."""
+    batch = collate_samples(samples)
+    model = local(samples)
+    head = model.decoder.orbital
+    with torch.no_grad():
+        h, p, y, _ = model.encode(batch)
+        phi = 6.0 * (head.kernel(p) + head.learned(h, p, batch))  # a trained head's range
+        plain = head.pooled(phi, p, batch)
+        with torch.autocast("cpu", dtype=dtype):
+            cast = head.pooled(phi, p, batch)
+    read = plain > -60  # the atom pairs with an orbital pair
+    assert cast.dtype == torch.float32 and (plain[read].max() - plain[read].min()) > 20
+    torch.testing.assert_close(cast, plain, atol=1e-5, rtol=0)
+
+
 def test_the_head_trains_and_the_loss_reads_it(samples):  # noqa: F811
     batch = collate_samples(samples)
     model = make(samples, **LOCAL).train()
