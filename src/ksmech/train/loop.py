@@ -70,7 +70,14 @@ from ksmech.model.loss import anchor_ranks, edit_matches, greedy_edit, step_loss
 from ksmech.model.net import KSMech
 from ksmech.physics.pairs import PairStats
 from ksmech.physics.stage_a import OPEN_SHELL_BLOCK
-from ksmech.train.batching import CellBudgetSampler, DrawnSamples, balance_weights
+from ksmech.train.batching import (
+    CellBudgetSampler,
+    DrawnSamples,
+    PackedSamples,
+    balance_weights,
+    sample_drawings,
+    sample_sizes,
+)
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +113,13 @@ class TrainConfig:
     val_cohort: str = ""  # validation restricted to a cohort, per source: pmechdb=closed_base
     direction: str = "forward"  # backward: the previous-step samples (`arrows.backward`)
     compile: bool = False  # torch.compile every encoder layer (dynamic shapes; docs/model_impl.md)
+    compile_scope: str = "layers"  # with `compile`: layers (the encoder layers) | step (also the
+    #   pair track's split init and the step loss: rounding only, ~20% faster on an RTX 4080)
     compact_samples: bool = True  # samples kept with their cells as stored, expanded per batch
+    deflate_samples: bool = True  # compact cells held as one zlib stream (~4x less memory,
+    #   lossless: `store.CompactCells`), inflated per batch in the DataLoader workers
+    pack_samples: bool = True  # `fit` holds its samples pickled in contiguous buffers
+    #   (`batching.PackedSamples`): no copy on write in the forked DataLoader workers
     load_workers: int = 1  # forked processes that read and verify the store's shards
     pin_memory: bool = False  # GPU runs: batches collated into page-locked memory, so the
     #   copies to the device are asynchronous (numbers unchanged; no gain measured on ROCm)
@@ -325,7 +338,13 @@ def load_source_part(
     path = samples_path(source, split, processed_dir, cfg.direction)
     require_direction(path, cfg.direction)
     ids = _part_ids(cfg, source, part, path, processed_dir)
-    samples = load_samples(path, ids=ids, compact=cfg.compact_samples, workers=cfg.load_workers)
+    samples = load_samples(
+        path,
+        ids=ids,
+        compact=cfg.compact_samples,
+        workers=cfg.load_workers,
+        deflate=cfg.deflate_samples,
+    )
     if cfg.limit:
         samples = samples[: cfg.limit]
     skipped, total = {}, len(samples)
@@ -415,8 +434,8 @@ def make_loader(
     """Batches by the cell budget; with `draw` (and `shuffle`) each sample in a random one of
     its resonance drawings every epoch; with `balance` (the training loader) the epoch is drawn
     by `cfg.balance_power` over the samples' edit signatures (`batching.balance_weights`)."""
-    draws = [s.n_drawings for s in samples] if draw else None
-    sizes = [(s.n_atoms, s.n_orbitals) for s in samples]  # the collate pads each apart
+    draws = sample_drawings(samples) if draw else None
+    sizes = sample_sizes(samples)  # the collate pads the atoms and the orbitals apart
     weights = None
     if balance and shuffle and cfg.balance_power > 0:
         weights = balance_weights([signature(s) for s in samples], cfg.balance_power)
@@ -434,14 +453,62 @@ def make_loader(
     )
 
 
-def compile_encoder(model: KSMech) -> None:
+def pack_parts(cfg: TrainConfig, train: list, *parts: dict) -> tuple:
+    """(train, *parts) with every list of samples packed (`PackedSamples.take`, which empties
+    it) under `cfg.pack_samples`; as they are otherwise. `parts` map source -> samples."""
+    if not cfg.pack_samples:
+        return (train, *parts)
+    packed = [{s: PackedSamples.take(x) for s, x in part.items()} for part in parts]
+    return (PackedSamples.take(train), *packed)
+
+
+def log_draws(cfg: TrainConfig, train: list) -> None:
+    """The resonance draws of the training part, when they are on."""
+    if cfg.resonance_draws:
+        other = sum(s.n_drawings > 1 for s in train)
+        log.info("resonance draws: %d of %d training samples have other drawings, %d in all",
+                 other, len(train), sum(s.n_drawings - 1 for s in train))  # fmt: skip
+
+
+def freeze_heap() -> None:
+    """Move every object alive now (the loaded samples above all) out of the garbage
+    collector's reach (`gc.freeze`), before the DataLoader workers fork: a collection in a
+    worker would otherwise write to the header of every sample object and copy its page (copy
+    on write), and every full collection in the trainer walks millions of objects that never
+    die. Nothing is freed that would have been: the samples live as long as the run."""
+    import gc
+
+    gc.collect()
+    gc.freeze()
+
+
+COMPILE_SCOPES = ("layers", "step")
+
+
+def compile_encoder(model: KSMech, scope: str = "layers") -> None:
     """torch.compile every encoder layer in place (`nn.Module.compile`: the state dict keeps its
     keys, so checkpoints are unchanged), with dynamic shapes, since every batch has its own N.
     Train and eval, with and without the sparse warm-up, each compile a variant: dynamo's limit
-    is raised to 32 so none falls back to eager."""
+    is raised to 32 so none falls back to eager. `scope` 'step' also compiles the dense
+    encoder's split pair init (`split_pair_init`: its sliced in-place sums fuse, no CopySlices
+    in the backward) and the step loss (`model.step_loss`, which `train_epoch` and `evaluate`
+    call): the decoder's many small kernels fuse. Rounding only (float32: 2e-7 relative on the
+    loss and the gradient)."""
+    if scope not in COMPILE_SCOPES:
+        raise ValueError(f"compile scope {scope!r}, expected one of {COMPILE_SCOPES}")
     torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 32)
     for layer in model.encoder.layers:
         layer.compile(dynamic=True)
+    if scope == "step":
+        if hasattr(model.encoder, "_init_split"):
+            model.encoder._init_split = torch.compile(model.encoder._init_split, dynamic=True)
+        model.step_loss = torch.compile(step_loss, dynamic=True)
+
+
+def loss_of(model: KSMech):
+    """The step loss the model is trained and scored with: `step_loss`, or its compiled form
+    (`compile_encoder` with scope 'step')."""
+    return getattr(model, "step_loss", step_loss)
 
 
 @torch.no_grad()
@@ -458,7 +525,7 @@ def evaluate(
         batch = to_device(batch, device)
         with torch.autocast(device.type, dtype=dtype or torch.float32, enabled=dtype is not None):
             h, p, y, _ = model.encode(batch, dense_warmup)
-            _, parts = step_loss(model.decoder, h, p, y, batch, lambda_stop)
+            _, parts = loss_of(model)(model.decoder, h, p, y, batch, lambda_stop)
             lp = parts["lp_anchor"]
             rank = anchor_ranks(lp, batch)
             exact = edit_matches(*greedy_edit(model.decoder, h, p, lp, batch), batch)
@@ -600,7 +667,7 @@ def train_epoch(model, loader, opt, sched, scaler, device, dtype, cfg: TrainConf
         batch = to_device(batch, device)
         with torch.autocast(device.type, dtype=dtype or torch.float32, enabled=dtype is not None):
             h, p, y, aux = model.encode(batch, state["step"] < cfg.warmup)
-            loss, parts = step_loss(model.decoder, h, p, y, batch, stop_weight(cfg))
+            loss, parts = loss_of(model)(model.decoder, h, p, y, batch, stop_weight(cfg))
             loss = loss + sum(aux.values())  # the sparse indexer's KL trains the indexer only
         opt.zero_grad(set_to_none=True)
         if track is None and _skip_nonfinite(loss, parts | aux, batch, state):  # no step
@@ -889,18 +956,23 @@ def fit(
     held = load_part(cfg, "test", processed_dir) if cfg.eval_test else ({}, None)
     probes, probe_info = load_probes(cfg, processed_dir)
     train = [s for part in by_source.values() for s in part]
+    del by_source  # `train` alone holds the training samples, so packing them frees them
     extra = OPEN_SHELL_BLOCK if model_cfg.open_shell else ()
     stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells, extra)
     feature_stats = fit_feature_stats(train, *token_columns(model_cfg))
     model = KSMech(model_cfg, feature_stats, stats).to(device)
     if cfg.compile:
-        compile_encoder(model)
+        compile_encoder(model, cfg.compile_scope)
     parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})
     parts |= probe_info
     header = _run_header(cfg, model_cfg, parts, stats_path)
     prov.write_json(run_dir / "run.json", {"device": str(device), "amp": str(dtype)}, header)
+    n_train = len(train)
+    log_draws(cfg, train)
+    train, val, test, probes = pack_parts(cfg, train, val, held[0], probes)
+    freeze_heap()
     train_loader = make_loader(train, cfg, True, cfg.resonance_draws, balance=True)
-    loaders = eval_loaders(cfg, val, held[0], probes)
+    loaders = eval_loaders(cfg, val, test, probes)
     total = cfg.epochs * len(train_loader.batch_sampler)
     opt = _optimizer(model, cfg)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, cfg.warmup, total))
@@ -913,11 +985,7 @@ def fit(
     state |= {"total": total, "epochs": cfg.epochs}
     n_params, n_val = sum(p.numel() for p in model.parameters()), val_info["used"]
     log.info("%d parameters, %d train / %d val samples, %d steps on %s (%s), lambda_stop %g",
-             n_params, len(train), n_val, total, device, dtype, stop_weight(cfg))  # fmt: skip
-    if cfg.resonance_draws:
-        other = sum(s.n_drawings > 1 for s in train)
-        log.info("resonance draws: %d of %d training samples have other drawings, %d in all",
-                 other, len(train), sum(s.n_drawings - 1 for s in train))  # fmt: skip
+             n_params, n_train, n_val, total, device, dtype, stop_weight(cfg))  # fmt: skip
     skipped = {p: info["skipped"] for p, info in parts.items()}
     for epoch in range(state["epoch"], cfg.epochs):
         state["epoch"] = epoch

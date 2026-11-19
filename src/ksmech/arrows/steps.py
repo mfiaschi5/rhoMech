@@ -1213,15 +1213,17 @@ def load_samples(
     ids: Iterable[str] | None = None,
     compact: bool = False,
     workers: int = 1,
+    deflate: bool = False,
 ) -> list[MechanismSample]:
     """The samples of one split view (`samples_<split>.json`), only `ids` when given. The view,
     the store index and every shard read are verified first (parquet, split file, token
     files); StaleArtifact names what changed. `allow_stale` is for diagnostic CLIs
     only: the mismatch is logged and the store is read anyway. `compact`: light samples that
     keep their cells as stored (`store.CompactCells`, ~3x less memory; `store.dense` makes
-    one whole, bit for bit); `workers` > 1 reads the shards in that many forked processes."""
+    one whole, bit for bit), with `deflate` held as one zlib stream (~4x less again, inflated
+    per batch); `workers` > 1 reads the shards in that many forked processes."""
     return store.load_view(
-        Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids, compact, workers
+        Path(path), MechanismSample, SAMPLE_VERSION, allow_stale, ids, compact, workers, deflate
     )
 
 

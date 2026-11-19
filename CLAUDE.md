@@ -408,11 +408,14 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `--no-own-pair-channel`; the orbital-token ablation `--drop-token-features orbital` (or column
   names), `--no-spectral-set`, `--no-inherit-atoms` (its runs: `scripts/orbital_ablation.sh`); metrics.jsonl also holds `open_top1`, `open_r_exact`, `open_n` over the
   pools with an unpaired electron; `--limit 64 --epochs 1` for a smoke run; the speed options of
-  `docs/model_impl.md`: `--compile` (every encoder layer compiled in place, dynamic shapes),
-  `--half-pair-norm` and `--split-pair-init` (the dense pair track's LayerNorm in the autocast
-  dtype, MLP_P part by part; both off by default, so older checkpoints score bit for bit),
-  `--load-workers` (shards read in forked processes), samples held compact in memory and
-  expanded per batch (on by default), a GPU run with fused AdamW and no host sync per step
+  `docs/model_impl.md`: `--compile` (every encoder layer compiled in place, dynamic shapes;
+  `--compile-scope step` also the split pair init and the step loss, rounding only, ~20%
+  faster), `--half-pair-norm` and `--split-pair-init` (the dense pair track's LayerNorm in the
+  autocast dtype, MLP_P part by part; both off by default, so older checkpoints score bit for
+  bit), `--load-workers` (shards read in forked processes), samples held compact in memory
+  and expanded per batch (on by default; their cells deflated, `--deflate-samples`, and the
+  samples pickled into contiguous buffers, `--pack-samples`, both on by default and lossless:
+  full ReactMech + PMechDB trains in ~15 GB of RAM), the token statistics in one pass, a GPU run with fused AdamW and no host sync per step
   (non-finite batches skipped on the device, read every `--log-every` steps), batches by
   orbitals then atoms at their padded cost; `--pair-update-every K` is an ablation; `--direction
   backward` trains the previous-step model on the backward store, views and pair statistics

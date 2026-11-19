@@ -103,17 +103,26 @@ class CompactCells:
     and defined masks: ~32 B per cell instead of ~102 dense), expanded by `dense` with the very
     code `unpack` runs, so a sample materialized later is bit for bit the one `unpack` returns.
     The trainer keeps these in memory (`load_view(compact=True)`) and expands one batch at a
-    time in its DataLoader workers."""
+    time in its DataLoader workers. With `deflate` the packed arrays are held as one zlib
+    stream (level 1: ~4x smaller again on ReactMech, ~0.8 ms per sample to inflate), inflated
+    by `dense`; lossless, so the dense sample is the same bytes."""
 
-    __slots__ = ("arrays", "n_feat", "pair_features")
+    __slots__ = ("arrays", "n_feat", "pair_features", "blob")
 
-    def __init__(self, arrays: dict[str, np.ndarray], n_feat: int, pair_features):
-        self.arrays = {k: arrays[k] for k in PACKED_CELLS}
+    def __init__(
+        self, arrays: dict[str, np.ndarray], n_feat: int, pair_features, deflate: bool = False
+    ):
+        packed = {k: arrays[k] for k in PACKED_CELLS}
         self.n_feat, self.pair_features = int(n_feat), tuple(pair_features)
+        self.arrays, self.blob = (None, _deflate(packed)) if deflate else (packed, None)
+
+    def packed(self) -> dict[str, np.ndarray]:
+        """The packed arrays as the shard stores them (inflated when held deflated)."""
+        return self.arrays if self.blob is None else _inflate(self.blob)
 
     def dense(self) -> dict[str, np.ndarray]:
         """pair_z, pair_defined, pair_gap_sign and pair_valid, dense."""
-        arrays, n_feat = self.arrays, self.n_feat
+        arrays, n_feat = self.packed(), self.n_feat
         shape = arrays["pair_valid"].shape
         binary = _binary_columns(self.pair_features)
         rest = [k for k in range(n_feat) if k not in binary]
@@ -129,7 +138,36 @@ class CompactCells:
         }
 
     def nbytes(self) -> int:
+        """The bytes held: the packed arrays, or the deflated stream."""
+        if self.blob is not None:
+            return len(self.blob[0])
         return sum(a.nbytes for a in self.arrays.values())
+
+
+DEFLATE_LEVEL = 1  # zlib: level 6 saves 9% more and takes 2.5x longer to write
+
+
+def _deflate(arrays: dict[str, np.ndarray]) -> tuple[bytes, tuple]:
+    """(one zlib stream of the arrays' bytes, (name, dtype, shape) of each in order)."""
+    import zlib
+
+    spec = tuple((k, a.dtype.str, a.shape) for k, a in arrays.items())
+    raw = b"".join(np.ascontiguousarray(a).tobytes() for a in arrays.values())
+    return zlib.compress(raw, DEFLATE_LEVEL), spec
+
+
+def _inflate(blob: tuple[bytes, tuple]) -> dict[str, np.ndarray]:
+    """The arrays of `_deflate`, views of one inflated (writable) buffer."""
+    import zlib
+
+    data, spec = blob
+    raw, out, at = bytearray(zlib.decompress(data)), {}, 0
+    for name, dtype, shape in spec:
+        n = int(np.prod(shape, dtype=np.int64)) * np.dtype(dtype).itemsize
+        out[name] = np.frombuffer(raw, dtype=dtype, count=n // np.dtype(dtype).itemsize,
+                                  offset=at).reshape(shape)  # fmt: skip
+        at += n
+    return out
 
 
 _ABSENT = object()
@@ -179,9 +217,11 @@ def unpack(
     meta: dict[str, Any],
     cls: type[MechanismSample],
     compact: bool = False,
+    deflate: bool = False,
 ) -> MechanismSample:
     """The dense MechanismSample of `pack`'s output (cls: MechanismSample); with `compact` a
-    light one carrying its `CompactCells` (`dense` expands it, bit for bit the same)."""
+    light one carrying its `CompactCells` (`dense` expands it, bit for bit the same), held as
+    one zlib stream with `deflate`."""
     from ksmech.arrows.align import ArrowLabel
     from ksmech.arrows.delta_be import EditLabel
     from ksmech.arrows.drawings import Drawing
@@ -191,7 +231,7 @@ def unpack(
     for name in ("pair_features", "atom_columns", "orbital_columns"):
         if name in meta:
             meta[name] = tuple(meta[name])
-    cells = CompactCells(arrays, n_feat, meta["pair_features"])
+    cells = CompactCells(arrays, n_feat, meta["pair_features"], deflate and compact)
     dense_cells = _no_cells(n_feat) if compact else cells.dense()
     skip = (*PACKED_CELLS, *DRAWING_ARRAYS.values())
     out = {k: v for k, v in arrays.items() if k not in skip}
@@ -337,7 +377,13 @@ def write_view(
 
 
 def _load_shard(
-    path: Path, members: list[int], cls, version: int, allow_stale: bool, compact: bool = False
+    path: Path,
+    members: list[int],
+    cls,
+    version: int,
+    allow_stale: bool,
+    compact: bool = False,
+    deflate: bool = False,
 ):
     prov.verify_clean(path, "sample_shard", version, allow_stale=allow_stale)
     with np.load(path, allow_pickle=False) as z:
@@ -349,7 +395,7 @@ def _load_shard(
         out = []
         for i in members:
             arrays = {n.split("/", 1)[1]: z[n] for n in names[str(i)]}
-            out.append(unpack(arrays, metas[i], cls, compact))
+            out.append(unpack(arrays, metas[i], cls, compact, deflate))
     return out
 
 
@@ -394,22 +440,30 @@ def iter_view(
     ids: Iterable[str] | None = None,
     compact: bool = False,
     workers: int = 1,
+    deflate: bool = False,
 ) -> Iterator[MechanismSample]:
     """The samples of one split view (only `ids` when given), one shard at a time in shard
     order, so a caller that reduces each sample never holds the whole view. Verifies the view,
     the index and every shard read: StaleArtifact names what changed. `compact`: light samples
-    with their `CompactCells` (`dense`); `workers` > 1 reads and verifies the shards in that
-    many forked processes, the order kept."""
+    with their `CompactCells` (`dense`), deflated with `deflate`; `workers` > 1 reads and
+    verifies the shards in that many forked processes, the order kept."""
     _, by_shard = _view_members(path, version, allow_stale, ids)
-    yield from _iter_shards(path, by_shard, cls, version, allow_stale, compact, workers)
+    yield from _iter_shards(path, by_shard, cls, version, allow_stale, compact, workers, deflate)
 
 
 def _iter_shards(
-    path: Path, by_shard: dict, cls, version: int, allow_stale, compact=False, workers: int = 1
+    path: Path,
+    by_shard: dict,
+    cls,
+    version: int,
+    allow_stale,
+    compact=False,
+    workers: int = 1,
+    deflate: bool = False,
 ):
     root = store_dir(Path(path).parent)
     tasks = [
-        (root / name, members, cls, version, allow_stale, compact)
+        (root / name, members, cls, version, allow_stale, compact, deflate)
         for name, members in sorted(by_shard.items())
     ]
     if workers <= 1 or len(tasks) <= 1:
@@ -456,10 +510,11 @@ def load_view(
     ids: Iterable[str] | None = None,
     compact: bool = False,
     workers: int = 1,
+    deflate: bool = False,
 ) -> list[MechanismSample]:
     """The samples of one split view (only `ids` when given), in its id order (skipped steps
-    have none). Verifies as `iter_view`; `compact` and `workers` as there."""
+    have none). Verifies as `iter_view`; `compact`, `workers` and `deflate` as there."""
     wanted, by_shard = _view_members(path, version, allow_stale, ids)
-    shards = _iter_shards(path, by_shard, cls, version, allow_stale, compact, workers)
+    shards = _iter_shards(path, by_shard, cls, version, allow_stale, compact, workers, deflate)
     loaded = {s.step_id: s for s in shards}
     return [loaded[sid] for sid in wanted]

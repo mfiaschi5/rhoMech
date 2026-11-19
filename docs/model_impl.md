@@ -130,6 +130,37 @@ Against the model as trained (23.4 samples/s), every option on is 2.3x on PMechD
 flags change rounding only (first losses within 3e-5 relative). `--pin-memory` (item 23) gave
 nothing on this card and stays off.
 
+## Round 3 (2026-11-19): the full ReactMech store in RAM, and the step on an RTX 4080 SUPER
+
+Before the joint PMechDB + full ReactMech run (95,230 training and 11,749 validation samples)
+the trainer was measured on that data (`docs/decisions.md`, 2026-11-19, "round 3"). The RAM
+was the limit, three causes:
+
+| # | Cause | Change | Option | Default | Effect on the numbers |
+|---|---|---|---|---|---|
+| 27 | The compact cells (`store.CompactCells`) are 315 KiB of a ReactMech sample's 380 | the packed cell arrays held as one zlib stream (level 1), inflated in `dense` | `--deflate-samples` (TrainConfig `deflate_samples`) | on | none: lossless (checked bit for bit on 500 full-store samples) |
+| 28 | A forked DataLoader worker writes to the reference count of every sample object it reads, so it copies its pages: ~55 KB per ReactMech sample per worker, up to ~20 GB over a run with four workers | `fit` packs every part into contiguous pickle buffers (`batching.PackedSamples`), the objects freed chunk by chunk; the garbage collector frozen before the workers fork (`gc.freeze`) | `--pack-samples` (TrainConfig `pack_samples`) | on | none: a pickle round trip is exact, the batches equal |
+| 29 | `fit_feature_stats` concatenated every training token in float64: a ~10 GB peak, 6 GB of the run pushed to swap | one pass, the same sums per sample (`inputs._Moments`) | always | the token statistics in a few ulps (1e-14 relative) |
+
+On speed the step was GPU-bound (90-96% busy) at ~103 ms per batch of ~16 samples, the backward
+63% of it. Outside the compiled layers the split pair init (its sliced in-place sums: CopySlices
+and AsStrided backwards) and the decoder with the loss (many small kernels) were eager:
+
+| # | Change | Option | Default | Effect on the numbers |
+|---|---|---|---|---|
+| 30 | The split pair init and the step loss compiled too (dynamic shapes; `train_epoch` and `evaluate` call `loop.loss_of(model)`) | `--compile-scope step` (TrainConfig `compile_scope`, with `--compile`) | layers | rounding: float32, 2e-7 relative on the loss and the gradient |
+
+| RTX 4080 SUPER, bf16, every option of round 2 + `--no-checkpoint` | ms per batch | samples/s |
+|---|---|---|
+| bench (1,600 joint samples, second pass), `--compile` | 102.8 | 162 |
+| + the pair init compiled | 95.9 | 174 |
+| + the step loss compiled (`--compile-scope step`) | 83.9 | 199 |
+| full data, `--compile` (steady, from the log) | ~110 | ~126 |
+| full data, `--compile-scope step` | ~87 | ~158 |
+
+The first epoch pays the recompiles (a few stalls of 20-40 s, the variants of size-1 dimensions);
+the start (load, pair and token statistics, packing) takes ~11 minutes on the full data.
+
 ## Item 14: the largest samples (a measurement, nothing changed)
 
 | | tokens median / p95 / max | cell share of the top 1% / 5% / 10% | `--max-tokens 512` drops / saves | 768 |
@@ -149,6 +180,8 @@ ksmech-arrows samples --source reactmech --workers 8 --stream
 ksmech-train fit --run rm_dense_s0 --source reactmech --preset general \
     --compile --half-pair-norm --split-pair-init --pair-linear-splitk --last-update-atoms \
     --load-workers 8
+# on a CUDA card with room for it (16 GB at 1.1M cells): round 3 as well
+ksmech-train fit ... --compile --compile-scope step --no-checkpoint --pin-memory --workers 4
 ```
 
 `--compact-samples` is on by default; `--no-compact-samples` keeps whole samples in memory.

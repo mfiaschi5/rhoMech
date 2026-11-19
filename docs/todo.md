@@ -136,7 +136,9 @@ choice hard to undo and is confirmed again before its build.
     SUPER; decisions.md "arms b and i on two seeds"): it holds, all four joint runs above
     all four PMechDB-only ones (66.8 against 61.2, permutation p = 0.014); the architecture
     (b/i, e/k) changes nothing measurable; the lever is more and more varied training data;
-    mech-USPTO-31K still has no loader;
+    mech-USPTO-31K still has no loader; next (the user, 2026-11-19): arm e on the full
+    ReactMech v19 store (scaffold split, `scripts/ood_fullrm.sh`, runs `fullrm_e_s0`/`s1`),
+    after the memory and speed round 3 (decisions.md of that day) that lets it train here;
   - a leave-one-class-out on a class whose edit signatures the rest does not hold;
   - the orbital-pair head with a learned choice of centre (and first the oracle: how much of
     the label's probability the fixed centre weights can reach at all), or its score as one

@@ -12,6 +12,10 @@ in the main process, so persistent DataLoader workers see every epoch's choice.
 
 from __future__ import annotations
 
+import contextlib
+import pickle
+from collections.abc import Sequence
+
 import numpy as np
 import torch
 
@@ -54,12 +58,87 @@ def size_order(sizes: np.ndarray, chunk: np.ndarray) -> np.ndarray:
     return chunk[np.lexsort((sizes[chunk, 0], sizes[chunk, 1]))]
 
 
+PACK_CHUNK = 2048  # samples pickled, then freed, at a time
+
+
+class PackedSamples(Sequence):
+    """Samples held as their pickles (protocol 5) in a few contiguous byte buffers, one per
+    `PACK_CHUNK` samples, with the sizes and drawing counts the sampler reads. A forked
+    DataLoader worker that reads a sample from a list of objects writes to the reference
+    counts of every object it touches and so copies their pages (copy on write: ~55 KB per
+    ReactMech sample per worker, up to ~20 GB over a run of four workers on full ReactMech);
+    here it reads bytes that nothing writes, and unpickles its own copy (~0.2 ms). The
+    samples come back equal, array for array (a pickle round trip is exact)."""
+
+    def __init__(self, chunks: list[np.ndarray], offsets: list[np.ndarray], sizes, drawings):
+        self.chunks, self.offsets = chunks, offsets
+        self.sizes, self.n_drawings = sizes, drawings
+
+    @classmethod
+    def take(cls, samples: list) -> PackedSamples:
+        """The samples packed. `samples` is emptied as it is read, chunk by chunk, so the
+        objects of a chunk are freed (and the heap trimmed) before the next is pickled and the
+        peak stays one chunk above the packed size; any other reference keeps them alive."""
+        sizes = np.array([(s.n_atoms, s.n_orbitals) for s in samples], dtype=np.int64)
+        drawings = np.array([s.n_drawings for s in samples], dtype=np.int64)
+        chunks, offsets = [], []
+        while samples:
+            head = samples[:PACK_CHUNK]
+            del samples[:PACK_CHUNK]
+            blobs = [pickle.dumps(x, protocol=5) for x in head]
+            del head
+            offsets.append(np.cumsum([0] + [len(b) for b in blobs], dtype=np.int64))
+            chunks.append(np.frombuffer(b"".join(blobs), dtype=np.uint8))
+            del blobs
+            _trim_heap()
+        return cls(chunks, offsets, sizes.reshape(-1, 2), drawings)
+
+    def __len__(self) -> int:
+        return len(self.sizes)
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[k] for k in range(*i.indices(len(self)))]
+        i = int(i) + (len(self) if i < 0 else 0)
+        if not 0 <= i < len(self):
+            raise IndexError(i)
+        c, k = divmod(i, PACK_CHUNK)
+        start, end = self.offsets[c][k], self.offsets[c][k + 1]
+        return pickle.loads(self.chunks[c][start:end])
+
+    def nbytes(self) -> int:
+        return sum(c.nbytes for c in self.chunks)
+
+
+def _trim_heap() -> None:
+    """Return freed heap pages to the system (glibc `malloc_trim`); nothing elsewhere."""
+    import ctypes
+    import ctypes.util
+
+    with contextlib.suppress(OSError, AttributeError):
+        ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6").malloc_trim(0)
+
+
+def sample_sizes(samples: Sequence) -> np.ndarray:
+    """(atoms, orbitals) of each sample, read from a `PackedSamples` without unpickling."""
+    if isinstance(samples, PackedSamples):
+        return samples.sizes
+    return np.array([(s.n_atoms, s.n_orbitals) for s in samples], dtype=np.int64).reshape(-1, 2)
+
+
+def sample_drawings(samples: Sequence) -> list[int]:
+    """The number of resonance drawings of each sample (`PackedSamples`: without unpickling)."""
+    if isinstance(samples, PackedSamples):
+        return [int(n) for n in samples.n_drawings]
+    return [s.n_drawings for s in samples]
+
+
 class DrawnSamples(torch.utils.data.Dataset):
     """Samples by index, or by (index, k) in their k-th resonance drawing
     (`MechanismSample.drawn`). A light sample with compact cells is made whole here, in the
     DataLoader worker (`store.dense`), so only the batch being collated is dense."""
 
-    def __init__(self, samples: list):
+    def __init__(self, samples: Sequence):
         self.samples = samples
 
     def __len__(self) -> int:

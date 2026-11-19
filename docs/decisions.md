@@ -10467,3 +10467,53 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   training data. For further arms, the joint configuration is the base; the choice between
   e's and k's encoder is structural (k: each molecule encoded alone, no element or charge
   label). Two seeds per arm are the minimum for a reading on the human benchmark.
+
+## 2026-11-19: round 3, the full ReactMech store in RAM and the step on an RTX 4080 SUPER
+
+- **Why.** The next step of the out-of-distribution plan (the user, 2026-11-19: "ReactMech
+  completo, ma prima ottimizza la memoria ... bottleneck sia di memoria che di velocità") is
+  phase 1's arm e on the full ReactMech v19 store. Joint with PMechDB, scaffold split for
+  ReactMech (the molecule split is degenerate on the full store, 2026-11-11): 95,230 training and
+  11,749 validation samples. Measured with the run's options on the 4080 (bf16, `--compile
+  --half-pair-norm --split-pair-init --pair-linear-splitk --last-update-atoms --no-checkpoint`).
+- **Memory, three causes.**
+  - A compact ReactMech sample is 380 KiB resident, 315 of them the packed cells. The training
+    and validation parts would need ~40 GB against 31 GB of RAM. Held as one zlib stream
+    (level 1; level 6 saves 9% more for 2.5x the time) a sample is 144 KiB, and the shards load
+    twice as fast (less to pickle back from the load workers). Inflating costs ~0.8 ms per
+    sample in the DataLoader workers. It is lossless: 500 full-store samples come back bit for
+    bit. Option `--deflate-samples`, on.
+  - The forked DataLoader workers copied the samples' pages. Each write to a reference count
+    copies the page that holds the object (copy on write). Measured on the full data: ~690 MB
+    private per worker after 23% of the first epoch, ~55 KB per sample touched. Over 30 epochs
+    each of four workers touches every sample, ~20 GB in all.
+    - `fit` now packs every part into contiguous pickle buffers (`batching.PackedSamples`, 2,048
+      samples a chunk, each chunk's objects freed and the heap trimmed before the next).
+    - The workers unpickle their own copy (0.16 ms per sample), and the sampler reads the sizes
+      and drawing counts from the pool.
+    - `gc.freeze()` runs before the workers fork.
+    - Option `--pack-samples`, on. A pickle round trip is exact; the batches equal those of the
+      list (test).
+  - `fit_feature_stats` concatenated every training token in float64. That made a ~10 GB peak
+    after loading, and 6 GB of the run went to swap. It now takes one pass, the same sums per
+    sample (`inputs._Moments`). The statistics move by a few ulps (1e-14 relative on 3,000 real
+    samples); bit for bit was not kept, since the order of the float64 sums changes.
+- **Speed.** The step is GPU-bound (90-96% busy), 103 ms per batch of ~16 samples, the backward
+  63% of it. The data loader makes a batch in 47 ms with two workers.
+  - Outside the compiled encoder layers two parts were still eager: the split pair init (sliced
+    in-place sums: CopySlices and AsStrided backwards, ~9 ms a step) and the decoder with the
+    loss (hundreds of small kernels).
+  - `--compile-scope step` compiles both: 103 -> 84 ms per batch on the bench, ~110 -> ~87 ms on
+    the full data, about +20%.
+  - It changes rounding only: in float32, eager against compiled, at most 2e-7 relative on the
+    loss and 1.4e-7 on the gradient norm over 19 joint batches.
+  - It costs a few recompiles in the first epoch: the size-1 and >= 2 variants of the dimensions,
+    and the number of label variants. The token embedding compiled gave nothing and is left eager.
+- **Not changed.**
+  - The cell budget (1.1M): a larger batch is another optimization, not comparable with e and k.
+    `--eval-cell-budget 2200000` is used (rounding only).
+  - Dropping the open-shell pair columns the general preset never reads: `inputs.pooled_own`
+    and `floor_kernels` read `own_g` when it is present, so dropping it would silently change
+    the model.
+  - The start takes ~11 minutes on the full data (load, the pair statistics in one process,
+    packing): once per run.

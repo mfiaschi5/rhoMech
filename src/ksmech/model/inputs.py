@@ -166,40 +166,53 @@ def device_index(index: tuple[int, ...], device: torch.device) -> torch.Tensor:
     return torch.tensor(index, dtype=torch.long, device=device)
 
 
-def _mean_std(x: np.ndarray, keep: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    n = keep.sum(0)
-    s1 = np.where(keep, x, 0.0).sum(0)
-    s2 = np.where(keep, x * x, 0.0).sum(0)
-    mean = np.divide(s1, n, out=np.zeros_like(s1), where=n > 0)
-    var = np.divide(s2, n, out=np.zeros_like(s2), where=n > 0) - mean**2
-    std = np.sqrt(np.clip(var, 0.0, None))
-    return mean, np.where(std > 0, std, 1.0)
+class _Moments:
+    """Per-column count, sum and sum of squares in float64, added sample by sample, so the
+    statistics of a training part never hold its concatenated features (on full ReactMech that
+    concatenation peaked at ~10 GB). The same formula as before over the same values; only the
+    order of the float64 sums differs (a few ulps)."""
+
+    def __init__(self, width: int):
+        self.n = np.zeros(width, dtype=np.int64)
+        self.s1, self.s2 = np.zeros(width), np.zeros(width)
+
+    def add(self, x: np.ndarray, keep: np.ndarray | None = None) -> None:
+        x = np.asarray(x, dtype=np.float64)
+        x = x[:, None] if x.ndim == 1 else x  # (rows, columns); no column at all is fine
+        keep = np.ones(x.shape, dtype=bool) if keep is None else keep.reshape(x.shape)
+        x = np.where(keep, x, 0.0)
+        self.n += keep.sum(0)
+        self.s1 += x.sum(0)
+        self.s2 += (x * x).sum(0)
+
+    def mean_std(self) -> tuple[np.ndarray, np.ndarray]:
+        n, s1, s2 = self.n, self.s1, self.s2
+        mean = np.divide(s1, n, out=np.zeros_like(s1), where=n > 0)
+        var = np.divide(s2, n, out=np.zeros_like(s2), where=n > 0) - mean**2
+        std = np.sqrt(np.clip(var, 0.0, None))
+        return mean, np.where(std > 0, std, 1.0)
 
 
 def fit_feature_stats(samples: Iterable, atom_names=None, orbital_names=None) -> FeatureStats:
     """The statistics of the token inputs `atom_names` and `orbital_names` (default: the v17
-    columns) over `samples`, selected by name from each sample's stored columns."""
-    samples = list(samples)
+    columns) over `samples`, selected by name from each sample's stored columns, in one pass
+    (`_Moments`: `samples` may be a stream); an atom's missing entries are left out, and the
+    spectral energies with a weight."""
     atom_names = tuple(atom_feature_names() if atom_names is None else atom_names)
     orbital_names = tuple(feature_names() if orbital_names is None else orbital_names)
-
-    def cols(s, kind: str, names):
-        return select_columns(getattr(s, f"{kind}_features"), getattr(s, f"{kind}_columns"), names)
-
-    atoms = np.concatenate([cols(s, "atom", atom_names) for s in samples]).astype(np.float64)
-    missing = np.concatenate(
-        [select_columns(s.atom_missing, s.atom_columns, atom_names) for s in samples]
-    )
-    orbitals = np.concatenate([cols(s, "orbital", orbital_names) for s in samples])
-    orbitals = orbitals.astype(np.float64)
-    spectra = np.concatenate([s.orbital_spectra.reshape(-1, 2) for s in samples])
-    energies = spectra[spectra[:, 1] > 0, 0].astype(np.float64)
-    am, asd = _mean_std(atoms, ~missing)
-    om, osd = _mean_std(orbitals, np.ones_like(orbitals, dtype=bool))
+    atoms, orbitals = _Moments(len(atom_names)), _Moments(len(orbital_names))
+    energies = _Moments(1)
+    for s in samples:
+        missing = select_columns(s.atom_missing, s.atom_columns, atom_names)
+        atoms.add(select_columns(s.atom_features, s.atom_columns, atom_names), ~missing)
+        orbitals.add(select_columns(s.orbital_features, s.orbital_columns, orbital_names))
+        spectra = s.orbital_spectra.reshape(-1, 2)
+        energies.add(spectra[spectra[:, 1] > 0, 0])
+    (am, asd), (om, osd) = atoms.mean_std(), orbitals.mean_std()
     for names, mean, std in ((atom_names, am, asd), (orbital_names, om, osd)):
         fixed = [k for k, n in enumerate(names) if n in FIXED_SCALE]
         mean[fixed], std[fixed] = 0.0, 1.0
-    em, esd = _mean_std(energies[:, None], np.ones((len(energies), 1), dtype=bool))
+    em, esd = energies.mean_std()
     return FeatureStats(am, asd, om, osd, float(em[0]), float(esd[0]), atom_names, orbital_names)
 
 
