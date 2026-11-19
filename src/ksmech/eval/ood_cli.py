@@ -87,16 +87,18 @@ def _coverage(args, payload: dict, scores: dict, samples: list, console: Console
     run's training views; a view that is missing is named and the section says so."""
     from ksmech.eval.ood import coverage, signature, training_signatures
 
-    views, subset = training_views(payload, args.train_processed_dir or args.processed_dir)
+    train_root = args.train_processed_dir or args.processed_dir
+    views, subset = training_views(payload, train_root)
     missing = [str(v) for v in views if not v.is_file()]
     if missing:
         console.print(f"[yellow]no coverage: training view missing: {missing}[/yellow]")
         return {"skipped": "TRAIN_VIEW_MISSING", "views": missing}, {}
     train: Counter = Counter()
     inputs: dict[str, str] = {}
-    for view in views:
-        train += training_signatures(view, args.allow_stale, subset)
-        inputs |= prov.file_input(view)
+    with prov.processed_root(train_root):  # the views verify against their own root
+        for view in views:
+            train += training_signatures(view, args.allow_stale, subset)
+            inputs |= prov.file_input(view)
     out = coverage(scores, {s.step_id: signature(s) for s in samples}, train)
     out |= {"train_signatures": len(train), "train_samples": sum(train.values())}
     return out | {"views": [str(v) for v in views], "train_subset": subset}, inputs

@@ -10467,3 +10467,27 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   training data. For further arms, the joint configuration is the base; the choice between
   e's and k's encoder is structural (k: each molecule encoded alone, no element or charge
   label). Two seeds per arm are the minimum for a reading on the human benchmark.
+
+## 2026-11-19: `--processed-dir` reads a moved store against its own neighbours
+
+- **Why.** The full ReactMech v19 store was built in the worktree `rm-v19` at
+  `data/processed/reactmech` and moved to `data/processed_full/reactmech`, because the main
+  checkout's `data/processed/reactmech` holds the 10k pilot store the out-of-distribution runs
+  use (views `locoall-*`, only there). `ksmech-train fit` and `ksmech-eval` already took
+  `--processed-dir`, but every artifact records its file inputs repository-relative
+  (`file:data/processed/reactmech/samples/index.json`), so `verify` hashed the pilot's files and
+  refused the moved store as STALE.
+- **What.** `provenance.processed_root(path)`: while active, `input_path` resolves a `file:` input
+  recorded below `data/processed/` (relative, or absolute under the repository) below `path`
+  instead; inputs elsewhere (`data/cache/...`) are untouched, and a file missing under the new
+  root is missing (no fall back to the default place, which would verify against another
+  store). The default root changes nothing, so every existing command behaves bit for bit as
+  before. `ksmech-train` and `ksmech-eval` run their command under `--processed-dir`
+  (`ksmech-eval ood` reads the run's training views under `--train-processed-dir`), and
+  `ksmech-data provenance --processed-dir` checks a moved artifact.
+- **Environment, not a context variable.** The root is the variable `KSMECH_PROCESSED_ROOT`,
+  set and restored by the context manager, so spawned worker processes resolve inputs the same
+  way.
+- **Limit.** One root for every source of a run: a joint run reading the full ReactMech store
+  and PMechDB needs `data/processed_full/pmechdb` (a symlink to `../processed/pmechdb` serves).
+  Artifacts written under the new root record that root (`file:data/processed_full/...`).

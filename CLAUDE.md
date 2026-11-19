@@ -221,7 +221,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
 - Provenance: `uv run ksmech-data provenance <artifact>` (prints what an artifact was built from and
   whether it is stale), `uv run ksmech-data provenance --backfill qm` (one-off: headers on QM records
   written before 2026-10-21; never while a QM batch runs). Loaders refuse stale artifacts
-  (STALE_ARTIFACT); only `textbook` takes `--allow-stale`. `uv run ksmech-data
+  (STALE_ARTIFACT); only `textbook` takes `--allow-stale`. A store moved to another processed root (the full
+  ReactMech v19 store in `data/processed_full/reactmech`) verifies under `--processed-dir ROOT`
+  of `ksmech-train`, `ksmech-eval` and `ksmech-data provenance`: inputs recorded under
+  `data/processed/` are read below ROOT (`provenance.processed_root`). `uv run ksmech-data
   open-shell-survey --source S` (read-only: a subclass for every excluded step and every kept
   step with a suspicious metal, the SPIN_PARITY failures by kind, `open_shell_survey.json`; the
   open-shell plan's oracle), `uv run ksmech-data freeze-sample --source reactmech` (the pilot's

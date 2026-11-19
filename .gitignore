@@ -12,6 +12,7 @@ build/
 data/raw/*
 data/processed/*
 data/processed_v17/
+data/processed_full/
 data/cache/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep

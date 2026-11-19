@@ -82,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--backfill", choices=["qm"], help="add headers to existing QM records")
     v.add_argument("--qm-cache-dir", type=Path, default=Path("data/cache/qm"))
     v.add_argument("--depth", type=int, default=4, help="levels of inputs to follow")
+    v.add_argument("--processed-dir", type=Path, help="read inputs recorded under data/processed/ "
+                   "below this root (a store moved there)")  # fmt: skip
     return parser
 
 
@@ -227,7 +229,8 @@ def cmd_provenance(args: argparse.Namespace, console: Console) -> int:
     if args.path is None or not args.path.is_file():
         console.print(f"[red]no such artifact: {args.path}[/red]")
         return 2
-    lines = provenance.describe_chain(args.path, max_depth=args.depth)
+    with provenance.processed_root(args.processed_dir):
+        lines = provenance.describe_chain(args.path, max_depth=args.depth)
     for line in lines:
         console.print(line, markup=False, highlight=False, soft_wrap=True)
     return 1 if any(" STALE" in line or "  ! " in line for line in lines) else 0

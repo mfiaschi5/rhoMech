@@ -693,7 +693,8 @@ def main(argv: list[str] | None = None) -> int:
         "roundtrip": roundtrip_cli.cmd_roundtrip,
         "ood": ood_cli.cmd_ood,
     }
-    return commands[args.command](args, Console())
+    with prov.processed_root(getattr(args, "processed_dir", None)):
+        return commands[args.command](args, Console())
 
 
 if __name__ == "__main__":

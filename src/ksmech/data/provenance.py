@@ -42,6 +42,8 @@ HEADER_KEY = "__provenance__"
 MAGIC = b"KSMECH-PROVENANCE-1\n"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SPEC_PATH = REPO_ROOT / "docs" / "ksmech_architecture.tex"
+DEFAULT_PROCESSED = Path("data/processed")  # = data.io.DEFAULT_PROCESSED_DIR (tested equal)
+PROCESSED_ROOT_ENV = "KSMECH_PROCESSED_ROOT"
 _CHUNK = 1 << 20
 
 
@@ -213,8 +215,39 @@ def file_input_name(path: Path | str) -> str:
 
 
 def input_path(name: str) -> Path:
+    """The file a `file:` input names; under `processed_root`, a file recorded below the default
+    processed directory is read below the active root instead."""
     p = Path(name.removeprefix("file:"))
-    return p if p.is_absolute() else REPO_ROOT / p
+    p = p if p.is_absolute() else REPO_ROOT / p
+    root = os.environ.get(PROCESSED_ROOT_ENV)
+    if root:
+        with contextlib.suppress(ValueError):
+            return Path(root) / p.relative_to(REPO_ROOT / DEFAULT_PROCESSED)
+    return p
+
+
+@contextlib.contextmanager
+def processed_root(path: Path | str | None) -> Iterator[None]:
+    """While active, a `file:` input recorded below `data/processed/` resolves below `path`: a
+    store built at the default place and moved to another processed root (a parallel store, a
+    reference copy) verifies against its moved neighbours, never against the files now at the
+    default place. None or the default root changes nothing. Set in the environment, so spawned
+    worker processes see it too (docs/decisions.md, 2026-11-19)."""
+    root = None if path is None else Path(path).resolve()
+    if root == (REPO_ROOT / DEFAULT_PROCESSED).resolve():
+        root = None
+    before = os.environ.get(PROCESSED_ROOT_ENV)
+    if root is None:
+        os.environ.pop(PROCESSED_ROOT_ENV, None)
+    else:
+        os.environ[PROCESSED_ROOT_ENV] = str(root)
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop(PROCESSED_ROOT_ENV, None)
+        else:
+            os.environ[PROCESSED_ROOT_ENV] = before
 
 
 def file_input(path: Path | str) -> dict[str, str]:

@@ -1,6 +1,7 @@
 """Provenance headers: stamp, verify, the QM record -> token chain, backfill and the CLI."""
 
 import dataclasses
+import os
 
 import numpy as np
 import pytest
@@ -252,3 +253,84 @@ def test_a_worker_stale_artifact_reaches_the_parent():
     with get_context("spawn").Pool(1) as pool, pytest.raises(prov.StaleArtifact) as exc:
         pool.apply_async(_raise_stale, (0,)).get(timeout=120)
     assert exc.value.changes == ["input changed: tokens.npz"]
+
+
+def _moved_store(monkeypatch, tmp_path):
+    """An artifact built in data/processed/src/ with a sibling input and a cache input, then
+    moved to data/processed_full/src/; a different file now sits at the old sibling's place."""
+    monkeypatch.setattr(prov, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv(prov.PROCESSED_ROOT_ENV, raising=False)
+    built, cache = tmp_path / "data/processed/src", tmp_path / "data/cache"
+    built.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    (built / "split.txt").write_text("full")
+    (cache / "record.txt").write_text("qm")
+    inputs = prov.file_input(built / "split.txt") | prov.file_input(cache / "record.txt")
+    assert set(inputs) == {"file:data/processed/src/split.txt", "file:data/cache/record.txt"}
+    _stamped(built / "view.npz", inputs=inputs)
+    full = tmp_path / "data/processed_full"
+    full.mkdir()
+    built.rename(full / "src")
+    built.mkdir()
+    (built / "split.txt").write_text("pilot")
+    return full
+
+
+def test_processed_root_reads_a_moved_store_against_its_own_neighbours(monkeypatch, tmp_path):
+    full = _moved_store(monkeypatch, tmp_path)
+    view = full / "src/view.npz"
+    with pytest.raises(prov.StaleArtifact, match="input changed: .*data/processed/src/split"):
+        prov.verify(view)
+    with prov.processed_root(full):
+        assert prov.input_path("file:data/processed/src/split.txt") == full / "src/split.txt"
+        assert prov.input_path("file:data/cache/record.txt") == tmp_path / "data/cache/record.txt"
+        prov.verify(view)
+    assert prov.PROCESSED_ROOT_ENV not in os.environ  # restored on exit
+    with prov.processed_root(tmp_path / "data/processed"):  # the default root: no remapping
+        assert prov.PROCESSED_ROOT_ENV not in os.environ
+        with pytest.raises(prov.StaleArtifact):
+            prov.verify(view)
+    (full / "src/split.txt").unlink()
+    with prov.processed_root(full), pytest.raises(prov.StaleArtifact, match="input missing"):
+        prov.verify(view)  # never falls back to the file at the default place
+
+
+def test_processed_root_nests_and_matches_the_io_default(monkeypatch, tmp_path):
+    from ksmech.data.io import DEFAULT_PROCESSED_DIR
+
+    assert prov.DEFAULT_PROCESSED == DEFAULT_PROCESSED_DIR
+    monkeypatch.setattr(prov, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv(prov.PROCESSED_ROOT_ENV, raising=False)
+    with prov.processed_root(tmp_path / "a"):
+        with prov.processed_root(tmp_path / "b"):
+            assert os.environ[prov.PROCESSED_ROOT_ENV] == str(tmp_path / "b")
+        assert os.environ[prov.PROCESSED_ROOT_ENV] == str(tmp_path / "a")
+        with prov.processed_root(None):
+            assert prov.PROCESSED_ROOT_ENV not in os.environ
+        assert os.environ[prov.PROCESSED_ROOT_ENV] == str(tmp_path / "a")
+    assert prov.PROCESSED_ROOT_ENV not in os.environ
+
+
+def test_provenance_cli_takes_the_processed_root(monkeypatch, tmp_path):
+    full = _moved_store(monkeypatch, tmp_path)
+    view = str(full / "src/view.npz")
+    assert data_main(["provenance", view]) == 1
+    assert data_main(["provenance", view, "--processed-dir", str(full)]) == 0
+
+
+def test_train_and_eval_clis_run_under_their_processed_dir(monkeypatch, tmp_path):
+    from ksmech.eval import cli as eval_cli
+    from ksmech.train import cli as train_cli
+
+    monkeypatch.delenv(prov.PROCESSED_ROOT_ENV, raising=False)
+    seen = []
+    monkeypatch.setattr(train_cli, "cmd_fit", lambda a: seen.append(os.environ.get(
+        prov.PROCESSED_ROOT_ENV)) or 0)  # fmt: skip
+    monkeypatch.setattr(eval_cli, "cmd_floor", lambda a, c: seen.append(os.environ.get(
+        prov.PROCESSED_ROOT_ENV)) or 0)  # fmt: skip
+    root = tmp_path / "processed_full"
+    assert train_cli.main(["fit", "--run", "x", "--processed-dir", str(root)]) == 0
+    assert eval_cli.main(["floor", "--source", "pmechdb", "--processed-dir", str(root)]) == 0
+    assert train_cli.main(["fit", "--run", "x"]) == 0  # the default: nothing set
+    assert seen == [str(root.resolve()), str(root.resolve()), None]
+    assert prov.PROCESSED_ROOT_ENV not in os.environ

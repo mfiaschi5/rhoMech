@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ksmech.arrows.backward import DIRECTIONS
 from ksmech.data.io import DEFAULT_PROCESSED_DIR
+from ksmech.data.provenance import processed_root
 from ksmech.model.config import PRESETS, ModelConfig
 from ksmech.train.loop import (
     DEFAULT_MODELS_DIR,
@@ -120,7 +121,8 @@ def cmd_fit(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser(_preset(argv)).parse_args(argv)
-    return {"fit": cmd_fit}[args.command](args)
+    with processed_root(args.processed_dir):
+        return {"fit": cmd_fit}[args.command](args)
 
 
 if __name__ == "__main__":
