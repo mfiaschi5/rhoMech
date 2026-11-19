@@ -181,9 +181,9 @@ source of one-electron steps (rmechdb) conserves u only where R moves no single 
 ## Commands
 
 ```bash
-uv sync                       # install everything into .venv (torch: the ROCm build)
-uv sync --no-group rocm --group cuda   # an NVIDIA host: the CUDA build of torch
-export UV_NO_SYNC=1           # then, on that host: else uv run re-syncs to the default rocm group
+uv sync                       # install everything into .venv (torch: the CUDA build, cu130)
+uv sync --no-group cuda --group rocm   # an AMD host: the ROCm build of torch
+export UV_NO_SYNC=1           # then, on that host: else uv run re-syncs to the default cuda group
 uv run pytest -n 14 -m "not realdata"  # unit tests in 14 processes (pytest-xdist; -x stops at the first failure)
 uv run pytest -m realdata     # real-data tests one at a time, each pass in 14 spawned processes
 uv run ruff check .           # lint
@@ -362,7 +362,7 @@ Main CLI entry points are added phase by phase and listed here as they land:
   server). The app is branded ChemRho, in four nav sections: ChemPtah (`#/workbench`), ClotoMech
   (`#/predict`, `#/correct`, `#/curate`), ChemThot (`#/browse`) and the Wiki (`#/wiki`); the
   section names are hash aliases (`docs/serve_architecture.md`)
-- Training: `HSA_OVERRIDE_GFX_VERSION=10.3.0 uv run ksmech-train fit --run NAME [--split molecule]
+- Training: `uv run ksmech-train fit --run NAME [--split molecule]
   [--encoder dense|flex|sparse] [--epochs 30] [--cell-budget 1100000] [--max-tokens 1024]
   [--resume] [--no-resonance-draws] [--eval-test] [--preset general|legacy|open_shell]
   [--drop-domain-class C...] [--val-cohort pmechdb=closed_base] [--compile] [--half-pair-norm]
@@ -399,8 +399,8 @@ Main CLI entry points are added phase by phase and listed here as they land:
   by default 0.5 and 0 on PMechDB; `data/models/<source>/<run>/`: `run.json` with the provenance of
   the views and pair statistics, `train.log` in the `step n / total` format `ksmech-eta` reads,
   `metrics.jsonl` per epoch, `last.pt` and `best.pt` by validation anchor top-1; batches by a
-  padded-cell budget, samples over `--max-tokens` skipped as TOO_LARGE and counted; the override is
-  for the RX 6600 XT (gfx1032 runs the gfx1030 kernels); `--eval-test` also scores the test part each epoch (`test_*`, never for `best.pt`);
+  padded-cell budget, samples over `--max-tokens` skipped as TOO_LARGE and counted; on an RX 6600
+  XT (ROCm group) prefix `HSA_OVERRIDE_GFX_VERSION=10.3.0` (gfx1032 runs the gfx1030 kernels); `--eval-test` also scores the test part each epoch (`test_*`, never for `best.pt`);
   `--drop-domain-class OSM_CU2 OSM_FE3` leaves those classes' training samples out (P4's metal
   ablation; evaluation keeps them; counted as DROPPED_DOMAIN_CLASS);
   every `ModelConfig` field is an option,
@@ -508,7 +508,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `uv run ksmech-network evaluate --set reactmech|human_benchmark --run NAME [--run-source S]
   [--part val] [--limit N] [the search options]` (per case the arrival, the recorded pathway's rank by
   its pool-key sequence, the step targets passed, the expansions; the rates over the cases;
-  `network_eval_<set>[_<part>][_n<limit>].json` beside the checkpoint)
+  `network_eval_<set>[_<part>][_n<limit>].json` beside the checkpoint; `--walk`: no search, each
+  recorded step target ranked among the children of the pool the walk has reached, the walk
+  moving to that child (`network.walk`: the first step's top-1/3/5, every step's, the pathways
+  walked whole, the stop codes), `network_walk_<set>[...].json`)
 
   With `--backward-run BWD [--backward-checkpoint best] [--roundtrip-lambda 1]`, `search` and
   `evaluate` search from both sides (item I1, `network.bidirectional`): the forward run from the

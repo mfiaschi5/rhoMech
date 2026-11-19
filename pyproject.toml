@@ -63,14 +63,15 @@ serve = [
 # renamed it MCPServer and moved to httpx2)
 client = ["httpx==0.28.1"]
 mcp = ["mcp==1.30.0"]
-# torch comes from one of two builds: ROCm (default here, AMD RX 6600 XT, run with
-# HSA_OVERRIDE_GFX_VERSION=10.3.0) or CUDA (NVIDIA hosts: uv sync --no-group rocm --group cuda).
+# torch comes from one of two builds: CUDA (default here since 2026-11-19, RTX 4080 SUPER) or
+# ROCm (AMD hosts: uv sync --no-group cuda --group rocm; an RX 6600 / 6600 XT also needs
+# HSA_OVERRIDE_GFX_VERSION=10.3.0).
 rocm = ["torch==2.14.1", "triton-rocm==3.8.0"]
 cuda = ["torch==2.14.1"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-default-groups = ["dev", "rocm", "serve", "client", "mcp"]
+default-groups = ["dev", "cuda", "serve", "client", "mcp"]
 conflicts = [[{ group = "rocm" }, { group = "cuda" }]]
 # certifi (a dev-only transitive of httpx) resolved to 2026.10.19, released the day before; keep
 # the last release that is at least two weeks old. The same for two transitives of mcp

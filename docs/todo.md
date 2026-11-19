@@ -114,9 +114,36 @@ choice hard to undo and is confirmed again before its build.
 - Phase 2, state (2026-11-16): built as the preset `local` (decisions.md, "phase 2, the local
   selector"): the molecule-scoped attention, the orbital-pair anchor head (a sum over the
   orbital pairs in probability, not in the logit: the floor is worse than uniform as a linear
-  logit), the inputs. Its arms g, h, i, j are `scripts/ood_phase2.sh`; none has trained yet.
+  logit), the inputs. Its arms g, h, i, j are `scripts/ood_phase2.sh`.
   Not built: encodings cached per species, the low-capacity context channel, the ablation of
   the canonical frontier inputs (`--drop-token-features fmo_homo ...` exists).
+- Phases 1 and 2, read (2026-11-17, decisions.md of that day). The thesis that the orbital-pair
+  head transfers does not hold as built: it reads the orbital-pair features and is 5 points
+  below the pointer on PMechDB val and 10 on ReactMech, and does not fit its training part
+  (anchor NLL 0.28 against 0.017). The molecule-scoped attention with the pointer head (arm i)
+  costs nothing. The joint run puts ReactMech at 96% without lowering PMechDB top-1; its
+  held-out class (acid-halide) is not out of distribution (93.6% from PMechDB alone). The
+  float16 sum that stopped g and j is fixed. Open, for the user to choose among:
+  - a joint model scored on a source it never trained on: done 2026-11-17 on the human
+    benchmark (`evaluate --walk`, decisions.md of that day): the joint models e and f lead
+    the PMechDB-only ones by about 6 points of first-step top-1 (68 against 62); the joint
+    run with arm i's encoder, arm k of `scripts/ood_phase2.sh` (`ood2_k_s0`, e's data and
+    options, i's flags), read 2026-11-18 (decisions.md of that day): e's equal in
+    distribution; on two seeds (`ood1_e_s1`, `ood2_k_s1`, decisions.md 2026-11-19) e and k
+    are equal on the human benchmark (66.3 against 67.2), the 2026-11-18 gap was seed noise
+    (two seeds of one arm differ by up to 6 points there); the second seeds of b and i, to
+    tell whether the joint data's gain over PMechDB alone holds, read 2026-11-19 (RTX 4080
+    SUPER; decisions.md "arms b and i on two seeds"): it holds, all four joint runs above
+    all four PMechDB-only ones (66.8 against 61.2, permutation p = 0.014); the architecture
+    (b/i, e/k) changes nothing measurable; the lever is more and more varied training data;
+    mech-USPTO-31K still has no loader;
+  - a leave-one-class-out on a class whose edit signatures the rest does not hold;
+  - the orbital-pair head with a learned choice of centre (and first the oracle: how much of
+    the label's probability the fixed centre weights can reach at all), or its score as one
+    more term of the pointer's logit;
+  - whether the preset `local` becomes arm i's configuration (the pointer head);
+  - a second seed of b, i and g before any difference under 3 points is read;
+  - phase 3 as planned.
 - Phase 2, the local selector: every molecule encoded alone (order invariance by construction,
   encodings cached per species); the anchor logit a sum over the (occupied, virtual) orbital
   pairs of the two atoms, initialized at the |G^atom| floor, so no atom-only path exists; an

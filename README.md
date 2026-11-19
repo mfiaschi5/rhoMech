@@ -19,11 +19,12 @@ uv run pytest
 uv run ruff check .
 ```
 
-torch comes from one of two dependency groups. `rocm` (the default) is the ROCm 7.2 build
-for AMD cards. Run with `HSA_OVERRIDE_GFX_VERSION=10.3.0` on an RX 6600 / 6600 XT (gfx1032),
-which runs the gfx1030 kernels. On an NVIDIA host, install the CUDA build instead:
-`uv sync --no-group rocm --group cuda`, then `export UV_NO_SYNC=1`. Without it every `uv run`
-syncs back to the default groups and reinstalls the ROCm build.
+torch comes from one of two dependency groups. `cuda` (the default) is the CUDA 13.0 build
+for NVIDIA cards. On an AMD host, install the ROCm 7.2 build instead:
+`uv sync --no-group cuda --group rocm`, then `export UV_NO_SYNC=1`. Without it every `uv run`
+syncs back to the default groups and reinstalls the CUDA build. Run with
+`HSA_OVERRIDE_GFX_VERSION=10.3.0` on an RX 6600 / 6600 XT (gfx1032), which runs the gfx1030
+kernels.
 
 ### tblite / xtb
 

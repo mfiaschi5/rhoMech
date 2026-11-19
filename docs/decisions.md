@@ -10115,3 +10115,355 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   the sum of |g| and |B^own| and ranks as `own_break` does on them; the terms `floor`,
   `orbital_pairs`, `charge` (`eval.embedding.term_names`, read by `ksmech-eval ood` and the
   embedding page) sum to the logit; a run fits, saves and loads.
+
+## 2026-11-17: phases 1 and 2 read: the joint arms, the local selector's arms, the float16 sum of the orbital-pair head
+
+- **What ran.** Phase 1's arms e and f (unit `ksmech-ood-phase1c`, d58a5b5, fp16) and phase
+  2's arms g, h, i, j (unit `ksmech-ood-phase2`, d6b4c75, fp16) ended on 2026-11-17 at 07:10.
+  g and j had stopped on the loss-scale guard (step 11,140, epoch 24, and step 4,485, epoch
+  9); a `--resume` of both stopped at the same step; both were then trained again from
+  scratch in float32 (`--amp off`, unit `ksmech-ood-phase2fp32`, same commit and options, log
+  `data/models/pmechdb/ood_phase2_fp32_2026-11-17.log`). The fp16 remains are
+  `ood2_{g,j}_s0_fp16_truncated`; `ood2_g_s0` and `ood2_j_s0` are the float32 runs. So g and j
+  are float32 and h and i fp16: 467-482 s an epoch against 256-283. One seed everywhere.
+- **Why g and j stopped: the pooled sum ran in float16.** `OrbitalPairAnchor.pooled` casts
+  its inputs to float32, but autocast runs an `einsum` in its own dtype whatever the inputs,
+  so the two sums of `_pool` were float16. A float16 sum holds nothing under 6e-8 of its
+  largest term: every atom pair more than about 17 nats under the best one came out at -inf
+  (540 of 882 logits of an ordinary ReactMech sample at g's `best.pt`), the finite ones up to
+  2 nats off, and a sample whose label is one of the lost pairs has a NaN loss and a NaN
+  gradient on every parameter. Early in training the range of phi is small and nothing is
+  lost; as the head sharpens such samples appear, their batches are skipped, the loss scale
+  halves each time and the guard stops the run. The same defect is in the reports: scored in
+  fp16, g's float32 checkpoint has a NaN likelihood on 10 of 911 ReactMech samples and 3 of
+  1,238 PMechDB ones, j on 48 and 14, h on 8 and 0 (their ranks count as misses), and h's
+  validation NLL is NaN in 14 of its last 15 epochs. In float32 the same checkpoint and
+  samples are finite (the one sample looked at has its label 19 nats down). **Fix:** the sum is taken with autocast off; on the GPU
+  under fp16 the logits are then finite, within 0.02 of float32, the gradients finite
+  (`tests/test_model_local.py::test_the_pooled_sum_stays_in_float32_under_autocast`, which
+  fails on the code as it was). What this does to the numbers below: g and j were trained in
+  float32 and are clean in training; their `ksmech-eval ood` reports and all of h carry the
+  defect. Over the ten epochs both g runs share (14-23) the fp16 one is 1.4 points lower on
+  PMechDB val top-1 (59.0 against 60.4) and 1.1 on ReactMech (43.9 against 45.0), inside the
+  epoch-to-epoch spread: the defect is not what separates the heads. The reports were not
+  rewritten with the fix.
+- **Phase 1, the joint arms** (PMechDB + ReactMech, 17,658 training samples, the ReactMech
+  class acid-halide held out as the test part, `--eval-test`; b is phase 1's arm trained on
+  PMechDB alone, scored on the same test part; mean of epochs 20-29 with the standard
+  deviation over those epochs, and `ksmech-eval ood` at `best.pt`):
+
+  | | b PMechDB only | e joint | f joint, `--balance-power 0.5` |
+  |---|---|---|---|
+  | best epoch | 15 | 23 | 25 |
+  | held-out class (377) top-1 / top-5 at best | 93.6 / 98.7 | 98.9 / 100.0 | 98.7 / 100.0 |
+  | held-out class, greedy R exact at best | 84.9 | 98.9 | 97.9 |
+  | held-out class top-1, epochs 20-29 | | 98.9 (0.3) | 98.4 (0.5) |
+  | ReactMech val, the other classes (855), top-1 | | 96.4 (0.3) | 96.0 (0.5) |
+  | PMechDB val top-1, epochs 20-29 | 65.4 (0.3) | 67.0 (0.5) | 65.5 (0.5) |
+  | PMechDB val top-5, epochs 20-29 | 91.1 (0.3) | 88.3 (1.0) | 88.4 (1.0) |
+  | PMechDB test (1,187) top-1, epochs 20-29 | | 68.9 (0.3) | 72.1 (0.9) |
+  | held-out samples by their signature's count in training: >= 20 / 1-19 / 0 | 268 / 106 / 3 | 377 / 0 / 0 | 377 / 0 / 0 |
+  | Lewis channels permuted, held-out class: top-1 change | -69.2 | -75.3 | -82.2 |
+  | gap group permuted, held-out class | -1.6 | 0.0 | 0.0 |
+
+  - **This held-out class measures nothing.** A model that never saw ReactMech already ranks
+    it at 93.6%, and every one of its 377 steps has an edit signature the joint training part
+    holds at least 20 times. Leaving one ReactMech class out, at least this one, is not a step
+    out of distribution, so e and f cannot say whether a joint model generalizes; a test of
+    that needs a source neither part trains on (the human benchmark, mech-USPTO-31K) or a
+    class chosen for signatures the rest does not hold.
+  - **Joint training does not lower PMechDB top-1**: 67.0 against 65.4 on val; top-5 is 2.8
+    lower (88.3 against 91.1). ReactMech's own validation steps are then at 96.4, against
+    53-58 for the models that never saw the source (not the same validation part: the
+    molecule split's there, the other classes' here). Having the source in training moves it
+    by about 40 points where no switch of phase 1 moved it by 3.
+  - **Balancing by signature shows no effect here**: within a point on the held-out class and
+    on ReactMech val, 1.5 points lower on PMechDB val and 3.2 higher on PMechDB test. Not
+    read as a gain or a loss; the test it was meant for (signatures absent from training) is
+    the one this split does not make.
+  - The joint models lean on the Lewis channels more than b does and on the orbital-pair gap
+    group not at all.
+- **Phase 2, the arms** (PMechDB molecule, 10,011 training samples, ReactMech molecule val
+  scored every epoch, against phase 1's b and d; i differs from d by the attention scope and
+  by the formal-charge embedding):
+
+  | | b | d | g `local` | h pool attention | i pointer head | j E_Z and charge back |
+  |---|---|---|---|---|---|---|
+  | attention | pool | pool | molecule | pool | molecule | molecule |
+  | anchor head | pointer | pointer | orbital pairs | orbital pairs | pointer | orbital pairs |
+  | E_Z / formal charge | yes / yes | no / yes | no / no | no / no | no / no | yes / yes |
+  | precision in training | fp16 | fp16 | float32 | fp16 (defect) | fp16 | float32 |
+  | best epoch | 15 | 15 | 17 | 17 | 25 | 24 |
+  | PMechDB val top-1, epochs 20-29 | 65.4 (0.3) | 65.3 (0.7) | 60.8 (0.6) | 61.4 (0.6) | 65.5 (0.3) | 63.9 (0.4) |
+  | PMechDB val top-5 | 91.1 (0.3) | 90.3 (0.5) | 84.2 (0.8) | 82.6 (0.5) | 88.0 (0.7) | 85.1 (0.4) |
+  | PMechDB val greedy R exact | 61.9 | 60.7 | 56.5 | 57.4 | 60.4 | 56.8 |
+  | ReactMech val top-1, epochs 20-29 | 57.7 (1.1) | 53.4 (0.8) | 45.9 (1.2) | 44.3 (1.8) | 55.9 (0.4) | 45.1 (0.8) |
+  | ReactMech val top-5 | 78.7 (0.4) | 79.4 (0.6) | 73.8 (1.2) | 69.1 (1.2) | 82.0 (0.3) | 71.6 (0.7) |
+  | ReactMech val greedy R exact | 51.4 | 47.3 | 36.2 | 37.4 | 47.8 | 39.7 |
+  | ReactMech anchor NLL, epochs 20-29 | 3.36 | 3.26 | 4.10 | NaN | 3.15 | 4.58 |
+  | training anchor NLL, last epoch | 0.017 | | 0.277 | 0.292 | 0.017 | 0.309 |
+  | fragment order: top anchor changed | 0% | 0% | 0% | 0% | 0% | 0% |
+  | gap group permuted: top-1 change, PMechDB / ReactMech | -1.5 / -1.6 | -0.3 / -0.9 | -14.0 / -12.5 | -14.2 / -11.3 | -0.1 / 0.0 | -13.9 / -7.5 |
+  | Lewis channels permuted | -31.2 / -42.2 | -26.0 / -33.8 | -6.1 / -12.5 | -6.9 / -14.4 | -21.2 / -32.6 | -0.2 / +1.5 |
+  | distances permuted | -19.1 / -18.7 | -25.1 / -24.8 | -16.2 / -24.3 | -18.0 / -17.8 | -39.1 / -42.4 | -13.0 / -4.8 |
+  | ReactMech val, signature never in training (143) | 44.8 | 46.9 | 41.3 | 39.2 | 37.8 | 23.1 |
+
+  - **The orbital-pair head does what it was built for and ranks worse.** With it the
+    ranking reads the orbital-pair features (permuting the gap group costs 11 to 14 points,
+    against at most 1.6 with the pointer) and far less the Lewis channels. But it is 4 to 5
+    points lower in distribution and 10 to 12 lower on ReactMech than the pointer (g against
+    i: the same inputs and attention, only the head), in float32. The transfer gap did not
+    close: PMechDB val minus ReactMech val is 8 to 10 points with the pointer (b, i) and 15
+    with this head (g).
+  - **It does not fit the training part.** Its training anchor NLL ends at 0.28-0.31 against
+    0.017 for the pointer (the mean of the steps logged in the last epoch): as a geometric
+    mean the label keeps about three quarters of the probability where the pointer gives it
+    98%. That is the limit written down at the build ("two centres of one
+    orbital share its score and differ by their centre weights only"): the head chooses an
+    orbital pair and the centre weights, which are not learned, say which atoms. Whether that
+    is the whole of the deficit was not measured (an oracle over orbital pairs would say).
+  - **The molecule-scoped attention is free.** With the pointer head (i) PMechDB val is 65.5
+    against 65.3-65.4, and ReactMech is the best of all the arms on top-5 (82.0 against 78.7
+    and 79.4) and on the likelihood (3.15), top-1 55.9 between b's 57.7 and d's 53.4. One
+    seed, and the arms differ by the formal-charge embedding as well, so "not worse" is what
+    is read, not a gain. Every molecule is then encoded by itself, which is what a cache of
+    encodings per species and a decoder over pathways need. With the orbital-pair head the
+    pool's attention (h) is not better than the molecule's (g) either, with h's defect in
+    mind.
+  - **E_Z and the formal charge help the orbital-pair head in distribution only**: j against
+    g is +3.1 on PMechDB val and -0.8 / -2.2 on ReactMech top-1 / top-5, and on the ReactMech
+    steps whose signature PMechDB does not hold it is 23.1% against 41.3% (143 samples, about
+    4 points of standard error each).
+  - As in phase 1, ReactMech top-1 is flat from epoch 10 on in every arm while its NLL
+    climbs (g: 2.3 at epoch 7, 4.5 at epoch 29).
+- **Verdict on phase 2.** The preset `local` as built (g) is not the robust model: it is
+  refused as the base. Its two halves come apart: the locality of the encoder is kept (arm
+  i's configuration: molecule-scoped attention, no fragment, E_Z or formal-charge embedding,
+  the pointer head), the orbital-pair head is not, in this form. The head stays in the code
+  behind its switch, with the float16 fix, as the starting point of a head with a learned
+  choice of centre; the preset is not changed until the user decides.
+- **What the two phases say together.** From PMechDB, ReactMech sits at 53-58% top-1 and
+  78-82% top-5 whatever was switched (order of the reactants, element, charge, attention
+  scope), and PMechDB itself in distribution at 65-67%; the head that reads the physics is
+  below both. A second source in training puts that source at 96% and takes nothing from the
+  first. Nothing measured here says an architecture switch of this kind buys the transfer;
+  the coverage of the data does, and the test of a joint model on a third source is missing.
+- **Not done.** No second seed. The `ksmech-eval ood` reports of g, h and j were not
+  rewritten with the float16 fix (their NaN samples count as misses: 10 of 911 for g). h was
+  not trained again. The oracle over orbital pairs was not computed. The class of the
+  leave-one-out was not replaced by a harder one.
+
+## 2026-11-17: the human benchmark as the third source, `ksmech-network evaluate --walk`
+
+- **Why.** The phase-1 and phase-2 entries (above) leave one question open: does a model
+  trained on more data transfer to a source no training part holds? The user chose that test
+  ("Test su terza sorgente"). The human benchmark (350 Clayden pathways, 1,034 steps,
+  evaluation only) is that source; mech-USPTO-31K has no loader yet (`data.mech_uspto` raises
+  NotImplementedError), so it was not used.
+- **The measure: a walk, not a search** (`network.walk`, `ksmech-network evaluate --walk`).
+  From the case's reactants, each recorded step target in order: the pool is expanded once
+  (the decoder's beam, 5 anchors x 5 completions, as `search` uses), its distinct children
+  ranked by log P, the step's rank is the place of the first child that holds the target's
+  species (EXACT, identity keys), and the walk moves to that child, so the by-products are the
+  model's own. It stops at a target no child holds (NOT_PROPOSED), at a pool that cannot be
+  expanded (EXPAND_FAILED:MISSING_TOKENS: a by-product no QM batch has seen) or at a target the
+  benchmark lacks. The search towards the product (`evaluate` without `--walk`) answers another
+  question, with a node budget and a heuristic; the first step's rank is the one number here
+  that is a plain top-k over the cases, every later rank is conditional on the recorded
+  pathway followed so far. 334 of the 350 cases have a first target to rank (the others:
+  target missing or unreadable, or the first expansion failed, 6 to 8 per model). A pool has a
+  median of 11-13 distinct children. The reports sit beside each checkpoint as
+  `network_walk_human_benchmark.json`, written from d6b4c75 with this entry's code
+  uncommitted (`code_dirty` in their header). CPU, about 25 minutes per model.
+- **How much of the benchmark is in training** (identity key v2; `data.benchmark_checks`
+  against PMechDB's molecule training part, the same code against all 10,000 steps of the
+  ReactMech store e and f read):
+  a step of PMechDB's training part makes the first target of 62 cases, a ReactMech step that
+  of 11 (10 of them also in PMechDB); 271 cases have a first step neither source makes. Of the
+  1,359 non-trivial species 308 are in PMechDB, 93 in ReactMech.
+- **Numbers** (first step, 334 cases; "unseen" = the 271 whose first step no training step
+  makes; one seed each):
+
+  | | trained on | first step top-1 / top-3 / top-5 | unseen first step top-1 / top-5 | every step ranked: n, top-1 | pathways walked whole (top-1 at every step) |
+  |---|---|---|---|---|---|
+  | b | PMechDB | 62.3 / 81.4 / 84.1 | 60.9 / 83.0 | 640, 62.7 | 40.3% (20.9%) |
+  | i molecule attention, pointer | PMechDB | 62.0 / 82.3 / 85.9 | 59.4 / 84.1 | 667, 61.8 | 44.0% (21.7%) |
+  | g preset `local` | PMechDB | 57.2 / 77.8 / 79.3 | 55.0 / 76.8 | 618, 58.3 | 39.1% (18.6%) |
+  | e | PMechDB + ReactMech | 68.0 / 85.9 / 87.4 | 65.3 / 85.6 | 645, 68.4 | 45.1% (25.4%) |
+  | f e, `--balance-power 0.5` | PMechDB + ReactMech | 67.7 / 85.0 / 87.7 | 65.3 / 86.7 | 677, 67.1 | 48.3% (26.3%) |
+  | rm_sub30k_s0 | ReactMech (30k) | 25.1 / 45.8 / 51.2 | 24.7 / 49.8 | 459, 28.1 | 20.3% (8.9%) |
+
+  Paired on the first step's top-1 (cases one model ranks first and the other not, exact
+  two-sided sign test): e against b 50 to 31 (p = 0.045), e against i 54 to 34 (p = 0.042), f
+  against b 42 to 24 (p = 0.036), i against b 45 to 46, g against i 20 to 36 (p = 0.044), e
+  against f 33 to 32. On the 271 unseen first steps alone e against b is 39 to 27 (p = 0.18)
+  and e against i 45 to 29 (p = 0.08).
+- **What it says.**
+  - **The joint model transfers better than either single-source model**: 6 points of top-1
+    above the PMechDB-only arms on the whole benchmark, 4.4 to 5.9 on the steps neither source
+    makes (not significant there on its own, one seed), and four times the ReactMech-only
+    model's 25% (rm_sub30k_s0: 30,000 training samples of the full ReactMech v19 store, built in
+    the worktree rm-v19, scaffold split; its overlap with the benchmark was not counted, the
+    count above is against the 10,000-step store of the main checkout that e and f read).
+    Why ReactMech alone teaches so little of the benchmark was not looked into.
+  - **The benchmark sits nearer PMechDB than ReactMech** (62 against 11 first steps made), so
+    "joint" here means "PMechDB plus something" more than a balance of two sources. The gain of
+    e and f is still there on the unseen first steps.
+  - **Balancing by signature (f) changes nothing at the first step** and walks a few more
+    pathways whole (48.3 against 45.1%); not read as a gain.
+  - **Phase 2 is confirmed on a third source.** The molecule-scoped attention (i) is b's
+    equal; the orbital-pair head (g) is 5 points under i (p = 0.044), as on ReactMech.
+  - Walking whole pathways is limited by the QM coverage as much as by the model: 94 to 106
+    walks per model stop on a by-product without tokens, 64 to 104 on a target not proposed
+    (195 for the ReactMech model). `--build-missing` (GFN2 per species) would lift the first
+    kind; it was not run.
+- **Verdict.** More and more varied mechanistic data is what moves the transfer; nothing
+  measured in phases 1 and 2 does it by architecture. The base for what follows is the joint
+  configuration (e or f) with the encoder of arm i (molecule-scoped attention, no fragment,
+  E_Z or formal-charge embedding, the pointer head), which was not trained jointly: that run
+  is the next arm if the user agrees. The human benchmark's walk is the out-of-distribution
+  number to report from now on, beside PMechDB val.
+- **Not done.** One seed per model. No walk with `--build-missing`. No search (`evaluate`
+  without `--walk`) on the full benchmark for these models. The joint model with i's encoder.
+  mech-USPTO-31K's loader.
+
+## 2026-11-18: arm k, the joint data with arm i's encoder
+
+- **What ran.** `ood2_k_s0` (arm k of `scripts/ood_phase2.sh`): e's data, split and options
+  (PMechDB molecule + ReactMech `locoall-acid-halide`, fp16, the speed options of e) with arm
+  i's flags (preset `local`, `--anchor-head pointer`: molecule-scoped attention, no fragment
+  index, E_Z never read, no formal-charge embedding). Trained 2026-11-17 21:31 to 2026-11-18
+  02:49 from the clean worktree at d6b4c75, no non-finite batch; best epoch 15 (e: 23). Read
+  with `scripts/ood_phase2.sh ood k` (clean headers) and the human-benchmark walk of the entry
+  above (this checkout, `network.walk` uncommitted). k was run without `--eval-test`, e with
+  it; the held-out class is read from the ood report.
+- **Numbers** (one seed each; validation top-1 the mean of epochs 20-29, the rest `best.pt`):
+
+  | | PMechDB val (mean 20-29) | ReactMech val | ood: PMechDB closed_base top-1 / top-5 / anchor NLL | acid-halide test | human benchmark first step top-1 / top-5 | unseen first step top-1 / top-5 |
+  |---|---|---|---|---|---|---|
+  | e | 66.9 | 96.4 | 67.6 / 88.9 / 2.30 | 98.9 | 68.0 / 87.4 | 65.3 / 85.6 |
+  | k | 65.7 | 94.9 | 67.9 / 90.4 / 1.46 | 98.1 | 64.1 / 87.4 | 60.9 / 86.0 |
+  | b (PMechDB) | 65.3 | 57.8 | 66.3 / - / - | 93.6 | 62.3 / 84.1 | 60.9 / 83.0 |
+  | i (PMechDB) | 65.4 | 56.0 | 66.1 / - / - | - | 62.0 / 85.9 | 59.4 / 84.1 |
+
+  Paired first-step top-1 on the human benchmark: e against k 43 to 30 (p = 0.16), on the 271
+  unseen first steps 37 to 25 (p = 0.16); k against i 43 to 36 (p = 0.5), k against b 50 to 44
+  (p = 0.6). The fragment-order probe changes nothing for either (0.0). Permutation of the
+  pair-level inputs (top-1 drop on PMechDB closed_base): k, like i, leans on the distances
+  (-38) and less on the Lewis channels of the atom pairs (-17); e, like b, the other way round
+  (-19 and -35). The orbital-pair groups move nothing in any of the four (within 1.5 points).
+- **What it says.**
+  - In distribution k is e's equal (top-1 67.9 against 67.6 on the ood baseline, a lower NLL,
+    a higher top-5).
+  - On the third source the joint data lift k less than e: k is 2 points above i at the first
+    step (p = 0.5) where e is 6 above b. The gap e - k (3.9 points, 4.4 on the unseen first
+    steps) is not significant with one seed (p = 0.16), and top-5 is the same (87.4).
+  - The local encoder reads the problem differently (distances first, the Lewis channels
+    second), not more through the orbital-pair features.
+- **Verdict.** The local encoder is not adopted as the base on accuracy: it buys nothing on the
+  third source and may cost a few points of top-1 there. e stays the reference. Whether the gap
+  is real needs second seeds of e and k (about 5.5 GPU hours each); its structural gains
+  (each molecule encoded alone, no element or charge label) are kept as an option, not a
+  default.
+
+## 2026-11-19: arms e and k on two seeds: the human benchmark's seed noise
+
+- **What ran.** `ood1_e_s1` and `ood2_k_s1`: e and k again with seed 1, the same code (clean
+  worktree at d6b4c75), options and data, one after the other on the RX 6600 XT (unit
+  `ksmech-seed1-e-k`, 2026-11-18 10:01 to 21:03, no non-finite batch), then `ksmech-eval ood`
+  and the human-benchmark walk as for seed 0.
+- **Numbers** (validation the mean of epochs 20-29; the rest `best.pt`; "unseen" here = the
+  272 first steps no step of PMechDB's training part makes: the ReactMech overlap of the
+  2026-11-17 entry, one case more, was not recomputed):
+
+  | | PMechDB val top-1 / top-5 | ReactMech val top-1 | ood PMechDB closed_base top-1 / NLL | acid-halide test | human benchmark first step top-1 / top-5 | unseen first step top-1 |
+  |---|---|---|---|---|---|---|
+  | e s0 | 66.9 / 88.3 | 96.4 | 67.6 / 2.30 | 98.9 | 68.0 / 87.4 | 65.4 |
+  | e s1 | 65.8 / 90.5 | 96.5 | 66.3 / 2.24 | 99.2 | 64.7 / 87.1 | 61.8 |
+  | k s0 | 65.7 / 90.3 | 94.9 | 67.9 / 1.46 | 98.1 | 64.1 / 87.4 | 61.0 |
+  | k s1 | 64.4 / 88.2 | 95.1 | 65.0 / 2.47 | 97.1 | 70.4 / 88.9 | 66.9 |
+  | e, mean of seeds | 66.4 | 96.5 | 67.0 | 99.1 | 66.3 | 63.6 |
+  | k, mean of seeds | 65.1 | 95.0 | 66.5 | 97.6 | 67.2 | 64.0 |
+
+  Paired first-step top-1 (exact two-sided sign test): seed against seed, k s0 against k s1
+  22 to 43 (p = 0.013), e s0 against e s1 34 to 23 (p = 0.19); the four e-k pairs run from e
+  ahead 43 to 30 (s0-s0, p = 0.16) to k ahead 48 to 29 (e s1 - k s1, p = 0.040). Per case,
+  hits summed over the two seeds: e more 54, k more 55; both seeds right, e only 38 and k
+  only 37 (p = 1); on the unseen first steps 33 against 31.
+- **What it says.**
+  - On the third source e and k are the same model: 66.3 against 67.2 over two seeds, no
+    paired difference. The 3.9 points of the 2026-11-18 entry were seed noise.
+  - Two seeds of one configuration differ by up to 6.3 points of first-step top-1 on the
+    human benchmark, and significantly by the paired test (k: p = 0.013). A single-seed
+    difference there below about 6 points is not a reading, and the paired sign test between
+    two single runs does not guard against it: it tests the cases, not the training.
+  - This also weakens the 2026-11-17 reading that the joint data lift the transfer (e 68.0
+    against b 62.3 and i 62.0, p ~ 0.04, one seed each). The four joint runs now average
+    66.8 (64.1 to 70.4) against 62.2 for the two PMechDB-only runs, which still points the
+    same way, but b and i have one seed each.
+  - In distribution, k is about one point under e on both validation sets and the
+    acid-halide class, within the seeds' spread on PMechDB (1.1 to 1.3 between seeds).
+- **Verdict.** The 2026-11-18 verdict is withdrawn: the local encoder (arm i's flags) costs
+  nothing measurable on the third source with joint data, so between e and k the choice is
+  structural, not one of accuracy. Readings on the human benchmark need at least two seeds
+  per arm from now on. Next, if the user agrees: second seeds of b and i (PMechDB only,
+  about 3 GPU hours each) to tell whether the joint data's gain holds over seeds.
+
+## 2026-11-19: CUDA is the default torch group (RTX 4080 SUPER)
+
+- The host's RX 6600 XT was replaced by an RTX 4080 SUPER (16 GB, sm_89). `default-groups` in
+  pyproject.toml now holds `cuda` (torch 2.14.1+cu130) instead of `rocm`; the lock is
+  unchanged (both groups were locked), and an AMD host runs `uv sync --no-group cuda --group
+  rocm` with `UV_NO_SYNC=1`. Without the switch every `uv run`, the commit hook's included,
+  would have put the ROCm build back over the CUDA one.
+- Runs from the 4080 on use the CUDA speed options of `docs/model_impl.md` (`--compile
+  --half-pair-norm --split-pair-init --pair-linear-splitk --last-update-atoms --no-checkpoint
+  --pin-memory`): about 160 samples/s on PMechDB against about 30 on the RX card, 50 s an
+  epoch. Comparisons with runs of the RX card carry the hardware confound of P9 step 9;
+  the second seeds of b and i keep `--amp fp16` (seed 0's precision) to narrow it.
+
+## 2026-11-19: arms b and i on two seeds: the joint data's gain holds
+
+- **What ran.** `ood1_b_s1` and `ood2_i_s1`: b and i again with seed 1, from the clean worktree
+  at d6b4c75, on the RTX 4080 SUPER (`--amp fp16` as seed 0, the CUDA speed options of the
+  entry above; unit `ksmech-seed1-b-i`, 18:30 to 19:58, about 50 s an epoch, no non-finite
+  batch), then `ksmech-eval ood` and the human-benchmark walk. Their seed 0 and both seeds of
+  e and k ran on the RX 6600 XT: seed 1 of b and i carries the hardware confound.
+- **Numbers** (human benchmark, first step top-1, 334 cases; "unseen" as in the entry on e
+  and k, 272 cases; validation = `ksmech-eval ood` on PMechDB closed_base, `best.pt`):
+
+  | arm | trained on | seed 0 | seed 1 | mean | unseen, mean | PMechDB val top-1, s0 / s1 |
+  |---|---|---|---|---|---|---|
+  | b | PMechDB | 62.3 | 57.5 | 59.9 | 57.9 | 66.3 / 68.0 |
+  | i | PMechDB | 62.0 | 62.9 | 62.4 | 60.1 | 66.1 / 66.6 |
+  | e | PMechDB + ReactMech | 68.0 | 64.7 | 66.3 | 63.6 | 67.6 / 66.3 |
+  | k | PMechDB + ReactMech | 64.1 | 70.4 | 67.2 | 64.0 | 67.9 / 65.0 |
+
+  - **Over runs:** every one of the four joint runs (64.1 to 70.4) is above every one of the
+    four PMechDB-only runs (57.5 to 62.9). By chance that has probability 1/70 = 0.014 (exact
+    permutation, one-sided). Joint mean 66.8 against 61.2, +5.6 points; on the unseen first
+    steps 63.8 against 59.0, +4.8, where the lowest joint run ties the highest PMechDB-only
+    one (61.0).
+  - **Over cases** (hits summed over the seeds of each side, exact two-sided sign test): joint
+    against PMechDB-only 94 cases to 66 (p = 0.033), unseen 74 to 57 (p = 0.16); e against b,
+    both seeds right, 59 to 28 (p = 0.001); k against i 50 to 29 (p = 0.024); e against i 55
+    to 33 (p = 0.025); b against i 37 to 46 (p = 0.38); e against k 38 to 37.
+  - **Seed against seed:** b 46 to 30 (p = 0.085), i 36 to 39, e 34 to 23, k 22 to 43
+    (p = 0.013).
+- **What it says.**
+  - **The joint data's gain on the third source holds on two seeds per arm**: about 5.6 points
+    of first-step top-1, and all four joint runs above all four PMechDB-only ones. This
+    confirms the 2026-11-17 verdict that data coverage, not an architecture switch, moves the
+    transfer; the single-seed numbers of that day were right in direction, not in size
+    (6 points then, 5.6 now).
+  - **The architecture changes nothing measurable**: b against i and e against k are equal on
+    the third source with two seeds each, and all eight runs are within 3 points on PMechDB
+    val (65.0 to 68.0).
+  - **In distribution the joint data cost nothing**: PMechDB val top-1 65.0 to 68.0 on both
+    sides.
+  - The hardware confound is not visible in the numbers: b's seed 1 is the lowest PMechDB-only
+    run and i's the highest.
+- **Verdict.** The lever for out-of-distribution transfer is more and more varied mechanistic
+  training data. For further arms, the joint configuration is the base; the choice between
+  e's and k's encoder is structural (k: each molecule encoded alone, no element or charge
+  label). Two seeds per arm are the minimum for a reading on the human benchmark.
