@@ -49,6 +49,38 @@ def test_a_case_scores_arrival_recorded_rank_and_step_targets():
     assert (s["recorded_top1"], s["recorded_top3"]) == (0.0, 1.0)
 
 
+def test_the_walk_ranks_each_step_target_from_the_pool_it_has_reached():
+    from ksmech.network.walk import ranked_children, walk_case, walk_summary
+
+    detour = walk_case(TOY, Case("w1", START, "CO", None, ("[CH2-]Cl", "CO"), "benchmark"))
+    assert [s["rank"] for s in detour["steps"]] == [2, 1] and detour["stop"] is None
+    direct = walk_case(TOY, Case("w2", START, "CO", None, ("CO",), "benchmark"))
+    assert direct["steps"] == [{"rank": 1, "held": False, "children": 2}]
+    held = walk_case(TOY, Case("w3", START, "CO", None, ("CCl", "CO"), "benchmark"))
+    assert held["steps"][0] == {"rank": None, "held": True} and held["steps"][1]["rank"] == 1
+    lost = walk_case(TOY, Case("w4", START, "CO", None, ("CCO", "CO"), "benchmark"))
+    assert (lost["stop"], [s["rank"] for s in lost["steps"]]) == ("NOT_PROPOSED", [None])
+    gap = walk_case(TOY, Case("w5", START, "CO", None, ("[CH2-]Cl", None, "CO"), "benchmark"))
+    assert (gap["stop"], len(gap["steps"])) == ("STEP_TARGET_MISSING", 1)
+    dead = ToyExpander({START: [(DETOUR, -1.0)]})
+    dead.expand = lambda state, inner=dead.expand: (
+        inner(state) if state.key == pool_state(START).key else Expansion([], Counter(), "X")
+    )
+    stuck = walk_case(dead, Case("w6", START, "CO", None, ("[CH2-]Cl", "CO"), "benchmark"))
+    assert (stuck["stop"], len(stuck["steps"])) == ("EXPAND_FAILED:X", 1)
+    bad = walk_case(TOY, Case("w7", "C(", "CO", None, ("CO",), "benchmark"))
+    twice = Expansion([Proposal(pool_state(SN2), -2.0), Proposal(pool_state(DETOUR), -1.0),
+                       Proposal(pool_state(SN2), -0.5)])  # fmt: skip
+    best_first = [pool_state(x).key for x in (SN2, DETOUR)]
+    assert [c.key for c in ranked_children(TOY, twice)] == best_first
+    s = walk_summary([detour, direct, held, lost, gap, stuck, bad])
+    assert (s["n"], s["failed"], s["steps_held"], s["steps_unreached"]) == (6, 1, 1, 4)
+    assert s["first_step"] == {"n": 5, "top1": 2 / 5, "top3": 4 / 5, "top5": 4 / 5}
+    assert s["steps"] == {"n": 7, "top1": 4 / 7, "top3": 6 / 7, "top5": 6 / 7}
+    assert (s["walked"], s["walked_top1"], s["walked_top3"]) == (3 / 6, 2 / 6, 3 / 6)
+    assert s["stops"] == {"EXPAND_FAILED:X": 1, "NOT_PROPOSED": 1, "STEP_TARGET_MISSING": 1}
+
+
 def test_recorded_rank_matches_the_whole_sequence():
     class Res:
         class search:

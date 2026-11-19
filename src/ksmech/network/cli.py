@@ -110,6 +110,12 @@ def _evaluate_parser(sub) -> None:
     e.add_argument("--split", default="molecule", help="the split whose parts label the chains")
     e.add_argument("--part", default="all", help="only the cases of this part (all: every one)")
     e.add_argument("--limit", type=int, help="the first N cases")
+    e.add_argument(
+        "--walk",
+        action="store_true",
+        help="no search: each recorded step target "
+        "ranked among the children of the pool the walk has reached (network.walk)",
+    )
     e.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     e.add_argument("--out", type=Path, help="the result (JSON)")
 
@@ -222,6 +228,8 @@ def cmd_evaluate(args, console: Console) -> int:
     cases = _cases(args, counts)
     ckpt, expander, cfg = _expander(args)
     keys = ("set", "run", "run_source", "checkpoint", "split", "part", "limit", *SEARCH_KEYS)
+    if args.walk:
+        return _walk(args, console, ckpt, expander, cases, counts)
     if args.backward_run:
         return bidirectional_cli.cmd_evaluate(args, console, ckpt, expander, cfg, cases, counts,
                                               keys)  # fmt: skip
@@ -240,6 +248,30 @@ def cmd_evaluate(args, console: Console) -> int:
     tag = args.set + (f"_{args.part}" if args.part != "all" else "")
     tag += f"_n{args.limit}" if args.limit is not None else ""
     out = args.out or ckpt.parent / f"network_eval_{tag}.json"
+    prov.write_json(out, {"summary": report, "cases": rows}, header)
+    console.print(f"wrote {out}")
+    return 0
+
+
+def _walk(args, console: Console, ckpt, expander, cases, counts) -> int:
+    """`evaluate --walk`: `network.walk` over the cases, `network_walk_<tag>.json`."""
+    from ksmech.network.walk import walk_case, walk_summary
+
+    rows = []
+    for i, case in enumerate(cases, start=1):
+        rows.append(walk_case(expander, case))
+        ranks = [s["rank"] for s in rows[-1].get("steps", [])]
+        console.print(f"case {i} / {len(cases)} {case.case_id}: ranks {ranks}, "
+                      f"stop {rows[-1].get('stop')}")  # fmt: skip
+    report = walk_summary(rows) | {"cases_skipped": dict(counts)}
+    console.print(report)
+    keys = ("set", "run", "run_source", "checkpoint", "split", "part", "limit", "beam",
+            "build_missing")  # fmt: skip
+    header = prov.stamp("network_walk", SEARCH_VERSION, prov.file_input(ckpt),
+                        {k: getattr(args, k) for k in keys})  # fmt: skip
+    tag = args.set + (f"_{args.part}" if args.part != "all" else "")
+    tag += f"_n{args.limit}" if args.limit is not None else ""
+    out = args.out or ckpt.parent / f"network_walk_{tag}.json"
     prov.write_json(out, {"summary": report, "cases": rows}, header)
     console.print(f"wrote {out}")
     return 0
