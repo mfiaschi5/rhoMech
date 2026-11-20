@@ -10491,3 +10491,139 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
 - **Limit.** One root for every source of a run: a joint run reading the full ReactMech store
   and PMechDB needs `data/processed_full/pmechdb` (a symlink to `../processed/pmechdb` serves).
   Artifacts written under the new root record that root (`file:data/processed_full/...`).
+
+## 2026-11-19: round 3, the full ReactMech store in RAM and the step on an RTX 4080 SUPER
+
+- **Why.** The next step of the out-of-distribution plan (the user, 2026-11-19: "ReactMech
+  completo, ma prima ottimizza la memoria ... bottleneck sia di memoria che di velocità") is
+  phase 1's arm e on the full ReactMech v19 store. Joint with PMechDB, scaffold split for
+  ReactMech (the molecule split is degenerate on the full store, 2026-11-11): 95,230 training and
+  11,749 validation samples. Measured with the run's options on the 4080 (bf16, `--compile
+  --half-pair-norm --split-pair-init --pair-linear-splitk --last-update-atoms --no-checkpoint`).
+- **Memory, three causes.**
+  - A compact ReactMech sample is 380 KiB resident, 315 of them the packed cells. The training
+    and validation parts would need ~40 GB against 31 GB of RAM. Held as one zlib stream
+    (level 1; level 6 saves 9% more for 2.5x the time) a sample is 144 KiB, and the shards load
+    twice as fast (less to pickle back from the load workers). Inflating costs ~0.8 ms per
+    sample in the DataLoader workers. It is lossless: 500 full-store samples come back bit for
+    bit. Option `--deflate-samples`, on.
+  - The forked DataLoader workers copied the samples' pages. Each write to a reference count
+    copies the page that holds the object (copy on write). Measured on the full data: ~690 MB
+    private per worker after 23% of the first epoch, ~55 KB per sample touched. Over 30 epochs
+    each of four workers touches every sample, ~20 GB in all.
+    - `fit` now packs every part into contiguous pickle buffers (`batching.PackedSamples`, 2,048
+      samples a chunk, each chunk's objects freed and the heap trimmed before the next).
+    - The workers unpickle their own copy (0.16 ms per sample), and the sampler reads the sizes
+      and drawing counts from the pool.
+    - `gc.freeze()` runs before the workers fork.
+    - Option `--pack-samples`, on. A pickle round trip is exact; the batches equal those of the
+      list (test).
+  - `fit_feature_stats` concatenated every training token in float64. That made a ~10 GB peak
+    after loading, and 6 GB of the run went to swap. It now takes one pass, the same sums per
+    sample (`inputs._Moments`). The statistics move by a few ulps (1e-14 relative on 3,000 real
+    samples); bit for bit was not kept, since the order of the float64 sums changes.
+- **Speed.** The step is GPU-bound (90-96% busy), 103 ms per batch of ~16 samples, the backward
+  63% of it. The data loader makes a batch in 47 ms with two workers.
+  - Outside the compiled encoder layers two parts were still eager: the split pair init (sliced
+    in-place sums: CopySlices and AsStrided backwards, ~9 ms a step) and the decoder with the
+    loss (hundreds of small kernels).
+  - `--compile-scope step` compiles both: 103 -> 84 ms per batch on the bench, ~110 -> ~87 ms on
+    the full data, about +20%.
+  - It changes rounding only: in float32, eager against compiled, at most 2e-7 relative on the
+    loss and 1.4e-7 on the gradient norm over 19 joint batches.
+  - It costs a few recompiles in the first epoch: the size-1 and >= 2 variants of the dimensions,
+    and the number of label variants. The token embedding compiled gave nothing and is left eager.
+- **Not changed.**
+  - The cell budget (1.1M): a larger batch is another optimization, not comparable with e and k.
+    `--eval-cell-budget 2200000` is used (rounding only).
+  - Dropping the open-shell pair columns the general preset never reads: `inputs.pooled_own`
+    and `floor_kernels` read `own_g` when it is present, so dropping it would silently change
+    the model.
+  - The start takes ~11 minutes on the full data (load, the pair statistics in one process,
+    packing): once per run.
+
+## 2026-11-20: arm e on the full ReactMech store: more of one source, about 2 points
+
+- **What ran.** `fullrm_e_s0` and `fullrm_e_s1` (`scripts/ood_fullrm.sh`, the next step of
+  `docs/todo.md` chosen by the user on 2026-11-19).
+  - Arm e's flags (`--preset general --no-fragment-embedding --no-resonance-draws`, 30 epochs,
+    `--amp fp16`) on PMechDB molecule + the full ReactMech v19 store, scaffold split.
+  - 95,230 training samples, against e's 17,658: ReactMech's part ~85k against ~7.8k of the
+    10,000-step pilot, PMechDB's unchanged.
+  - Code 80783ad (worktree `claude/rm-full-opt`, `code_dirty` false), RTX 4080 SUPER with the
+    speed options of round 3 (above).
+  - Unit `ksmech-fullrm`, 2026-11-20 00:17 to 12:42: ~10 min an epoch at ~157 samples/s, no
+    non-finite batch, peak RAM ~18.5 GB plus 3 GB of swap. The Triton `CompiledKernel.__del__`
+    "initialization error" lines in the log come from the forked validation workers and are
+    harmless.
+  - Then `ksmech-eval ood` and the human-benchmark walk, as for e and k.
+- **How much of the benchmark the training makes** (identity key v2, `data.benchmark_checks`
+  code against the 85,349 steps of ReactMech's scaffold training part):
+  - a ReactMech step makes the first target of 16 of the 350 cases (the pilot: 11), and only 5
+    of them are not made by PMechDB's training part;
+  - 283 cases have a first step neither training part makes; 267 of them are ranked by every
+    run, the "unseen" column below.
+  - So the benchmark stays near PMechDB: the larger store adds almost no direct overlap.
+- **Numbers** (two seeds per arm; human benchmark first step, the 334 cases every run ranks;
+  ood = PMechDB closed_base val, `best.pt`):
+
+  | arm | trained on | first step top-1, s0 / s1 | mean | unseen (267), mean | top-5, mean | ood PMechDB top-1, s0 / s1 |
+  |---|---|---|---|---|---|---|
+  | b | PMechDB | 62.3 / 57.5 | 59.9 | 57.5 | 85.0 | 66.3 / 68.0 |
+  | i | PMechDB | 62.0 / 62.9 | 62.4 | 59.9 | 85.8 | 66.1 / 66.6 |
+  | e | + ReactMech pilot | 68.0 / 64.7 | 66.3 | 63.1 | 87.3 | 67.6 / 66.3 |
+  | k | + ReactMech pilot | 64.1 / 70.4 | 67.2 | 63.7 | 88.2 | 67.9 / 65.0 |
+  | fullrm_e | + ReactMech full | 68.6 / 69.8 | 69.2 | 66.7 | 88.5 | 65.5 / 70.4 |
+
+  - Every step ranked (n ~ 670): fullrm 67.8 / 66.8 against e 68.4 / 64.3 and k 63.6 / 68.3.
+  - Pathways walked whole: 47.1 / 48.9% against 45.1-48.0%.
+  - ReactMech scaffold test (11,589 samples): top-1 99.2 / 99.2, R exact 98.5 / 97.0.
+  - Of its 131 samples whose edit signature training holds 1-19 times: 79.4 / 95.4.
+- **Tests.**
+  - **Against the pilot's joint runs.** Hits summed over the seeds, exact two-sided sign test:
+    - fullrm against e: 57 cases to 44 (p = 0.23); on the unseen first steps 49 to 37
+      (p = 0.24);
+    - fullrm against k: 63 to 57 (p = 0.65);
+    - both seeds right: 39 to 35 against e, 47 to 42 against k.
+    - Over runs, fullrm's two runs against the four of e and k: one-sided permutation
+      p = 4/15 = 0.27.
+  - **Against PMechDB alone.** fullrm against b: 77 to 35 (p < 0.001); against i: 77 to 46
+    (p = 0.007); on the unseen first steps 62 to 29 and 64 to 41.
+  - **Seed against seed:** 32 to 36 (p = 0.72). The two seeds are 1.2 points apart, against
+    3.3 for e and 6.3 for k.
+- **What it says.**
+  - **More of the same source helps little on the third source.** ReactMech grew elevenfold
+    (the training set fivefold) for +2.4 points of first-step top-1 over the pilot's joint
+    runs (69.2 against 66.8). That is +3.3 on the unseen first steps (66.7 against 63.4).
+    Neither is significant with two seeds a side.
+  - **The direction holds.** Both fullrm runs are above the pilot's joint mean, and on the
+    unseen first steps both are at or above three of its four runs. The first 7.8k ReactMech
+    steps gave +5.6 points over PMechDB alone (2026-11-19). The next 77k give at most half as
+    much again: the gain from one more source of the same kind is levelling off.
+  - **In distribution nothing is lost.** PMechDB closed_base val is 68.0 over the seeds
+    against 66.9 (e) and 66.5 (k). ReactMech's scaffold test is 99%.
+  - **The ranking still reads the Lewis channels, not the orbital pairs.** On PMechDB
+    closed_base, permuting the Lewis block costs 32-40 points of top-1 and the connectivity
+    34-38. The pair gap costs 1.6-2.4 points, as for the pilot's runs (2026-11-15). More data
+    of the same kind did not move what the model reads.
+  - The seeds agree more closely (1.2 points apart). One reading, not tested: a larger
+    training set lowers the seed noise that 2026-11-19 found on the benchmark.
+- **Confounds.**
+  - The split: scaffold on the full store against locoall-acid-halide on the pilot.
+  - The hardware: e and k ran on the RX 6600 XT, and fullrm on the 4080 with
+    `--compile-scope step`, which changes rounding only.
+  - `best.pt` is chosen on the pooled validation part, 89% of it ReactMech.
+- **Not done.**
+  - 4 walks per run stop at their second step on `EXPAND_FAILED:STALE_ARTIFACT`: a by-product
+    whose cached file no longer verifies under 80783ad, new against the runs of d6b4c75. The
+    first-step numbers are not affected. Not looked into.
+  - No walk with `--build-missing`.
+- **Verdict.** The full ReactMech store is the better joint base, a little better on the third
+  source and no worse elsewhere, so it replaces the pilot as the ReactMech part of joint runs.
+  It is not the next lever. What could move the transfer, each the user's choice:
+  - data of another kind: FlowER's polar lines (PM/PC), never ingested by today's rule, so
+    using them means changing that rule;
+  - more PMechDB-like curated steps;
+  - pretraining that makes the orbital-pair channels worth reading (phase 3).
+  mech-USPTO-31K stays an evaluation set (never trained on): its loader would give a fourth
+  source to read these arms on.

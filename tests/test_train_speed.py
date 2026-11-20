@@ -96,6 +96,68 @@ def test_compact_samples_expand_bit_for_bit(samples, tmp_path, monkeypatch):
         store.dense(stripped)
 
 
+def test_deflated_compact_samples_expand_bit_for_bit(samples, tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "SHARD_SIZE", 2)
+    view = _stored(tmp_path, samples)
+    whole = load_samples(view)
+    packed = load_samples(view, compact=True, workers=2)
+    deflated = load_samples(view, compact=True, workers=2, deflate=True)
+    for a, b, c in zip(whole, packed, deflated, strict=True):
+        assert c._cells.arrays is None and c._cells.blob is not None
+        assert c._cells.nbytes() < b._cells.nbytes()
+        dense = store.dense(c)
+        _same_arrays(a, dense)
+        dense.pair_gap_sign[...] = 0  # writable, as a sample read from its shard
+    _same_arrays(DrawnSamples(deflated)[0], DrawnSamples(whole)[0])
+    _same_arrays(load_samples(view, deflate=True)[0], whole[0])  # not compact: no effect
+
+
+def test_feature_stats_in_one_pass_match_the_concatenated_formula(samples):
+    from ksmech.model.inputs import feature_names, select_columns
+
+    stats = fit_feature_stats(iter(samples))  # a stream: one pass
+    names = feature_names()
+    x = np.concatenate(
+        [select_columns(s.orbital_features, s.orbital_columns, names) for s in samples]
+    ).astype(np.float64)
+    mean, std = x.mean(0), x.std(0)
+    free = [k for k, n in enumerate(names) if std[k] > 0 and stats.orbital_std[k] != 1.0]
+    assert free
+    assert np.allclose(stats.orbital_mean[free], mean[free], rtol=1e-12, atol=1e-12)
+    assert np.allclose(stats.orbital_std[free], std[free], rtol=1e-9, atol=1e-12)
+    again = fit_feature_stats(samples)
+    assert np.array_equal(again.atom_mean, stats.atom_mean)
+    assert np.array_equal(again.atom_std, stats.atom_std)
+
+
+def test_packed_samples_come_back_equal_and_free_the_list(samples, tmp_path, monkeypatch):
+    from ksmech.train import batching, loop
+    from ksmech.train.batching import PackedSamples, sample_drawings, sample_sizes
+
+    monkeypatch.setattr(batching, "PACK_CHUNK", 2)  # several chunks
+    view = _stored(tmp_path, samples)
+    whole = load_samples(view)
+    light = load_samples(view, compact=True, deflate=True)
+    sizes, drawings = sample_sizes(light), sample_drawings(light)
+    held = list(light)
+    packed = PackedSamples.take(held)
+    assert held == [] and len(packed) == len(whole) and packed.nbytes() > 0
+    assert np.array_equal(sample_sizes(packed), sizes) and sample_drawings(packed) == drawings
+    for i, a in enumerate(whole):
+        _same_arrays(a, DrawnSamples(packed)[i])
+        assert store.is_light(packed[i]) and packed[i].step_id == a.step_id
+    assert packed[-1].step_id == whole[-1].step_id
+    assert [x.step_id for x in packed] == [x.step_id for x in whole]  # iteration stops
+    with pytest.raises(IndexError):
+        packed[len(whole)]
+    cfg = TrainConfig(workers=0, cell_budget=10**7)
+    a = list(loop.make_loader(packed, cfg, False))
+    b = list(loop.make_loader(whole, cfg, False))
+    assert [x["step_id"] for x in a] == [x["step_id"] for x in b]
+    for x, y in zip(a, b, strict=True):
+        assert torch.equal(x["pair_z"], y["pair_z"]) and torch.equal(x["r_pairs"], y["r_pairs"])
+
+
 def test_the_stream_writer_stores_the_same_samples(samples, tmp_path, monkeypatch):
     monkeypatch.setattr(store, "SHARD_SIZE", 2)
     (tmp_path / "a").mkdir()
@@ -252,6 +314,21 @@ def test_compile_keeps_the_state_dict_keys(samples):
     keys = list(model.state_dict())
     compile_encoder(model)
     assert list(model.state_dict()) == keys
+
+
+def test_the_step_scope_compiles_the_pair_init_and_the_loss_too(samples):
+    from ksmech.model.loss import step_loss
+    from ksmech.train.loop import loss_of
+
+    model = make(samples, split_pair_init=True)
+    keys = list(model.state_dict())
+    assert loss_of(model) is step_loss
+    compile_encoder(model, "step")
+    assert list(model.state_dict()) == keys
+    assert loss_of(model) is model.step_loss and model.step_loss is not step_loss
+    assert "_init_split" in vars(model.encoder)  # the compiled method, on the instance
+    with pytest.raises(ValueError, match="compile scope"):
+        compile_encoder(make(samples), "everything")
 
 
 def test_the_streaming_build_gives_the_same_views_samples_and_statistics(
