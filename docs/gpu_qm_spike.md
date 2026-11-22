@@ -140,3 +140,16 @@ All the work outside the SCF of one energy and gradient costs 0.49 ms per molecu
 atoms and 2.5 ms above 120, 5-10% of the budget from 16 atoms up. Only the smallest bin is
 tight (0.026 of 0.040 ms). The table is in docs/decisions.md, 2026-11-22. What remains is the
 SCF: the eigensolver and one potential evaluation per cycle (0.16 ms at 51-80 atoms).
+
+## Stage 3 result (2026-11-22)
+
+**The batched SCF single point beats cpu12 in every bin.** `ksmech.qm.gpu.scf` runs tblite's
+SCF for a batch: SAD guess, Broyden mixer, convergence criteria. Cycles run in fp32 and finish in
+fp64. With both converged hard it lands on tblite's fixed point (energy 4e-12 Eh, gradient
+9e-11 Eh/Bohr on 48 spike molecules). At production accuracy it lands where tblite does.
+
+A fresh single point with gradient takes 3.9 ms per molecule at 51-80 atoms, against cpu12's
+21 ms (5.4x; the gate was <= 10.5 ms), and 0.7-25 ms from 16 to 200 atoms (3.9-7.8x). Below
+16 atoms it is about even (1.1x). A restarted SCF, as an optimizer runs it, is 20-30% cheaper.
+The table is in docs/decisions.md, 2026-11-22. The end-to-end question, a whole optimized record
+against `ksmech-qm run --workers 12`, is stage 4's (the batched optimizer).

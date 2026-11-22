@@ -228,7 +228,8 @@ class DeviceBatch:
         return b
 
     def set_xyz(self, xyz: torch.Tensor | np.ndarray) -> None:
-        self.t["xyz"].copy_(torch.as_tensor(np.asarray(xyz).reshape(-1)))
+        src = xyz if torch.is_tensor(xyz) else torch.as_tensor(np.asarray(xyz, dtype=float))
+        self.t["xyz"].copy_(src.reshape(-1))
 
     def forward(self) -> None:
         out = KsFwdOut(*map(_ptr, (self.S, self.H0, self.D, self.Q)))

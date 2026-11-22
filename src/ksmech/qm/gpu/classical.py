@@ -227,7 +227,8 @@ class ClassicalBatch:
         return c
 
     def set_xyz(self, xyz) -> None:
-        self.t["xyz"].copy_(torch.as_tensor(np.asarray(xyz).reshape(-1)))
+        src = xyz if torch.is_tensor(xyz) else torch.as_tensor(np.asarray(xyz, dtype=float))
+        self.t["xyz"].copy_(src.reshape(-1))
 
     def geometry(self) -> None:
         """Both CNs, multipole and Born radii, zero-charge D4 C6, ATM energy, surface areas."""

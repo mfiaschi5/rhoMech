@@ -10812,3 +10812,74 @@ Branch `claude/gpu-xtb`.
     work, molecules of <=15 atoms come to 0.064 ms, over their 0.06 ms budget (they go to the
     CPU anyway); from 16 atoms up it is 17-29% of the budget. Stage 3 waits for the user's
     approval.
+
+## 2026-11-22: GPU xTB stage 3: the batched GFN2 SCF single point
+
+Stage 3 of the GPU xTB plan (`docs/gpu_qm_spike.md`), approved by the user after stage 2.
+Branch `claude/gpu-xtb`.
+
+- **What was built.** `ksmech.qm.gpu.scf.SCFBatch`: tblite's SCF for a batch of molecules,
+  with the SAD guess (charge / nat, split over the shells by reference occupation). Each cycle:
+  1. the stage 2 potentials of the input charges and multipoles;
+  2. the Fock matrix (tblite's add_vao_to_h1 and add_vmp_to_h1);
+  3. the Cholesky-orthogonalized eigenproblem on matrices padded to the batch's largest AO
+     count;
+  4. tblite's Fermi filling per spin channel from one set of orbitals, and the entropy;
+  5. Mulliken shell charges and atomic multipoles, the output energy;
+  6. tblite's modified Broyden mixer (damping 0.4, whole history), per molecule.
+
+  The convergence criteria are tblite's: |dE| < 1e-6 accuracy, RMS residual < 2e-5 accuracy.
+  Converged molecules are frozen and no longer diagonalized. `gradient()` gives the energy and
+  gradient at the output density.
+- **Correctness.**
+  - **Fock build.** At tblite's converged charges it gives tblite's orbital energies to 1e-11
+    and its density to 1e-10 (tblite's own residual at accuracy 1e-6).
+  - **Tight tier.** Both sides at accuracy 1e-6, same fixed point. Fixtures (gas and water,
+    CuCl2 and FeBr4- included) and 48 spike molecules: energy within 4e-12 Eh, gradient within
+    8.6e-11 Eh/Bohr.
+  - **Production tier.** Accuracy 1, each against tblite at 1e-6. The GPU's energy lands where
+    tblite's does (the same mixer path: 8.55e-9 against 8.67e-9 at 51-80 atoms). Its gradient
+    is within 2.4e-5 of the converged one, against tblite's 1.7e-5; tblite's lags by using the
+    last input potential. 9-25 cycles, no failures.
+- **Speed.** Single point with gradient, accuracy 1, ALPB water, ms per molecule, best of batches
+  64/256/1024, RTX 4080 SUPER idle (the QMugs pretraining run sharing the GPU had finished):
+
+  | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+  |---|---|---|---|---|---|---|
+  | GPU, fresh (SAD guess) | 0.36 | 0.71 | 1.57 | 3.9 | 9.9 | 25 |
+  | GPU, restarted (previous charges, atoms moved <= 0.01 Bohr) | 0.26 | 0.56 | 1.26 | 3.1 | 7.6 | 17.6 |
+  | cpu12 (spike measurement 1) | 0.4 | 2.8 | 7.6 | 21 | 77 | 119 |
+  | fresh, speed-up over cpu12 | 1.1x | 3.9x | 4.8x | 5.4x | 7.8x | 4.8x |
+  | SCF cycles, mean | 12.6 | 12.5 | 12.7 | 13.0 | 13.4 | 13.8 |
+
+  **Gate passed:** at 51-80 atoms the fresh single point takes 3.9 ms, against at most 10.5 (half
+  of cpu12). The largest batches did not fit in 16 GB (>= 1024 molecules from 51 atoms,
+  >= 256 above 120): the padded multipole integrals (9 n^2 per molecule) dominate memory, so
+  above 120 atoms only batch 64 ran, and that bin's speed-up is batch-limited. cpu12 is one
+  core of a loaded 12-worker run divided by 12, as the spike defined it. These are single
+  points: the optimizer's whole record (stage 4) decides the end-to-end gain.
+- **Design choices.**
+  - **Precision.** Each molecule's cycles run in fp32 (transform, eigensolve, density) until
+    its residual RMS falls below 1e-4, then in fp64. Convergence is declared only after two fp64
+    cycles, so the energy test compares fp64 energies. On average 10.9 fp32 and 2.2 fp64 cycles
+    per molecule at 51-80 atoms.
+  - **Tried and dropped: fp32 eigensolve refined in fp64.** Ogita and Aishima's refinement,
+    restricted to pairs of orbitals of different occupation, took the density from fp32's
+    1e-5 to 1e-14 in two steps. But its eight fp64 GEMMs cost more than an fp64 eigensolve on this
+    GPU (fp64 at 1/64 of fp32): 1.31 against 1.09 ms per molecule at n = 230, batch 256.
+  - **Light evaluations.** The SCF calls stage 2 twice per cycle (potentials of the input,
+    energy of the output). The geometry pass now also computes everything charge-independent
+    (zero-charge D4 weights and C6, the ATM energy, the surface areas). An SCF evaluation does
+    energies and potentials only, the gradient pass runs once at the end. 13.5 -> 0.6 ms per
+    molecule per SCF at 51-80 atoms.
+  - **Fused kernels** (`native/ksxtb/src/scf.cu`): the Fock build (1.37 -> 0.26 ms per SCF), the
+    Mulliken sums (0.83 -> 0.39) and tblite's Fermi filling, one warp per molecule and spin
+    with no host sync (1.6 -> 0.2).
+- **Scope.** Closed shells are the target. Open shells run (restricted, Fermi filling per
+  spin) and match tblite, but the fp32 phase slows Broyden on CuCl2 and FeBr4- (34-54 cycles at
+  accuracy 1e-6 against 18 in fp64).
+- **Open.**
+  - **Licensing**, as before.
+  - **Stage 4 (the batched optimizer)** waits for the user's approval. The single point is the
+    optimizer's inner step. A restarted SCF (from the previous geometry's charges) is what it
+    will run.
