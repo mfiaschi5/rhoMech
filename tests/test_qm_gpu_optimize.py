@@ -70,3 +70,55 @@ def test_batched_rfo_and_bfgs_match_qm_anc():
         assert np.abs(step[m, :n] - anc.rfo_step(hs[m], gs[m])).max() < 1e-12
         assert np.abs(step[m, n:]).max(initial=0.0) < 1e-14  # padded modes: rounding only
         assert np.abs(upd[m, :n, :n] - anc._bfgs(hs[m], ss[m], ys[m])).max() < 1e-12
+
+
+def _task(name: str, key: str | None = None):
+    from ksmech.qm.embed import embed, prepare_mol
+    from ksmech.qm.geometry import BOHR_ANG
+    from ksmech.qm.gpu import optimize as O
+    from tests.fixtures.molecules import MOLECULES
+
+    mol = prepare_mol(MOLECULES[name])
+    cid = embed(mol, 1, seed=0)[0]
+    z = np.array([a.GetAtomicNum() for a in mol.GetAtoms()])
+    start = mol.GetConformer(cid).GetPositions() / BOHR_ANG
+    return O.RelaxTask(key or name, mol, z, start, 0, 0)
+
+
+@pytest.mark.gpu
+@gpu
+def test_relax_many_converges_and_runs_the_walled_retry():
+    """acetone and ethanol relax to fmax; with every bond counted broken (conn_cov_factor
+    0.5) the guard stops the free run, the walled run follows, and the bonds still read broken:
+    CONNECTIVITY_CHANGED after both runs' energies, as qm.xtb_calc._relax would end."""
+    from ksmech.qm.gpu import optimize as O
+    from ksmech.qm.xtb_calc import QMConfig
+
+    tasks = [_task("acetone"), _task("ethanol")]
+    out = O.relax_many(tasks)
+    assert all(o.reason is None and o.gmax <= 3e-4 and not o.restrained for o in out)
+    broken = O.relax_many([_task("ethane")], QMConfig(optimizer="tblite-anc", conn_cov_factor=0.5))
+    assert broken[0].reason.value == "CONNECTIVITY_CHANGED"
+    assert broken[0].n_evals > 5  # the guard's patience, then the walled run
+
+
+@pytest.mark.gpu
+@gpu
+def test_a_resumed_optimization_reaches_the_same_minimum():
+    """Stopped in one batch and resumed in another, a run lands where it lands alone (the
+    padded fp32 SCF cycles differ with the batch: noise, not a different minimum)."""
+    from ksmech.qm.embed import kabsch_rmsd
+    from ksmech.qm.gpu import optimize as O
+
+    tasks = [_task(n) for n in ("acetone", "methyl_acetate", "acrolein")]
+    specs = [O.OptSpec(t.z, t.start, 0, 0) for t in tasks]
+    alone = [O.BatchedANC([sp]).run()[0] for sp in specs]
+    done, states = O.BatchedANC(specs).run(stop_below=3)
+    assert states  # stopped with all three still running
+    resumed = O.BatchedANC([O.OptSpec(sp.z, sp.start, 0, 0, state=states[m])
+                            for m, sp in enumerate(specs) if m in states]).run()  # fmt: skip
+    got = dict(done) | dict(zip(sorted(states), resumed, strict=True))
+    for m, a in enumerate(alone):
+        assert got[m].converged and a.converged
+        assert abs(got[m].energy - a.energy) < 1e-5
+        assert kabsch_rmsd(got[m].xyz, a.xyz) < 0.05

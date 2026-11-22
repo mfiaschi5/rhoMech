@@ -43,6 +43,27 @@ class OptSpec:
     unpaired: int
     walls: tuple[np.ndarray, np.ndarray, float] | None = None
     guard: tuple[np.ndarray, np.ndarray, float, int] | None = None
+    state: MolState | None = None  # resume an optimization a previous batch left unfinished
+
+
+@dataclass
+class MolState:
+    """Everything one molecule's optimization carries from one batch to the next."""
+
+    x: np.ndarray  # (n, 3) the current point, Bohr
+    e: float
+    g: np.ndarray  # (n, 3)
+    radius: float
+    n_evals: int
+    micro: int  # steps since the last basis
+    hcart: np.ndarray  # (3n, 3n) the Hessian the next basis is built from
+    vecs: np.ndarray  # (3n, 3n - 5) the ANC basis (zero columns past its modes)
+    h: np.ndarray  # (3n - 5, 3n - 5) the Hessian in that basis
+    qsh: np.ndarray  # the last evaluated point's SCF variables, the next SCF's start
+    dp: np.ndarray
+    qp: np.ndarray
+    streak: int
+    fresh_starts: int
 
 
 @dataclass
@@ -292,38 +313,96 @@ class BatchedANC:
         return fail
 
     def _initial(self) -> tuple[dict, torch.Tensor]:
-        """The start of every molecule: one evaluation, the Lindh model Hessian."""
+        """Every molecule's start: resumed molecules from their state; new ones get their
+        first evaluation (from the SAD guess) and the Lindh model Hessian."""
         b, pdim = self.b, 3 * self.nmax
+        mm = max(pdim - 5, 1)
+        dev = {"device": "cuda"}
+        self.trace, self.fresh_starts = [], torch.zeros(b, dtype=torch.long, **dev)
         x = torch.as_tensor(
-            np.concatenate([sp.start for sp in self.specs]), dtype=F64, device="cuda"
+            np.concatenate([sp.state.x if sp.state else sp.start for sp in self.specs]),
+            dtype=F64,
+            **dev,
         )
-        self.start, self.trace = None, []
-        self.fresh_starts = torch.zeros(b, dtype=torch.long, device="cuda")
-        active = self.nat > 1  # a single atom returns at once (optimize_tblite_anc)
         st = {
             "x": x,
-            "radius": torch.full((b,), self.cfg.radius, dtype=F64, device="cuda"),
-            "n_evals": torch.zeros(b, dtype=torch.long, device="cuda"),
-            "micro": torch.zeros(b, dtype=torch.long, device="cuda"),
+            "radius": torch.full((b,), self.cfg.radius, dtype=F64, **dev),
+            "n_evals": torch.zeros(b, dtype=torch.long, **dev),
+            "micro": torch.zeros(b, dtype=torch.long, **dev),
+            "e": torch.zeros(b, dtype=F64, **dev),
+            "g": torch.zeros_like(x),
+            "vecs": torch.zeros(b, pdim, mm, dtype=F64, **dev),
+            "h": PAD_CURVATURE * torch.eye(mm, dtype=F64, **dev).repeat(b, 1, 1),
         }
-        st["e"], st["g"], fail = self._evaluate(x, active)
-        st["n_evals"] += active.long()
         hcart = np.zeros((b, pdim, pdim))
+        resumed = np.array([sp.state is not None for sp in self.specs])
         for m, sp in enumerate(self.specs):
             k = 3 * len(sp.z)
-            if len(sp.z) > 1:
+            if sp.state is None and len(sp.z) > 1:
                 hcart[m, :k, :k] = lindh_hessian_fast(np.asarray(sp.z), np.asarray(sp.start))
-        st["hcart"] = torch.as_tensor(hcart, device="cuda")
-        mm = max(pdim - 5, 1)
-        st["vecs"] = torch.zeros(b, pdim, mm, dtype=F64, device="cuda")
-        st["h"] = PAD_CURVATURE * torch.eye(mm, dtype=F64, device="cuda").repeat(b, 1, 1)
-        return st, fail
+            elif sp.state is not None:
+                hcart[m, :k, :k] = sp.state.hcart
+        st["hcart"] = torch.as_tensor(hcart, **dev)
+        self.start = self.sb.guess()
+        self._restore(st, resumed)
+        new = torch.as_tensor(~resumed, **dev) & (self.nat > 1)
+        e, g, fail = self._evaluate(st["x"], new)
+        am = new[self.atom_mol]
+        st["e"], st["g"] = torch.where(new, e, st["e"]), torch.where(am[:, None], g, st["g"])
+        st["n_evals"] += new.long()
+        return st, torch.where(new, fail, FAIL_NONE), new
 
-    def run(self) -> list[OptOutcome]:
-        """Optimize every molecule; one batched evaluation per step for all still running."""
+    def _restore(self, st: dict, resumed: np.ndarray) -> None:
+        """Write the resumed molecules' states into the batch's tensors."""
+        sh_mol = self.atom_mol[self.sb.sh_atom].cpu().numpy()
+        qsh, dp, qp = (t.clone() for t in self.start)
+        for m in np.flatnonzero(resumed):
+            sp, s_ = self.specs[m], self.specs[m].state
+            o, n, k = self.offsets[m], len(sp.z), 3 * len(sp.z)
+            st["x"][o : o + n] = torch.as_tensor(s_.x)
+            st["g"][o : o + n] = torch.as_tensor(s_.g)
+            st["e"][m], st["radius"][m] = s_.e, s_.radius
+            st["n_evals"][m], st["micro"][m] = s_.n_evals, s_.micro
+            w = s_.vecs.shape[1]
+            st["vecs"][m, :k, :w] = torch.as_tensor(s_.vecs)
+            st["h"][m, :w, :w] = torch.as_tensor(s_.h)
+            shells = torch.as_tensor(np.flatnonzero(sh_mol == m), device="cuda")
+            qsh[shells] = torch.as_tensor(s_.qsh, device="cuda")
+            dp[o : o + n], qp[o : o + n] = torch.as_tensor(s_.dp), torch.as_tensor(s_.qp)
+            self.streak[m], self.fresh_starts[m] = s_.streak, s_.fresh_starts
+        self.start = (qsh, dp, qp)
+
+    def _extract(self, st: dict, m: int) -> MolState:
+        sp = self.specs[m]
+        o, n, k = self.offsets[m], len(sp.z), 3 * len(sp.z)
+        w = max(k - 5, 1)
+        shells = torch.nonzero(self.atom_mol[self.sb.sh_atom] == m).squeeze(1)
+        cpu = lambda t: t.detach().cpu().numpy().copy()  # noqa: E731
+        return MolState(
+            cpu(st["x"][o : o + n]),
+            float(st["e"][m]),
+            cpu(st["g"][o : o + n]),
+            float(st["radius"][m]),
+            int(st["n_evals"][m]),
+            int(st["micro"][m]),
+            cpu(st["hcart"][m, :k, :k]),
+            cpu(st["vecs"][m, :k, :w]),
+            cpu(st["h"][m, :w, :w]),
+            cpu(self.start[0][shells]),
+            cpu(self.start[1][o : o + n]),
+            cpu(self.start[2][o : o + n]),
+            int(self.streak[m]),
+            int(self.fresh_starts[m]),
+        )
+
+    def run(self, stop_below: int | None = None):
+        """Optimize every molecule, one batched evaluation per step for all still running.
+        Without `stop_below`: the outcomes (one per spec). With it: stop once fewer molecules
+        than that are running and return ({index: outcome} of the finished, {index: MolState}
+        of the rest), for a driver to refill the batch."""
         cfg = self.cfg
-        st, fail = self._initial()
-        reason = torch.where(fail != FAIL_NONE, fail, FAIL_NONE)
+        st, fail, new = self._initial()
+        reason = fail.clone()
         active = (self.nat > 1) & (fail == FAIL_NONE)
 
         def finished(active):
@@ -331,8 +410,10 @@ class BatchedANC:
             return active & ((gmax <= cfg.fmax) | (st["n_evals"] >= cfg.maxiter))
 
         active = active & ~finished(active)
-        self._rebuild(st, active)
+        self._rebuild(st, active & new)
         while bool(active.any()):
+            if stop_below is not None and int(active.sum()) < stop_below:
+                break
             fail = self._step(st, active)
             reason = torch.where(active & (fail != FAIL_NONE), fail, reason)
             active = active & (fail == FAIL_NONE)
@@ -344,7 +425,12 @@ class BatchedANC:
                     due[:, None, None], v @ h @ v.transpose(1, 2), st["hcart"]
                 )
                 self._rebuild(st, due)
-        return self._outcomes(st, reason)
+        outcomes = self._outcomes(st, reason)
+        if stop_below is None:
+            return outcomes
+        running = active.cpu().numpy()
+        done = {m: o for m, o in enumerate(outcomes) if not running[m]}
+        return done, {int(m): self._extract(st, int(m)) for m in np.flatnonzero(running)}
 
     def _gmax(self, g: torch.Tensor) -> torch.Tensor:
         return torch.zeros(self.b, dtype=F64, device=g.device).scatter_reduce(
@@ -387,3 +473,176 @@ class BatchedANC:
         if code == FAIL_SCF:
             return ReasonCode.SCF_NOT_CONVERGED, "during optimization (GPU SCF, from the guess too)"
         return ReasonCode.OPT_NOT_CONVERGED, f"max|grad|={gmax:.2e} after {n_evals} energies (ANC)"
+
+
+# --- production's relax for many molecules, with refill --------------------------------------
+
+
+@dataclass
+class RelaxTask:
+    key: str
+    mol: object  # rdkit Mol, prepared and embedded as qm.batch._compute does
+    z: np.ndarray
+    start: np.ndarray  # Bohr
+    charge: int
+    unpaired: int
+
+
+@dataclass
+class RelaxOutcome:
+    key: str
+    xyz: np.ndarray | None
+    restrained: bool
+    reason: ReasonCode | None
+    detail: str
+    n_evals: int  # every energy of both runs, as the reference counts them
+    energy: float
+    gmax: float
+    fresh_starts: int
+
+
+def _guard_spec(mol, factor: float):
+    from ksmech.qm.geometry import DissociationGuard
+
+    g = DissociationGuard(mol, factor)
+    return (g.pairs, g.rcov, float(g.factor), int(g.patience))
+
+
+def _wall_spec(mol, wall_factor: float, k: float):
+    from ksmech.qm.geometry import bond_walls
+
+    w = bond_walls(mol, wall_factor, k)
+    return (w.pairs, w.d0_bohr, float(w.k))
+
+
+def _connectivity(task: RelaxTask, xyz: np.ndarray, factor: float) -> str | None:
+    from ksmech.qm.geometry import check_connectivity
+    from ksmech.qm.records import QMError
+
+    try:
+        check_connectivity(task.mol, xyz * BOHR_ANG, factor)
+    except QMError as exc:
+        return exc.detail
+    return None
+
+
+class _Job:
+    """One task's place in `relax_many`: the free run, then perhaps the walled one."""
+
+    def __init__(self, task: RelaxTask, config) -> None:
+        self.task, self.cfg, self.phase, self.evals_before, self.fresh_before = (
+            task,
+            config,
+            0,
+            0,
+            0,
+        )
+        self.spec = OptSpec(
+            task.z,
+            task.start,
+            task.charge,
+            task.unpaired,
+            guard=_guard_spec(task.mol, config.conn_cov_factor),
+        )
+
+    def to_walls(self, out: OptOutcome) -> None:
+        self.phase, self.evals_before = 1, self.evals_before + out.n_evals
+        self.fresh_before += out.fresh_starts
+        t = self.task
+        self.spec = OptSpec(
+            t.z,
+            t.start,
+            t.charge,
+            t.unpaired,
+            walls=_wall_spec(t.mol, self.cfg.wall_factor, self.cfg.wall_k),
+        )
+
+    def finish(self, out: OptOutcome) -> RelaxOutcome | None:
+        """The outcome, or None when the walled run is still to come (`qm.xtb_calc._relax`)."""
+        cfg, broke = self.cfg, None
+        if out.converged:
+            broke = _connectivity(self.task, out.xyz, cfg.conn_cov_factor)
+            if broke is None:
+                return self._done(out, None, "")
+        elif out.reason is not ReasonCode.CONNECTIVITY_CHANGED:
+            return self._done(out, out.reason, out.detail)
+        detail = broke or out.detail
+        if self.phase == 0 and cfg.restrain:
+            self.to_walls(out)
+            return None
+        return self._done(out, ReasonCode.CONNECTIVITY_CHANGED, detail)
+
+    def _done(self, out: OptOutcome, reason, detail) -> RelaxOutcome:
+        ok = reason is None
+        return RelaxOutcome(
+            self.task.key,
+            out.xyz if ok else None,
+            self.phase == 1,
+            reason,
+            detail,
+            self.evals_before + out.n_evals,
+            out.energy,
+            out.gmax,
+            self.fresh_before + out.fresh_starts,
+        )
+
+
+def molecule_bytes(z: np.ndarray) -> int:
+    """A batch member's peak device memory: ~50 n_ao^2 doubles for the SCF (the padded
+    matrices, the eigensolver's workspace and transient copies; measured 47-49 at 21-117 atoms)
+    and the optimizer's (3N)^2 Hessians and basis."""
+    from ksmech.qm.gpu.basis import mol_basis
+
+    nao, p = mol_basis(np.asarray(z)).nao, 3 * len(z)
+    return 8 * (50 * nao * nao + 4 * p * p)
+
+
+def relax_many(
+    tasks: list[RelaxTask],
+    config=None,
+    capacity: int = 256,
+    refill: float = 0.75,
+    solvent: bool = True,
+    rfo_dtype=F64,
+    on_batch=None,
+    memory_bytes: float = 9e9,
+) -> list[RelaxOutcome]:
+    """`qm.xtb_calc.GFN2Calculator._relax` with the tblite-anc settings of `config` (a QMConfig)
+    for many molecules: a free run with the dissociation guard, `check_connectivity`, and on a
+    broken bond a walled run from the start geometry, checked again. The batch holds up to
+    `capacity` runs and at most `memory_bytes` (`molecule_bytes` of its largest member times
+    its size); when fewer than `refill` x its size still run, it is rebuilt with them (their
+    state carried over) and the next tasks, smallest first."""
+    from ksmech.qm.xtb_calc import QMConfig
+
+    config = config or QMConfig(optimizer="tblite-anc")
+    cfg = AncSettings(fmax=config.fmax, maxiter=config.maxiter)
+    queue = sorted((_Job(t, config) for t in tasks), key=lambda j: len(j.task.z))
+    running: list[_Job] = []
+    results: dict[str, RelaxOutcome] = {}
+    while queue or running:
+        while queue and len(running) < capacity:
+            biggest = max([molecule_bytes(j.task.z) for j in running] + [0])
+            need = max(biggest, molecule_bytes(queue[0].task.z)) * (len(running) + 1)
+            if running and need > memory_bytes:
+                break
+            running.append(queue.pop(0))
+        opt = BatchedANC([j.spec for j in running], solvent, cfg, rfo_dtype=rfo_dtype)
+        stop = int(refill * len(running)) if queue else None
+        got = opt.run(stop_below=stop) if stop else (dict(enumerate(opt.run())), {})
+        done, states = got
+        nxt = []
+        for m, job in enumerate(running):
+            if m in states:
+                job.spec.state = states[m]
+                nxt.append(job)
+                continue
+            res = job.finish(done[m])
+            if res is None:
+                nxt.append(job)  # the walled run, from the start
+            else:
+                results[job.task.key] = res
+        running = nxt
+        if on_batch is not None:
+            on_batch(len(results), len(running), len(queue))
+    return [results[t.key] for t in tasks]
