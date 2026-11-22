@@ -10736,3 +10736,65 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   - fullrm_e started from it on two seeds, read like fullrm_e on the three sources: the human
     benchmark walk, PMechDB closed_base ood, the ReactMech scaffold test. The permutation
     importance of the gap block says whether the orbital-pair channels are now read.
+
+## 2026-11-22: phase 3, the store, the gate and the read, registered before the runs
+
+- **The store** (unit `ksmech-qmugs-store`, `data/processed/qmugs/pretrain/build_store.sh`, from
+  the clean worktree `qmugs-tokens` at 16b1a4f, 12 processes, 15:43 to 18:32).
+  - 49,045 samples of the 50,000 molecules: 46,547 train, 2,498 val; 4.5 GB.
+  - Skipped: MISSING_TOKENS 936, OPEN_SHELL 12, DEGENERATE_BASIS 7; no MULTI_FRAGMENT,
+    CORRESPONDENCE or NO_BOND_INDEX.
+  - The 936 are the molecules whose RDKit re-canonicalization changes the key (cage
+    stereocentres): their QM record is filed under QMugs's SMILES, their tokens are looked up
+    under the canonical one (915 missing_qm, 21 stale_qm in the token build). Left out, not
+    rebuilt: 1.9% of the subset.
+  - The Wiberg sidecars: the serial pass over all 150k QMugs records was stopped at 7,677 and
+    replaced by a pass over the subset only (`build_wbi_subset.sh`, 47,497 built, 0 failed).
+  - `ksmech-data provenance` reads the views clean, code 16b1a4f.
+- **The gate's baselines** (val, 2,498 molecules; is the molecule's strongest E2 cell the
+  top-1 / in the top-5 of the defined cells, ranked by an input column, with the rank rule of
+  `train.pretrain.eval_sums`):
+
+  | ranking | top-1 | top-5 |
+  |---|---|---|
+  | \|g\| | 0.04% | 0.5% |
+  | \|g2\| | 0.0% | 0.1% |
+  | beta^2 \|g\| (cross_coupling^2 x \|g\|) | 0.8% | 21.5% |
+
+  - |g| almost never ranks the strongest cell first. One reading, not tested: the gap factor
+    is large for the frontier pairs, not for the geminal and vicinal pairs where E2 peaks.
+    Either way the gate agreed with the user (val_masked_top1 against |g|) is passed by almost
+    any learned ranking.
+  - The registered gate is therefore two conditions on `best.pt`, both needed:
+    1. the agreed one: val_masked_top5 above |g|'s 0.5% by its 95% binomial interval;
+    2. the stricter one: val_top5 above beta^2 |g|'s 21.5% by its 95% interval (about +-1.6
+       points at n = 2,498), i.e. the encoder ranks the cells better than the textbook
+       second-order formula on its own inputs.
+  - If either fails, no fine-tune: the numbers go to the user first.
+- **The pretraining run** `qmugs_e_s0` (`data/models/qmugs/`), seed 0, 10 epochs,
+  `--mask-geometry 0.5`, arm e's model flags (`--preset general --encoder dense
+  --no-fragment-embedding`) and fullrm_pipeline.sh's EXTRA (`--amp fp16 --compile
+  --compile-scope step --half-pair-norm --split-pair-init --pair-linear-splitk
+  --last-update-atoms --no-checkpoint --pin-memory --load-workers 8 --workers 4
+  --eval-cell-budget 2200000`), from the worktree at 16b1a4f. `last_update_atoms` changes no
+  parameter and the pretraining head reads the whole pair track (`pair_track` without
+  `atoms_only`), so the fine-tune's strict load holds.
+- **The fine-tunes** `ftq_e_s0`, `ftq_e_s1`: fullrm_e_s0 / s1 exactly (BASE, JOINT and EXTRA
+  of `scripts/ood_fullrm.sh` and `fullrm_pipeline.sh`, the full ReactMech store, same seeds)
+  plus `--init-from data/models/qmugs/qmugs_e_s0/best.pt`. One pretraining checkpoint serves
+  both seeds: the pretraining's own seed noise is not measured.
+- **The read**, against fullrm_e_s0 / s1 (the 2026-11-22 walks), two seeds a side, so a
+  difference under about 3 points of top-1 is noise (seed against seed 1.2 points for fullrm,
+  up to 6 for the pilot's arms):
+  1. human benchmark, first step top-1 on the 334 cases every run ranks and on the 267 unseen
+     ones: hits summed over the seeds, the exact two-sided sign test on the cases where the
+     sums differ; every-step top-1 and pathways walked whole as secondary numbers;
+  2. PMechDB closed_base val (`ksmech-eval ood`): top-1, no loss expected beyond the noise;
+  3. ReactMech scaffold test: top-1 and R exact, no loss expected;
+  4. the permutation importance of the pair gap block on PMechDB closed_base (1.6-2.4 points
+     for fullrm_e): whether the orbital-pair channels are now read.
+  - Pretraining helps if the first-step top-1 rises by more than 3 points with a sign test
+    p < 0.05 on the 334 cases, without loss on 2 and 3. A rise of the gap block's importance
+    without a rise of the benchmark says the channels are read but do not transfer.
+- **Known gap.** With `--init-from`, run.json still lists the run's own pair-statistics file
+  as an input although the model uses the checkpoint's statistics.
