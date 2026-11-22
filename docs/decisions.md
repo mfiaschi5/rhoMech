@@ -10575,8 +10575,9 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   | k | + ReactMech pilot | 64.1 / 70.4 | 67.2 | 63.7 | 88.2 | 67.9 / 65.0 |
   | fullrm_e | + ReactMech full | 68.6 / 69.8 | 69.2 | 66.7 | 88.5 | 65.5 / 70.4 |
 
-  - Every step ranked (n ~ 670): fullrm 67.8 / 66.8 against e 68.4 / 64.3 and k 63.6 / 68.3.
-  - Pathways walked whole: 47.1 / 48.9% against 45.1-48.0%.
+  - Every step ranked (n ~ 670): fullrm 68.0 / 67.0 against e 68.4 / 64.3 and k 63.6 / 68.3
+    (the walks of 2026-11-22; those of 2026-11-20 read 67.8 / 66.8, see "Not done").
+  - Pathways walked whole: 47.4 / 49.1% against 45.1-48.0% (47.1 / 48.9% on 2026-11-20).
   - ReactMech scaffold test (11,589 samples): top-1 99.2 / 99.2, R exact 98.5 / 97.0.
   - Of its 131 samples whose edit signature training holds 1-19 times: 79.4 / 95.4.
 - **Tests.**
@@ -10614,10 +10615,24 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
     `--compile-scope step`, which changes rounding only.
   - `best.pt` is chosen on the pooled validation part, 89% of it ReactMech.
 - **Not done.**
-  - 4 walks per run stop at their second step on `EXPAND_FAILED:STALE_ARTIFACT`: a by-product
-    whose cached file no longer verifies under 80783ad, new against the runs of d6b4c75. The
-    first-step numbers are not affected. Not looked into.
   - No walk with `--build-missing`.
+- **The 4 walks lost on STALE_ARTIFACT (2026-11-22).** On 2026-11-20, 4 walks per run (the same
+  4 cases in both seeds) stopped at their second step on `EXPAND_FAILED:STALE_ARTIFACT`.
+  - The cause is not the code. The token files of the two by-products,
+    CC(C)(C)C1CCC([O-])CC1 and CC(NC(=O)OC(C)(C)C)C(=O)[O-], read "input missing" because
+    their QM records are among the 106,162 in data/cache/qm that are symlinks into the full
+    ReactMech archive on the NTFS volume (2026-11-19). That volume is not mounted at boot, and
+    it was unmounted at 00:12 that night, five minutes before the pipeline started. The
+    training, ood and first-step numbers read the sample store and were not affected. The
+    walks of e and k ran while the volume was mounted.
+  - Walked again on 2026-11-22 from main 2efdae3, with the volume mounted read-only.
+    - The first-step rank is identical in all 350 cases.
+    - The 4 cases go on: one is walked whole, one stops on STEP_TARGET_MISSING and two on
+      MISSING_TOKENS.
+    - The numbers above are these walks. The old files are kept beside the checkpoints as
+      `network_walk_human_benchmark_stale-2026-11-20.json`.
+  - Before any token, QM, walk or serve work on these species:
+    `find data/cache/qm -maxdepth 1 -xtype l | wc -l` must be 0.
 - **Verdict.** The full ReactMech store is the better joint base, a little better on the third
   source and no worse elsewhere, so it replaces the pilot as the ReactMech part of joint runs.
   It is not the next lever. What could move the transfer, each the user's choice:
