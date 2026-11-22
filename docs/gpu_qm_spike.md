@@ -128,3 +128,15 @@ At 51-80 atoms one forward plus gradient pass costs 0.14 ms per molecule, agains
 
 Every bin passes. The table and the design are in docs/decisions.md, 2026-11-22. The flop
 estimate above ("a few ms") was pessimistic by about 20x.
+
+## Stage 2 result (2026-11-22)
+
+**Every other GFN2 term passes too.** Repulsion, D4, ES2, ES3, AES, ALPB and CDS run batched
+on the GPU in fp64 (`native/ksxtb/src/classical.cu`), with their potentials and gradients.
+With stage 1's integrals, the whole energy and gradient at tblite's converged density match
+tblite on 48 spike molecules: energy 4e-12 Eh, gradient 2.6e-11 Eh/Bohr, ALPB water.
+
+All the work outside the SCF of one energy and gradient costs 0.49 ms per molecule at 51-80
+atoms and 2.5 ms above 120, 5-10% of the budget from 16 atoms up. Only the smallest bin is
+tight (0.026 of 0.040 ms). The table is in docs/decisions.md, 2026-11-22. What remains is the
+SCF: the eigensolver and one potential evaluation per cycle (0.16 ms at 51-80 atoms).

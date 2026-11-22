@@ -10718,6 +10718,8 @@ budget? The gate was one third of the spike's budget per molecule and energy.
     versions fail the CCCL check.
   - `KSXTB_NVCC` overrides the path. cudart is linked statically, so the library does not
     collide with torch's 13.0 runtime.
+- **Scope.** Closed and open shells alike (the terms do not depend on the spin), ALPB water
+  or the gas phase. The other ALPB solvents' records are not extracted yet.
 - **Open.**
   - **Licensing.** The kernels and the reference follow tblite (LGPL-3.0-or-later) line by
     line, and the parameters are tblite's. rhoMech has no LICENSE file. The user decides before
@@ -10725,3 +10727,88 @@ budget? The gate was one third of the spike's budget per molecule and energy.
   - **What decides the rest.** Stage 2 (H0's coordination numbers, repulsion, D4, the
     electrostatics and ALPB, with gradients) and the SCF's eigensolver now decide the engine.
     Stage 2 waits for the user's approval.
+
+## 2026-11-22: GPU xTB stage 2: every non-integral GFN2 term on the GPU, exact against tblite
+
+Stage 2 of the GPU xTB plan (`docs/gpu_qm_spike.md`), approved by the user after stage 1.
+Branch `claude/gpu-xtb`.
+
+- **What was built.**
+  - `ksmech.qm.gpu.terms`: a torch (fp64, CPU) reference of every GFN2 term beyond the
+    one-electron integrals. Each is an energy of the geometry and of the SCF variables (shell
+    charges, atomic charges, dipoles, quadrupoles), and autograd gives its gradient and its
+    potentials. The terms: the dexp CN and the self-energies, repulsion, ES2, ES3, AES (radii
+    from the CN), D4 (two-body with the SCF charges, ATM with zero-charge C6, its own erf CN),
+    ALPB (GBOBC Born radii, P16 kernel, the shape term), CDS (smoothed SASA, H-bond term on the
+    charges), the shift and the Fermi entropy. `total_energy` and `total_gradient` assemble
+    tblite's energy and gradient at a given density with stage 1's integrals.
+  - `native/ksxtb/src/classical.cu` and `ksmech.qm.gpu.classical`: the same terms batched on
+    the GPU in fp64. `ksxtb_geometry` computes both CNs, the multipole radii and the Born radii;
+    `ksxtb_classical` the energies, the four potentials and the gradient at given SCF
+    variables, with an external dE/dCN (the H0 self-energies') chained in.
+    `classical.total_at_density` is the whole GPU energy and gradient at a density.
+  - The extractor also reads mctc-lib v0.5.2's covalent radii, dftd4 v4.2.0's element data
+    and its `reference.inc` DATA statements, and tblite's GFN2 ALPB, CDS and shift records of
+    water. The 230-point Lebedev grid comes from scipy (`lebedev_rule(25)`, the same rule).
+- **Correctness.**
+  - Reference vs tblite, at tblite's converged density: total energy within 1e-12 Eh, gas and
+    water, on the ten fixtures, CuCl2 and FeBr4- (entropy included). Gradient within 5e-12
+    Eh/Bohr at SCF accuracy 1e-6. At accuracy 1e-2 the gap is 4e-8 and falls with the
+    accuracy: tblite's H0 gradient uses the potential of the last SCF input charges. This also
+    checks stage 1's H0 gradient against tblite, the item stage 1 left open.
+  - The cutoffs: nine spike molecules of 67-139 atoms (extents to 61 Bohr), and dimers placed in
+    the D4 switching windows (50 and 25 Bohr, width 0.05) and on both sides of the Born cutoff
+    (35 A). Without the switch, or without the Born cutoff, those tests fail.
+  - Every element: a hydride Z-H for Z = 1..86 in water (charged atoms, so ALPB, the H-bond
+    term and D4's charge scaling read every element's tables) matches tblite's energy within
+    3.4e-13 Eh. Seven even lanthanides need the other spin parity: GFN2's valence electron
+    count is not Z.
+  - CUDA vs the reference, random SCF variables, on the fixtures, the windows, a 92-atom chain
+    of 71 Bohr and the 86 hydrides: every term's energy within 6.4e-16 relative, the
+    potentials and the gradient within 6.1e-16.
+  - The whole GPU pipeline vs tblite (stage 1 + stage 2): 48 spike molecules, 8 per bin, ALPB
+    water: energy within 4e-12 Eh, gradient within 2.6e-11 Eh/Bohr.
+- **Speed.** Per molecule and energy, best of batches 64/256/1024, ALPB water, RTX 4080 SUPER, CUDA
+  events, machine idle (load ~2):
+
+  | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+  |---|---|---|---|---|---|---|
+  | stage 2 (geometry pass + one evaluation with gradient), ms | 0.006 | 0.024 | 0.062 | 0.16 | 0.51 | 1.00 |
+  | gate (budget / 3) | 0.020 | 0.27 | 0.77 | 2.27 | 8.3 | 12.3 |
+  | all non-SCF work of one energy + gradient (stage 1 + 2), ms | 0.026 | 0.080 | 0.19 | 0.49 | 1.32 | 2.53 |
+  | gate (2 x budget / 3) | 0.040 | 0.53 | 1.53 | 4.53 | 16.7 | 24.7 |
+  | one evaluation alone (per-SCF-cycle upper bound), ms | 0.006 | 0.025 | 0.061 | 0.16 | 0.50 | 0.98 |
+
+  Every bin passes both gates. From 16 atoms up the non-SCF work takes 5-10% of the spike's
+  budget. The smallest bin is the tightest (0.026 of 0.040 ms), launch overhead dominating.
+  The ATM triples and the surface grid make stage 2 grow faster than stage 1 with size: at
+  >120 atoms it is 1.0 ms against stage 1's 0.5. Batch 1024 at >120 atoms was skipped for
+  memory (stage 1's matrices).
+- **Design choices.**
+  - **Reference in torch, not numpy.** Autograd gives exact gradients and potentials of
+    energy expressions, so the hand-derived CUDA gradients are checked against an independent
+    derivation, to 1e-15 rather than a finite difference's 1e-8. The total against tblite checks
+    the energy expressions.
+  - **No derivative tensors.** tblite stores dCN/dR, dBorn/dR and dSASA/dR as (3, nat, nat).
+    The kernels accumulate the per-atom adjoints (dE/dCN of both CNs, dE/dmultipole radius,
+    dE/dBorn radius) with atomics, then one chain pass over the pairs turns them into gradient.
+    The surface gradient is weighted by tension + hbond q^2 in the same pass that computes the
+    surface.
+  - **One thread per atom pair**, the pairs of a molecule contiguous in (i, j < i) order, so the
+    ATM pass finds the C6 of (i, k) and (j, k) by index. It loops k < j from the (i, j) thread,
+    reading zero-charge C6 the pair pass stored. One thread per (atom, grid point) for the
+    surface, per atom for the D4 weights and on-site terms, per molecule for the ALPB shape.
+  - **Exactness over speed where they differ.** The SASA neighbour test uses the contact
+    distance instead of tblite's list cutoff; they select the same neighbours.
+- **Scope.** Closed and open shells alike (the terms do not depend on the spin), ALPB water
+  or the gas phase. The other ALPB solvents' records are not extracted yet.
+- **Open.**
+  - **Licensing.** The dftd4 reference tables (LGPL-3.0) join tblite's in the open licence
+    question. rhoMech has no LICENSE file; the user decides before any public push.
+  - **The SCF (stage 3).** Each SCF cycle needs the potentials, an evaluation at the cycle's
+    charges, on top of the eigensolver. No gate counts that yet. `evaluate` has no
+    potentials-only mode: it always runs the ATM, surface and chain passes, so the table's
+    evaluation time is an upper bound. With six evaluations per energy added to the non-SCF
+    work, molecules of <=15 atoms come to 0.064 ms, over their 0.06 ms budget (they go to the
+    CPU anyway); from 16 atoms up it is 17-29% of the budget. Stage 3 waits for the user's
+    approval.

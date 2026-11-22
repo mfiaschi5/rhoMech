@@ -108,3 +108,40 @@ def test_cutoff_windows_match_tblite(name, solvent):
     wdensity = (c * (r["orbital-occupations"] * emo)) @ c.T
     g = T.total_gradient(basis, xyz, r["density-matrix"], wdensity, solvent is not None)
     assert np.abs(g - r["gradient"]).max() < 1e-9
+
+
+def element_hydrides() -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Z-H for Z = 1..86 at 3/4 of the covalent distance: charged atoms in every element."""
+    from ksmech.qm.gpu.basis import params
+
+    rcov = params()["covalent_rad"]["covalent_rad_d3"]
+    return {z: (np.array([z, 1]), np.array([[0.0, 0.0, 0.0],
+                                            [0.3, -0.2, 0.75 * (rcov[z - 1] + rcov[0])]]))
+            for z in range(1, 87)}  # fmt: skip
+
+
+def _tblite_any_spin(z, xyz, solvent):
+    """tblite at the lowest spin its electron count allows (GFN2's lanthanide valence counts
+    differ from Z), returning the result and uhf."""
+    from tblite.interface import TBLiteRuntimeError
+
+    for uhf in ((int(z.sum()) % 2), 1 - int(z.sum()) % 2):
+        try:
+            return new_calculator(z, xyz, 0, uhf, solvent).singlepoint(), uhf
+        except TBLiteRuntimeError:
+            continue
+    raise AssertionError(f"tblite failed for {z.tolist()} at both spin parities")
+
+
+def test_total_energy_matches_tblite_for_every_element():
+    """Water, so ALPB, the H-bond term and D4's charge scaling see every element's tables."""
+    worst = 0.0
+    for z, (zz, xyz) in element_hydrides().items():
+        res, uhf = _tblite_any_spin(zz, xyz, "water")
+        emo = np.array(res.get("orbital-energies"))
+        nel = T.reference_occupations(mol_basis(zz)).sum()
+        occ = [T.fermi_filling(emo, (nel + uhf) / 2), T.fermi_filling(emo, (nel - uhf) / 2)]
+        e, _ = T.total_energy(mol_basis(zz), xyz, np.array(res.get("density-matrix")), occ, True)
+        assert abs(e - float(res.get("energy"))) < 1e-10, z
+        worst = max(worst, abs(e - float(res.get("energy"))))
+    assert worst < 1e-10
