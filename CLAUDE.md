@@ -423,6 +423,21 @@ Main CLI entry points are added phase by phase and listed here as they land:
   orbitals then atoms at their padded cost; `--pair-update-every K` is an ablation; `--direction
   backward` trains the previous-step model on the backward store, views and pair statistics
   checked to be backward, the direction in run.json, which a forward run leaves out)
+- Pretraining (phase 3 of the OOD plan; spec v10.2 "Encoder pretraining"): `uv run
+  ksmech-pretrain species --n 50000 --seed 0` (the seeded QMugs subset as a species file under
+  `data/processed/qmugs/pretrain/`; prints the next commands), then `ksmech-qm bond-index
+  --cache-dir data/cache/qmugs/qm --out-dir data/cache/qmugs/bond_index` and `ksmech-orbitals
+  build --species-from FILE --qm-cache-dir data/cache/qmugs/qm --out-dir data/cache/qmugs/tokens
+  --method GFN2-xTB/ALPB-water/given`, then `uv run ksmech-pretrain samples --species FILE
+  [--workers 14]` (one `PretrainSample` per molecule: the one-molecule pool's inputs and the
+  donor-acceptor energy E2 of every (occupied, virtual) cell, `physics.donor_acceptor`; views
+  `samples_pretrain_train|val.json`, val 5% by hash), `uv run ksmech-train pretrain --run NAME
+  [--preset general --no-fragment-embedding ...] [--mask-geometry 0.5] [--epochs 10]` (the dense
+  encoder and a head on its pair track, Huber on log10(E2 + 1e-4), the pose channels undefined in
+  half of each batch's molecules; `data/models/qmugs/<run>/`, best.pt by val loss; metrics
+  `val_*` and `val_masked_*`: loss, r, the strongest cell's top-1 / top-5, strong-cell MAE), and
+  `ksmech-train fit ... --init-from data/models/qmugs/<run>/best.pt` (the run starts from that
+  encoder and its statistics, the decoder fresh; same model flags)
 - Evaluation: `uv run ksmech-eval floor --source pmechdb [--split molecule] [--cells valid|all]
   [--floor legacy|own_break] [--kernel g|g2] [--drop-intra-open]` (the physics floor:
   anchors ranked by |G^atom| over the valid orbital pairs, or every pair, no learned parameter, val and test

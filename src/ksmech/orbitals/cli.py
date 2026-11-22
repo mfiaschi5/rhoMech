@@ -45,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     b.add_argument("--qm-cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     b.add_argument("--out-dir", type=Path, default=DEFAULT_TOKENS_DIR)
+    b.add_argument(
+        "--method",
+        default=QMConfig().method,
+        help="the QM method of the records read (QMugs: GFN2-xTB/ALPB-water/given)",
+    )
     b.add_argument("--workers", type=int, default=1)
     b.add_argument("--limit", type=int, default=None, help="first N molecules, for pilots")
     b.add_argument("--force", action="store_true", help="rebuild existing token files")
@@ -95,7 +100,9 @@ def cmd_build_species(args: argparse.Namespace, config: BuildConfig, console: Co
 
 
 def cmd_build(args: argparse.Namespace, console: Console) -> int:
-    config = BuildConfig(qm_cache_dir=args.qm_cache_dir, out_dir=args.out_dir, force=args.force)
+    config = BuildConfig(
+        qm_cache_dir=args.qm_cache_dir, out_dir=args.out_dir, method=args.method, force=args.force
+    )
     if args.species_from is not None:
         return cmd_build_species(args, config, console)
     if args.name is not None:

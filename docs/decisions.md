@@ -10642,3 +10642,97 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   - pretraining that makes the orbital-pair channels worth reading (phase 3).
   mech-USPTO-31K stays an evaluation set (never trained on): its loader would give a fourth
   source to read these arms on.
+
+## 2026-11-22: phase 3, the orbital-pair pretraining target and its build
+
+- **Why.** The step after arm e on the full ReactMech store (2026-11-20) is phase 3 of the
+  out-of-distribution plan: pretraining that makes the orbital-pair channels worth reading.
+  The spec named QMugs for it but defined no objective.
+  - Four objectives were put to the user: the orbital-pair donor-acceptor energy, QMugs's DFT
+    targets (charges, ESP, bond orders, HOMO/LUMO, all per atom, bond or molecule), both
+    together, or masked reconstruction of the descriptors.
+  - User choice: the orbital pairs.
+- **The target** (`physics.donor_acceptor`, spec v10.2 "Encoder pretraining"). It is NBO's
+  second-order energy on the token file's LMOs.
+  - Each LMO is restricted to its own centres, the atoms at or above tau_atom of its
+    population (`ks_terms.centre_restricted`, the same restriction as the cross-coupling
+    input). The whole restricted set, occupied and virtual, is Lowdin-orthonormalized under S.
+  - E2(r, s) = 2 |F'_rs|^2 / (F'_ss - F'_rr) in eV. It is undefined where the denominator is
+    at or below 0.1 eV, and refused for a molecule with an open-shell token (OPEN_SHELL) or a
+    near-singular restricted set (DEGENERATE_BASIS).
+  - No new QM is needed: S, F and the LMO coefficients are in every token file.
+  - Unrestricted (the exact LMOs), the occupied-virtual block vanishes below 1e-5 eV
+    (Brillouin; a test). Every coupling the target reports therefore comes from the
+    restriction.
+- **Checked on the fixture molecules** (gas-phase single points; ALPB-water records give the
+  same order):
+  - methyl acetate: n_O(ether) -> pi*(C=O), the ester resonance, 52 kcal/mol, the largest term
+    (NBO ~45-50);
+  - acetone: n_O -> sigma*(C-C), 24, the two equal;
+  - acrolein: pi(C=C) -> pi*(C=O), 20;
+  - methylamine: n_N -> sigma*(C-H) anti, 8;
+  - ethane: each sigma(C-H) gives most to the antiperiplanar sigma*(C-H), 3.1 (NBO ~2.5).
+  - Every E2 is >= 0, and the smallest eigenvalue of T^T S T is >= 0.65.
+  - Within one molecule, log E2 correlates with log cc^2 (the nearest input, the WH cross
+    coupling squared) at 0.0 to 0.46, and with log|g| at -0.5 to 0.3. The target is not a copy
+    of an input.
+- **The pretraining** (`train.pretrain`, `ksmech-train pretrain`).
+  - The dense encoder's whole pair track is read on every (occupied, virtual) cell
+    (`DenseEncoder.pair_track`, split out of `forward`, bit for bit as before).
+  - A head, an MLP d_p -> d_p -> 1, predicts y = log10(E2 / eV + 1e-4). The floor puts every
+    cell below ~0.002 kcal/mol at -4 decades, so the head learns the near and the far cells
+    alike.
+  - The loss is Huber (delta 1 decade) over the defined cells of the batch.
+  - In half of the molecules of every batch (`--mask-geometry 0.5`) the reactant-pose channels
+    are undefined: centroid distance, cross coupling, align and dihedral cosines, g2. An
+    intermolecular cell of a pool has none of them. Without the mask the head could read the
+    interaction off the cross coupling and teach the track nothing an intermolecular cell can
+    use.
+  - Validation, with and without the pose channels (`val_*`, `val_masked_*`):
+    - the loss;
+    - the pooled correlation r;
+    - whether each molecule's strongest cell is the top-1 / within the top-5 predicted, the
+      analogue of the anchor ranking within one molecule;
+    - the mean absolute error on the strong cells (E2 > 0.1 eV).
+  - `best.pt` is the lowest val loss. A checkpoint is what `load_model` reads, with the head
+    beside it.
+  - The dense encoder only: flex and sparse have no pair state.
+- **`fit --init-from`** (`train.loop.initial_model`).
+  - The run takes the pretraining checkpoint's encoder (a strict load) and its input
+    statistics. These are the statistics the encoder was trained on; refitting them on the
+    mechanism data would rescale every input the pretrained first layers read.
+  - The decoder starts fresh.
+  - Refused:
+    - a checkpoint that is not a `pretrain_run`;
+    - one from a dirty tree;
+    - one whose pair features differ from the run's.
+  - The checkpoint is an input of run.json.
+- **Data** (`pretrain.samples`, `ksmech-pretrain species|samples`).
+  - 50,000 molecules drawn with seed 0 from the distinct keys of the 150,000 `ok` QMugs records
+    (`select_species`).
+  - The validation part is 5% by a hash of the key (`part_of`), so a larger subset keeps the
+    parts of a smaller one.
+  - A sample is the one-molecule pool's `reactant_sample` and Lewis structure, the very code of
+    the mechanism samples, with E2 as `PretrainSample.pair_target` (NaN where undefined). The
+    store and views have the mechanism store's layout and provenance.
+  - Every molecule without a sample is counted by its code: MISSING_TOKENS, NO_BOND_INDEX,
+    OPEN_SHELL, DEGENERATE_BASIS, MULTI_FRAGMENT, CORRESPONDENCE.
+  - `ksmech-orbitals build --method` reads the QMugs records' method, GFN2-xTB/ALPB-water/given.
+- **Costs measured.**
+  - Tokens: 0.6 s and 0.56 MB per molecule (12 random records), so ~28 GB for the 50k.
+  - Wiberg sidecars: 20 ms and 4 KB per record.
+  - A sample: 3-10 s depending on the load, 105 kB stored; median 166 tokens, at most 488.
+    Most of the time is `stage_a._intra`, the per-cell Python loop of the pose features, slow
+    on QMugs's larger molecules and left as it is: it builds every mechanism store.
+  - The largest E2 per molecule: median 50 kcal/mol, at most 140 (30 molecules).
+- **Build** (started 2026-11-22 12:57).
+  - Unit `ksmech-qmugs-tokens`, script `data/processed/qmugs/pretrain/build_tokens.sh`, from
+    the clean worktree `qmugs-tokens` at main 8e9a385, so tokens and sidecars carry committed
+    code.
+  - It builds the 50k molecules' tokens and the Wiberg sidecars of every QMugs record.
+- **Next.**
+  - The store.
+  - A pretraining run with arm e's model flags.
+  - fullrm_e started from it on two seeds, read like fullrm_e on the three sources: the human
+    benchmark walk, PMechDB closed_base ood, the ReactMech scaffold test. The permutation
+    importance of the gap block says whether the orbital-pair channels are now read.

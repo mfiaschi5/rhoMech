@@ -160,6 +160,29 @@ def mini_token_cache(mini_steps, token_loader, sp_record, tmp_path):
     return cache
 
 
+@pytest.fixture
+def pretrain_cache(token_loader, sp_record, tmp_path):
+    """A `TokenCache` with the token and bond-index files of four closed-shell fixture molecules
+    (acetone, methyl acetate, acrolein, chloromethane) and the methyl radical: the pretraining
+    tests (`pretrain.samples`, `train.pretrain`)."""
+    from ksmech.arrows.reactants import TokenCache
+    from ksmech.data import chem
+    from ksmech.orbitals.build import tokens_path
+    from ksmech.orbitals.tokens import save_tokens
+    from ksmech.qm.bond_index import save_bond_indices
+    from ksmech.qm.records import save_record
+    from tests.fixtures.molecules import OPEN_SHELL
+
+    names = ("acetone", "methyl_acetate", "acrolein", "chloromethane")
+    cache = TokenCache(tmp_path / "tokens", bond_index_dir=tmp_path / "wbi")
+    for n, smi in enumerate([*(MOLECULES[k] for k in names), OPEN_SHELL["methyl"][0]]):
+        key = chem.unmapped_canonical(Chem.MolFromSmiles(smi))
+        save_tokens(token_loader(key), tokens_path(cache.tokens_dir, key, 0, cache.method))
+        rec = sp_record(key)
+        save_bond_indices(rec, save_record(rec, tmp_path / f"rec_{n}.npz"), tmp_path / "wbi")
+    return cache
+
+
 @pytest.fixture(scope="session")
 def realdata_workers() -> int:
     """Spawned processes of one real-data pass: `KSMECH_TEST_WORKERS` (default 14), or 1

@@ -792,3 +792,22 @@ The manifest has one row per (`chembl_id`, `conformer_id`, `method`):
 Two QMugs-specific reason codes: `SDF_UNREADABLE` (RDKit cannot read the molfile) and
 `RECORD_ORDER` (its atoms do not all map onto the record's). A geometry in which a bond of the
 Lewis structure is longer than 1.3 times the covalent radii is `CONNECTIVITY_CHANGED`.
+
+### Pretraining store: `data/processed/qmugs/pretrain/` (phase 3, 2026-11-22)
+
+Built by `ksmech-pretrain` (`pretrain.samples`) from the QMugs records, their tokens
+(`data/cache/qmugs/tokens/`) and Wiberg sidecars (`data/cache/qmugs/bond_index/`):
+
+- `species_<n>.json`: `{"species": [...], "n", "seed"}`, the seeded random subset of the
+  distinct `ok` keys of the manifest (its provenance input), read by `ksmech-orbitals build
+  --species-from`.
+- `samples/shard_*.npz` and `samples/index.json`: the mechanism store's layout
+  (`arrows.store`). Each sample is a `PretrainSample`: the fields of a `MechanismSample` of the
+  one-molecule pool (no labels, `edit_label` None, source `qmugs`, id `qmugs-<sha256 of the key,
+  16 hex>`). Beside them is `pair_target`, (n_occ, n_virt) float32: E2 of every (occupied,
+  virtual) cell in eV (`physics.donor_acceptor`), NaN where undefined, in the layout of
+  `pair_z`.
+- `samples_pretrain_train.json` and `samples_pretrain_val.json`: the views of the two parts.
+  The validation part is 5% of the keys by hash (`part_of`).
+- `pretrain_report.json`: the counts of the build, with every skipped molecule counted by its
+  reason code.
