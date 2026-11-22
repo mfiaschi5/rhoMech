@@ -31,7 +31,7 @@ def test_fock_at_tblite_charges_gives_tblite_orbitals(solvent):
     p = torch.from_numpy(np.concatenate([r["density-matrix"].ravel() for r in runs])).cuda()
     qsh, dp, qp = K._mulliken(sb.db, sb.geo_mols, p)
     pot = sb._potentials(qsh, dp, qp)
-    emo, c = S.solve(sb.g, S.fock(sb.g, sb.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"]))
+    emo, c, _ = S.solve(sb.g, S.fock(sb.g, sb.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"]))
     for m, (name, r) in enumerate(zip(names, runs, strict=True)):
         k = mol_basis(CASES[name][0]).nao
         assert np.abs(emo[m, :k].cpu().numpy() - r["orbital-energies"]).max() < 1e-9, name
@@ -102,3 +102,33 @@ def test_scf_gradient_follows_tblite_convention_at_production_accuracy():
         ref = np.array(new_calculator(z, xyz, charge, uhf, "water").singlepoint().get("gradient"))
         assert np.abs(g[a0 : a0 + len(z)] - ref).max() < 2e-5, name
         a0 += len(z)
+
+
+@pytest.mark.gpu
+@gpu
+def test_a_poisoned_molecule_fails_alone():
+    """Coincident atoms (S not positive definite) and a NaN coordinate fail their own molecule
+    with a status; the rest of the batch reaches the clean batch's results."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    names = ["acetone", "benzene", "chloromethane"]
+    clean = [CASES[n] for n in names]
+    z, xyz, charge, uhf = CASES["acetone"]
+    coincident = xyz.copy()
+    coincident[1] = coincident[0]
+    nan = xyz.copy()
+    nan[2, 1] = np.nan
+    poisoned = clean + [(z, coincident, charge, uhf), (z, nan, charge, uhf)]
+    ref = S.SCFBatch(clean, True)
+    r_ref = ref.run()
+    e_ref, g_ref = ref.gradient(r_ref)
+    sb = S.SCFBatch(poisoned, True)
+    r = sb.run()
+    e, g = sb.gradient(r)
+    assert r.converged.tolist() == [True, True, True, False, False]
+    assert r.status[3:].tolist() == [S.SCF_BAD_GEOMETRY, S.SCF_BAD_GEOMETRY]
+    assert torch.abs(e[:3] - e_ref).max() < 1e-12
+    n = sum(len(CASES[k][0]) for k in names)
+    assert torch.abs(g[:n] - g_ref).max() < 1e-12

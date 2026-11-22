@@ -1,0 +1,92 @@
+"""Stage 4's reference: production's CPU optimization (tblite-anc) of the spike sample's species.
+
+    uv run python scripts/gpu_xtb/stage4_reference.py [--per-bin 16] [--workers 8]
+
+For each species: `prepare_mol` and `embed(mol, 1, seed=0)` as `qm.batch._compute` does, then
+`GFN2Calculator._relax` with `QMConfig(optimizer="tblite-anc")` (free run with the dissociation
+guard, a walled retry from the start when a bond breaks, `check_connectivity` after each). Only
+untagged closed shells (`spin_for_qm`), the GPU engine's scope. Per species: the start and end
+geometries (Bohr), the outcome (ok or the reason code), whether walls were needed, the number of
+energies, the seconds, and tblite's energy and max|gradient| at the end point. Written once to
+data/processed/gpu_qm_spike/stage4_reference.json (the GPU runs compare against it).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import numpy as np
+
+SAMPLE = Path("data/processed/gpu_qm_spike/mols.json")
+OUT = Path("data/processed/gpu_qm_spike/stage4_reference.json")
+
+
+def _one(smiles: str) -> dict:
+    import os
+
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    from ksmech.qm import geometry
+    from ksmech.qm import spin as qm_spin
+    from ksmech.qm.embed import embed, prepare_mol
+    from ksmech.qm.geometry import BOHR_ANG, new_calculator
+    from ksmech.qm.records import QMError
+    from ksmech.qm.xtb_calc import GFN2Calculator, QMConfig
+
+    row: dict = {"smiles": smiles}
+    mol = prepare_mol(smiles)
+    ids = embed(mol, 1, seed=0)
+    charge, unpaired, tag = qm_spin.spin_for_qm(mol, smiles)
+    row.update(charge=charge, unpaired=unpaired, tag=tag, n_embedded=len(ids))
+    if not ids or tag is not None or unpaired:
+        row["outcome"] = "skipped"
+        return row
+    z = np.array([a.GetAtomicNum() for a in mol.GetAtoms()])
+    start = mol.GetConformer(ids[0]).GetPositions() / BOHR_ANG
+    row.update(z=z.tolist(), start=start.tolist())
+    calls = {"n": 0}
+    orig = geometry.TbliteEnergy.__call__
+
+    def counted(self, x):
+        calls["n"] += 1
+        return orig(self, x)
+
+    geometry.TbliteEnergy.__call__ = counted
+    calc = GFN2Calculator(QMConfig(optimizer="tblite-anc"))
+    t0 = time.perf_counter()
+    try:
+        xyz, restrained = calc._relax(mol, z, start, charge, unpaired)
+        row.update(outcome="ok", restrained=restrained, end=np.asarray(xyz).tolist())
+        res = new_calculator(z, xyz, charge, unpaired, "water").singlepoint()
+        row.update(energy=float(res.get("energy")),
+                   gmax=float(np.abs(np.array(res.get("gradient"))).max()))  # fmt: skip
+    except QMError as exc:
+        row.update(outcome=str(exc.reason), detail=exc.detail)
+    row.update(n_evals=calls["n"], seconds=time.perf_counter() - t0)
+    return row
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--per-bin", type=int, default=16)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--root", type=Path, default=Path("/home/jacopo/Documents/ksmech"))
+    args = ap.parse_args()
+    sample = json.loads((args.root / SAMPLE).read_text())
+    smiles = [(key, r["smiles"]) for key, recs in sample.items() for r in recs[: args.per_bin]]
+    out = {}
+    with ProcessPoolExecutor(args.workers) as pool:
+        for (key, _smi), row in zip(smiles, pool.map(_one, [s for _, s in smiles]), strict=True):
+            row["bin"] = key
+            out.setdefault(key, []).append(row)
+            print(key, row["outcome"], row.get("n_evals"), round(row.get("seconds", 0), 1),
+                  flush=True)  # fmt: skip
+    (args.root / OUT).write_text(json.dumps(out) + "\n")
+    print("wrote", args.root / OUT)
+
+
+if __name__ == "__main__":
+    main()

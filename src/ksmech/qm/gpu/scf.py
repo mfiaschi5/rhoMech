@@ -112,16 +112,44 @@ class Geometry:
     Q: torch.Tensor  # (B, 6, n, n)
     Linv: torch.Tensor  # (B, n, n) inverse Cholesky factor of S
     Linv32: torch.Tensor  # the same in fp32, for the fp32 cycles
+    bad: torch.Tensor  # (B,) non-finite integrals or S not positive definite
 
 
 def padded_geometry(db: native.DeviceBatch, lay: Layout) -> Geometry:
-    eye = torch.diag_embed((~lay.valid).to(F64))
-    s = pad(db.S, lay)[:, 0] + eye
-    chol = torch.linalg.cholesky(s)
-    eye_n = torch.eye(lay.nmax, dtype=F64, device=s.device).expand_as(s)
-    linv = torch.linalg.solve_triangular(chol, eye_n, upper=False)
+    """The padded matrices; a molecule with non-finite integrals or an S that is not positive
+    definite (coincident atoms) is flagged `bad` and given harmless stand-ins (S = 1, H0 = 0),
+    so it cannot fail the batch."""
+    s = pad(db.S, lay)[:, 0] + torch.diag_embed((~lay.valid).to(F64))
     h0, d, q = pad(db.H0, lay)[:, 0], pad(db.D, lay, 3), pad(db.Q, lay, 6)
-    return Geometry(s, h0, d, q, linv, linv.float())
+    bad = ~(torch.isfinite(s).all((1, 2)) & torch.isfinite(h0).all((1, 2))
+            & torch.isfinite(d).all((1, 2, 3)) & torch.isfinite(q).all((1, 2, 3)))  # fmt: skip
+    eye_n = torch.eye(lay.nmax, dtype=F64, device=s.device).expand_as(s)
+    s = torch.where(bad[:, None, None], eye_n, s)
+    chol, info = torch.linalg.cholesky_ex(s)
+    bad = bad | (info != 0)
+    m3, m4 = bad[:, None, None], bad[:, None, None, None]
+    s, chol = torch.where(m3, eye_n, s), torch.where(m3, eye_n, chol)
+    h0, d, q = torch.where(m3, 0.0, h0), torch.where(m4, 0.0, d), torch.where(m4, 0.0, q)
+    linv = torch.linalg.solve_triangular(chol, eye_n, upper=False)
+    return Geometry(s, h0, d, q, linv, linv.float(), bad)
+
+
+def eigh_safe(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Batched eigh that cannot fail the batch: a non-finite matrix, or one the solver fails on,
+    gets eigenvalues PAD_LEVEL and unit vectors and ok = False."""
+    ok = torch.isfinite(a).all((1, 2))
+    eye = torch.eye(a.shape[-1], dtype=a.dtype, device=a.device).expand_as(a)
+    a = torch.where(ok[:, None, None], a, PAD_LEVEL * eye)
+    try:
+        e, c = torch.linalg.eigh(a)
+    except torch.linalg.LinAlgError:
+        e, c = torch.empty_like(a[..., 0]), torch.empty_like(a)
+        for i in range(a.shape[0]):
+            try:
+                e[i], c[i] = torch.linalg.eigh(a[i])
+            except torch.linalg.LinAlgError:
+                ok[i], e[i], c[i] = False, PAD_LEVEL, eye[i]
+    return e, c, ok
 
 
 class KsFock(C.Structure):
@@ -198,22 +226,22 @@ def fock_reference(g: Geometry, lay: Layout, vsh, vat, vdp, vqp, idx=None) -> to
     return f + torch.diag_embed((~valid).to(F64) * PAD_LEVEL)
 
 
-def solve(g: Geometry, f: torch.Tensor, idx=None) -> tuple[torch.Tensor, torch.Tensor]:
-    """Orbital energies (B, n) and coefficients (B, n, n), columns the orbitals: F C = S C e,
-    in fp64 throughout (the exact reference of the faster solvers)."""
+def solve(g: Geometry, f: torch.Tensor, idx=None):
+    """Orbital energies (B, n), coefficients (B, n, n), columns the orbitals (F C = S C e), and
+    whether each solve succeeded (`eigh_safe`), in fp64 throughout."""
     linv = g.Linv if idx is None else g.Linv[idx]
     fp = linv @ f @ linv.transpose(1, 2)
-    e, c = torch.linalg.eigh(0.5 * (fp + fp.transpose(1, 2)))
-    return e, linv.transpose(1, 2) @ c
+    e, c, ok = eigh_safe(0.5 * (fp + fp.transpose(1, 2)))
+    return e, linv.transpose(1, 2) @ c, ok
 
 
-def solve_fp32(g: Geometry, f: torch.Tensor, idx) -> tuple[torch.Tensor, torch.Tensor]:
+def solve_fp32(g: Geometry, f: torch.Tensor, idx):
     """The same in fp32 (transform, eigensolve, back-transform): the early SCF cycles. The
     orbital energies come back in fp64, the coefficients in fp32."""
     linv = g.Linv32[idx]
     fp = linv @ f.float() @ linv.transpose(1, 2)
-    e, c = torch.linalg.eigh(0.5 * (fp + fp.transpose(1, 2)))
-    return e.double(), linv.transpose(1, 2) @ c
+    e, c, ok = eigh_safe(0.5 * (fp + fp.transpose(1, 2)))
+    return e.double(), linv.transpose(1, 2) @ c, ok
 
 
 def fermi(emo: torch.Tensor, nel: torch.Tensor, kt: float = T.KT_300K) -> torch.Tensor:
@@ -375,6 +403,14 @@ class SCFResult:
     qsh: torch.Tensor
     dp: torch.Tensor
     qp: torch.Tensor
+    status: torch.Tensor  # (B,) SCF_OK, SCF_MAXITER, SCF_BAD_GEOMETRY or SCF_NONFINITE
+    vin: dict  # the last cycle's input potentials (vsh, vat, vdp, vqp): tblite's gradient's
+
+
+SCF_OK, SCF_MAXITER, SCF_BAD_GEOMETRY, SCF_NONFINITE = 0, 1, 2, 3
+SCF_STATUS = {SCF_MAXITER: "no convergence within the cycle limit",
+              SCF_BAD_GEOMETRY: "non-finite integrals or S not positive definite",
+              SCF_NONFINITE: "non-finite Fock matrix, eigensolve or energy"}  # fmt: skip
 
 
 class SCFBatch:
@@ -438,23 +474,24 @@ class SCFBatch:
         shift = T.solvent_shift() if self.solvent else 0.0
         return band + ts + out_pot["energy"].sum(1) + shift
 
-    def _cycle(self, st: dict, pot: dict, active, precise) -> None:
-        """Fock, eigensolve and density of the active molecules, into the state buffers."""
+    def _cycle(self, st: dict, pot: dict, active, precise) -> torch.Tensor:
+        """Fock, eigensolve and density of the active molecules, into the state buffers;
+        returns the molecules whose eigensolve failed (B,)."""
+        failed = torch.zeros_like(active)
         for phase in (False, True):
             idx = torch.nonzero(active & (precise == phase)).squeeze(1)
             if not len(idx):
                 continue
             f = fock(self.g, self.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"], idx)
-            if phase:
-                emo, c = solve(self.g, f, idx)
-            else:
-                emo, c = solve_fp32(self.g, f, idx)
+            emo, c, ok = (solve if phase else solve_fp32)(self.g, f, idx)
+            failed[idx] = ~ok
             occ, ts = self._occupations(emo, idx)
             st["emo"][idx], st["occ"][idx], st["ts"][idx] = emo, occ, ts
             # the fp32 phase's density in fp32; C and F kept only for the precise phase's X
             st["p"][idx] = ((c * occ[:, None, :].to(c.dtype)) @ c.transpose(1, 2)).double()
             if phase:
                 st["c"][idx] = c
+        return failed
 
     def _wdensity(self, st: dict, idx) -> None:
         """X = C diag(f e) C^T of the last (fp64) cycle, tblite's energy-weighted density."""
@@ -463,46 +500,87 @@ class SCFBatch:
 
     SWITCH = 1e-4  # residual RMS below which a molecule's cycles turn fp64-accurate
 
-    def run(self, start=None) -> SCFResult:
-        """The SCF from `start` (qsh, dp, qp), default the SAD guess."""
+    def run(self, start=None, active=None) -> SCFResult:
+        """The SCF from `start` (qsh, dp, qp), default the SAD guess, for the molecules
+        `active` (default all; bad geometries never run). A molecule that fails stops alone:
+        its status says why (SCF_STATUS)."""
         qsh, dp, qp = start if start is not None else self.guess()
         mixer = Broyden(self.vars.pack(qsh, dp, qp))
         b, n = self.vars.b, self.lay.nmax
         st = {k: torch.zeros(b, n, n, **_f64()) for k in ("c", "p", "x")}
         st.update(emo=torch.zeros(b, n, **_f64()), occ=torch.zeros(b, n, **_f64()),
                   ts=torch.zeros(b, **_f64()))  # fmt: skip
-        flags = {k: torch.zeros(b, dtype=torch.bool, device="cuda") for k in ("conv", "precise")}
-        active = torch.ones(b, dtype=torch.bool, device="cuda")
+        go = torch.ones(b, dtype=torch.bool, device="cuda") if active is None else active.clone()
+        active = go & ~self.g.bad
+        status = torch.full((b,), SCF_MAXITER, dtype=torch.long, device="cuda")
+        status[self.g.bad] = SCF_BAD_GEOMETRY
+        precise = torch.zeros(b, dtype=torch.bool, device="cuda")
         elast = torch.full((b,), torch.inf, **_f64())
+        energy = torch.full((b,), torch.nan, **_f64())
         iters = torch.zeros(b, dtype=torch.long, device="cuda")
-        energy = qout = None
+        qout, vin = mixer.q.clone(), self._zero_potentials()
+        sh_mol = self.atom_mol[self.sh_atom]
         for it in range(1, self.max_iter + 1):
-            precise = flags["precise"].clone()
-            self._cycle(st, self._potentials(*self.vars.unpack(mixer.q)), active, precise)
+            if not bool(active.any()):
+                break
+            this = precise.clone()
+            pot = self._potentials(*self.vars.unpack(mixer.q))
+            _keep_input(vin, pot, active[sh_mol], active[self.atom_mol])
+            failed = self._cycle(st, pot, active, this)
             qo = mulliken(self.g, self.lay, st["p"], self.n0sh, self.db.hb.nat)
-            qnew = self.vars.pack(*qo)
-            qout = qnew if qout is None else torch.where(active[:, None], qnew, qout)
+            qout = torch.where(active[:, None], self.vars.pack(*qo), qout)
             dq = qout - mixer.q
             enew = self._energy(st["p"], st["ts"], self._potentials(*qo, slot="out"))
-            energy = enew if energy is None else torch.where(active, enew, energy)
+            energy = torch.where(active, enew, energy)
             err = torch.sqrt((dq * dq).sum(1) / self.vars.nvar)
-            done = precise & ((energy - elast).abs() < self.econv) & (err < self.pconv)
-            elast = torch.where(precise, energy, torch.inf)
+            bad = active & (failed | ~torch.isfinite(energy) | ~torch.isfinite(err))
+            done = active & this & ((energy - elast).abs() < self.econv) & (err < self.pconv)
+            elast = torch.where(this, energy, torch.inf)
             iters = torch.where(active, it, iters)
-            finished = active & (done | ~torch.isfinite(energy))
-            flags["conv"] |= active & done & torch.isfinite(energy)
+            status = torch.where(bad, SCF_NONFINITE, torch.where(done & ~bad, SCF_OK, status))
+            finished = done | bad
             if bool(finished.any()):
                 self._wdensity(st, torch.nonzero(finished).squeeze(1))
             active = active & ~finished
-            flags["precise"] |= active & (err < self.SWITCH)
-            if not bool(active.any()):
-                break
+            precise |= active & (err < self.SWITCH)
             mixer.next(torch.where(active[:, None], dq, 0.0), active)
         if bool(active.any()):
             self._wdensity(st, torch.nonzero(active).squeeze(1))
         qsh, dp, qp = self.vars.unpack(qout)
-        return SCFResult(energy, flags["conv"], iters, st["p"], st["x"], st["emo"], st["occ"],
-                         qsh, dp, qp)  # fmt: skip
+        return SCFResult(energy, status == SCF_OK, iters, st["p"], st["x"], st["emo"],
+                         st["occ"], qsh, dp, qp, status, vin)  # fmt: skip
+
+    def run_with_fallback(self, start, active=None) -> tuple[SCFResult, torch.Tensor]:
+        """`run` from `start`; the molecules it leaves unconverged run again from the SAD guess
+        (as `TbliteEnergy` restarts tblite). Returns the merged result and who fell back."""
+        r = self.run(start, active)
+        retry = ~r.converged & ~self.g.bad
+        if active is not None:
+            retry &= active
+        if start is None or not bool(retry.any()):
+            return r, torch.zeros_like(retry)
+        return self.merge(r, self.run(None, retry), retry), retry
+
+    def merge(self, a: SCFResult, b: SCFResult, take_b: torch.Tensor) -> SCFResult:
+        """`a` with the molecules `take_b` from `b`."""
+        sh_mol = self.atom_mol[self.sh_atom]
+
+        def pick(x, y, mask):
+            return torch.where(mask.view(-1, *([1] * (x.dim() - 1))), y, x)
+
+        mol = {k: pick(getattr(a, k), getattr(b, k), take_b) for k in
+               ("energy", "converged", "iterations", "density", "wdensity", "emo", "occ",
+                "status")}  # fmt: skip
+        sh, at = take_b[sh_mol], take_b[self.atom_mol]
+        vin = {k: pick(a.vin[k], b.vin[k], sh if k == "vsh" else at) for k in a.vin}
+        return SCFResult(**mol, qsh=pick(a.qsh, b.qsh, sh), dp=pick(a.dp, b.dp, at),
+                         qp=pick(a.qp, b.qp, at), vin=vin)  # fmt: skip
+
+    def _zero_potentials(self) -> dict:
+        nat, nsh = self.db.hb.nat, len(self.sh_atom)
+        z = _f64()
+        return {"vsh": torch.zeros(nsh, **z), "vat": torch.zeros(nat, **z),
+                "vdp": torch.zeros(nat, 3, **z), "vqp": torch.zeros(nat, 6, **z)}  # fmt: skip
 
     def gradient(
         self, r: SCFResult, potentials: str = "input"
@@ -512,12 +590,8 @@ class SCFBatch:
         contracted with the potentials of the output variables ("output", consistent with the
         density) or, as tblite does, of the last cycle's input ("input": right after `run`)."""
         qat = self.qat(r.qsh)
-        if potentials == "input":
-            raw = self._slots["in"]  # untouched since the last cycle; frozen molecules' too
-            pot = {"vsh": raw["vsh"], "vat": raw["vat"], "vdp": raw["vdp"].view(-1, 3),
-                   "vqp": raw["vqp"].view(-1, 6)}  # fmt: skip
-        else:
-            pot = self._potentials(r.qsh, r.dp, r.qp, slot="out")
+        out_pot = potentials != "input"
+        pot = self._potentials(r.qsh, r.dp, r.qp, slot="out") if out_pot else r.vin
         p, x = (torch.zeros(self.db.hb.mat_total, **_f64()) for _ in range(2))
         unpad_into(p, r.density, self.lay)
         unpad_into(x, r.wdensity, self.lay)
@@ -530,3 +604,11 @@ class SCFBatch:
 
 def _f64() -> dict:
     return {"dtype": F64, "device": "cuda"}
+
+
+def _keep_input(vin: dict, pot: dict, sh_active, at_active) -> None:
+    """Copy the active molecules' input potentials of this cycle into `vin`."""
+    vin["vsh"] = torch.where(sh_active, pot["vsh"], vin["vsh"])
+    vin["vat"] = torch.where(at_active, pot["vat"], vin["vat"])
+    vin["vdp"] = torch.where(at_active[:, None], pot["vdp"], vin["vdp"])
+    vin["vqp"] = torch.where(at_active[:, None], pot["vqp"], vin["vqp"])
