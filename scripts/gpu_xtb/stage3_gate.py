@@ -14,8 +14,9 @@ water as in production.
   - SCF cycles of the GPU at accuracy 1, and failures (not converged, non-finite).
 - time, per molecule, best of the batch sizes, accuracy 1: a fresh single point with gradient
   (from the SAD guess) and a restarted one (the previous geometry's converged charges, every
-  atom moved by up to 0.01 Bohr, as in an optimizer). Gate at 51-80 atoms: the fresh single
-  point at most half of cpu12's (tblite's single point + gradient on one core / 12).
+  atom moved by up to 0.01 Bohr, as in an optimizer), and the host-side construction of the
+  batch (build_ms, once per batch, outside both). Gate at 51-80 atoms: the fresh single point
+  at most half of cpu12's (tblite's single point + gradient on one core / 12).
 """
 
 from __future__ import annotations
@@ -113,7 +114,10 @@ def time_bins(sample: dict, batches: list[int], reps: int) -> dict:
         for nb in batches:
             picked = [recs[i % len(recs)] for i in range(nb)]
             try:
+                t_build = time.perf_counter()
                 sb = S.SCFBatch(_mols(picked), True)
+                torch.cuda.synchronize()
+                build_ms = (time.perf_counter() - t_build) * 1e3 / nb
             except torch.OutOfMemoryError:
                 print(key, nb, "skipped: memory", flush=True)
                 torch.cuda.empty_cache()
@@ -134,6 +138,7 @@ def time_bins(sample: dict, batches: list[int], reps: int) -> dict:
 
             row = {"fresh_ms": min(_time_once(fresh) for _ in range(reps)) / nb,
                    "restart_ms": min(_time_once(restart) for _ in range(reps)) / nb,
+                   "build_ms": build_ms,
                    "cycles_fresh": float(r0.iterations.double().mean())}  # fmt: skip
             out[key][nb] = row
             print(key, nb, {k: round(v, 3) for k, v in row.items()}, flush=True)

@@ -10837,10 +10837,17 @@ Branch `claude/gpu-xtb`.
   - **Tight tier.** Both sides at accuracy 1e-6, same fixed point. Fixtures (gas and water,
     CuCl2 and FeBr4- included) and 48 spike molecules: energy within 4e-12 Eh, gradient within
     8.6e-11 Eh/Bohr.
-  - **Production tier.** Accuracy 1, each against tblite at 1e-6. The GPU's energy lands where
-    tblite's does (the same mixer path: 8.55e-9 against 8.67e-9 at 51-80 atoms). Its gradient
-    is within 2.4e-5 of the converged one, against tblite's 1.7e-5; tblite's lags by using the
-    last input potential. 9-25 cycles, no failures.
+  - **Production tier.** Accuracy 1. The GPU's energy lands where tblite's does (the same mixer
+    path: 8.55e-9 against 8.67e-9 from the converged energy at 51-80 atoms). The gradient
+    contracts the H0 term with the last cycle's input potentials, as tblite does
+    (`gradient(potentials="input")`, the default).
+    - Against tblite at accuracy 1: 2e-7 at 51-80 atoms, at most 5e-6 on the spike bins, and
+      1.1e-5 on the fixture batch.
+    - That last one misses the plan's 1e-5 gate as written. There tblite is itself 1.0e-5 from
+      the converged gradient and the GPU 1.5e-6, so the two differ by how far each SCF went.
+    - Against the converged gradient the GPU is never farther than tblite (at most 1.7e-5).
+    - The output-potential variant, consistent with the density, was farther from both.
+    - 9-25 cycles, no failures.
 - **Speed.** Single point with gradient, accuracy 1, ALPB water, ms per molecule, best of batches
   64/256/1024, RTX 4080 SUPER idle (the QMugs pretraining run sharing the GPU had finished):
 
@@ -10858,6 +10865,13 @@ Branch `claude/gpu-xtb`.
   above 120 atoms only batch 64 ran, and that bin's speed-up is batch-limited. cpu12 is one
   core of a loaded 12-worker run divided by 12, as the spike defined it. These are single
   points: the optimizer's whole record (stage 4) decides the end-to-end gain.
+
+  **Building the batch is outside those times.** The host packing (`SCFBatch(...)`: basis,
+  H0 scale, pair lists, parameter tables, padded layout) costs 0.8, 2.5 and 7.3 ms per molecule
+  at <=15, 51-80 and >120 atoms. That was 25 ms at 51-80 atoms before `h0_params` was
+  vectorized. With it, a lone fresh single point at 51-80 atoms is 6.4 ms, 3.3x cpu12; below 16
+  atoms it is slower than the CPU. An optimizer builds its batch once and pays this per record,
+  not per step.
 - **Design choices.**
   - **Precision.** Each molecule's cycles run in fp32 (transform, eigensolve, density) until
     its residual RMS falls below 1e-4, then in fp64. Convergence is declared only after two fp64
@@ -10867,6 +10881,8 @@ Branch `claude/gpu-xtb`.
     restricted to pairs of orbitals of different occupation, took the density from fp32's
     1e-5 to 1e-14 in two steps. But its eight fp64 GEMMs cost more than an fp64 eigensolve on this
     GPU (fp64 at 1/64 of fp32): 1.31 against 1.09 ms per molecule at n = 230, batch 256.
+  The per-step timings below (13.5 -> 0.6, 1.37 -> 0.26, ...) were taken while a QMugs
+  pretraining run shared the GPU; they compare steps, not absolute speed.
   - **Light evaluations.** The SCF calls stage 2 twice per cycle (potentials of the input,
     energy of the output). The geometry pass now also computes everything charge-independent
     (zero-charge D4 weights and C6, the ATM energy, the surface areas). An SCF evaluation does
@@ -10879,6 +10895,11 @@ Branch `claude/gpu-xtb`.
   spin) and match tblite, but the fp32 phase slows Broyden on CuCl2 and FeBr4- (34-54 cycles at
   accuracy 1e-6 against 18 in fp64).
 - **Open.**
+  - **Failures are batch-fatal.** A non-positive-definite S or a non-finite F raises in
+    `cholesky` or `eigh` for the whole batch, and there are no reason codes yet. An optimizer
+    will meet such geometries, so per-molecule isolation (SCF_NOT_CONVERGED, non-finite) is
+    stage 4's first item.
+  - **Memory** caps the batch: 256 molecules at 51-120 atoms, 64 above.
   - **Licensing**, as before.
   - **Stage 4 (the batched optimizer)** waits for the user's approval. The single point is the
     optimizer's inner step. A restarted SCF (from the previous geometry's charges) is what it

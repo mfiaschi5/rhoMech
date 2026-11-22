@@ -191,13 +191,15 @@ def h0_params(basis: MolBasis) -> H0Params:
     nsh = len(basis.sh_atom)
     zs = basis.z[basis.sh_atom]
     cg = [basis.shell(s) for s in range(nsh)]
-    hscale = np.empty((nsh, nsh))
-    for a in range(nsh):
-        for b in range(nsh):
-            zi, zj = cg[a].zeta, cg[b].zeta
-            zij = (2 * math.sqrt(zi * zj) / (zi + zj)) ** scalar("wexp")
-            enp = 1.0 + scalar("enscale") * (en[zs[a] - 1] - en[zs[b] - 1]) ** 2
-            hscale[a, b] = zij * _kshell(cg[a].l, cg[b].l) * enp
+    zeta = np.array([c.zeta for c in cg])
+    ls = np.array([c.l for c in cg])
+    kshell = np.array([[_kshell(li, lj) for lj in range(3)] for li in range(3)])
+    zij = (2 * np.sqrt(zeta[:, None] * zeta[None, :]) / (zeta[:, None] + zeta[None, :])) ** scalar(
+        "wexp"
+    )
+    ens = en[zs - 1]
+    enp = 1.0 + scalar("enscale") * (ens[:, None] - ens[None, :]) ** 2
+    hscale = zij * kshell[ls[:, None], ls[None, :]] * enp
     shpoly = np.array([g["p_shpoly"][c.l, z - 1] for c, z in zip(cg, zs, strict=True)])
     return H0Params(hscale, shpoly, rad_tab[basis.z - 1])
 

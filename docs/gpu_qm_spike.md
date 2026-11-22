@@ -151,5 +151,7 @@ fp64. With both converged hard it lands on tblite's fixed point (energy 4e-12 Eh
 A fresh single point with gradient takes 3.9 ms per molecule at 51-80 atoms, against cpu12's
 21 ms (5.4x; the gate was <= 10.5 ms), and 0.7-25 ms from 16 to 200 atoms (3.9-7.8x). Below
 16 atoms it is about even (1.1x). A restarted SCF, as an optimizer runs it, is 20-30% cheaper.
+Building the batch on the host is outside these times: 2.5 ms per molecule at 51-80 atoms, so a
+lone single point there is 6.4 ms (3.3x); an optimizer pays it once per record.
 The table is in docs/decisions.md, 2026-11-22. The end-to-end question, a whole optimized record
 against `ksmech-qm run --workers 12`, is stage 4's (the batched optimizer).

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, cached_property, lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -105,7 +105,7 @@ class MolBasis:
     def shell(self, s: int) -> CGTO:
         return element_shells(int(self.z[self.sh_atom[s]]))[int(self.sh_elem[s])]
 
-    @property
+    @cached_property
     def ao_atom(self) -> np.ndarray:
         out = np.empty(self.nao, dtype=int)
         for s in range(len(self.sh_atom)):
@@ -115,7 +115,13 @@ class MolBasis:
 
 
 def mol_basis(z: np.ndarray) -> MolBasis:
-    z = np.asarray(z, dtype=int)
+    """The basis of a molecule, cached by its element sequence (treat it as read-only)."""
+    return _mol_basis(tuple(int(x) for x in np.asarray(z).ravel()))
+
+
+@lru_cache(maxsize=8192)
+def _mol_basis(zt: tuple[int, ...]) -> MolBasis:
+    z = np.array(zt, dtype=int)
     atom, elem, ao, nao = [], [], [], 0
     for iat, zi in enumerate(z):
         for ish, cg in enumerate(element_shells(int(zi))):

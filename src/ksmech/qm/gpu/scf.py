@@ -504,11 +504,20 @@ class SCFBatch:
         return SCFResult(energy, flags["conv"], iters, st["p"], st["x"], st["emo"], st["occ"],
                          qsh, dp, qp)  # fmt: skip
 
-    def gradient(self, r: SCFResult) -> tuple[torch.Tensor, torch.Tensor]:
+    def gradient(
+        self, r: SCFResult, potentials: str = "input"
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Energy and gradient (nat, 3) at the SCF result: the stage-2 terms at the output
-        variables, stage 1's H0 gradient with their potentials, the CN chain of its dE/dCN."""
+        variables, stage 1's H0 gradient, the CN chain of its dE/dCN. The H0 gradient is
+        contracted with the potentials of the output variables ("output", consistent with the
+        density) or, as tblite does, of the last cycle's input ("input": right after `run`)."""
         qat = self.qat(r.qsh)
-        pot = self._potentials(r.qsh, r.dp, r.qp)
+        if potentials == "input":
+            raw = self._slots["in"]  # untouched since the last cycle; frozen molecules' too
+            pot = {"vsh": raw["vsh"], "vat": raw["vat"], "vdp": raw["vdp"].view(-1, 3),
+                   "vqp": raw["vqp"].view(-1, 6)}  # fmt: skip
+        else:
+            pot = self._potentials(r.qsh, r.dp, r.qp, slot="out")
         p, x = (torch.zeros(self.db.hb.mat_total, **_f64()) for _ in range(2))
         unpad_into(p, r.density, self.lay)
         unpad_into(x, r.wdensity, self.lay)

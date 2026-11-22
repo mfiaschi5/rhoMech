@@ -57,3 +57,48 @@ def test_scf_lands_on_tblite_energy_and_gradient(solvent):
         assert abs(e[m] - float(ref["energy"])) < 1e-10, name
         assert np.abs(g[a0 : a0 + nat] - ref["gradient"]).max() < 1e-9, name
         a0 += nat
+
+
+@pytest.mark.gpu
+@gpu
+def test_scf_kernels_match_torch_references():
+    """scf.cu's Fock build, Mulliken sums and Fermi filling against their torch versions, with
+    the open-shell metals' fractional occupations in the batch."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    sb = S.SCFBatch(list(CASES.values()), True)
+    r = sb.run()
+    pot = sb._potentials(r.qsh, r.dp, r.qp)
+    args = (sb.g, sb.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"])
+    assert torch.abs(S.fock(*args) - S.fock_reference(*args)).max() < 1e-13
+    for a, b in zip(S.mulliken(sb.g, sb.lay, r.density, sb.n0sh, sb.db.hb.nat),
+                    S.mulliken_reference(sb.g, sb.lay, r.density, sb.n0sh, sb.db.hb.nat),
+                    strict=True):  # fmt: skip
+        assert torch.abs(a - b).max() < 1e-13
+    occ, ts = S.occupations(r.emo, sb.nel_spin)
+    ref = [S.fermi(r.emo, n) for n in sb.nel_spin]
+    assert torch.abs(occ - ref[0] - ref[1]).max() < 1e-14
+    assert torch.abs(ts - S.entropy(ref[0]) - S.entropy(ref[1])).max() < 1e-14
+    fractional = ((occ - occ.round()).abs() > 1e-6).any(1)
+    assert bool(fractional.any())  # the metals exercise fractional occupations
+
+
+@pytest.mark.gpu
+@gpu
+def test_scf_gradient_follows_tblite_convention_at_production_accuracy():
+    """At accuracy 1 the H0 gradient is contracted with the last input potentials, as tblite's
+    is; the gradient then stays within 2e-5 of tblite's at the same accuracy."""
+    from ksmech.qm.geometry import new_calculator
+    from ksmech.qm.gpu import scf as S
+
+    names = ["ethanol", "acetone", "acrolein", "chloromethane"]
+    sb = S.SCFBatch([CASES[n] for n in names], True)
+    _, g = sb.gradient(sb.run())
+    g, a0 = g.cpu().numpy(), 0
+    for name in names:
+        z, xyz, charge, uhf = CASES[name]
+        ref = np.array(new_calculator(z, xyz, charge, uhf, "water").singlepoint().get("gradient"))
+        assert np.abs(g[a0 : a0 + len(z)] - ref).max() < 2e-5, name
+        a0 += len(z)
