@@ -210,14 +210,19 @@ __device__ void d4_weights(const KsClassical& c, int a, double cn, double q, dou
   for (int r = nref; r < KS_NREF; ++r) gw[r] = dgwdcn[r] = dgwdq[r] = 0.0;
 }
 
-__global__ void __launch_bounds__(kThreads) atom_scf_kernel(KsClassical c, KsWork w, KsScf s,
-                                                            KsClsOut o) {
+__global__ void __launch_bounds__(kThreads) atom_d4_zero_kernel(KsClassical c, KsWork w) {
   int a = blockIdx.x * blockDim.x + threadIdx.x;
   if (a >= c.nat) return;
   double tmp[KS_NREF];
+  d4_weights(c, a, w.cn4[a], 0.0, w.gw0 + KS_NREF * a, w.dgw0dcn + KS_NREF * a, tmp);
+}
+
+__global__ void __launch_bounds__(kThreads) atom_scf_kernel(KsClassical c, KsWork w, KsScf s,
+                                                            KsClsOut o, bool grad) {
+  int a = blockIdx.x * blockDim.x + threadIdx.x;
+  if (a >= c.nat) return;
   d4_weights(c, a, w.cn4[a], s.qat[a], w.gw + KS_NREF * a, w.dgwdcn + KS_NREF * a,
              w.dgwdq + KS_NREF * a);
-  d4_weights(c, a, w.cn4[a], 0.0, w.gw0 + KS_NREF * a, w.dgw0dcn + KS_NREF * a, tmp);
   double* ea = w.eatom + KE_N * a;
   // ES3 and the on-site ES2 block, eta_ab = (eta_a + eta_b) / 2
   int sh0 = it(c, a, KI_SH0), nsh = it(c, a, KI_NSH);
@@ -253,7 +258,7 @@ __global__ void __launch_bounds__(kThreads) atom_scf_kernel(KsClassical c, KsWor
   double keps = c.sc[KS_KEPS], q = s.qat[a], br = w.brad[a];
   atomicAdd(ea + KE_ALPB, 0.5 * keps * q * q / br);
   atomicAdd(o.vat + a, keps * q / br);
-  atomicAdd(w.dedbr + a, -0.5 * keps * q * q / (br * br));
+  if (grad) atomicAdd(w.dedbr + a, -0.5 * keps * q * q / (br * br));
 }
 
 // ------------------------------------------------------------------------------ per pair
@@ -262,6 +267,7 @@ __global__ void __launch_bounds__(kThreads) atom_scf_kernel(KsClassical c, KsWor
 struct Pair {
   int i, j, m;
   double v[3], r2, r;
+  bool grad;  // forces and adjoints too, else energies and potentials only
 };
 
 __device__ __forceinline__ void add_energy(const KsWork& w, const Pair& p, int term, double e) {
@@ -269,6 +275,7 @@ __device__ __forceinline__ void add_energy(const KsWork& w, const Pair& p, int t
   atomicAdd(w.eatom + KE_N * p.j + term, 0.5 * e);
 }
 __device__ __forceinline__ void add_force(const KsClsOut& o, const Pair& p, const double* g) {
+  if (!p.grad) return;
   add3(o.grad, p.i, g, 1.0);
   add3(o.grad, p.j, g, -1.0);
 }
@@ -341,8 +348,10 @@ __device__ void aes_pair(const KsClassical& c, const KsWork& w, const KsScf& s,
   }
   add_force(o, p, g);
   double dedR = (df3 * psd + df5 * dpij) / r4 + df5 * (psq - 3.0 * pdd) / r6;  // d/dR, R = u r
-  atomicAdd(w.dedcn + i, 0.5 * dedR);  // dE/dmrad until post_kernel multiplies by dmrad/dCN
-  atomicAdd(w.dedcn + j, 0.5 * dedR);
+  if (p.grad) {  // dE/dmrad until post_kernel multiplies by dmrad/dCN
+    atomicAdd(w.dedcn + i, 0.5 * dedR);
+    atomicAdd(w.dedcn + j, 0.5 * dedR);
+  }
   atomicAdd(o.vat + i, g3 * dpjv + g5 * qtj);
   atomicAdd(o.vat + j, -g3 * dpiv + g5 * qti);
   for (int k = 0; k < 3; ++k) {
@@ -369,16 +378,22 @@ __device__ __forceinline__ double c6_contract(const double* ref, const double* x
   return acc;
 }
 
-__device__ void d4_pair(const KsClassical& c, const KsWork& w, const KsClsOut& o, const Pair& p,
-                        long long pidx) {
+// zero-charge C6 of every pair and its CN derivatives, read by the ATM pass
+__global__ void __launch_bounds__(kThreads) c60_kernel(KsClassical c, KsWork w) {
+  int q = blockIdx.x * blockDim.x + threadIdx.x;
+  if (q >= c.npair) return;
+  const int i = c.pi[q], j = c.pj[q], ni = it(c, i, KI_NREF), nj = it(c, j, KI_NREF);
+  const double* ref = c.c6ref + 49LL * (it(c, i, KI_SP) * c.nsp + it(c, j, KI_SP));
+  const double *g0i = w.gw0 + KS_NREF * i, *g0j = w.gw0 + KS_NREF * j;
+  w.c60[3 * q + 0] = c6_contract(ref, g0i, ni, g0j, nj);
+  w.c60[3 * q + 1] = c6_contract(ref, w.dgw0dcn + KS_NREF * i, ni, g0j, nj);
+  w.c60[3 * q + 2] = c6_contract(ref, g0i, ni, w.dgw0dcn + KS_NREF * j, nj);
+}
+
+__device__ void d4_pair(const KsClassical& c, const KsWork& w, const KsClsOut& o, const Pair& p) {
   const int i = p.i, j = p.j, ni = it(c, i, KI_NREF), nj = it(c, j, KI_NREF);
   const double* ref = c.c6ref + 49LL * (it(c, i, KI_SP) * c.nsp + it(c, j, KI_SP));
   const double *gi = w.gw + KS_NREF * i, *gj = w.gw + KS_NREF * j;
-  // zero-charge C6 and its CN derivatives for the ATM pass
-  const double *g0i = w.gw0 + KS_NREF * i, *g0j = w.gw0 + KS_NREF * j;
-  w.c60[3 * pidx + 0] = c6_contract(ref, g0i, ni, g0j, nj);
-  w.c60[3 * pidx + 1] = c6_contract(ref, w.dgw0dcn + KS_NREF * i, ni, g0j, nj);
-  w.c60[3 * pidx + 2] = c6_contract(ref, g0i, ni, w.dgw0dcn + KS_NREF * j, nj);
   if (p.r2 > kDisp2Cut * kDisp2Cut) return;
   double dsw, sw = smooth(p.r, kDisp2Cut, kDispWidth, &dsw);
   if (sw <= 0.0) return;
@@ -394,8 +409,10 @@ __device__ void d4_pair(const KsClassical& c, const KsWork& w, const KsClsOut& o
   add_energy(w, p, KE_D4TWO, -c6 * edisp);
   double g[3] = {-c6 * gdisp * p.v[0], -c6 * gdisp * p.v[1], -c6 * gdisp * p.v[2]};
   add_force(o, p, g);
-  atomicAdd(w.dedcn4 + i, -edisp * c6_contract(ref, w.dgwdcn + KS_NREF * i, ni, gj, nj));
-  atomicAdd(w.dedcn4 + j, -edisp * c6_contract(ref, gi, ni, w.dgwdcn + KS_NREF * j, nj));
+  if (p.grad) {
+    atomicAdd(w.dedcn4 + i, -edisp * c6_contract(ref, w.dgwdcn + KS_NREF * i, ni, gj, nj));
+    atomicAdd(w.dedcn4 + j, -edisp * c6_contract(ref, gi, ni, w.dgwdcn + KS_NREF * j, nj));
+  }
   atomicAdd(o.vat + i, -edisp * c6_contract(ref, w.dgwdq + KS_NREF * i, ni, gj, nj));
   atomicAdd(o.vat + j, -edisp * c6_contract(ref, gi, ni, w.dgwdq + KS_NREF * j, nj));
 }
@@ -413,14 +430,16 @@ __device__ void alpb_pair(const KsClassical& c, const KsWork& w, const KsScf& s,
   double gs = -e / fgb * dfdr / p.r, g[3] = {gs * p.v[0], gs * p.v[1], gs * p.v[2]};
   add_force(o, p, g);
   double deab = -e / fgb * dfdab;
-  atomicAdd(w.dedbr + i, deab * 0.5 * ab / bi);
-  atomicAdd(w.dedbr + j, deab * 0.5 * ab / bj);
+  if (p.grad) {
+    atomicAdd(w.dedbr + i, deab * 0.5 * ab / bi);
+    atomicAdd(w.dedbr + j, deab * 0.5 * ab / bj);
+  }
   atomicAdd(o.vat + i, keps * s.qat[j] / fgb);
   atomicAdd(o.vat + j, keps * s.qat[i] / fgb);
 }
 
 __global__ void __launch_bounds__(kThreads) pair_kernel(KsClassical c, KsWork w, KsScf s,
-                                                        KsClsOut o) {
+                                                        KsClsOut o, bool grad) {
   int q = blockIdx.x * blockDim.x + threadIdx.x;
   if (q >= c.npair) return;
   Pair p;
@@ -430,10 +449,11 @@ __global__ void __launch_bounds__(kThreads) pair_kernel(KsClassical c, KsWork w,
   p.r2 = pair_vec(c, p.i, p.j, p.v);
   if (p.r2 < 1e-12) return;
   p.r = sqrt(p.r2);
+  p.grad = grad;
   rep_pair(c, w, o, p);
   es2_pair(c, w, s, o, p);
   aes_pair(c, w, s, o, p);
-  d4_pair(c, w, o, p, q);
+  d4_pair(c, w, o, p);
   if (c.solvent) alpb_pair(c, w, s, o, p);
 }
 
@@ -458,7 +478,7 @@ struct AtmAcc {  // what the (i, j) thread accumulates over k
 
 // one triple (i, j, k), k < j < i, added to the accumulators and k's atomics
 __device__ void atm_triple(const KsClassical& c, const KsWork& w, const KsClsOut& o,
-                           const AtmPair& p, int k, AtmAcc& acc) {
+                           const AtmPair& p, int k, AtmAcc& acc, bool grad) {
   const double cut2 = kDisp3Cut * kDisp3Cut, eps = 2.220446049250313e-16;
   double vik[3], r2ik = pair_vec(c, k, p.i, vik);
   if (r2ik > cut2 || r2ik < eps) return;
@@ -486,20 +506,25 @@ __device__ void atm_triple(const KsClassical& c, const KsWork& w, const KsClsOut
   double sjk = sw * c9 * (-atm_dang(r2jk, r2ik, r2ij, r5) * fdmp + ang * dfdmp) / r2jk
              - de0 * dswjk / rjk * p.swij * swik;
   double de = de0 * sw, gk[3];
+  acc.e -= de;
+  if (!grad) {
+    atomicAdd(w.egeo + KE_N * k + KE_D4THREE, -de / 3.0);
+    return;
+  }
   for (int x = 0; x < 3; ++x) {
     acc.gi[x] -= sij * p.vij[x] + sik * vik[x];
     acc.gj[x] += sij * p.vij[x] - sjk * vjk[x];
     gk[x] = sik * vik[x] + sjk * vjk[x];
   }
   add3(o.grad, k, gk, 1.0);
-  acc.e -= de;
   acc.dci -= de * 0.5 * (p.cij[1] / p.cij[0] + cik[1] / cik[0]);
   acc.dcj -= de * 0.5 * (p.cij[2] / p.cij[0] + cjk[1] / cjk[0]);
   atomicAdd(w.dedcn4 + k, -de * 0.5 * (cik[2] / cik[0] + cjk[2] / cjk[0]));
-  atomicAdd(w.eatom + KE_N * k + KE_D4THREE, -de / 3.0);
 }
 
-__global__ void __launch_bounds__(kThreads) atm_kernel(KsClassical c, KsWork w, KsClsOut o) {
+// grad false: the energy, into egeo (geometry pass); true: the gradient and dE/dCN only
+__global__ void __launch_bounds__(kThreads) atm_kernel(KsClassical c, KsWork w, KsClsOut o,
+                                                       bool grad) {
   int q = blockIdx.x * blockDim.x + threadIdx.x;
   if (q >= c.npair) return;
   AtmPair p;
@@ -515,11 +540,14 @@ __global__ void __launch_bounds__(kThreads) atm_kernel(KsClassical c, KsWork w, 
   p.r0ij = c.sc[KS_D4_A1] * sqrt(3.0 * p.ri * p.rj) + c.sc[KS_D4_A2];
   p.cij = w.c60 + 3 * q;
   AtmAcc acc = {{0, 0, 0}, {0, 0, 0}, 0.0, 0.0, 0.0};
-  for (int k = c.mol_at0[p.m]; k < p.j; ++k) atm_triple(c, w, o, p, k, acc);
+  for (int k = c.mol_at0[p.m]; k < p.j; ++k) atm_triple(c, w, o, p, k, acc, grad);
+  if (!grad) {
+    atomicAdd(w.egeo + KE_N * p.i + KE_D4THREE, acc.e / 3.0);
+    atomicAdd(w.egeo + KE_N * p.j + KE_D4THREE, acc.e / 3.0);
+    return;
+  }
   add3(o.grad, p.i, acc.gi, 1.0);
   add3(o.grad, p.j, acc.gj, 1.0);
-  atomicAdd(w.eatom + KE_N * p.i + KE_D4THREE, acc.e / 3.0);
-  atomicAdd(w.eatom + KE_N * p.j + KE_D4THREE, acc.e / 3.0);
   atomicAdd(w.dedcn4 + p.i, acc.dci);
   atomicAdd(w.dedcn4 + p.j, acc.dcj);
 }
@@ -528,7 +556,7 @@ __global__ void __launch_bounds__(kThreads) atm_kernel(KsClassical c, KsWork w, 
 // keps alpha / A_det (sum q)^2 / 2, A_det from the inertia of the vdW spheres; one thread per
 // molecule. d ln A_det / dx_a = r_a^3 (tr(I^-1) v_a - I^-1 v_a) / 3, the centre term vanishing.
 
-__global__ void adet_kernel(KsClassical c, KsWork w, KsScf s, KsClsOut o) {
+__global__ void adet_kernel(KsClassical c, KsWork w, KsScf s, KsClsOut o, bool grad) {
   int m = blockIdx.x * blockDim.x + threadIdx.x;
   if (m >= c.nmol || !c.solvent) return;
   int a0 = c.mol_at0[m], n = c.mol_nat[m];
@@ -562,6 +590,7 @@ __global__ void adet_kernel(KsClassical c, KsWork w, KsScf s, KsClsOut o) {
   double tr = mi[0] + mi[3] + mi[5];
   for (int a = a0; a < a0 + n; ++a) {
     atomicAdd(o.vat + a, kq * qsum);
+    if (!grad) continue;
     double r3 = pow(at(c, a, KA_RVDW), 3), v[3], g[3];
     for (int k = 0; k < 3; ++k) v[k] = c.xyz[3 * a + k] - cen[k];
     double mv[3] = {mi[0] * v[0] + mi[1] * v[1] + mi[2] * v[2],
@@ -576,8 +605,10 @@ __global__ void adet_kernel(KsClassical c, KsWork w, KsScf s, KsClsOut o) {
 // one thread per (atom, grid point): the point's smoothed exposure, the atom's surface and,
 // weighted by the atom's tension + hbond q^2, the gradient (surface.f90 compute_numsa)
 
+// surface true: the surface areas (geometry pass); false: their gradient, weighted by tension +
+// hbond q^2
 __global__ void __launch_bounds__(kThreads) sasa_kernel(KsClassical c, KsWork w, KsScf s,
-                                                        KsClsOut o) {
+                                                        KsClsOut o, bool surface) {
   long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (t >= (long long)c.nat * KS_NGRID) return;
   const int a = (int)(t / KS_NGRID), pt = (int)(t % KS_NGRID), m = c.atom_mol[a];
@@ -601,7 +632,10 @@ __global__ void __launch_bounds__(kThreads) sasa_kernel(KsClassical c, KsWork w,
   }
   if (!(sasap > kTolSesp)) return;
   double wsa = c.gweight[pt] * at(c, a, KA_WRP) * sasap;
-  atomicAdd(w.surface + a, wsa);
+  if (surface) {
+    atomicAdd(w.surface + a, wsa);
+    return;
+  }
   double q = s.qat[a], wt = at(c, a, KA_TENSION) + at(c, a, KA_HBOND) * q * q;
   double ga[3] = {0, 0, 0};
   for (int b = a0; b < a0 + n; ++b) {
@@ -621,12 +655,13 @@ __global__ void __launch_bounds__(kThreads) sasa_kernel(KsClassical c, KsWork w,
 // ------------------------------------------------------------------------------ post / chain
 
 __global__ void __launch_bounds__(kThreads) post_kernel(KsClassical c, KsWork w, KsScf s,
-                                                        KsClsOut o, const double* dedcn_in) {
+                                                        KsClsOut o, const double* dedcn_in,
+                                                        bool grad) {
   int a = blockIdx.x * blockDim.x + threadIdx.x;
   if (a >= c.nat) return;
-  w.dedcn[a] = w.dedcn[a] * w.dmrdcn[a] + (dedcn_in ? dedcn_in[a] : 0.0);
+  if (grad) w.dedcn[a] = w.dedcn[a] * w.dmrdcn[a] + (dedcn_in ? dedcn_in[a] : 0.0);
   if (!c.solvent) return;
-  w.dedbr[a] *= w.dbrdpsi[a];  // now dE/dpsi
+  if (grad) w.dedbr[a] *= w.dbrdpsi[a];  // now dE/dpsi
   double q = s.qat[a], hb = at(c, a, KA_HBOND), area = w.surface[a];
   w.eatom[KE_N * a + KE_CDS] += area * (at(c, a, KA_TENSION) + hb * q * q);
   o.vat[a] += 2.0 * hb * area * q;
@@ -662,7 +697,8 @@ __global__ void reduce_kernel(KsClassical c, KsWork w, KsClsOut o) {
   if (t >= c.nmol * KE_N) return;
   int m = t / KE_N, term = t % KE_N, a0 = c.mol_at0[m];
   double e = 0.0;
-  for (int a = a0; a < a0 + c.mol_nat[m]; ++a) e += w.eatom[KE_N * a + term];
+  for (int a = a0; a < a0 + c.mol_nat[m]; ++a)
+    e += w.eatom[KE_N * a + term] + w.egeo[KE_N * a + term];
   o.energy[t] = e;
 }
 
@@ -680,40 +716,51 @@ extern "C" int ksxtb_geometry(const KsClassical* cp, const KsWork* wp, void* str
   cudaStream_t st = (cudaStream_t)stream;
   const size_t na = sizeof(double) * c.nat;
   cudaError_t e;
-  if ((e = zero(w.cn, na, st)) || (e = zero(w.cn4, na, st)) || (e = zero(w.psi, na, st)))
+  if ((e = zero(w.cn, na, st)) || (e = zero(w.cn4, na, st)) || (e = zero(w.psi, na, st)) ||
+      (e = zero(w.surface, na, st)) || (e = zero(w.egeo, KE_N * na, st)))
     return (int)e;
+  if (c.nat == 0) return (int)cudaSuccess;
+  KsClsOut none = {};
+  KsScf nos = {};
   if (c.npair) cn_psi_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w);
-  if (c.nat) atom_geometry_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w);
+  atom_geometry_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w);
+  atom_d4_zero_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w);
+  if (c.npair) {
+    c60_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w);
+    atm_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, none, false);
+  }
+  if (c.solvent)
+    sasa_kernel<<<blocks((long long)c.nat * KS_NGRID), kThreads, 0, st>>>(c, w, nos, none, true);
   return (int)cudaGetLastError();
 }
 
 extern "C" int ksxtb_classical(const KsClassical* cp, const KsWork* wp, const KsScf* sp,
-                               const KsClsOut* op, const double* dedcn_in, void* stream) {
+                               const KsClsOut* op, const double* dedcn_in, int gradient,
+                               void* stream) {
   const KsClassical c = *cp;
   const KsWork w = *wp;
   const KsScf s = *sp;
   const KsClsOut o = *op;
+  const bool g = gradient != 0;
   cudaStream_t st = (cudaStream_t)stream;
   const size_t na = sizeof(double) * c.nat;
   cudaError_t e;
-  if ((e = zero(w.dedcn, na, st)) || (e = zero(w.dedcn4, na, st)) || (e = zero(w.dedbr, na, st)) ||
-      (e = zero(w.surface, na, st)) || (e = zero(w.eatom, KE_N * na, st)) ||
-      (e = zero(o.vsh, sizeof(double) * c.nsh, st)) || (e = zero(o.vat, na, st)) ||
-      (e = zero(o.vdp, 3 * na, st)) || (e = zero(o.vqp, 6 * na, st)) ||
-      (e = zero(o.grad, 3 * na, st)))
+  if ((e = zero(w.eatom, KE_N * na, st)) || (e = zero(o.vsh, sizeof(double) * c.nsh, st)) ||
+      (e = zero(o.vat, na, st)) || (e = zero(o.vdp, 3 * na, st)) || (e = zero(o.vqp, 6 * na, st)))
+    return (int)e;
+  if (g && ((e = zero(w.dedcn, na, st)) || (e = zero(w.dedcn4, na, st)) ||
+            (e = zero(w.dedbr, na, st)) || (e = zero(o.grad, 3 * na, st))))
     return (int)e;
   if (c.nat == 0) return (int)cudaSuccess;
-  atom_scf_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w, s, o);
-  if (c.npair) {
-    pair_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, s, o);
-    atm_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, o);
-  }
+  atom_scf_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w, s, o, g);
+  if (c.npair) pair_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, s, o, g);
+  if (g && c.npair) atm_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, o, true);
   if (c.solvent) {
-    adet_kernel<<<blocks(c.nmol), kThreads, 0, st>>>(c, w, s, o);
-    sasa_kernel<<<blocks((long long)c.nat * KS_NGRID), kThreads, 0, st>>>(c, w, s, o);
+    adet_kernel<<<blocks(c.nmol), kThreads, 0, st>>>(c, w, s, o, g);
+    if (g) sasa_kernel<<<blocks((long long)c.nat * KS_NGRID), kThreads, 0, st>>>(c, w, s, o, false);
   }
-  post_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w, s, o, dedcn_in);
-  if (c.npair) chain_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, o);
+  post_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w, s, o, dedcn_in, g);
+  if (g && c.npair) chain_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, o);
   reduce_kernel<<<blocks((long long)c.nmol * KE_N), kThreads, 0, st>>>(c, w, o);
   return (int)cudaGetLastError();
 }

@@ -137,6 +137,7 @@ typedef struct { /* device workspace, every array sized by atoms, pairs or molec
   double* dedbr;   /* [nat] dE/dBorn radius */
   double* surface; /* [nat] SASA */
   double* eatom;   /* [nat * KE_N] */
+  double* egeo;    /* [nat * KE_N] charge-independent energies (ATM), from ksxtb_geometry */
 } KsWork;
 
 typedef struct { /* SCF variables */
@@ -155,14 +156,60 @@ typedef struct { /* outputs, overwritten */
   double* grad;   /* [nat * 3] dE/dR at fixed SCF variables, CN, Born and surface chains included */
 } KsClsOut;
 
-/* Coordination numbers, multipole radii and Born radii of the current geometry. */
+/* Everything charge-independent of the current geometry: both CNs, the multipole and Born
+ * radii, the zero-charge D4 weights and C6, the ATM energy and the surface areas. */
 int ksxtb_geometry(const KsClassical* c, const KsWork* w, void* stream);
 
-/* Energies, potentials and gradient at the SCF variables. `dedcn_in` (may be NULL) is an
- * external dE/dCN of the dexp CN, the H0 self-energies' from ksxtb_h0_gradient, chained into
- * the gradient with the multipole radii's. Needs ksxtb_geometry of the same geometry. */
+/* Energies and potentials at the SCF variables, with `gradient` also the gradient (o->grad is
+ * left untouched without). `dedcn_in` (may be NULL) is an external dE/dCN of the dexp CN, the
+ * H0 self-energies' from ksxtb_h0_gradient, chained into the gradient with the multipole
+ * radii's. Needs ksxtb_geometry of the same geometry. */
 int ksxtb_classical(const KsClassical* c, const KsWork* w, const KsScf* s, const KsClsOut* o,
-                    const double* dedcn_in, void* stream);
+                    const double* dedcn_in, int gradient, void* stream);
+
+/* ---- stage 3: the SCF's memory-bound steps on padded (B, n, n) matrices (scf.cu) ---------- */
+
+typedef struct {
+  const double* H0;     /* [B * n * n] */
+  const double* S;      /* [B * n * n] */
+  const double* D;      /* [B * 3 * n * n] */
+  const double* Q;      /* [B * 6 * n * n] */
+  const double* vao;    /* [B * n] shell + atom potential of each AO */
+  const double* vmp;    /* [B * n * 9] vdp then vqp of each AO's atom */
+  const unsigned char* valid; /* [B * n] 1 for a real AO */
+  const long long* idx; /* [nsel] the molecules to build */
+  double* fock;         /* [nsel * n * n] output */
+  double pad;           /* diagonal of padded AOs */
+  int n, nsel;
+} KsFock;
+
+typedef struct {
+  const double* P;  /* [nmol * n * n] */
+  const double* S;
+  const double* D;
+  const double* Q;
+  double* out;      /* [nmol * n * 10] per AO: population, 3 dipole, 6 quadrupole parts */
+  int n, nmol;
+} KsMulliken;
+
+typedef struct {
+  const double* emo; /* [B * n] orbital energies, ascending */
+  const double* nel; /* [njob] electrons of the job's spin channel */
+  const long long* mol; /* [njob] row of emo */
+  double* occ;       /* [njob * n] occupations */
+  double* ts;        /* [njob] kt * sum (f ln f + (1 - f) ln (1 - f)) */
+  double kt;
+  int n, njob;
+} KsFermi;
+
+/* tblite's Fermi filling and electronic entropy, one warp per (molecule, spin) job. */
+int ksxtb_fermi(const KsFermi* f, void* stream);
+
+/* tblite's Fock matrix (H0 + add_vao_to_h1 + add_vmp_to_h1) of the selected molecules. */
+int ksxtb_fock(const KsFock* f, void* stream);
+
+/* Per-AO Mulliken populations and multipole parts of a padded density. */
+int ksxtb_mulliken(const KsMulliken* m, void* stream);
 
 #ifdef __cplusplus
 }

@@ -17,12 +17,21 @@ SCF cycle, as tblite's `next_scf`:
 Converged: |dE| < 1e-6 accuracy and the residual's RMS < 2e-5 accuracy, tblite's criteria. The
 guess is tblite's SAD: charge / nat on every atom, split over its shells by reference occupation.
 Padded AOs get the diagonal `PAD_LEVEL` in F (identity in S): empty, far above the Fermi level.
+
+Precision, per molecule: the cycles run in fp32 (transform, eigensolve, density) until the
+residual's RMS falls below `SCFBatch.SWITCH`, then in fp64, and convergence is only declared
+after two fp64 cycles, so the energy test compares fp64 energies. An fp32 eigenvector
+refinement in fp64 (Ogita-Aishima) was tried and dropped: on this GPU's fp64 rate its GEMMs
+cost more than an fp64 eigensolve (docs/decisions.md). The Fock build, the Mulliken sums and
+the Fermi filling are fused kernels (native/ksxtb/src/scf.cu).
 """
 
 from __future__ import annotations
 
+import ctypes as C
 import math
 from dataclasses import dataclass
+from functools import cache
 
 import numpy as np
 import torch
@@ -48,6 +57,10 @@ class Layout:
     ao_shell: torch.Tensor  # (B, n) global shell, nsh for padding
     valid: torch.Tensor  # (B, n) bool
     sh_atom: torch.Tensor  # (nsh,) global atom of each shell
+
+    @property
+    def valid_u8(self) -> torch.Tensor:
+        return self.valid.to(torch.uint8).contiguous()
 
 
 def layout(hb: native.HostBatch, mols, device="cuda") -> Layout:
@@ -98,6 +111,7 @@ class Geometry:
     D: torch.Tensor  # (B, 3, n, n)
     Q: torch.Tensor  # (B, 6, n, n)
     Linv: torch.Tensor  # (B, n, n) inverse Cholesky factor of S
+    Linv32: torch.Tensor  # the same in fp32, for the fp32 cycles
 
 
 def padded_geometry(db: native.DeviceBatch, lay: Layout) -> Geometry:
@@ -106,26 +120,100 @@ def padded_geometry(db: native.DeviceBatch, lay: Layout) -> Geometry:
     chol = torch.linalg.cholesky(s)
     eye_n = torch.eye(lay.nmax, dtype=F64, device=s.device).expand_as(s)
     linv = torch.linalg.solve_triangular(chol, eye_n, upper=False)
-    return Geometry(s, pad(db.H0, lay)[:, 0], pad(db.D, lay, 3), pad(db.Q, lay, 6), linv)
+    h0, d, q = pad(db.H0, lay)[:, 0], pad(db.D, lay, 3), pad(db.Q, lay, 6)
+    return Geometry(s, h0, d, q, linv, linv.float())
 
 
-def fock(g: Geometry, lay: Layout, vsh, vat, vdp, vqp) -> torch.Tensor:
-    """tblite's H1 = H0 + add_vao_to_h1 + add_vmp_to_h1 (dipole, quadrupole), padded."""
+class KsFock(C.Structure):
+    _fields_ = [(n, C.c_void_p) for n in ("H0", "S", "D", "Q", "vao", "vmp", "valid", "idx",
+                                          "fock")] + [("pad", C.c_double), ("n", C.c_int),
+                                                      ("nsel", C.c_int)]  # fmt: skip
+
+
+class KsMulliken(C.Structure):
+    _fields_ = [(n, C.c_void_p) for n in ("P", "S", "D", "Q", "out")] + [
+        ("n", C.c_int), ("nmol", C.c_int)]  # fmt: skip
+
+
+class KsFermi(C.Structure):
+    _fields_ = [(n, C.c_void_p) for n in ("emo", "nel", "mol", "occ", "ts")] + [
+        ("kt", C.c_double), ("n", C.c_int), ("njob", C.c_int)]  # fmt: skip
+
+
+@cache
+def _lib():
+    so = native.lib()
+    so.ksxtb_fock.argtypes = [C.POINTER(KsFock), C.c_void_p]
+    so.ksxtb_mulliken.argtypes = [C.POINTER(KsMulliken), C.c_void_p]
+    so.ksxtb_fermi.argtypes = [C.POINTER(KsFermi), C.c_void_p]
+    so.ksxtb_fock.restype = so.ksxtb_mulliken.restype = so.ksxtb_fermi.restype = C.c_int
+    return so
+
+
+def occupations(emo: torch.Tensor, nel_spin) -> tuple[torch.Tensor, torch.Tensor]:
+    """Both spin channels' Fermi filling of each molecule (B, n), summed, and the entropy
+    term (B,): scf.cu's warp-per-channel kernel (`fermi` in torch, the reference)."""
+    b, n = emo.shape
+    e = emo.contiguous()
+    nel = torch.cat([nel_spin[0], nel_spin[1]]).contiguous()
+    mol = torch.arange(b, device=emo.device).repeat(2).contiguous()
+    occ = torch.empty(2 * b, n, dtype=F64, device=emo.device)
+    ts = torch.empty(2 * b, dtype=F64, device=emo.device)
+    args = KsFermi(*[t.data_ptr() for t in (e, nel, mol, occ, ts)], T.KT_300K, n, 2 * b)
+    native._check(_lib().ksxtb_fermi(C.byref(args), _stream()), "ksxtb_fermi")
+    return occ[:b] + occ[b:], ts[:b] + ts[b:]
+
+
+def _stream() -> int:
+    return torch.cuda.current_stream().cuda_stream
+
+
+def fock(g: Geometry, lay: Layout, vsh, vat, vdp, vqp, idx=None) -> torch.Tensor:
+    """tblite's H1 = H0 + add_vao_to_h1 + add_vmp_to_h1 (dipole, quadrupole), padded, for the
+    molecules `idx` (default all): the fused kernel of scf.cu (`fock_reference` in torch)."""
+    if idx is None:
+        idx = torch.arange(g.S.shape[0], device=g.S.device)
+    vao = torch.cat([vsh + vat[lay.sh_atom], vsh.new_zeros(1)])[lay.ao_shell].contiguous()
+    vmp = torch.cat([torch.cat([vdp, vqp], 1), vdp.new_zeros(1, 9)])[lay.ao_atom].contiguous()
+    out = torch.empty(len(idx), lay.nmax, lay.nmax, dtype=F64, device=g.S.device)
+    idx = idx.contiguous()
+    args = KsFock(*[t.data_ptr() for t in (g.H0, g.S, g.D, g.Q, vao, vmp, lay.valid_u8, idx, out)],
+                  PAD_LEVEL, lay.nmax, len(idx))  # fmt: skip
+    native._check(_lib().ksxtb_fock(C.byref(args), _stream()), "ksxtb_fock")
+    return out
+
+
+def fock_reference(g: Geometry, lay: Layout, vsh, vat, vdp, vqp, idx=None) -> torch.Tensor:
+    """The same in torch."""
+    sel = slice(None) if idx is None else idx
+    ao_shell, ao_atom, valid = lay.ao_shell[sel], lay.ao_atom[sel], lay.valid[sel]
+    s_, h0, d, q = g.S[sel], g.H0[sel], g.D[sel], g.Q[sel]
     vsh_ext = torch.cat([vsh + vat[lay.sh_atom], vsh.new_zeros(1)])
-    vao = vsh_ext[lay.ao_shell]  # (B, n)
-    f = g.H0 - 0.5 * g.S * (vao[:, :, None] + vao[:, None, :])
-    vdp_ext = torch.cat([vdp, vdp.new_zeros(1, 3)])[lay.ao_atom]  # (B, n, 3) at atom(nu)
-    vqp_ext = torch.cat([vqp, vqp.new_zeros(1, 6)])[lay.ao_atom]
-    w = torch.einsum("bcmn,bnc->bmn", g.D, vdp_ext) + torch.einsum("bcmn,bnc->bmn", g.Q, vqp_ext)
+    vao = vsh_ext[ao_shell]  # (B, n)
+    f = h0 - 0.5 * s_ * (vao[:, :, None] + vao[:, None, :])
+    vdp_ext = torch.cat([vdp, vdp.new_zeros(1, 3)])[ao_atom]  # (B, n, 3) at atom(nu)
+    vqp_ext = torch.cat([vqp, vqp.new_zeros(1, 6)])[ao_atom]
+    w = torch.einsum("bcmn,bnc->bmn", d, vdp_ext) + torch.einsum("bcmn,bnc->bmn", q, vqp_ext)
     f = f - 0.5 * (w + w.transpose(1, 2))
-    return f + torch.diag_embed((~lay.valid).to(F64) * PAD_LEVEL)
+    return f + torch.diag_embed((~valid).to(F64) * PAD_LEVEL)
 
 
-def solve(g: Geometry, f: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Orbital energies (B, n) and coefficients (B, n, n), columns the orbitals: F C = S C e."""
-    fp = g.Linv @ f @ g.Linv.transpose(1, 2)
+def solve(g: Geometry, f: torch.Tensor, idx=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Orbital energies (B, n) and coefficients (B, n, n), columns the orbitals: F C = S C e,
+    in fp64 throughout (the exact reference of the faster solvers)."""
+    linv = g.Linv if idx is None else g.Linv[idx]
+    fp = linv @ f @ linv.transpose(1, 2)
     e, c = torch.linalg.eigh(0.5 * (fp + fp.transpose(1, 2)))
-    return e, g.Linv.transpose(1, 2) @ c
+    return e, linv.transpose(1, 2) @ c
+
+
+def solve_fp32(g: Geometry, f: torch.Tensor, idx) -> tuple[torch.Tensor, torch.Tensor]:
+    """The same in fp32 (transform, eigensolve, back-transform): the early SCF cycles. The
+    orbital energies come back in fp64, the coefficients in fp32."""
+    linv = g.Linv32[idx]
+    fp = linv @ f.float() @ linv.transpose(1, 2)
+    e, c = torch.linalg.eigh(0.5 * (fp + fp.transpose(1, 2)))
+    return e.double(), linv.transpose(1, 2) @ c
 
 
 def fermi(emo: torch.Tensor, nel: torch.Tensor, kt: float = T.KT_300K) -> torch.Tensor:
@@ -143,7 +231,7 @@ def fermi(emo: torch.Tensor, nel: torch.Tensor, kt: float = T.KT_300K) -> torch.
     live_mol = homo > 0
     thr, tiny = math.sqrt(np.finfo(float).eps), math.sqrt(np.finfo(float).tiny)
     done = ~live_mol
-    for _ in range(200):
+    for it in range(200):
         x = (emo - ef[:, None]) / kt
         live = x < 50
         ex = torch.exp(torch.where(live, x, 0.0))
@@ -155,7 +243,7 @@ def fermi(emo: torch.Tensor, nel: torch.Tensor, kt: float = T.KT_300K) -> torch.
         ok = (occt - total).abs() <= thr
         ef = torch.where(done, ef, ef + step)
         done = done | ok
-        if bool(done.all()):
+        if it % 8 == 7 and bool(done.all()):  # one host sync per 8 Newton steps
             break
     return occ
 
@@ -167,7 +255,23 @@ def entropy(occ: torch.Tensor, kt: float = T.KT_300K) -> torch.Tensor:
 
 
 def mulliken(g: Geometry, lay: Layout, p: torch.Tensor, n0sh: torch.Tensor, nat: int):
-    """Output shell charges (nsh,), atomic dipoles (nat, 3) and quadrupoles (nat, 6)."""
+    """Output shell charges (nsh,), atomic dipoles (nat, 3) and quadrupoles (nat, 6): the per-AO
+    sums of scf.cu's kernel, reduced to shells and atoms (`mulliken_reference` in torch)."""
+    b, n = p.shape[0], lay.nmax
+    per = torch.empty(b, n, 10, dtype=F64, device=p.device)
+    pc = p.contiguous()
+    args = KsMulliken(*[t.data_ptr() for t in (pc, g.S, g.D, g.Q, per)], n, b)
+    native._check(_lib().ksxtb_mulliken(C.byref(args), _stream()), "ksxtb_mulliken")
+    nsh = len(n0sh)
+    pop = torch.zeros(nsh + 1, dtype=F64, device=p.device).index_add(
+        0, lay.ao_shell.reshape(-1), per[..., 0].reshape(-1))[:nsh]  # fmt: skip
+    mp = torch.zeros(nat + 1, 9, dtype=F64, device=p.device).index_add(
+        0, lay.ao_atom.reshape(-1), per[..., 1:].reshape(-1, 9))[:nat]  # fmt: skip
+    return n0sh - pop, mp[:, :3].contiguous(), mp[:, 3:].contiguous()
+
+
+def mulliken_reference(g: Geometry, lay: Layout, p: torch.Tensor, n0sh: torch.Tensor, nat: int):
+    """The same in torch."""
     pop = (p * g.S).sum(1)  # column sums, (B, n)
     nsh = len(n0sh)
     sh = lay.ao_shell.reshape(-1)
@@ -319,56 +423,86 @@ class SCFBatch:
     def qat(self, qsh: torch.Tensor) -> torch.Tensor:
         return torch.zeros(self.db.hb.nat, **_f64()).index_add(0, self.sh_atom, qsh)
 
-    def _potentials(self, qsh, dp, qp) -> dict:
-        out = self.cb.evaluate(qsh, self.qat(qsh), dp, qp)
-        return {k: v.clone() for k, v in out.items()}
+    def _potentials(self, qsh, dp, qp, slot: str = "in") -> dict:
+        """Energies and potentials (no gradient) at the variables, into the slot's buffers."""
+        if not hasattr(self, "_slots"):
+            self._slots = {k: self.cb.new_outputs() for k in ("in", "out")}
+        return self.cb.evaluate(qsh, self.qat(qsh), dp, qp, gradient=False,
+                                out=self._slots[slot])  # fmt: skip
 
-    def _diagonalize(self, pot):
-        f = fock(self.g, self.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"])
-        emo, c = solve(self.g, f)
-        occs = [fermi(emo, n) for n in self.nel_spin]
-        occ = occs[0] + occs[1]
-        ts = entropy(occs[0]) + entropy(occs[1])
-        p = (c * occ[:, None, :]) @ c.transpose(1, 2)
-        return emo, c, occ, ts, p
+    def _occupations(self, emo, idx):
+        return occupations(emo, [n[idx] for n in self.nel_spin])
 
     def _energy(self, p, ts, out_pot) -> torch.Tensor:
         band = (p * self.g.H0).sum((1, 2))
         shift = T.solvent_shift() if self.solvent else 0.0
         return band + ts + out_pot["energy"].sum(1) + shift
 
+    def _cycle(self, st: dict, pot: dict, active, precise) -> None:
+        """Fock, eigensolve and density of the active molecules, into the state buffers."""
+        for phase in (False, True):
+            idx = torch.nonzero(active & (precise == phase)).squeeze(1)
+            if not len(idx):
+                continue
+            f = fock(self.g, self.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"], idx)
+            if phase:
+                emo, c = solve(self.g, f, idx)
+            else:
+                emo, c = solve_fp32(self.g, f, idx)
+            occ, ts = self._occupations(emo, idx)
+            st["emo"][idx], st["occ"][idx], st["ts"][idx] = emo, occ, ts
+            # the fp32 phase's density in fp32; C and F kept only for the precise phase's X
+            st["p"][idx] = ((c * occ[:, None, :].to(c.dtype)) @ c.transpose(1, 2)).double()
+            if phase:
+                st["c"][idx] = c
+
+    def _wdensity(self, st: dict, idx) -> None:
+        """X = C diag(f e) C^T of the last (fp64) cycle, tblite's energy-weighted density."""
+        c, w = st["c"][idx], (st["occ"] * st["emo"])[idx]
+        st["x"][idx] = (c * w[:, None, :]) @ c.transpose(1, 2)
+
+    SWITCH = 1e-4  # residual RMS below which a molecule's cycles turn fp64-accurate
+
     def run(self, start=None) -> SCFResult:
         """The SCF from `start` (qsh, dp, qp), default the SAD guess."""
         qsh, dp, qp = start if start is not None else self.guess()
         mixer = Broyden(self.vars.pack(qsh, dp, qp))
-        b = self.vars.b
+        b, n = self.vars.b, self.lay.nmax
+        st = {k: torch.zeros(b, n, n, **_f64()) for k in ("c", "p", "x")}
+        st.update(emo=torch.zeros(b, n, **_f64()), occ=torch.zeros(b, n, **_f64()),
+                  ts=torch.zeros(b, **_f64()))  # fmt: skip
+        flags = {k: torch.zeros(b, dtype=torch.bool, device="cuda") for k in ("conv", "precise")}
         active = torch.ones(b, dtype=torch.bool, device="cuda")
-        elast = torch.zeros(b, **_f64())
-        res = None
+        elast = torch.full((b,), torch.inf, **_f64())
         iters = torch.zeros(b, dtype=torch.long, device="cuda")
-        conv = torch.zeros(b, dtype=torch.bool, device="cuda")
+        energy = qout = None
         for it in range(1, self.max_iter + 1):
-            pot = self._potentials(*self.vars.unpack(mixer.q))
-            emo, c, occ, ts, p = self._diagonalize(pot)
-            qo = mulliken(self.g, self.lay, p, self.n0sh, self.db.hb.nat)
-            qout = self.vars.pack(*qo)
+            precise = flags["precise"].clone()
+            self._cycle(st, self._potentials(*self.vars.unpack(mixer.q)), active, precise)
+            qo = mulliken(self.g, self.lay, st["p"], self.n0sh, self.db.hb.nat)
+            qnew = self.vars.pack(*qo)
+            qout = qnew if qout is None else torch.where(active[:, None], qnew, qout)
             dq = qout - mixer.q
-            energy = self._energy(p, ts, self._potentials(*qo))
+            enew = self._energy(st["p"], st["ts"], self._potentials(*qo, slot="out"))
+            energy = enew if energy is None else torch.where(active, enew, energy)
             err = torch.sqrt((dq * dq).sum(1) / self.vars.nvar)
-            done = ((energy - elast).abs() < self.econv) & (err < self.pconv)
-            elast = energy
-            cur = (energy, emo, c, occ, p, qout)
-            res = cur if res is None else _merge(res, cur, active)
+            done = precise & ((energy - elast).abs() < self.econv) & (err < self.pconv)
+            elast = torch.where(precise, energy, torch.inf)
             iters = torch.where(active, it, iters)
-            conv = conv | (active & done & torch.isfinite(energy))
-            active = active & ~done & torch.isfinite(energy)
+            finished = active & (done | ~torch.isfinite(energy))
+            flags["conv"] |= active & done & torch.isfinite(energy)
+            if bool(finished.any()):
+                self._wdensity(st, torch.nonzero(finished).squeeze(1))
+            active = active & ~finished
+            flags["precise"] |= active & (err < self.SWITCH)
             if not bool(active.any()):
                 break
             mixer.next(torch.where(active[:, None], dq, 0.0), active)
-        energy, emo, c, occ, p, qout = res
-        x = (c * (occ * emo)[:, None, :]) @ c.transpose(1, 2)
+        if bool(active.any()):
+            self._wdensity(st, torch.nonzero(active).squeeze(1))
         qsh, dp, qp = self.vars.unpack(qout)
-        return SCFResult(energy, conv, iters, p, x, emo, occ, qsh, dp, qp)
+        return SCFResult(energy, flags["conv"], iters, st["p"], st["x"], st["emo"], st["occ"],
+                         qsh, dp, qp)  # fmt: skip
 
     def gradient(self, r: SCFResult) -> tuple[torch.Tensor, torch.Tensor]:
         """Energy and gradient (nat, 3) at the SCF result: the stage-2 terms at the output
@@ -387,12 +521,3 @@ class SCFBatch:
 
 def _f64() -> dict:
     return {"dtype": F64, "device": "cuda"}
-
-
-def _merge(old, new, active):
-    """Keep converged molecules' last values, take the active ones' new values."""
-    out = []
-    for o, n in zip(old, new, strict=True):
-        mask = active.view(-1, *([1] * (n.dim() - 1)))
-        out.append(torch.where(mask, n, o))
-    return tuple(out)

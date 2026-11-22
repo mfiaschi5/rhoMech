@@ -58,7 +58,7 @@ KsClassical._fields_ = [
 ]  # fmt: skip
 
 WORK = ("cn", "cn4", "mrad", "dmrdcn", "psi", "brad", "dbrdpsi", "gw", "dgwdcn", "dgwdq", "gw0",
-        "dgw0dcn", "c60", "dedcn", "dedcn4", "dedbr", "surface", "eatom")  # fmt: skip
+        "dgw0dcn", "c60", "dedcn", "dedcn4", "dedbr", "surface", "eatom", "egeo")  # fmt: skip
 
 
 class KsWork(C.Structure):
@@ -81,7 +81,7 @@ def _lib() -> C.CDLL:
     so = native.lib()
     so.ksxtb_geometry.argtypes = [C.POINTER(KsClassical), C.POINTER(KsWork), P]
     so.ksxtb_classical.argtypes = [C.POINTER(KsClassical), C.POINTER(KsWork), C.POINTER(KsScf),
-                                   C.POINTER(KsClsOut), P, P]  # fmt: skip
+                                   C.POINTER(KsClsOut), P, C.c_int, P]  # fmt: skip
     so.ksxtb_geometry.restype = so.ksxtb_classical.restype = C.c_int
     return so
 
@@ -201,15 +201,24 @@ class ClassicalBatch:
         f64 = {"dtype": torch.float64, "device": dev}
         n, nr = self.nat, _e("KS_NREF")
         sizes = {"gw": n * nr, "dgwdcn": n * nr, "dgwdq": n * nr, "gw0": n * nr,
-                 "dgw0dcn": n * nr, "c60": 3 * self.npair, "eatom": n * _e("KE_N")}  # fmt: skip
+                 "dgw0dcn": n * nr, "c60": 3 * self.npair, "eatom": n * _e("KE_N"),
+                 "egeo": n * _e("KE_N")}  # fmt: skip
         self.w = {k: torch.zeros(max(sizes.get(k, n), 1), **f64) for k in WORK}
-        self.out = {"energy": torch.zeros(self.nmol * _e("KE_N"), **f64),
-                    "vsh": torch.zeros(self.nsh, **f64), "vat": torch.zeros(n, **f64),
-                    "vdp": torch.zeros(3 * n, **f64), "vqp": torch.zeros(6 * n, **f64),
-                    "grad": torch.zeros(3 * n, **f64)}  # fmt: skip
         self.sc = _scalars(solvent)
+        self.out = self.new_outputs()
+        self._c = self._build_struct()
+        self._w = KsWork(*[self.w[k].data_ptr() for k in WORK])
 
-    def c_struct(self) -> KsClassical:
+    def new_outputs(self) -> dict[str, torch.Tensor]:
+        """A set of output buffers, flat as the kernels write them."""
+        f64 = {"dtype": torch.float64, "device": self.t["xyz"].device}
+        n = self.nat
+        return {"energy": torch.zeros(self.nmol * _e("KE_N"), **f64),
+                "vsh": torch.zeros(self.nsh, **f64), "vat": torch.zeros(n, **f64),
+                "vdp": torch.zeros(3 * n, **f64), "vqp": torch.zeros(6 * n, **f64),
+                "grad": torch.zeros(3 * n, **f64)}  # fmt: skip
+
+    def _build_struct(self) -> KsClassical:
         names = [n for n, _ in KsClassical._fields_[:15]]
         c = KsClassical(*[self.t[k].data_ptr() for k in names])
         c.sc[:] = self.sc.tolist()
@@ -221,28 +230,36 @@ class ClassicalBatch:
         self.t["xyz"].copy_(torch.as_tensor(np.asarray(xyz).reshape(-1)))
 
     def geometry(self) -> None:
-        w = KsWork(*[self.w[k].data_ptr() for k in WORK])
+        """Both CNs, multipole and Born radii, zero-charge D4 C6, ATM energy, surface areas."""
         stream = torch.cuda.current_stream().cuda_stream
-        native._check(_lib().ksxtb_geometry(C.byref(self.c_struct()), C.byref(w), stream),
+        native._check(_lib().ksxtb_geometry(C.byref(self._c), C.byref(self._w), stream),
                       "ksxtb_geometry")  # fmt: skip
 
-    def evaluate(self, qsh, qat, dp, qp, dedcn_in: torch.Tensor | None = None) -> dict:
-        """Energies (nmol, terms), vsh, vat, vdp (nat, 3), vqp (nat, 6), grad (nat, 3)."""
+    def evaluate(
+        self,
+        qsh,
+        qat,
+        dp,
+        qp,
+        dedcn_in: torch.Tensor | None = None,
+        gradient: bool = True,
+        out: dict | None = None,
+    ) -> dict:
+        """Energies (nmol, terms), vsh, vat, vdp (nat, 3), vqp (nat, 6) and, with `gradient`,
+        grad (nat, 3), into `out` (from `new_outputs`, default the batch's own buffers)."""
+        out = self.out if out is None else out
         keep = [x.contiguous() for x in (qsh, qat, dp, qp)]
         s = KsScf(*[x.data_ptr() for x in keep])
-        o = KsClsOut(*[self.out[k].data_ptr() for k, _ in KsClsOut._fields_])
-        w = KsWork(*[self.w[k].data_ptr() for k in WORK])
+        o = KsClsOut(*[out[k].data_ptr() for k, _ in KsClsOut._fields_])
         stream = torch.cuda.current_stream().cuda_stream
         ext = None if dedcn_in is None else dedcn_in.contiguous()
         ext_ptr = None if ext is None else ext.data_ptr()
-        code = _lib().ksxtb_classical(
-            C.byref(self.c_struct()), C.byref(w), C.byref(s), C.byref(o), ext_ptr, stream
-        )
+        code = _lib().ksxtb_classical(C.byref(self._c), C.byref(self._w), C.byref(s), C.byref(o),
+                                      ext_ptr, int(gradient), stream)  # fmt: skip
         native._check(code, "ksxtb_classical")
-        o = self.out
-        return {"energy": o["energy"].view(self.nmol, -1), "vsh": o["vsh"], "vat": o["vat"],
-                "vdp": o["vdp"].view(-1, 3), "vqp": o["vqp"].view(-1, 6),
-                "grad": o["grad"].view(-1, 3)}  # fmt: skip
+        return {"energy": out["energy"].view(self.nmol, -1), "vsh": out["vsh"],
+                "vat": out["vat"], "vdp": out["vdp"].view(-1, 3), "vqp": out["vqp"].view(-1, 6),
+                "grad": out["grad"].view(-1, 3)}  # fmt: skip
 
 
 def _shell_selfenergy_tables(mols) -> tuple[np.ndarray, np.ndarray]:

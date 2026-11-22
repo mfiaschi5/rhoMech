@@ -119,3 +119,28 @@ def test_cuda_total_matches_tblite(solvent):
         assert abs(em + ts - float(r["energy"])) < 1e-10, name
         assert np.abs(g[a0 : a0 + len(z)] - r["gradient"]).max() < 1e-9, name
         a0 += len(z)
+
+
+@pytest.mark.gpu
+@gpu
+@pytest.mark.parametrize("solvent", [False, True])
+def test_cuda_light_evaluation_matches_full(solvent):
+    """The SCF's evaluation without gradient gives the same energies and potentials."""
+    import torch
+
+    from ksmech.qm.gpu import classical as K
+
+    mols = batch_molecules()
+    rng = np.random.default_rng(6)
+    vs = [random_variables(z, rng) for z, _ in mols.values()]
+    cb = K.ClassicalBatch(list(mols.values()), solvent)
+    cb.geometry()
+
+    def cat(key):
+        return torch.from_numpy(np.concatenate([v[key].ravel() for v in vs])).cuda()
+
+    args = (cat("qsh"), cat("qat"), cat("dp"), cat("qp"))
+    full = {k: t.clone() for k, t in cb.evaluate(*args).items()}
+    light = cb.evaluate(*args, gradient=False, out=cb.new_outputs())
+    for key in ("energy", "vsh", "vat", "vdp", "vqp"):
+        assert torch.abs(light[key] - full[key]).max() < 1e-14, key
