@@ -121,4 +121,5 @@ markers = [
     "diagnostic: checks the classifier's labels (lone pair, sigma, ...), which are never model input",
     "serve: serve app tests: stubs or synthetic chemistry, never xTB",
     "e2e: Playwright wrapper, skipped unless KSMECH_E2E=1",
+    "gpu: CUDA kernels of ksmech.qm.gpu, skipped without a device or the ksxtb toolchain",
 ]

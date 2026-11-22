@@ -1,0 +1,130 @@
+# Batched GPU QM: go/no-go spike (2026-11-22)
+
+Question: can a batched GPU path make `ksmech-qm run` (GFN2-xTB / ALPB-water, the geometry
+optimization plus the final single point and the Fukui N+-1 points) at least 2x faster than the
+production CPU path with 12 workers, at 30-80 atoms?
+
+Hardware: RTX 4080 SUPER (16 GB; FP64 at 1/64 of the FP32 rate), Ryzen 7 2700X (8 cores,
+16 threads). The CPU runs below are on one core with OpenBLAS preloaded (as the QM workers do,
+`qm.blas`), on a machine running a 12-worker job (load ~15). That is close to one worker's speed
+in a 12-worker production run on this machine. "cpu12" = one core's time / 12.
+
+Molecules: 64 cached closed-shell records per bin (PMechDB + ReactMech, total atoms with H),
+`sample.py`. Scripts and raw results: `data/processed/gpu_qm_spike/` (local, gitignored).
+
+## Where the time is
+
+Median seconds per record, from the QM manifests (161k records):
+
+| atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+|---|---|---|---|---|---|---|
+| ReactMech, optimized | 0.4 | 2.4 | 11.8 | 46 | 221 | 432 |
+| PMechDB, optimized | 0.3 | 1.6 | 7.4 | 29 | 157 | 661 |
+| QMugs `given` (3 single points + sterics) | 0.3 | 0.8 | 1.5 | 2.5 | 5.0 | 12.4 |
+
+- The optimizer is about 90-95% of an optimized record's time above 30 atoms.
+- About 90% of ReactMech's 197 CPU-hours lie at 51 atoms and more: 70 h at 51-80, 97 h at
+  81-120.
+
+## Measurements
+
+**1. tblite single point + gradient, ALPB-water, one core** (`cpu_tblite.py`). With OpenBLAS
+it is 1.0-2.3x faster than the wheel's netlib BLAS.
+
+| atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+|---|---|---|---|---|---|---|
+| ms, fresh SCF | 5 | 33 | 91 | 254 | 919 | 1431 |
+| cpu12 ms | 0.4 | 2.8 | 7.6 | 21 | 77 | 119 |
+| restarted / fresh (same geometry, 1-2 cycles) | 0.53 | 0.44 | 0.48 | 0.38 | pending | - |
+
+A restarted single point still costs 0.38-0.53 of a fresh one. So about half of tblite's time
+is integrals, gradient, ALPB and D4, not the SCF cycles. A GPU engine has to speed up that half
+too.
+
+**2. dxtb (main, 6961f9c, pure-torch integrals), GFN2 gas, batched on CUDA, fp64**
+(`gpu_dxtb.py`).
+
+| atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+|---|---|---|---|---|---|---|
+| ms per molecule, batch 16 | 5218 | 1754 | 3091 | 3499 | OOM | OOM |
+| ms per molecule, batch 64 | 2617 | 2328 | OOM | OOM | OOM | OOM |
+| max abs(E - tblite gas), Eh | 1e-6 | 2e-6 | 3e-6 | 2e-5 | - | - |
+
+- It is 100-6000x slower than cpu12.
+- The GPU sat at about 1% use.
+- Breakdown at 31-50 atoms, batch 16 (`dxtb_timer.py`): of 75 s, the integrals take 32 s
+  (Python loops over shells), the SCF 5 s, and the autograd backward most of the rest.
+- **dxtb is out**, both as an engine and as a dependency.
+
+**3. One batched SCF cycle on the GPU, lower bound** (`gpu_kernel.py`). The cycle is
+X^T F X, eigh, back-transform, density, Mulliken charges and the Fock update with 9 multipole
+contractions. Matrices are padded to the bin's largest AO count, best batch of 64/256/1024.
+
+| atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+|---|---|---|---|---|---|---|
+| AO count, largest | 74 | 100 | 153 | 230 | 309 | 454 |
+| fp64 ms per molecule-cycle | 0.083 | 0.134 | 0.293 | 0.680 | 1.28 | 3.31 |
+| fp32 ms per molecule-cycle | 0.015 | 0.023 | 0.057 | 0.102 | 0.346 | 0.726 |
+
+**4. fp32 eigensolver on the records' real Fock matrices** (`fp32_check.py`, 8 per bin). S^-1/2
+is built in fp64 and only the eigh runs in fp32. Against fp64:
+- AO charges agree within 2.1e-6;
+- the band energy agrees within 7e-6 Eh.
+
+This is accurate enough for an optimizer converging to fmax 3e-4.
+
+**5. Polish share** (`checks_cpu.py`, 4 molecules per bin, RDKit start). This is the share of
+an optimization's energies spent after max abs(g) first drops below 1e-3:
+
+| atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 |
+|---|---|---|---|---|---|
+| L-BFGS, median (range) | 0.50 (0.23-0.60) | 0.56 (0.23-0.72) | 0.59 (0.33-0.68) | 0.58 (0.35-0.80) | pending |
+| ANC, median (range) | 0.33 (0.25-0.50) | 0.46 (0.31-0.93) | 0.69 (0.63-0.82) | 0.58 (0.18-0.61) | pending |
+
+ANC also needed about half of L-BFGS's energies here, as in the benchmark of 2026-11-09.
+
+## Verdict
+
+**No-go:**
+- **dxtb**, by measurement 2.
+- **An all-fp64 GPU engine.** SCF cycles alone at 15 cycles per SCF, with the rest costing as
+  much again, project to 0.9-1.9x against cpu12 at 31-80 atoms. That is below the 2x gate.
+- **The plan's split** (GPU optimizer down to fmax 1e-3, tblite polish down to 3e-4 on the
+  CPU). About half of the energies come after 1e-3 (measurement 5), so the CPU would keep
+  about half the work. That caps the end-to-end gain near 2x however fast the GPU is.
+
+**Not yet decided: an engine of our own that optimizes on the GPU all the way to fmax 3e-4.**
+It would assemble energy and gradient in fp64 with the eigensolver in fp32 (measurement 4).
+tblite would do only the record's final single point (already in the pipeline) and the Fukui
+points, with a CPU polish only where tblite's gradient there exceeds the limit. The GPU must
+fit integrals, their gradients, D4, ALPB and repulsion within these budgets per molecule and
+energy to reach 2x:
+
+| atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+|---|---|---|---|---|---|---|
+| budget for the non-SCF part, ms | 0.06 | 0.8 | 2.3 | 6.8 | 25 | 37 |
+
+The budget is cpu12 x 0.7 (a restarted SCF in an optimizer) / 2, minus 6 fp32 cycles. A flop
+count of the GFN2 overlap and multipole integrals with gradients (about 4e8 flop per molecule at
+51-80 atoms) suggests a few ms. That makes 51 atoms and up plausible (about 90% of the CPU-hours),
+31-50 tight, and 30 atoms and below out of reach. This is an estimate, not a measurement.
+
+**What decides it.** Write the engine's first piece, the batched overlap, dipole and quadrupole
+integrals of the GFN2 basis with gradients (about a day), and time it against the budgets. It is
+the engine's step 1 either way, so nothing is lost if the answer is go.
+
+**The CPU alternative, for comparison.** `--optimizer tblite-anc` already gives about 2x fewer
+energies. It also needs a full recompute, just like a GPU method tag.
+
+## Stage 1 result (2026-11-22)
+
+**The integrals gate passes.** The batched fp64 CUDA kernels (`native/ksxtb`) compute S, H0,
+D and Q with tblite's conventions, plus the H0 gradient contraction. They agree with tblite
+on 96 of these molecules to machine precision: S 1e-15, H0 2e-13, and dipole and quadrupole
+4e-13.
+
+At 51-80 atoms one forward plus gradient pass costs 0.14 ms per molecule, against a gate of
+2.27 ms and 21 ms for cpu12's whole single point.
+
+Every bin passes. The table and the design are in docs/decisions.md, 2026-11-22. The flop
+estimate above ("a few ms") was pessimistic by about 20x.

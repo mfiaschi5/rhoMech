@@ -10642,3 +10642,86 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   - pretraining that makes the orbital-pair channels worth reading (phase 3).
   mech-USPTO-31K stays an evaluation set (never trained on): its loader would give a fourth
   source to read these arms on.
+
+## 2026-11-22: GPU xTB stage 1: the batched one-electron integrals pass the gate
+
+Stage 1 of the GPU xTB plan (approved up to this gate). It answers the question of
+docs/gpu_qm_spike.md: can the batched GFN2 integrals with their gradients fit the non-SCF
+budget? The gate was one third of the spike's budget per molecule and energy.
+
+- **What was built.**
+  - `native/ksxtb` is a CUDA library with a C interface. It computes S, H0, the dipole and
+    quadrupole integrals D and Q, and the H0 gradient contraction of tblite's
+    `get_hamiltonian_gradient` for a closed shell, all in fp64 and for a whole batch of
+    molecules.
+  - `ksmech.qm.gpu.reference` is a plain numpy port of tblite 0.7.0 (integral/multipole.f90,
+    xtb/h0.f90), term by term. It is the oracle, not an engine.
+  - `ksmech.qm.gpu.native` builds the library, packs a batch and holds device memory in torch
+    tensors.
+  - The GFN2 parameters are parsed from tblite's and mctc-lib's Fortran tables, never retyped
+    (`native/ksxtb/tools/extract_gfn2.py` writes `src/ksmech/qm/gpu/gfn2_params.json`).
+- **Correctness.**
+  - Against tblite on the spike's real molecules (16 per size bin, 96 in all, from 1 to 200
+    atoms): S within 1.2e-15, H0 within 1.7e-13. D and Q agree with tblite's molecular dipole
+    and quadrupole, rebuilt from tblite's density, within 1.6e-14 and 4.3e-13.
+  - The analytic gradient contraction agrees with central differences of the functional it
+    differentiates to about 3e-9, the error of the differences, in every bin.
+  - Every element of GFN2 (Z = 1-86) was checked on the GPU against tblite: 165 Z-H and Z-Z
+    diatomics, S within 1.6e-15, H0 within 2.5e-13. tblite's SCF fails on seven lanthanide
+    hydrides; their homodiatomics pass.
+  - The CUDA kernels agree with the numpy reference within 1e-15 on the ten fixtures,
+    H3PO4, DMSO, MeBr, CuCl2 and FeBr4-, every angular class with d-d pairs included.
+  - Tests: `tests/test_qm_gpu.py`. The marker `gpu` covers the kernels: S and H0 of every
+    fixture and of every element's Z-Z diatomic against tblite; D, Q and the gradient against
+    the reference.
+  - **Not yet checked against tblite's gradient.** The gradient contraction is transcribed
+    from tblite. It matches the derivative of its own functional and the numpy port, but it is
+    first compared with tblite's gradient in stage 3, where the SCF supplies real P, W and
+    potentials.
+  - Script: `scripts/gpu_xtb/stage1_gate.py check-tblite | check-fd | time`. Results are in
+    `data/processed/gpu_qm_spike/stage1_*.json` (local).
+- **Speed.** Forward (S, H0, D, Q) plus gradient pass, ms per molecule, RTX 4080 SUPER, at the
+  best of batches 64/256/1024:
+
+  | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+  |---|---|---|---|---|---|---|
+  | GPU integrals + gradient | 0.011 | 0.024 | 0.063 | 0.14 | 0.32 | 0.50 |
+  | gate (budget / 3) | 0.020 | 0.27 | 0.77 | 2.27 | 8.3 | 12.3 |
+  | cpu12, one tblite SP + gradient (spike) | 0.4 | 2.8 | 7.6 | 21 | 77 | 119 |
+
+  Every bin passes. From 16 atoms up the margin is 10-40x, and the integrals take 2-8% of the
+  spike's whole non-SCF budget. The timings were taken with the QMugs store build loading the
+  CPU (load ~16), with CUDA events around the launches. The GPU was otherwise idle.
+- **Design choices.**
+  - **Thread mapping.** One thread per (shell pair, spherical AO pair), with the AO pair as the
+    slow index (thread t takes pair t % n). A warp therefore shares one AO pair, so its
+    branches are uniform, and the cartesian loops unroll at compile time, so the 1D tables stay
+    in registers. ptxas spills 128 B in the d-d gradient kernel and 4 B in the off-site s-p
+    forward kernel, nothing elsewhere. The kernels use 78-254 registers, so occupancy is low;
+    that is left for later, as the gate passes without it.
+  - **1D integrals.** Obara-Saika over the product Gaussian plus the transfer relation
+    (x - B) = (x - A) + (A - B).
+  - **Gradient.** The B-centred multipoles are folded into per-pair weights, so only the
+    A-centred derivatives are computed and contracted at once. No derivative matrix is stored,
+    and the gradient is accumulated with fp64 atomics.
+  - **Kernels.** One kernel per angular class (9 off-site, 9 on-site).
+  - **tblite cutoff quirk, kept.** tblite's `integral_cutoff(acc)` clips with its bounds
+    reversed, so it returns 25 for every accuracy. The primitive screening and the neighbour
+    cutoff, min(sqrt(50 / min alpha), 40) Bohr, reproduce that.
+- **Toolchain.**
+  - CUDA 13.0's crt headers clash with glibc 2.42 (`rsqrtf` declared noexcept), whatever the
+    host compiler.
+  - The 13.3 wheels fix it, but need `-allow-unsupported-compiler` for gcc 16. The checks
+    against tblite cover that risk.
+  - The toolchain is a venv of its own, `~/.local/share/ksxtb/tc13x`. Five wheels are pinned
+    together, all at 13.3: `nvidia-cuda-nvcc`, `-crt`, `-nvvm`, `-runtime`, `-cccl`. Mixed
+    versions fail the CCCL check.
+  - `KSXTB_NVCC` overrides the path. cudart is linked statically, so the library does not
+    collide with torch's 13.0 runtime.
+- **Open.**
+  - **Licensing.** The kernels and the reference follow tblite (LGPL-3.0-or-later) line by
+    line, and the parameters are tblite's. rhoMech has no LICENSE file. The user decides before
+    any public push.
+  - **What decides the rest.** Stage 2 (H0's coordination numbers, repulsion, D4, the
+    electrostatics and ALPB, with gradients) and the SCF's eigensolver now decide the engine.
+    Stage 2 waits for the user's approval.

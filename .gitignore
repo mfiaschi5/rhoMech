@@ -43,3 +43,4 @@ apps/ui/playwright-report/
 apps/ui/.e2e-data/
 # Trained models (data/models/<source>/<run>/)
 data/models/
+native/*/build/
