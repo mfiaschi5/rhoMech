@@ -1,6 +1,6 @@
 """Stage 4's reference: production's CPU optimization (tblite-anc) of the spike sample's species.
 
-    uv run python scripts/gpu_xtb/stage4_reference.py [--per-bin 16] [--workers 8]
+    uv run python scripts/gpu_xtb/stage4_reference.py [--per-bin 16] [--workers 8] [--preload]
 
 For each species: `prepare_mol` and `embed(mol, 1, seed=0)` as `qm.batch._compute` does, then
 `GFN2Calculator._relax` with `QMConfig(optimizer="tblite-anc")` (free run with the dissociation
@@ -9,14 +9,19 @@ untagged closed shells (`spin_for_qm`), the GPU engine's scope. Per species: the
 geometries (Bohr), the outcome (ok or the reason code), whether walls were needed, the number of
 energies, the seconds, and tblite's energy and max|gradient| at the end point. Written once to
 data/processed/gpu_qm_spike/stage4_reference.json (the GPU runs compare against it).
+With --preload the workers start as `qm.batch.execute` starts them (spawned, one thread, the
+OpenBLAS `qm.blas` chooses preloaded): production's CPU speed, written to
+stage4_reference_preload.json; each row records the library behind tblite's dsygvd.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import time
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -66,6 +71,9 @@ def _one(smiles: str) -> dict:
     except QMError as exc:
         row.update(outcome=str(exc.reason), detail=exc.detail)
     row.update(n_evals=calls["n"], seconds=time.perf_counter() - t0)
+    from ksmech.qm import blas
+
+    row["blas"] = blas.provider()
     return row
 
 
@@ -74,18 +82,38 @@ def main() -> None:
     ap.add_argument("--per-bin", type=int, default=16)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--root", type=Path, default=Path("/home/jacopo/Documents/ksmech"))
+    ap.add_argument("--preload", action="store_true")
     args = ap.parse_args()
     sample = json.loads((args.root / SAMPLE).read_text())
     smiles = [(key, r["smiles"]) for key, recs in sample.items() for r in recs[: args.per_bin]]
     out = {}
-    with ProcessPoolExecutor(args.workers) as pool:
+    with _pool(args.workers, args.preload) as pool:
         for (key, _smi), row in zip(smiles, pool.map(_one, [s for _, s in smiles]), strict=True):
             row["bin"] = key
             out.setdefault(key, []).append(row)
             print(key, row["outcome"], row.get("n_evals"), round(row.get("seconds", 0), 1),
-                  flush=True)  # fmt: skip
-    (args.root / OUT).write_text(json.dumps(out) + "\n")
-    print("wrote", args.root / OUT)
+                  row.get("blas"), flush=True)  # fmt: skip
+    path = args.root / (OUT.with_name("stage4_reference_preload.json") if args.preload else OUT)
+    path.write_text(json.dumps(out) + "\n")
+    print("wrote", path)
+
+
+@contextmanager
+def _pool(n: int, preload: bool):
+    if not preload:
+        with ProcessPoolExecutor(n) as pool:
+            yield pool
+        return
+    from ksmech.processes import single_threaded_children
+    from ksmech.qm import blas
+
+    ctx = multiprocessing.get_context("spawn")
+    with (
+        single_threaded_children(),
+        blas.preloaded_children(),
+        ProcessPoolExecutor(n, mp_context=ctx) as pool,
+    ):
+        yield pool
 
 
 if __name__ == "__main__":

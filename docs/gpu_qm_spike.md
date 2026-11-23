@@ -165,7 +165,8 @@ same walled retries (15), the same energy counts (median ratio 1.0), and end poi
 accepts (79 of 81 free runs below fmax, the other two above by 1e-6). 69 land in the same
 minimum, most of the rest in the same flat basin.
 
-Throughput is preliminary: 1.1x the cpu12 estimate at 51-80 atoms with 64 species, 2.4x with 256
-in flight, 3.6-4.4x above 80 atoms, and slower than the CPU below 30 atoms. The CPU estimate
-lacks the QM workers' OpenBLAS preload and may flatter the GPU by up to ~2x. Details in
-docs/decisions.md, 2026-11-23; stage 6 measures it end to end.
+Throughput against production's CPU speed (12 workers with the OpenBLAS preload, estimated
+from the reference): even (1.17x) at 51-80 atoms with 256 molecules in flight, slower with
+fewer, 3.1-3.3x above 80 atoms, and much slower below 30 atoms. The spike's 2x bar at 30-80
+atoms is missed; the SCF's per-step cost is the lever. Details in docs/decisions.md,
+2026-11-23; stage 6 measures it end to end.

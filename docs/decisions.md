@@ -10936,39 +10936,50 @@ Branch `claude/gpu-xtb`.
   - **Against production** (`stage4_gate.py check`, `stage4_reference.json`): 96 untagged
     closed-shell spike species, embedded as `qm.batch._compute` does; production's tblite-anc
     `_relax` on the CPU against `relax_many`.
+    All from one run of the committed build (b5de1bb's batching):
     - Outcomes: all 96 converged on both sides; the walled retry was needed by the same 15.
-    - Energies used: median ratio 1.0 in every bin, 1.05 in total.
-    - End points: 69 in the same minimum (Kabsch RMSD < 0.05 A and |dE| < 1e-5 Eh), 16 lower,
-      11 higher. Most of those lie in the same flat basin (|dE| < 1e-4, RMSD < 0.05); about a
-      dozen are other conformers (RMSD 0.1-1.9 A), lower more often than higher.
-    - tblite's max|gradient| at the GPU's end point: below fmax at 79 of the 81 free runs, the
-      other two above by at most 1e-6 (the share a CPU polish would take). The walled runs
-      converge on the gradient with the walls, as on the CPU.
+    - Energies used: median ratio 1.0 in every bin, 1.03 in total.
+    - End points: 71 in the same minimum (Kabsch RMSD < 0.05 A and |dE| < 1e-5 Eh), 20 lower,
+      5 higher. Of those 25, 11 lie in the same flat basin (|dE| < 1e-4, RMSD < 0.05) and 11
+      are other conformers (RMSD > 0.1 A): about one species in nine lands in another conformer
+      than the CPU's, lower more often than higher.
+    - tblite's max|gradient| at the GPU's end point: below fmax at all 81 free runs (an earlier
+      run had two above by 1e-6), so no CPU polish here. The walled runs converge on the
+      gradient with the walls, as on the CPU, and tblite's own gradient there is large on both.
   - **Batch independence.** A run stopped and resumed in another batch lands where it lands
     alone, within 4e-6 Eh and 6e-3 A: the padded fp32 SCF cycles depend on the batch. GPU
     records are reproducible to that level, not bit for bit.
 - **fp32 RFO, tried and dropped.** One 9-atom species never converged (500 energies against the
   CPU's 10), and the whole sample was no faster (263 against 267 s).
-- **Speed, preliminary.** Idle GPU (gpu-unlock installed, which does not touch fp64), seconds
-  per optimized molecule. cpu12 is the reference's single-threaded tblite seconds / 12, without
-  the OpenBLAS preload the QM workers use, which makes tblite 1.0-2.3x faster (spike
-  measurement 1), so these ratios can be up to ~2x too favourable to the GPU. Stage 6 measures
-  `ksmech-qm run --workers 12` properly.
+- **Speed.** Seconds per optimized molecule, GPU free of other work (gpu-unlock installed; its
+  effect on these fp64-bound kernels was not measured). cpu12 is production's CPU speed: the
+  reference rerun with the workers started as `qm.batch` starts them (spawned, one thread,
+  OpenBLAS preloaded; `stage4_reference.py --preload`), mean seconds per molecule / 12. The
+  preload makes tblite 1.4-2.2x faster than without it, the same outcomes in every bin.
 
   | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
   |---|---|---|---|---|---|---|
-  | GPU, 64 species per bin | 0.21 | 0.48 | 0.45 | 1.26 | 2.6 | 2.8 |
-  | cpu12 estimate | 0.017 | 0.08 | 0.34 | 1.39 | 9.5 | 12.2 |
-  | ratio | 0.08x | 0.17x | 0.76x | 1.1x | 3.6x | 4.4x |
+  | cpu12 | 0.012 | 0.057 | 0.19 | 0.68 | 4.4 | 6.6 |
+  | GPU, 64 species per bin | 0.16 | 0.46 | 0.41 | 1.02 | 2.4 | 2.8 |
+  | ratio | 0.07x | 0.12x | 0.46x | 0.67x | 1.8x | 2.3x |
+  | GPU, 256 in flight (4 embedding seeds) | | | | 0.58 | 1.42 | 2.03 |
+  | ratio | | | | 1.17x | 3.1x | 3.3x |
 
-  With 256 molecules in flight at 51-80 atoms (the 64 species from 4 embedding seeds), the GPU
-  takes 0.57 s per molecule (2.4x). The batch size decides it: 64 species per bin give batches
-  of 25-30 at the AO ratio, and a molecule-energy costs 7.6 ms at best against a single point's
-  3.1 ms. The SCF waits for each batch's slowest molecule at every step. Below ~30 atoms the
-  per-step latency dominates, and those species stay on the CPU (stage 5's size routing).
+  The spike's bar, 2x at 30-80 atoms, is missed: at 51-80 atoms the GPU is even with 12 CPU
+  workers when enough molecules are in flight, slower when not. Above 80 atoms it is 3x. A
+  molecule-energy costs 7.6 ms in the 51-80-atom run against a batched restarted single
+  point's 3.1 ms (stage 3, before the unlock and 4a): the SCF is 47 of 63 s in a profile, and
+  each step waits for its batch's slowest SCF. The cycles per phase of a restarted SCF are not
+  yet measured. Below ~30 atoms the per-step latency dominates; those species are the CPU's
+  (stage 5's size routing).
+- **Failures.** From the 1280 starts of the timing runs (64 or 256 per bin), the GPU failed 6.
+  Production's CPU `_relax` from the same starts fails 5 of them identically (two
+  SCF_NOT_CONVERGED after 1 and 16 energies, three OPT_NOT_CONVERGED at 500). The sixth, a
+  potassium complex (`C#CC[O+]([K])C(=CC(=O)c1ccccc1)SC`), converges on the CPU after 322
+  energies and not on the GPU in 500: a GPU-only failure, which a CPU retry would catch. One of
+  the five was converged by an earlier GPU run of the same start: near the limit, the outcome
+  depends on the SCF noise.
 - **Open.**
-  - 1 of 64 species at 16-30 atoms and 2 of 256 at 51-80 failed on the GPU, from starts outside
-    the reference; not yet examined.
   - The per-step overhead (7.6 against 3.1 ms per molecule-energy): skipping finished molecules'
     potential and Mulliken work inside the SCF, and fewer host syncs, are the next levers.
   - Licensing, as before. Stage 5 (integration as `--optimizer gpu-anc`) waits for the user.
