@@ -8,7 +8,8 @@ For each species: `prepare_mol` and `embed(mol, 1, seed=0)` as `qm.batch._comput
 guard, a walled retry from the start when a bond breaks, `check_connectivity` after each). Only
 untagged closed shells (`spin_for_qm`), the GPU engine's scope. Per species: the start and end
 geometries (Bohr), the outcome (ok or the reason code), whether walls were needed, the number of
-energies, the seconds, and tblite's energy and max|gradient| at the end point. Written once to
+energies, the seconds (`relax_seconds` the optimization alone, `seconds` with the end point's
+single point), and tblite's energy and max|gradient| at the end point. Written once to
 data/processed/gpu_qm_spike/stage4_reference.json (the GPU runs compare against it).
 With --preload the workers start as `qm.batch.execute` starts them (spawned, one thread, the
 OpenBLAS `qm.blas` chooses preloaded): production's CPU speed, written to
@@ -66,6 +67,7 @@ def _one(smiles: str) -> dict:
     t0 = time.perf_counter()
     try:
         xyz, restrained = calc._relax(mol, z, start, charge, unpaired)
+        row["relax_seconds"] = time.perf_counter() - t0  # the optimization alone
         row.update(outcome="ok", restrained=restrained, end=np.asarray(xyz).tolist())
         res = new_calculator(z, xyz, charge, unpaired, "water").singlepoint()
         row.update(energy=float(res.get("energy")),
@@ -73,6 +75,7 @@ def _one(smiles: str) -> dict:
     except QMError as exc:
         row.update(outcome=str(exc.reason), detail=exc.detail)
     row.update(n_evals=calls["n"], seconds=time.perf_counter() - t0)
+    row.setdefault("relax_seconds", row["seconds"])  # a failure ends in _relax
     from ksmech.qm import blas
 
     row["blas"] = blas.provider()

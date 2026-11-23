@@ -23,7 +23,7 @@ import json
 import pickle
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -261,9 +261,11 @@ def main() -> None:
         instrument()
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    O.relax_many(tasks, config)
+    outs = O.relax_many(tasks, config)
     torch.cuda.synchronize()
     res = report(time.perf_counter() - t0, len(tasks))
+    res["outcomes"] = dict(Counter("ok" if r.reason is None else str(r.reason) for r in outs))
+    res["walled"] = sum(bool(r.restrained) for r in outs)
     if log is not None:
         res["by_live"] = drain(log)
     if clog is not None:

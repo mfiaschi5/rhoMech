@@ -213,7 +213,7 @@ def time_bins(root: Path, per_bin: int, seeds: int, bins: list[str] | None) -> d
     import time
 
     sample = json.loads((root / SAMPLE).read_text())
-    out = {}
+    out, memory = {}, _record_memory()
     for key, recs in sample.items():
         if bins and key not in bins:
             continue
@@ -232,7 +232,8 @@ def time_bins(root: Path, per_bin: int, seeds: int, bins: list[str] | None) -> d
         out[key] = {"n": len(tasks), "gpu_s_per_mol": gpu, "cpu12_s_per_mol": cpu12,
                     "cpu_reference": label, "speedup": cpu12 / gpu,
                     "gpu_evals_mean": float(np.mean([r.n_evals for r in res])),
-                    "failures": fails}  # fmt: skip
+                    "failures": fails, "memory": list(memory)}  # fmt: skip
+        memory.clear()
         print(key, {k: round(v, 3) if isinstance(v, float) else v for k, v in out[key].items()},
               flush=True)  # fmt: skip
         torch.cuda.empty_cache()

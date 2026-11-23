@@ -11045,7 +11045,8 @@ per-cycle CUDA events.
     - Mulliken is tiled (32 AOs x 8 row slices, shared-memory reduction) and runs only for
       the active molecules.
     - The ALPB shape term runs one warp per molecule.
-    - No measurable change in wall time: 124 against 121 s, within run-to-run noise.
+    - No measurable change in wall time from the first three: 124 against 121 s, within
+      run-to-run noise. The ALPB change came later and was not timed on its own.
 - **Correctness.**
   - All GPU xTB tests pass: SCF on tblite within 1e-10 Eh and 1e-9 Eh/Bohr at accuracy 1e-6.
   - The refined density and energy-weighted density are within 7e-12 of fp64 eigh on 128
@@ -11053,35 +11054,60 @@ per-cycle CUDA events.
   - Parity gate (`stage4_gate.py check`), 96 species against production's tblite-anc
     `_relax`, run on the committed build:
     - 96/96 outcomes, energy ratio 1.08.
-    - Walled retries: the CPU's 15, plus one more. A 150-atom Pd complex broke a bond in its
+    - Walled retries: the CPU's 15, plus one more. A 127-atom Pd complex broke a bond in its
       free run on the GPU and took the walled retry (474 energies, end 2.8e-3 Eh below the
-      CPU's); the CPU did not need it (223). Before tuning, and in a run of the previous
-      fallback rule (which refined this metal rather than handing it to fp64 eigh), the GPU
-      did not need it either.
+      CPU's); the CPU did not need it (223).
+      - This comes and goes. Run alone four times (`tuning_pd_probe.json`), the GPU needs no
+        walls three times (222-231 energies, ends within 3e-5 Eh of the CPU's) and takes
+        the walled retry once (463 energies).
+      - Its SCF at the start takes no fp64 fallback.
+      - Its free run passes near the guard's threshold, and the GPU's run-to-run rounding
+        decides which side it lands on.
     - 71 same minimum (as before), 14 lower, 11 higher. The higher ones are at most 1.8e-4 Eh
       above the CPU's, as before.
     - Between builds, 30 of 96 end energies moved by more than 1e-6 (the previous rule's run
       against the pre-tuning check): on flat surfaces the optimizer's path follows the
       rounding. The pre-tuning check is kept as `stage4_check_fp64_stage4.json`.
-  - Peak device memory per batch is within `molecule_bytes`' estimate from 15 molecules up;
-    above it for 2-9-molecule batches (up to 9.5x, small in absolute terms).
-- **Speed.** Seconds per optimized molecule, untagged closed shells. cpu12 is the reference
-  rerun on the same 64 species per bin, the workers started as `qm.batch` starts them
-  (`stage4_reference_preload_64.json`): 4.53 and 9.31 ms per energy.
+  - Peak device memory per batch is within `molecule_bytes`' estimate from 15 molecules up
+    (about half of it, see below); above it for 2-9-molecule batches (up to 9.5x, small in
+    absolute terms).
+- **Speed.** Seconds per optimized molecule, untagged closed shells.
+  - **The CPU baseline.** The reference rerun on the same 64 species per bin, the workers
+    started as `qm.batch` starts them, timing the optimization alone (`_relax`, without the
+    reference's end-point single point, ~2%): `stage4_reference_preload_64_relax.json`. That
+    is 0.214 and 0.682 s per molecule, 4.42 and 9.27 ms per energy. Two CPU runs differ by ~1%.
+  - **The GPU.** Every 31-80-atom row except the before-tuning one is from `f453642`.
 
   | | 31-50 atoms | 51-80 atoms |
   |---|---|---|
-  | cpu12, 64 species | 0.220 | 0.686 |
+  | cpu12, 64 species, `_relax` alone | 0.214 | 0.682 |
   | GPU before tuning, 256 conformers | 0.24 | 0.55-0.57 |
-  | GPU after, 256 conformers | 0.19-0.20 | 0.47-0.48 |
+  | GPU after, 256 conformers (round 2-3 builds) | 0.19-0.20 | 0.47-0.48 |
   | ratio | 1.1x | 1.45x |
-  | GPU after, 1024 conformers (16 seeds) | 0.134 | 0.331 |
-  | ratio | 1.65x | 2.07x |
+  | GPU after, 1024 conformers (16 seeds), two runs | 0.142-0.146 | 0.330-0.332 |
+  | ratio | 1.47-1.51x | 2.06-2.07x |
 
-  The 1024-conformer run is closer to production, where a stream of species keeps the
-  batches full: steps with at most 8 live molecules take 8% of its time, against 28-35% with
-  256. The spike's 2x bar at 30-80 atoms is met at 51-80 atoms on a long queue and missed at
-  31-50 (1.65x).
+  - **Why 1024.** It is closer to production, where a stream of species keeps the batches
+    full: steps with at most 8 live molecules take 8% of its time, against 28-35% with 256.
+  - **Repeat spread.** The two final runs differ by 3% at 31-50 and 1% at 51-80. One earlier
+    1024-conformer run of the round-3 build (before the final fallback rule) gave 0.134 s at
+    31-50 (1.60x), 8% faster. Whether the rule or run-to-run variation made that difference
+    is not separated.
+  - **Failures in the 1024-conformer runs.** 6-7 SCF_NOT_CONVERGED per bin and, in one run,
+    one OPT_NOT_CONVERGED at 51-80. The CPU was not run on those starts (seeds 1-15). Stage 4
+    found most such failures identical on the CPU.
+  - **Above 80 atoms** (`stage4_gate.py time --seeds 4`, 256 conformers,
+    `tuning_time_81-200_s4.json`):
+    - 81-120: 1.39 s per molecule against stage 4's 1.42, 3.1x the 16-species cpu12.
+    - 121-200: 1.98 against 2.03, 3.3x.
+    - The same failures as stage 4: two OPT_NOT_CONVERGED at 81-120.
+    - Peak device memory is 0.51 of `molecule_bytes`' estimate in every batch of 15 or more,
+      up to 244 molecules. The estimate (50 n_ao^2) is now twice the need, so batches stop at
+      half the size the budget would allow.
+  - **The bar.** The spike's 2x at 30-80 atoms is not met: about 2x at 51-80 on a long queue,
+    1.5x at 31-50.
+  - **Data.** In `data/processed/gpu_qm_spike/`: `tuning_*.json` (profiles, drains, per-cycle
+    costs, long queues) and `tuning_long_*_r{1,2}.json` (the final runs).
 - **What is left.**
   - A step still runs as many SCF cycles as its slowest molecule (13-29 per step against 6.4
     per molecule).
