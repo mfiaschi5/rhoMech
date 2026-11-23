@@ -132,6 +132,9 @@ class TrainConfig:
     #   best.pt, e.g. reactmech=molecule,rmechdb=rc_molecule: the out-of-distribution curve
     init_from: str = ""  # a pretraining checkpoint (`train.pretrain`, data/models/qmugs/<run>/
     #   best.pt): its encoder and its statistics start the run, the decoder fresh (phase 3)
+    init_stats: str = "checkpoint"  # with init_from: 'checkpoint' standardizes the inputs with
+    #   the pretraining's statistics, 'run' with the run's own (token and pair statistics fitted
+    #   on its training part), the encoder still the checkpoint's (docs/decisions.md 2026-11-23)
 
 
 # PMechDB and rmechdb: isolated steps, no stop labels; the minimum over a joint run's sources is
@@ -792,13 +795,17 @@ def load_model(path: Path, device: torch.device | str = "cpu") -> tuple[KSMech, 
 
 
 PRETRAIN_KIND = "pretrain_run"  # the provenance kind of a `train.pretrain` run
+INIT_STATS = ("checkpoint", "run")  # TrainConfig.init_stats
 
 
 def initial_model(cfg: TrainConfig, model_cfg: ModelConfig, train: list, stats) -> KSMech:
     """A fresh model on the run's statistics; with `init_from`, the encoder of a pretraining
-    checkpoint with that checkpoint's statistics (the ones its encoder was trained on), the
-    decoder fresh. The checkpoint must be clean, a pretraining run, and read the run's pair
-    features; its encoder must fit this configuration's (a strict load)."""
+    checkpoint, the decoder fresh, with that checkpoint's statistics (the ones its encoder was
+    trained on) or, under `init_stats='run'`, the run's own. The checkpoint must be clean, a
+    pretraining run, and read the run's pair features; its encoder must fit this
+    configuration's (a strict load)."""
+    if cfg.init_stats not in INIT_STATS:
+        raise ValueError(f"--init-stats {cfg.init_stats!r}: one of {INIT_STATS}")
     if not cfg.init_from:
         return KSMech(model_cfg, fit_feature_stats(train, *token_columns(model_cfg)), stats)
     path = Path(cfg.init_from)
@@ -810,12 +817,16 @@ def initial_model(cfg: TrainConfig, model_cfg: ModelConfig, train: list, stats) 
     names = tuple(ckpt["pair_stats"])
     if names != tuple(stats.names):
         raise ValueError(f"--init-from {path}: pair features {names}, the run reads {stats.names}")
-    pair = PairStats.from_dict(ckpt["pair_stats"], names)
-    model = KSMech(model_cfg, FeatureStats.from_dict(ckpt["feature_stats"]), pair)
+    if cfg.init_stats == "run":
+        model = KSMech(model_cfg, fit_feature_stats(train, *token_columns(model_cfg)), stats)
+    else:
+        pair = PairStats.from_dict(ckpt["pair_stats"], names)
+        model = KSMech(model_cfg, FeatureStats.from_dict(ckpt["feature_stats"]), pair)
     prefix = "encoder."
     encoder = {k[len(prefix) :]: v for k, v in ckpt["state_dict"].items() if k.startswith(prefix)}
     model.encoder.load_state_dict(encoder)
-    log.info("encoder and statistics from %s (epoch %s)", path, ckpt.get("epoch"))
+    what = "encoder" if cfg.init_stats == "run" else "encoder and statistics"
+    log.info("%s from %s (epoch %s)", what, path, ckpt.get("epoch"))
     return model
 
 

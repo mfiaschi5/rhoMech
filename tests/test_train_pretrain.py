@@ -94,6 +94,23 @@ def test_smoke_run_and_init_from(store, tmp_path):
     assert ft.feature_stats.to_dict() == model.feature_stats.to_dict()
 
 
+def test_init_from_with_the_runs_statistics(store, tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    tp.fit_pretrain(replace(_cfg(tmp_path), epochs=1), tp.PretrainConfig(store=str(store)),
+                    TINY, run, torch.device("cpu"))  # fmt: skip
+    model, _ = load_model(run / "best.pt")
+    own = replace(model.pair_stats, mean=model.pair_stats.mean + 1.0)
+    cfg = replace(_cfg(tmp_path), init_from=str(run / "best.pt"), init_stats="run")
+    ft = initial_model(cfg, TINY, [], own)
+    assert ft.pair_stats is own
+    for (k, a), (_, b) in zip(ft.encoder.state_dict().items(), model.encoder.state_dict().items(),
+                              strict=True):  # fmt: skip
+        assert torch.equal(a, b), k
+    with pytest.raises(ValueError, match="init-stats"):
+        initial_model(replace(cfg, init_stats="qmugs"), TINY, [], own)
+
+
 def test_init_from_refuses_another_checkpoint_kind(store, tmp_path):
     run = tmp_path / "run"
     run.mkdir()

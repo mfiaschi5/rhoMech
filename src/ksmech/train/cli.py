@@ -11,7 +11,8 @@
     ksmech-train fit --run ft_s0 ... --init-from data/models/qmugs/qmugs_s0/best.pt
 
 `pretrain` trains the encoder on the QMugs store (`train.pretrain`; data/models/qmugs/<run>/);
-`--init-from` starts a run from its encoder and statistics, with the same model flags.
+`--init-from` starts a run from its encoder and statistics, with the same model flags;
+`--init-stats run` keeps the encoder but standardizes with the run's own statistics.
 
 `--direction backward` reads the backward store (`arrows.backward`, `<source>/backward/`) and
 records the direction in run.json; the default, forward, is unchanged.
