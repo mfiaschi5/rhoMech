@@ -1,6 +1,7 @@
 """Stage 4's reference: production's CPU optimization (tblite-anc) of the spike sample's species.
 
     uv run python scripts/gpu_xtb/stage4_reference.py [--per-bin 16] [--workers 8] [--preload]
+        [--bins 31-50 51-80] [--out NAME]
 
 For each species: `prepare_mol` and `embed(mol, 1, seed=0)` as `qm.batch._compute` does, then
 `GFN2Calculator._relax` with `QMConfig(optimizer="tblite-anc")` (free run with the dissociation
@@ -12,6 +13,7 @@ data/processed/gpu_qm_spike/stage4_reference.json (the GPU runs compare against 
 With --preload the workers start as `qm.batch.execute` starts them (spawned, one thread, the
 OpenBLAS `qm.blas` chooses preloaded): production's CPU speed, written to
 stage4_reference_preload.json; each row records the library behind tblite's dsygvd.
+--bins limits the run to those size bins and --out names the file (in the same folder).
 """
 
 from __future__ import annotations
@@ -83,9 +85,12 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--root", type=Path, default=Path("/home/jacopo/Documents/ksmech"))
     ap.add_argument("--preload", action="store_true")
+    ap.add_argument("--bins", nargs="+", default=None)
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
     sample = json.loads((args.root / SAMPLE).read_text())
-    smiles = [(key, r["smiles"]) for key, recs in sample.items() for r in recs[: args.per_bin]]
+    smiles = [(key, r["smiles"]) for key, recs in sample.items() for r in recs[: args.per_bin]
+              if not args.bins or key in args.bins]  # fmt: skip
     out = {}
     with _pool(args.workers, args.preload) as pool:
         for (key, _smi), row in zip(smiles, pool.map(_one, [s for _, s in smiles]), strict=True):
@@ -94,6 +99,8 @@ def main() -> None:
             print(key, row["outcome"], row.get("n_evals"), round(row.get("seconds", 0), 1),
                   row.get("blas"), flush=True)  # fmt: skip
     path = args.root / (OUT.with_name("stage4_reference_preload.json") if args.preload else OUT)
+    if args.out:
+        path = args.root / OUT.with_name(args.out)
     path.write_text(json.dumps(out) + "\n")
     print("wrote", path)
 

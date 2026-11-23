@@ -132,3 +132,62 @@ def test_a_poisoned_molecule_fails_alone():
     assert torch.abs(e[:3] - e_ref).max() < 1e-12
     n = sum(len(CASES[k][0]) for k in names)
     assert torch.abs(g[:n] - g_ref).max() < 1e-12
+
+
+@pytest.mark.gpu
+@gpu
+def test_broyden_buffers_equal_the_list_form():
+    """The preallocated, equilibrated mixer against tblite's arithmetic as written, over more
+    iterations than one buffer chunk, with molecules dropping out."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    q0 = torch.randn(5, 40, dtype=torch.float64, device="cuda", generator=gen)
+    a, b = S.Broyden(q0, chunk=4), S.BroydenReference(q0)
+    target = torch.randn(5, 40, dtype=torch.float64, device="cuda", generator=gen)
+    active = torch.ones(5, dtype=torch.bool, device="cuda")
+    for it in range(12):
+        if it == 6:
+            active[1] = False
+        dq = torch.where(active[:, None], 0.3 * (target - a.q) + 0.05 * torch.sin(3 * a.q), 0.0)
+        qa, qb = a.next(dq, active), b.next(dq, active)
+        assert torch.abs(qa - qb).max() < 1e-11, it
+
+
+@pytest.mark.gpu
+@gpu
+def test_refined_fp32_orbitals_reach_fp64_eigh():
+    """At the converged Fock matrices of the fixtures, the fp32 eigensolve refined in fp64 gives
+    the fp64 eigensolve's density, energy-weighted density and sum of occupied orbital energies
+    (rotations among orbitals of equal occupation are left unresolved, so single energies are
+    Rayleigh quotients); the metals (fractional occupations in near-degenerate pairs, whose split
+    follows fp32 noise) are flagged for fp64 eigh."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    sb = S.SCFBatch(list(CASES.values()), True)
+    r = sb.run()
+    pot = sb._potentials(r.qsh, r.dp, r.qp)
+    idx = torch.arange(len(CASES), device="cuda")
+    f = S.fock(sb.g, sb.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"], idx)
+    e32, c32, _ = S.eig_fp32(sb.g, f, idx)
+    occ, _ = S.occupations(e32, sb.nel_spin)
+    emo, cf, k, ok = S.refine_occupied(sb.g, f, c32, e32, occ, idx)
+    e64, c64, _ = S.solve(sb.g, f, idx)
+    occ64, _ = S.occupations(e64, sb.nel_spin)
+    names = list(CASES)
+    # the metals: fractionally occupied orbitals in near-degenerate pairs
+    assert [n for n, o in zip(names, ok.tolist(), strict=True) if not o] == [
+        "copper_dichloride", "tetrabromoferrate"]  # fmt: skip
+    st = {"occ": occ64, "c": cf, "f": f, "x": torch.zeros_like(f)}
+    sb._wdensity(st, idx)
+    for m in torch.nonzero(ok).squeeze(1).tolist():
+        nocc = int((occ64[m] > 0).sum())
+        assert abs(float(emo[m, :nocc].sum() - e64[m, :nocc].sum())) < 1e-11
+        p = (cf[m, :, :k] * occ64[m, :k]) @ cf[m, :, :k].T
+        assert torch.abs(p - (c64[m] * occ64[m]) @ c64[m].T).max() < 5e-12  # eigh rounding
+        x64 = (c64[m] * occ64[m] * e64[m]) @ c64[m].T
+        assert torch.abs(st["x"][m] - x64).max() < 5e-12

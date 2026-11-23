@@ -40,23 +40,34 @@ __global__ void __launch_bounds__(kThreads) fock_kernel(KsFock f) {
   *out = f.H0[blk + e] - 0.5 * f.S[blk + e] * vao - 0.5 * w;
 }
 
-// per AO nu of each molecule: the Mulliken population sum_mu P S and the atomic multipole
-// contributions -sum_mu P D[:, mu, nu], -sum_mu P Q[:, mu, nu] (out[(b, nu) * 10 + k])
-__global__ void __launch_bounds__(kThreads) mulliken_kernel(KsMulliken m) {
-  const long long n = m.n, nn = n * n;
-  long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (t >= (long long)m.nmol * n) return;
-  const long long b = t / n, nu = t % n;
+// per AO nu of each molecule of idx: the Mulliken population sum_mu P S and the atomic
+// multipole contributions -sum_mu P D[:, mu, nu], -sum_mu P Q[:, mu, nu] (out[(b, nu) * 10 + k],
+// b the molecule's row). A block takes 32 AOs nu of one molecule (x) and splits the sum over
+// mu into kRows slices (y), reduced in shared memory: a small batch still fills the device.
+constexpr int kRows = 8;
+
+__global__ void __launch_bounds__(32 * kRows) mulliken_kernel(KsMulliken m) {
+  __shared__ double part[kRows][32][10];
+  const long long n = m.n, nn = n * n, b = m.idx[blockIdx.y];
+  const int x = threadIdx.x, y = threadIdx.y;
+  const long long nu = (long long)blockIdx.x * 32 + x;
   double acc[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  const double* p = m.P + b * nn + nu;
-  const double* s = m.S + b * nn + nu;
-  for (long long mu = 0; mu < n; ++mu) {
-    double pm = p[mu * n];
-    acc[0] += pm * s[mu * n];
-    for (int c = 0; c < 3; ++c) acc[1 + c] -= pm * m.D[(b * 3 + c) * nn + mu * n + nu];
-    for (int c = 0; c < 6; ++c) acc[4 + c] -= pm * m.Q[(b * 6 + c) * nn + mu * n + nu];
+  if (nu < n) {
+    const double *p = m.P + b * nn + nu, *s = m.S + b * nn + nu;
+    const double *d = m.D + b * 3 * nn + nu, *q = m.Q + b * 6 * nn + nu;
+    for (long long mu = y; mu < n; mu += kRows) {
+      const double pm = p[mu * n];
+      acc[0] += pm * s[mu * n];
+      for (int c = 0; c < 3; ++c) acc[1 + c] -= pm * d[c * nn + mu * n];
+      for (int c = 0; c < 6; ++c) acc[4 + c] -= pm * q[c * nn + mu * n];
+    }
   }
-  for (int k = 0; k < 10; ++k) m.out[t * 10 + k] = acc[k];
+  for (int k = 0; k < 10; ++k) part[y][x][k] = acc[k];
+  __syncthreads();
+  if (y || nu >= n) return;
+  for (int r = 1; r < kRows; ++r)
+    for (int k = 0; k < 10; ++k) acc[k] += part[r][x][k];
+  for (int k = 0; k < 10; ++k) m.out[(b * n + nu) * 10 + k] = acc[k];
 }
 
 // tblite's get_fermi_filling (aufbau start, Newton steps on the Fermi level until the electron
@@ -119,8 +130,10 @@ extern "C" int ksxtb_fock(const KsFock* fp, void* stream) {
 
 extern "C" int ksxtb_mulliken(const KsMulliken* mp, void* stream) {
   const KsMulliken m = *mp;
-  long long total = (long long)m.nmol * m.n;
-  if (total) mulliken_kernel<<<blocks(total), kThreads, 0, (cudaStream_t)stream>>>(m);
+  if (m.nsel && m.n) {
+    dim3 grid((unsigned)((m.n + 31) / 32), (unsigned)m.nsel), block(32, kRows);
+    mulliken_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(m);
+  }
   return (int)cudaGetLastError();
 }
 

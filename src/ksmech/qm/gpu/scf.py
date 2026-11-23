@@ -19,11 +19,13 @@ guess is tblite's SAD: charge / nat on every atom, split over its shells by refe
 Padded AOs get the diagonal `PAD_LEVEL` in F (identity in S): empty, far above the Fermi level.
 
 Precision, per molecule: the cycles run in fp32 (transform, eigensolve, density) until the
-residual's RMS falls below `SCFBatch.SWITCH`, then in fp64, and convergence is only declared
-after two fp64 cycles, so the energy test compares fp64 energies. An fp32 eigenvector
-refinement in fp64 (Ogita-Aishima) was tried and dropped: on this GPU's fp64 rate its GEMMs
-cost more than an fp64 eigensolve (docs/decisions.md). The Fock build, the Mulliken sums and
-the Fermi filling are fused kernels (native/ksxtb/src/scf.cu).
+residual's RMS falls below `SCFBatch.SWITCH`, then with fp64-accurate orbitals, and convergence
+is only declared after two such cycles, so the energy test compares fp64 energies. A cycle makes
+one fp32 eigensolve for all its active molecules; for the precise ones the occupied orbitals are
+then refined in fp64 (`refine_occupied`, Ogita-Aishima restricted to pairs of different
+occupation), an fp64 eigensolve only where the refinement is ill-conditioned (fixed cost per
+call: 4 ms in fp64, docs/decisions.md 2026-11-23). The Fock build, the Mulliken sums and the
+Fermi filling are fused kernels (native/ksxtb/src/scf.cu).
 """
 
 from __future__ import annotations
@@ -159,8 +161,8 @@ class KsFock(C.Structure):
 
 
 class KsMulliken(C.Structure):
-    _fields_ = [(n, C.c_void_p) for n in ("P", "S", "D", "Q", "out")] + [
-        ("n", C.c_int), ("nmol", C.c_int)]  # fmt: skip
+    _fields_ = [(n, C.c_void_p) for n in ("P", "S", "D", "Q", "out", "idx")] + [
+        ("n", C.c_int), ("nsel", C.c_int)]  # fmt: skip
 
 
 class KsFermi(C.Structure):
@@ -238,10 +240,70 @@ def solve(g: Geometry, f: torch.Tensor, idx=None):
 def solve_fp32(g: Geometry, f: torch.Tensor, idx):
     """The same in fp32 (transform, eigensolve, back-transform): the early SCF cycles. The
     orbital energies come back in fp64, the coefficients in fp32."""
+    e, c, ok = eig_fp32(g, f, idx)
+    return e, g.Linv32[idx].transpose(1, 2) @ c, ok
+
+
+def eig_fp32(g: Geometry, f: torch.Tensor, idx):
+    """The fp32 eigensolve in the orthogonalized basis: orbital energies (fp64) and the
+    orthonormal eigenvectors c of L^-1 F L^-T (fp32, before the back-transform)."""
     linv = g.Linv32[idx]
     fp = linv @ f.float() @ linv.transpose(1, 2)
     e, c, ok = eigh_safe(0.5 * (fp + fp.transpose(1, 2)))
-    return e.double(), linv.transpose(1, 2) @ c, ok
+    return e.double(), c, ok
+
+
+REFINE_TINY = 1e-12  # occupations within this of each other count as equal
+REFINE_NEAR = 1e-3  # Hartree: orbital pairs closer than this are near-degenerate
+REFINE_FLAT = 1e-8  # occupations farther than this from an integer are fractional
+REFINE_CHECK = 1e-7  # the last refinement step's largest rotation; above it, an fp64 eigh
+
+
+def refine_occupied(g: Geometry, f, c32, emo32, occ, idx, steps: int = 2):
+    """fp64-accurate occupied orbitals from an fp32 eigensolve, without an fp64 eigensolve.
+
+    Ogita and Aishima's refinement of an approximate eigenbasis, in the AO basis (F x = e S x)
+    and restricted to the columns the density needs: the first K orbitals, K the most occupied
+    orbitals of any molecule. Per step, with X the K columns and C the whole basis (X first):
+    R = I - C^T S X, M = C^T F X, e_j = M_jj / (1 - R_jj), and X += C E with
+    E_ij = (M_ij + e_j R_ij) / (e_j - e_i) for orbitals of different occupation, R_ij / 2 (the
+    orthonormalization) for equal ones. The virtual orbitals beyond K keep their fp32 energies
+    and only serve as the basis. Near-degenerate pairs (closer than REFINE_NEAR) are not
+    rotated: between orbitals of equal integer occupation the rotation does not move the
+    density. A molecule with a near-degenerate pair that holds a fractionally occupied orbital
+    (more than REFINE_FLAT from an integer: there the split of the occupations follows the
+    fp32 eigenvalues' noise) goes to an fp64 eigensolve, as does one whose last step still
+    rotated by more than REFINE_CHECK.
+
+    Returns the orbital energies (b, n) and the basis (b, n, n, the first K columns refined) in
+    fp64, the number K, and ok (b,)."""
+    s, linv = g.S[idx], g.Linv[idx]
+    cf = linv.transpose(1, 2) @ c32.double()
+    k = max(int((occ > REFINE_TINY).sum(1).max()), 1)
+    dfo = (occ[:, :, None] - occ[:, None, :k]).abs()  # (b, n, k)
+    near = (emo32[:, :, None] - emo32[:, None, :k]).abs() < REFINE_NEAR
+    near &= ~torch.eye(*near.shape[1:], dtype=torch.bool, device=near.device)
+    frac = (occ - occ.round()).abs() > REFINE_FLAT
+    differ = (dfo > REFINE_TINY) & ~near
+    clean = ~(near & (frac[:, :, None] | frac[:, None, :k])).any((1, 2))
+    eye = torch.eye(cf.shape[1], k, dtype=F64, device=cf.device)
+    sf = torch.cat([s, f], 1)  # one GEMM for S X and F X
+    emo = emo32.clone()
+    rot = torch.zeros_like(emo32[:, 0])
+    for step in range(steps):
+        x = cf[:, :, :k]
+        rm = cf.transpose(1, 2) @ (sf @ x).view(len(cf), 2, -1, k).transpose(1, 2).reshape(
+            len(cf), -1, 2 * k)  # fmt: skip
+        r, m = eye - rm[:, :, :k], rm[:, :, k:]
+        lam = torch.diagonal(m[:, :k], dim1=1, dim2=2) / (1 - torch.diagonal(r[:, :k], dim1=1,
+                                                                              dim2=2))  # fmt: skip
+        emo[:, :k] = lam
+        den = lam[:, None, :] - emo[:, :, None]
+        e = torch.where(differ, (m + lam[:, None, :] * r) / torch.where(differ, den, 1.0), r / 2)
+        if step == steps - 1:
+            rot = torch.where(differ, e.abs(), 0.0).amax((1, 2))
+        cf[:, :, :k] = x + cf @ e
+    return emo, cf, k, clean & (rot <= REFINE_CHECK) & torch.isfinite(rot)
 
 
 def fermi(emo: torch.Tensor, nel: torch.Tensor, kt: float = T.KT_300K) -> torch.Tensor:
@@ -282,13 +344,17 @@ def entropy(occ: torch.Tensor, kt: float = T.KT_300K) -> torch.Tensor:
     return kt * torch.where((occ > 0) & (occ < 1), s, 0.0).sum(1)
 
 
-def mulliken(g: Geometry, lay: Layout, p: torch.Tensor, n0sh: torch.Tensor, nat: int):
+def mulliken(g: Geometry, lay: Layout, p: torch.Tensor, n0sh: torch.Tensor, nat: int, idx=None):
     """Output shell charges (nsh,), atomic dipoles (nat, 3) and quadrupoles (nat, 6): the per-AO
-    sums of scf.cu's kernel, reduced to shells and atoms (`mulliken_reference` in torch)."""
+    sums of scf.cu's kernel, reduced to shells and atoms (`mulliken_reference` in torch). With
+    `idx` only those molecules are summed; the others' charges are the reference occupations
+    and their multipoles zero (an SCF discards them)."""
     b, n = p.shape[0], lay.nmax
-    per = torch.empty(b, n, 10, dtype=F64, device=p.device)
-    pc = p.contiguous()
-    args = KsMulliken(*[t.data_ptr() for t in (pc, g.S, g.D, g.Q, per)], n, b)
+    if idx is None:
+        idx = torch.arange(b, device=p.device)
+    per = torch.zeros(b, n, 10, dtype=F64, device=p.device)
+    pc, idx = p.contiguous(), idx.contiguous()
+    args = KsMulliken(*[t.data_ptr() for t in (pc, g.S, g.D, g.Q, per, idx)], n, len(idx))
     native._check(_lib().ksxtb_mulliken(C.byref(args), _stream()), "ksxtb_mulliken")
     nsh = len(n0sh)
     pop = torch.zeros(nsh + 1, dtype=F64, device=p.device).index_add(
@@ -351,7 +417,69 @@ class VarMap:
 
 class Broyden:
     """tblite's broyden (Johnson's modified Broyden, damping 0.4, the whole history) for every
-    molecule of a batch at once; molecules outside `active` keep their input unchanged."""
+    molecule of a batch at once; molecules outside `active` keep their input unchanged.
+
+    The history lives in preallocated buffers (grown by doubling), the Gram matrix of the
+    normalized residual differences is updated by one row per iteration, and the small system is
+    solved in its equilibrated form: with W = diag(omega), tblite's (W A W + 1e-4 I) c = W g is
+    (A + 1e-4 W^-2) y = g for y = W c, the products the update needs, an SPD matrix with unit
+    diagonal solved by Cholesky (LU, as tblite, for a molecule where that fails). Equal to
+    `BroydenReference` (the list form) to rounding."""
+
+    def __init__(self, q0: torch.Tensor, damping: float = 0.4, chunk: int = 16) -> None:
+        self.q, self.alpha, self.iter, self.h = q0.clone(), damping, 0, 0
+        self.qlast = self.dqlast = None
+        b, v = q0.shape
+        self.df, self.u = q0.new_zeros(b, chunk, v), q0.new_zeros(b, chunk, v)
+        self.winv2, self.a = q0.new_zeros(b, chunk), q0.new_zeros(b, chunk, chunk)
+
+    def _grow(self) -> None:
+        cap = self.df.shape[1]
+        if self.h < cap:
+            return
+        pad = torch.nn.functional.pad
+        self.df, self.u = pad(self.df, (0, 0, 0, cap)), pad(self.u, (0, 0, 0, cap))
+        self.winv2, self.a = pad(self.winv2, (0, cap)), pad(self.a, (0, cap, 0, cap))
+
+    def next(self, dq: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
+        self.iter += 1
+        q, act = self.q, active[:, None]
+        if self.iter == 1:
+            self.dqlast, self.qlast = dq.clone(), q.clone()
+            self.q = torch.where(act, q + self.alpha * dq, q)
+            return self.q
+        norm = torch.sqrt((dq * dq).sum(1))
+        om = torch.where(norm > 0.01 / 1e5, 0.01 / norm.clamp(min=1e-300), 1e5).clamp(min=1.0)
+        df = dq - self.dqlast
+        inv = 1.0 / torch.sqrt((df * df).sum(1)).clamp(min=np.finfo(float).eps)
+        df = inv[:, None] * df
+        self._grow()
+        k = self.h
+        self.h = h = k + 1
+        self.df[:, k], self.winv2[:, k] = df, 1.0 / (om * om)
+        row = (self.df[:, :h] @ df[:, :, None])[:, :, 0]
+        self.a[:, k, :h], self.a[:, :h, k] = row, row
+        g = (self.df[:, :h] @ dq[:, :, None])[:, :, 0]
+        y = _spd_solve(self.a[:, :h, :h] + torch.diag_embed(1e-4 * self.winv2[:, :h]), g)
+        self.u[:, k] = self.alpha * df + inv[:, None] * (q - self.qlast)
+        new = q + self.alpha * dq - (y[:, None, :] @ self.u[:, :h])[:, 0]
+        self.dqlast, self.qlast = torch.where(act, dq, self.dqlast), torch.where(act, q, self.qlast)
+        self.q = torch.where(act, new, q)
+        return self.q
+
+
+def _spd_solve(a: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+    """a y = g for a batch of SPD matrices: Cholesky, LU where Cholesky fails."""
+    chol, info = torch.linalg.cholesky_ex(a)
+    y = torch.cholesky_solve(g[:, :, None], chol)[:, :, 0]
+    bad = info != 0
+    if bool(bad.any()):
+        y[bad] = torch.linalg.solve(a[bad], g[bad][:, :, None])[:, :, 0]
+    return y
+
+
+class BroydenReference:
+    """The list form of the mixer, tblite's arithmetic as written (the test reference)."""
 
     def __init__(self, q0: torch.Tensor, damping: float = 0.4) -> None:
         self.q, self.alpha, self.iter = q0.clone(), damping, 0
@@ -398,7 +526,7 @@ class SCFResult:
     iterations: torch.Tensor  # (B,) cycles run
     density: torch.Tensor  # (B, n, n)
     wdensity: torch.Tensor  # (B, n, n) energy-weighted density
-    emo: torch.Tensor  # (B, n)
+    emo: torch.Tensor  # (B, n); a refined molecule's occupied energies are Rayleigh quotients
     occ: torch.Tensor  # (B, n) both spins
     qsh: torch.Tensor
     dp: torch.Tensor
@@ -421,6 +549,7 @@ class SCFBatch:
         self.charge = torch.tensor([float(c) for *_, c, _ in mols], dtype=F64, device="cuda")
         uhf = torch.tensor([float(u) for *_, u in mols], dtype=F64, device="cuda")
         self.solvent, self.max_iter = solvent, max_iter
+        self.fallbacks = 0  # precise-phase eigensolves that needed fp64 eigh (`_precise`)
         self.econv, self.pconv = 1e-6 * accuracy, 2e-5 * accuracy
         self.db = native.DeviceBatch(native.host_batch(self.geo_mols))
         self.cb = K.ClassicalBatch(self.geo_mols, solvent)
@@ -474,29 +603,61 @@ class SCFBatch:
         shift = T.solvent_shift() if self.solvent else 0.0
         return band + ts + out_pot["energy"].sum(1) + shift
 
-    def _cycle(self, st: dict, pot: dict, active, precise) -> torch.Tensor:
+    def _cycle(self, st: dict, pot: dict, active, precise, idx=None) -> torch.Tensor:
         """Fock, eigensolve and density of the active molecules, into the state buffers;
         returns the molecules whose eigensolve failed (B,)."""
         failed = torch.zeros_like(active)
-        for phase in (False, True):
-            idx = torch.nonzero(active & (precise == phase)).squeeze(1)
-            if not len(idx):
-                continue
-            f = fock(self.g, self.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"], idx)
-            emo, c, ok = (solve if phase else solve_fp32)(self.g, f, idx)
-            failed[idx] = ~ok
-            occ, ts = self._occupations(emo, idx)
-            st["emo"][idx], st["occ"][idx], st["ts"][idx] = emo, occ, ts
-            # the fp32 phase's density in fp32; C and F kept only for the precise phase's X
-            st["p"][idx] = ((c * occ[:, None, :].to(c.dtype)) @ c.transpose(1, 2)).double()
-            if phase:
-                st["c"][idx] = c
+        idx = torch.nonzero(active).squeeze(1) if idx is None else idx
+        if not len(idx):
+            return failed
+        f = fock(self.g, self.lay, pot["vsh"], pot["vat"], pot["vdp"], pot["vqp"], idx)
+        emo, c, ok = eig_fp32(self.g, f, idx)  # one fp32 eigensolve for every active molecule
+        failed[idx] = ~ok
+        occ, ts = self._occupations(emo, idx)
+        sel = precise[idx]
+        lo, hi = torch.nonzero(~sel).squeeze(1), torch.nonzero(sel).squeeze(1)
+        if len(lo):  # the fp32 phase: density in fp32
+            i = idx[lo]
+            cc = self.g.Linv32[i].transpose(1, 2) @ c[lo]
+            st["emo"][i], st["occ"][i], st["ts"][i] = emo[lo], occ[lo], ts[lo]
+            st["p"][i] = ((cc * occ[lo][:, None, :].float()) @ cc.transpose(1, 2)).double()
+        if len(hi):
+            self._precise(st, f[hi], c[hi], emo[hi], occ[hi], idx[hi], failed)
         return failed
 
+    REFINE_STEPS = 2
+
+    def _precise(self, st, f, c32, emo32, occ32, idx, failed) -> None:
+        """The precise phase's orbitals: the fp32 eigenvectors refined in fp64
+        (`refine_occupied`), an fp64 eigensolve for the molecules it flags; the density from
+        the occupied columns, C kept for the energy-weighted density."""
+        emo, cf, k, ok = refine_occupied(self.g, f, c32, emo32, occ32, idx, self.REFINE_STEPS)
+        back = torch.nonzero(~ok).squeeze(1)
+        if len(back):
+            e64, c64, ok64 = solve(self.g, f[back], idx[back])
+            emo[back], cf[back] = e64, c64
+            failed[idx[back]] |= ~ok64
+            self.fallbacks += len(back)
+        occ, ts = self._occupations(emo, idx)
+        if len(back):
+            k = max(k, int((occ > 0).sum(1).max()))
+        x = cf[:, :, :k]
+        st["emo"][idx], st["occ"][idx], st["ts"][idx] = emo, occ, ts
+        st["p"][idx] = (x * occ[:, None, :k]) @ x.transpose(1, 2)
+        st["c"][idx], st["f"][idx] = cf, f
+
     def _wdensity(self, st: dict, idx) -> None:
-        """X = C diag(f e) C^T of the last (fp64) cycle, tblite's energy-weighted density."""
-        c, w = st["c"][idx], (st["occ"] * st["emo"])[idx]
-        st["x"][idx] = (c * w[:, None, :]) @ c.transpose(1, 2)
+        """tblite's energy-weighted density C diag(f e) C^T of the last (fp64) cycle, as
+        C_k sqrt(f) (C_k^T F C_k) sqrt(f) C_k^T over the occupied columns: the same at exact
+        eigenvectors, and unchanged by rotations among orbitals of equal occupation, which the
+        refinement (`refine_occupied`) leaves unresolved."""
+        if not len(idx):
+            return
+        occ = st["occ"][idx]
+        k = max(int((occ > 0).sum(1).max()), 1)
+        c, f = st["c"][idx, :, :k], st["f"][idx]
+        y = c * occ[:, None, :k].sqrt()
+        st["x"][idx] = y @ (c.transpose(1, 2) @ (f @ c)) @ y.transpose(1, 2)
 
     SWITCH = 1e-4  # residual RMS below which a molecule's cycles turn fp64-accurate
 
@@ -507,7 +668,7 @@ class SCFBatch:
         qsh, dp, qp = start if start is not None else self.guess()
         mixer = Broyden(self.vars.pack(qsh, dp, qp))
         b, n = self.vars.b, self.lay.nmax
-        st = {k: torch.zeros(b, n, n, **_f64()) for k in ("c", "p", "x")}
+        st = {k: torch.zeros(b, n, n, **_f64()) for k in ("c", "p", "x", "f")}
         st.update(emo=torch.zeros(b, n, **_f64()), occ=torch.zeros(b, n, **_f64()),
                   ts=torch.zeros(b, **_f64()))  # fmt: skip
         go = torch.ones(b, dtype=torch.bool, device="cuda") if active is None else active.clone()
@@ -526,8 +687,9 @@ class SCFBatch:
             this = precise.clone()
             pot = self._potentials(*self.vars.unpack(mixer.q))
             _keep_input(vin, pot, active[sh_mol], active[self.atom_mol])
-            failed = self._cycle(st, pot, active, this)
-            qo = mulliken(self.g, self.lay, st["p"], self.n0sh, self.db.hb.nat)
+            idx = torch.nonzero(active).squeeze(1)
+            failed = self._cycle(st, pot, active, this, idx)
+            qo = mulliken(self.g, self.lay, st["p"], self.n0sh, self.db.hb.nat, idx)
             qout = torch.where(active[:, None], self.vars.pack(*qo), qout)
             dq = qout - mixer.q
             enew = self._energy(st["p"], st["ts"], self._potentials(*qo, slot="out"))

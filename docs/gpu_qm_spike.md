@@ -170,3 +170,18 @@ from the reference): even (1.17x) at 51-80 atoms with 256 molecules in flight, s
 fewer, 3.1-3.3x above 80 atoms, and much slower below 30 atoms. The spike's 2x bar at 30-80
 atoms is missed; the SCF's per-step cost is the lever. Details in docs/decisions.md,
 2026-11-23; stage 6 measures it end to end.
+
+## SCF tuning result (2026-11-23)
+
+**The 2x bar is met at 51-80 atoms on a long queue, missed at 31-50.** Changes:
+- one fp32 eigensolve per SCF cycle, with the precise phase's occupied orbitals refined in fp64
+  instead of an fp64 eigensolve (fixed cost of 4 ms per call);
+- a Cholesky mixer with preallocated history;
+- kernel layouts that keep small batches spread over the device.
+
+Against 12 CPU workers on the same species, 1024 conformers in flight: 2.07x at 51-80 atoms
+(0.331 against 0.686 s per molecule), 1.65x at 31-50. With 256 conformers the end of the set
+drains the GPU: 1.45x and 1.1x. Parity gate: 96/96 outcomes. One 150-atom Pd complex took a
+walled retry that the CPU (and the GPU before tuning) did not need; the other 15 match. The rest is the SCF straggler (a step runs as many cycles as its slowest
+molecule) and each cycle's fixed cost. Details in docs/decisions.md, 2026-11-23.
+

@@ -10983,3 +10983,112 @@ Branch `claude/gpu-xtb`.
   - The per-step overhead (7.6 against 3.1 ms per molecule-energy): skipping finished molecules'
     potential and Mulliken work inside the SCF, and fewer host syncs, are the next levers.
   - Licensing, as before. Stage 5 (integration as `--optimizer gpu-anc`) waits for the user.
+
+## 2026-11-23: GPU xTB SCF tuning: one fp32 eigensolve per cycle, the precise phase by refinement
+
+After stage 4 the user chose to tune the GPU SCF before stage 5 integration. Branch
+`claude/gpu-xtb`. Measurements: `scripts/gpu_xtb/scf_profile.py` runs `relax_many`
+(production's path) on one size bin's spike species, with section timers, per-evaluation or
+per-cycle CUDA events.
+
+- **Where the time was** (51-80 atoms, 64 species x 4 embedding seeds = 256 conformers):
+  - An SCF in a step runs as many cycles as its slowest molecule: 11.5 per SCF against 6.45
+    per molecule. One cycle costs 6-12 ms almost whatever the number of active molecules
+    (about 10 ms with 2 active, 12 ms with 43). Cycles with under 10% of the batch active take
+    28-34% of the SCF time.
+  - The fp64 eigensolve has a fixed cost per call: 4.4 ms for one matrix, 10 ms for 16 (fp32:
+    1.1 and 2.5 ms), 0.27 ms per matrix at 256. It ran every cycle on the few molecules in the
+    precise phase: 49 of 163 s.
+  - The mixer took 2 ms per cycle, about 40 small ops plus a batched LU solve of ~1 ms.
+  - Steps with at most 8 live molecules (the end of a finite set: the 500-energy
+    non-convergers, the walled retries) took 28% of the wall time at 19 ms per
+    molecule-energy. In full batches a molecule-energy already cost 2.4 ms against the CPU's
+    9.3.
+- **Changes.**
+  - **Mixer.** Preallocated history, the Gram matrix updated by one row per iteration, and
+    tblite's system (W A W + 1e-4 I) c = W g solved in its equilibrated form,
+    (A + 1e-4 W^-2) y = g with y = W c: an SPD matrix with unit diagonal, solved by Cholesky,
+    LU where Cholesky fails. Equal to the list form (`BroydenReference`) to 1e-11 over 12
+    iterations.
+  - **Precise phase.** One fp32 eigensolve per cycle for every active molecule. For the
+    precise ones, the occupied orbitals are then refined in fp64 (`refine_occupied`):
+    - Ogita and Aishima's refinement in the AO basis, restricted to the occupied columns and
+      to pairs of different occupation; pairs of equal occupation get only the
+      orthonormalization. Two steps take the density from fp32's error to 1e-14.
+    - Near-degenerate pairs (< 1e-3 Eh) are not rotated.
+    - An fp64 eigensolve is kept only for a molecule with a near-degenerate pair that holds a
+      fractionally occupied orbital (more than 1e-8 from an integer), or whose last step
+      still rotated by more than 1e-7.
+    - That falls back on 1 of 64 sample species at 51-80 atoms and 0 of 64 at 31-50, and on
+      the two metal fixtures (CuCl2, FeBr4-).
+    - Two earlier rules were dropped:
+      - Falling back on any non-integer occupation sent 20% of the sample to fp64 eigh:
+        every molecule with a gap below ~1.4 eV.
+      - Falling back on a near-degenerate pair whose occupations differ by more than 1e-8
+        was flaky. CuCl2's half-filled degenerate pair split its occupations by 8e-6 to
+        3e-5 on a quiet GPU and by less than 1e-8 under load: the split follows the fp32
+        eigenvalues' noise.
+    - Stage 3 rejected this refinement on 1.31 against 1.09 ms per molecule. That was measured
+      while a pretraining run shared the GPU, at batch 256, with eight full-size GEMMs. Here
+      the GEMMs are restricted to the occupied columns (17 us at n = 200), and what is saved
+      is the fixed cost per call of an fp64 eigensolve at the small precise-phase batches.
+  - **Energy-weighted density.** Computed as C_k sqrt(f) (C_k^T F C_k) sqrt(f) C_k^T over the
+    occupied columns, from the last cycle's F (kept per molecule). At exact eigenvectors this
+    equals tblite's C diag(f e) C^T. It is unchanged by rotations among orbitals of equal
+    occupation, which the refinement leaves unresolved (the plain form was 8e-7 off in the
+    gradient). So a refined molecule's occupied orbital energies are Rayleigh quotients: their
+    sum is exact, each one within ~2e-7 where fp32 mixed them. Only tests read them.
+  - **Kernel layouts, no change in the numbers.**
+    - Thread-per-pair kernels spread a warp's lanes over the pair list. Consecutive pairs share
+      an atom, so their atomic adds serialized 32 ways.
+    - ATM's k loop is rotated per pair.
+    - Mulliken is tiled (32 AOs x 8 row slices, shared-memory reduction) and runs only for
+      the active molecules.
+    - The ALPB shape term runs one warp per molecule.
+    - No measurable change in wall time: 124 against 121 s, within run-to-run noise.
+- **Correctness.**
+  - All GPU xTB tests pass: SCF on tblite within 1e-10 Eh and 1e-9 Eh/Bohr at accuracy 1e-6.
+  - The refined density and energy-weighted density are within 7e-12 of fp64 eigh on 128
+    sample species.
+  - Parity gate (`stage4_gate.py check`), 96 species against production's tblite-anc
+    `_relax`, run on the committed build:
+    - 96/96 outcomes, energy ratio 1.08.
+    - Walled retries: the CPU's 15, plus one more. A 150-atom Pd complex broke a bond in its
+      free run on the GPU and took the walled retry (474 energies, end 2.8e-3 Eh below the
+      CPU's); the CPU did not need it (223). Before tuning, and in a run of the previous
+      fallback rule (which refined this metal rather than handing it to fp64 eigh), the GPU
+      did not need it either.
+    - 71 same minimum (as before), 14 lower, 11 higher. The higher ones are at most 1.8e-4 Eh
+      above the CPU's, as before.
+    - Between builds, 30 of 96 end energies moved by more than 1e-6 (the previous rule's run
+      against the pre-tuning check): on flat surfaces the optimizer's path follows the
+      rounding. The pre-tuning check is kept as `stage4_check_fp64_stage4.json`.
+  - Peak device memory per batch is within `molecule_bytes`' estimate from 15 molecules up;
+    above it for 2-9-molecule batches (up to 9.5x, small in absolute terms).
+- **Speed.** Seconds per optimized molecule, untagged closed shells. cpu12 is the reference
+  rerun on the same 64 species per bin, the workers started as `qm.batch` starts them
+  (`stage4_reference_preload_64.json`): 4.53 and 9.31 ms per energy.
+
+  | | 31-50 atoms | 51-80 atoms |
+  |---|---|---|
+  | cpu12, 64 species | 0.220 | 0.686 |
+  | GPU before tuning, 256 conformers | 0.24 | 0.55-0.57 |
+  | GPU after, 256 conformers | 0.19-0.20 | 0.47-0.48 |
+  | ratio | 1.1x | 1.45x |
+  | GPU after, 1024 conformers (16 seeds) | 0.134 | 0.331 |
+  | ratio | 1.65x | 2.07x |
+
+  The 1024-conformer run is closer to production, where a stream of species keeps the
+  batches full: steps with at most 8 live molecules take 8% of its time, against 28-35% with
+  256. The spike's 2x bar at 30-80 atoms is met at 51-80 atoms on a long queue and missed at
+  31-50 (1.65x).
+- **What is left.**
+  - A step still runs as many SCF cycles as its slowest molecule (13-29 per step against 6.4
+    per molecule).
+  - A cycle has a fixed cost: the fp32 eigensolve's latency (1.7 ms for 2 matrices), ~300
+    kernel launches, ~9 host syncs.
+  - Levers, not built: carrying an unconverged SCF over to the next step instead of waiting
+    for it (per-molecule mixer histories); an fp32 cycle without an eigensolve, refining the
+    previous cycle's orbitals (the distance between consecutive cycles' orbitals not yet
+    probed).
+  - Below 30 atoms the CPU stays faster: stage 5's size routing.

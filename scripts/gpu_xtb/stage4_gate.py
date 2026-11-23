@@ -165,6 +165,7 @@ def check(root: Path, rfo: str, capacity: int) -> dict:
         z, start = np.array(row["z"]), np.array(row["start"])
         tasks.append(O.RelaxTask(str(k), mol, z, start, row["charge"], 0))
     dtype = torch.float32 if rfo == "fp32" else torch.float64
+    memory = _record_memory()
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     outs = O.relax_many(tasks, capacity=capacity, rfo_dtype=dtype,
@@ -176,7 +177,26 @@ def check(root: Path, rfo: str, capacity: int) -> dict:
         print(c, flush=True)
     cpu_s = sum(r["seconds"] for r in rows)
     return {"per_species": per, "gpu_seconds": seconds, "cpu_seconds_one_core": cpu_s,
-            "n": len(rows)}  # fmt: skip
+            "n": len(rows), "memory": memory}  # fmt: skip
+
+
+def _record_memory() -> list:
+    """Per batch: its size, `molecule_bytes` of its largest member times its size (relax_many's
+    estimate) and the measured peak of allocated device memory while it ran."""
+    rows, orig = [], O.BatchedANC.run
+
+    def run(self, *a, **k):
+        base = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        out = orig(self, *a, **k)
+        est = max(O.molecule_bytes(sp.z) for sp in self.specs) * self.b
+        peak = torch.cuda.max_memory_allocated() - base
+        rows.append({"b": self.b, "estimate": est, "peak": peak, "ratio": peak / est})
+        print("memory", rows[-1], flush=True)
+        return out
+
+    O.BatchedANC.run = run
+    return rows
 
 
 def _cpu12(root: Path, key: str) -> tuple[float, str]:

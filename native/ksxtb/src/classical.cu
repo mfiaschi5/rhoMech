@@ -110,6 +110,15 @@ __device__ __forceinline__ double smooth(double r, double cut, double width, dou
   return x * x * x * (10.0 + x * (-15.0 + 6.0 * x));
 }
 
+// The pair list runs i by i (pair_index), so consecutive threads would share the atom i and
+// serialize their atomic adds to it 32 ways. A thread-per-pair kernel takes the pair
+// spread(t): the 32 lanes of a warp take pairs G = ceil(npair / 32) apart. A bijection of
+// [0, 32 G), which blocks(npair) threads cover; t beyond it maps to npair (returns).
+__device__ __forceinline__ int spread(int t, int npair) {
+  const int g = (npair + 31) / 32;
+  return t >= 32 * g ? npair : (t & 31) * g + (t >> 5);
+}
+
 __device__ __forceinline__ long long pair_index(const KsClassical& c, int m, int i, int j) {
   int il = i - c.mol_at0[m], jl = j - c.mol_at0[m];
   return c.mol_pair0[m] + (long long)il * (il - 1) / 2 + jl;
@@ -118,7 +127,7 @@ __device__ __forceinline__ long long pair_index(const KsClassical& c, int m, int
 // ------------------------------------------------------------------------------ geometry
 
 __global__ void __launch_bounds__(kThreads) cn_psi_kernel(KsClassical c, KsWork w) {
-  int p = blockIdx.x * blockDim.x + threadIdx.x;
+  int p = spread(blockIdx.x * blockDim.x + threadIdx.x, c.npair);
   if (p >= c.npair) return;
   int i = c.pi[p], j = c.pj[p];
   double v[3], r2 = pair_vec(c, i, j, v);
@@ -440,7 +449,7 @@ __device__ void alpb_pair(const KsClassical& c, const KsWork& w, const KsScf& s,
 
 __global__ void __launch_bounds__(kThreads) pair_kernel(KsClassical c, KsWork w, KsScf s,
                                                         KsClsOut o, bool grad) {
-  int q = blockIdx.x * blockDim.x + threadIdx.x;
+  int q = spread(blockIdx.x * blockDim.x + threadIdx.x, c.npair);
   if (q >= c.npair) return;
   Pair p;
   p.i = c.pi[q];
@@ -525,7 +534,7 @@ __device__ void atm_triple(const KsClassical& c, const KsWork& w, const KsClsOut
 // grad false: the energy, into egeo (geometry pass); true: the gradient and dE/dCN only
 __global__ void __launch_bounds__(kThreads) atm_kernel(KsClassical c, KsWork w, KsClsOut o,
                                                        bool grad) {
-  int q = blockIdx.x * blockDim.x + threadIdx.x;
+  int q = spread(blockIdx.x * blockDim.x + threadIdx.x, c.npair);
   if (q >= c.npair) return;
   AtmPair p;
   p.i = c.pi[q];
@@ -540,7 +549,9 @@ __global__ void __launch_bounds__(kThreads) atm_kernel(KsClassical c, KsWork w, 
   p.r0ij = c.sc[KS_D4_A1] * sqrt(3.0 * p.ri * p.rj) + c.sc[KS_D4_A2];
   p.cij = w.c60 + 3 * q;
   AtmAcc acc = {{0, 0, 0}, {0, 0, 0}, 0.0, 0.0, 0.0};
-  for (int k = c.mol_at0[p.m]; k < p.j; ++k) atm_triple(c, w, o, p, k, acc, grad);
+  // k rotated by the pair, so lanes of one molecule add to different atoms k at a time
+  const int k0 = c.mol_at0[p.m], nk = p.j - k0;
+  for (int kk = 0; kk < nk; ++kk) atm_triple(c, w, o, p, k0 + (kk + q) % nk, acc, grad);
   if (!grad) {
     atomicAdd(w.egeo + KE_N * p.i + KE_D4THREE, acc.e / 3.0);
     atomicAdd(w.egeo + KE_N * p.j + KE_D4THREE, acc.e / 3.0);
@@ -553,22 +564,31 @@ __global__ void __launch_bounds__(kThreads) atm_kernel(KsClassical c, KsWork w, 
 }
 
 // ------------------------------------------------------------------------------ ALPB shape
-// keps alpha / A_det (sum q)^2 / 2, A_det from the inertia of the vdW spheres; one thread per
+// keps alpha / A_det (sum q)^2 / 2, A_det from the inertia of the vdW spheres; one warp per
 // molecule. d ln A_det / dx_a = r_a^3 (tr(I^-1) v_a - I^-1 v_a) / 3, the centre term vanishing.
 
-__global__ void adet_kernel(KsClassical c, KsWork w, KsScf s, KsClsOut o, bool grad) {
-  int m = blockIdx.x * blockDim.x + threadIdx.x;
+__device__ __forceinline__ double warp_sum(double x) {
+  for (int o = 16; o > 0; o >>= 1) x += __shfl_xor_sync(0xffffffffu, x, o);
+  return x;
+}
+
+// one warp per molecule: the lanes take its atoms in turn, the sums are warp reductions
+__global__ void __launch_bounds__(32) adet_kernel(KsClassical c, KsWork w, KsScf s, KsClsOut o,
+                                                  bool grad) {
+  const int m = blockIdx.x, lane = threadIdx.x;
   if (m >= c.nmol || !c.solvent) return;
-  int a0 = c.mol_at0[m], n = c.mol_nat[m];
+  const int a0 = c.mol_at0[m], n = c.mol_nat[m];
   double vol = 0.0, cen[3] = {0, 0, 0}, qsum = 0.0, in[6] = {0, 0, 0, 0, 0, 0};
-  for (int a = a0; a < a0 + n; ++a) {
+  for (int a = a0 + lane; a < a0 + n; a += 32) {
     double r3 = pow(at(c, a, KA_RVDW), 3);
     vol += r3;
     for (int k = 0; k < 3; ++k) cen[k] += r3 * c.xyz[3 * a + k];
     qsum += s.qat[a];
   }
-  for (int k = 0; k < 3; ++k) cen[k] /= vol;
-  for (int a = a0; a < a0 + n; ++a) {  // inertia xx xy xz yy yz zz
+  vol = warp_sum(vol);
+  qsum = warp_sum(qsum);
+  for (int k = 0; k < 3; ++k) cen[k] = warp_sum(cen[k]) / vol;
+  for (int a = a0 + lane; a < a0 + n; a += 32) {  // inertia xx xy xz yy yz zz
     double rad = at(c, a, KA_RVDW), r3 = rad * rad * rad, v[3];
     for (int k = 0; k < 3; ++k) v[k] = c.xyz[3 * a + k] - cen[k];
     double d = dot3(v, v) + 0.4 * rad * rad;
@@ -579,16 +599,17 @@ __global__ void adet_kernel(KsClassical c, KsWork w, KsScf s, KsClsOut o, bool g
     in[4] -= r3 * v[1] * v[2];
     in[5] += r3 * (d - v[2] * v[2]);
   }
+  for (int k = 0; k < 6; ++k) in[k] = warp_sum(in[k]);
   double c00 = in[3] * in[5] - in[4] * in[4], c01 = in[2] * in[4] - in[1] * in[5];
   double c02 = in[1] * in[4] - in[2] * in[3], c11 = in[0] * in[5] - in[2] * in[2];
   double c12 = in[1] * in[2] - in[0] * in[4], c22 = in[0] * in[3] - in[1] * in[1];
   double det = in[0] * c00 + in[1] * c01 + in[2] * c02;
   double adet = sqrt(cbrt(det) / (0.4 * vol));
   double kq = c.sc[KS_KEPS] * c.sc[KS_ALPBET] / adet, e = 0.5 * kq * qsum * qsum;
-  atomicAdd(w.eatom + KE_N * a0 + KE_ALPB, e);
+  if (lane == 0) atomicAdd(w.eatom + KE_N * a0 + KE_ALPB, e);
   double mi[6] = {c00 / det, c01 / det, c02 / det, c11 / det, c12 / det, c22 / det};
   double tr = mi[0] + mi[3] + mi[5];
-  for (int a = a0; a < a0 + n; ++a) {
+  for (int a = a0 + lane; a < a0 + n; a += 32) {
     atomicAdd(o.vat + a, kq * qsum);
     if (!grad) continue;
     double r3 = pow(at(c, a, KA_RVDW), 3), v[3], g[3];
@@ -668,7 +689,7 @@ __global__ void __launch_bounds__(kThreads) post_kernel(KsClassical c, KsWork w,
 }
 
 __global__ void __launch_bounds__(kThreads) chain_kernel(KsClassical c, KsWork w, KsClsOut o) {
-  int q = blockIdx.x * blockDim.x + threadIdx.x;
+  int q = spread(blockIdx.x * blockDim.x + threadIdx.x, c.npair);
   if (q >= c.npair) return;
   int i = c.pi[q], j = c.pj[q];
   double v[3], r2 = pair_vec(c, i, j, v);
@@ -756,7 +777,7 @@ extern "C" int ksxtb_classical(const KsClassical* cp, const KsWork* wp, const Ks
   if (c.npair) pair_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, s, o, g);
   if (g && c.npair) atm_kernel<<<blocks(c.npair), kThreads, 0, st>>>(c, w, o, true);
   if (c.solvent) {
-    adet_kernel<<<blocks(c.nmol), kThreads, 0, st>>>(c, w, s, o, g);
+    if (c.nmol) adet_kernel<<<c.nmol, 32, 0, st>>>(c, w, s, o, g);
     if (g) sasa_kernel<<<blocks((long long)c.nat * KS_NGRID), kThreads, 0, st>>>(c, w, s, o, false);
   }
   post_kernel<<<blocks(c.nat), kThreads, 0, st>>>(c, w, s, o, dedcn_in, g);

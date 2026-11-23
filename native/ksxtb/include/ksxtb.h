@@ -189,7 +189,8 @@ typedef struct {
   const double* D;
   const double* Q;
   double* out;      /* [nmol * n * 10] per AO: population, 3 dipole, 6 quadrupole parts */
-  int n, nmol;
+  const long long* idx; /* [nsel] the molecules to sum (rows of P and out) */
+  int n, nsel;
 } KsMulliken;
 
 typedef struct {
