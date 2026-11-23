@@ -155,3 +155,17 @@ Building the batch on the host is outside these times: 2.5 ms per molecule at 51
 lone single point there is 6.4 ms (3.3x); an optimizer pays it once per record.
 The table is in docs/decisions.md, 2026-11-22. The end-to-end question, a whole optimized record
 against `ksmech-qm run --workers 12`, is stage 4's (the batched optimizer).
+
+## Stage 4 result (2026-11-23)
+
+**The batched optimizer reproduces production's.** `ksmech.qm.gpu.optimize.relax_many` runs
+production's tblite-anc `_relax` (free run with the dissociation guard, walled retry) for many
+molecules at once on the GPU. On 96 spike species it gives the same outcome for every one, the
+same walled retries (15), the same energy counts (median ratio 1.0), and end points tblite
+accepts (79 of 81 free runs below fmax, the other two above by 1e-6). 69 land in the same
+minimum, most of the rest in the same flat basin.
+
+Throughput is preliminary: 1.1x the cpu12 estimate at 51-80 atoms with 64 species, 2.4x with 256
+in flight, 3.6-4.4x above 80 atoms, and slower than the CPU below 30 atoms. The CPU estimate
+lacks the QM workers' OpenBLAS preload and may flatter the GPU by up to ~2x. Details in
+docs/decisions.md, 2026-11-23; stage 6 measures it end to end.

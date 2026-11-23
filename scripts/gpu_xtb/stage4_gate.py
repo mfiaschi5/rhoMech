@@ -2,6 +2,7 @@
 
     uv run python scripts/gpu_xtb/stage4_gate.py steps [--per-bin 2] [--rfo fp64|fp32]
     uv run python scripts/gpu_xtb/stage4_gate.py check [--rfo fp64|fp32] [--capacity 256]
+    uv run python scripts/gpu_xtb/stage4_gate.py time [--per-bin 64]
 
 Molecules: the spike sample's species (`data/processed/gpu_qm_spike/mols.json`), embedded as
 production does (`prepare_mol`, `embed(mol, 1, seed=0)`), untagged closed shells, ALPB water.
@@ -17,6 +18,10 @@ production does (`prepare_mol`, `embed(mol, 1, seed=0)`), untagged closed shells
   above it is what a CPU polish would take); same minimum (Kabsch RMSD < 0.05 A and |dE| <
   1e-5 Eh against the reference's end) or a different one, lower or higher; the energies used;
   the GPU's wall time over the whole sample against the reference's CPU seconds.
+- time: per size bin, `relax_many` on `--per-bin` species of the spike sample (embedded as
+  production does) alone on the GPU: seconds and energies per molecule, against the reference's
+  CPU seconds per molecule of that bin divided by 12 (one core of 12 single-threaded workers,
+  tblite without the OpenBLAS preload the QM workers use: an estimate, stage 6 measures it).
 """
 
 from __future__ import annotations
@@ -151,9 +156,40 @@ def check(root: Path, rfo: str, capacity: int) -> dict:
             "n": len(rows)}  # fmt: skip
 
 
+def time_bins(root: Path, per_bin: int) -> dict:
+    import time
+
+    sample = json.loads((root / SAMPLE).read_text())
+    ref = json.loads((root / OUT / "stage4_reference.json").read_text())
+    out = {}
+    for key, recs in sample.items():
+        tasks = []
+        for k, rec in enumerate(recs[:per_bin]):
+            got = embedded(rec["smiles"])
+            if got is not None:
+                mol, z, x0, charge = got
+                tasks.append(O.RelaxTask(f"{key}:{k}", mol, z, x0, charge, 0))
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        res = O.relax_many(tasks)
+        torch.cuda.synchronize()
+        gpu = (time.perf_counter() - t0) / len(tasks)
+        ok = [r for r in ref[key] if r["outcome"] == "ok"]
+        cpu12 = float(np.mean([r["seconds"] for r in ok])) / 12
+        out[key] = {"n": len(tasks), "gpu_s_per_mol": gpu, "cpu12_s_per_mol": cpu12,
+                    "speedup": cpu12 / gpu,
+                    "gpu_evals_mean": float(np.mean([r.n_evals for r in res])),
+                    "ref_evals_mean": float(np.mean([r["n_evals"] for r in ok])),
+                    "failed": sum(r.reason is not None for r in res)}  # fmt: skip
+        print(key, {k: round(v, 3) if isinstance(v, float) else v for k, v in out[key].items()},
+              flush=True)  # fmt: skip
+        torch.cuda.empty_cache()
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("what", choices=("steps", "check"))
+    ap.add_argument("what", choices=("steps", "check", "time"))
     ap.add_argument("--capacity", type=int, default=256)
     ap.add_argument("--per-bin", type=int, default=2)
     ap.add_argument("--rfo", choices=("fp64", "fp32"), default="fp64")
@@ -161,6 +197,8 @@ def main() -> None:
     args = ap.parse_args()
     if args.what == "check":
         res = check(args.root, args.rfo, args.capacity)
+    elif args.what == "time":
+        res = time_bins(args.root, args.per_bin)
     else:
         res = steps(json.loads((args.root / SAMPLE).read_text()), args.per_bin, args.rfo)
     path = args.root / OUT / f"stage4_{args.what}_{args.rfo}.json"

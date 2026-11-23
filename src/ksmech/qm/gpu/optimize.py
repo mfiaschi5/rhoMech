@@ -587,6 +587,15 @@ class _Job:
         )
 
 
+MIN_COMPACT = 8  # a batch smaller than this runs to its end
+
+
+def _nao(z: np.ndarray) -> int:
+    from ksmech.qm.gpu.basis import mol_basis
+
+    return mol_basis(np.asarray(z)).nao
+
+
 def molecule_bytes(z: np.ndarray) -> int:
     """A batch member's peak device memory: ~50 n_ao^2 doubles for the SCF (the padded
     matrices, the eigensolver's workspace and transient copies; measured 47-49 at 21-117 atoms)
@@ -600,35 +609,45 @@ def molecule_bytes(z: np.ndarray) -> int:
 def relax_many(
     tasks: list[RelaxTask],
     config=None,
-    capacity: int = 256,
+    capacity: int = 1024,
     refill: float = 0.75,
     solvent: bool = True,
     rfo_dtype=F64,
     on_batch=None,
-    memory_bytes: float = 9e9,
+    memory_bytes: float | None = None,
+    size_ratio: float = 1.5,
 ) -> list[RelaxOutcome]:
     """`qm.xtb_calc.GFN2Calculator._relax` with the tblite-anc settings of `config` (a QMConfig)
     for many molecules: a free run with the dissociation guard, `check_connectivity`, and on a
     broken bond a walled run from the start geometry, checked again. The batch holds up to
     `capacity` runs and at most `memory_bytes` (`molecule_bytes` of its largest member times
-    its size); when fewer than `refill` x its size still run, it is rebuilt with them (their
-    state carried over) and the next tasks, smallest first."""
+    its size; default 60% of the device memory free at the start, as another process may hold
+    the rest); when fewer than `refill` x its size still run, it is rebuilt with them (their
+    state carried over) and the next tasks, smallest first. A batch takes a molecule only if
+    its AO count is within `size_ratio` of the batch's smallest: every member pays for the
+    padding to the largest."""
     from ksmech.qm.xtb_calc import QMConfig
 
     config = config or QMConfig(optimizer="tblite-anc")
+    if memory_bytes is None:
+        torch.cuda.empty_cache()
+        memory_bytes = 0.6 * torch.cuda.mem_get_info()[0]
     cfg = AncSettings(fmax=config.fmax, maxiter=config.maxiter)
-    queue = sorted((_Job(t, config) for t in tasks), key=lambda j: len(j.task.z))
+    queue = sorted((_Job(t, config) for t in tasks), key=lambda j: _nao(j.task.z))
     running: list[_Job] = []
     results: dict[str, RelaxOutcome] = {}
     while queue or running:
         while queue and len(running) < capacity:
             biggest = max([molecule_bytes(j.task.z) for j in running] + [0])
             need = max(biggest, molecule_bytes(queue[0].task.z)) * (len(running) + 1)
-            if running and need > memory_bytes:
+            smallest = min([_nao(j.task.z) for j in running] + [_nao(queue[0].task.z)])
+            if running and (need > memory_bytes or _nao(queue[0].task.z) > size_ratio * smallest):
                 break
             running.append(queue.pop(0))
         opt = BatchedANC([j.spec for j in running], solvent, cfg, rfo_dtype=rfo_dtype)
-        stop = int(refill * len(running)) if queue else None
+        # stop to refill, or with nothing queued to compact: a finished molecule left in the
+        # batch would still pay its geometry and gradient at every step
+        stop = int(refill * len(running)) if len(running) >= MIN_COMPACT else None
         got = opt.run(stop_below=stop) if stop else (dict(enumerate(opt.run())), {})
         done, states = got
         nxt = []
