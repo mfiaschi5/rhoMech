@@ -225,8 +225,8 @@ under `GFN2-xTB/ALPB-water/gpu-anc`.
 Smoke runs on the spike's 384 species (1-200 atoms):
 - 384/384 records in each of the three runs: 256 optimized on the GPU, 3-5 of them polished,
   none retried on the CPU.
-- 467-503 s with 12 workers. A first estimate for the CPU alone is about 810 s, about 1.7x;
-  stage 6 measures it.
+- 467-503 s with 12 workers. An estimate for the CPU alone on this sample is about 810 s,
+  about 1.7x, dominated by the species above 80 atoms; stage 6 measures it end to end.
 - The GPU records' energies match production's tblite-anc from the same starts as closely as
   the parity gate did.
 

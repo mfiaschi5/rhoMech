@@ -57,6 +57,7 @@ OPTIMIZER = "gpu-anc"
 GPU_MIN_ATOMS = 31  # atoms with H; below, the CPU workers are faster
 MAX_Z = 86  # the GPU engine's GFN2 parameters
 FEED = 256  # prepared GPU items sent to its queue at a time (all that are left at the end)
+BACKLOG = 4096  # preparing pauses while this many GPU items wait for their outcome
 _POLL_S = 0.2
 _DONE = object()
 RETRY_NOTE = "GPU retried on the CPU"
@@ -147,26 +148,18 @@ def prepare(job: tuple[batch.MolTask, int]):
     return "gpu", GpuItem(task, blob, cid, z, start, charge)
 
 
-def _record_rows(job: Finish, t0: float) -> list[dict] | str:
+def _saved_record(job: Finish, t0: float) -> list[dict] | str:
     """The record of a GPU geometry, saved: its rows, or the failure (str) to retry."""
     item, task = job.item, job.item.task
     mol = Chem.Mol(item.mol)
     try:
         rec = GFN2Calculator(task.config).run_from(mol, item.conf_id, job.xyz, job.restrained)
-    except batch._Timeout:
-        detail = f"> {task.config.timeout_s}s finishing the GPU geometry"
-        seconds = time.perf_counter() - t0
-        row = batch._row(task.smiles, item.conf_id, reason=str(ReasonCode.TIMEOUT), detail=detail)
-        return [{**row, "seconds": seconds}]
     except QMError as exc:
         return f"finishing: {exc.reason}: {exc.detail}"
-    except Exception as exc:  # noqa: BLE001 - retried on the CPU path
-        log.exception("finishing %s failed", task.smiles)
-        return f"finishing: {type(exc).__name__}: {exc}"
     if rec.smiles != task.smiles:
         return f"finishing: {ReasonCode.RECORD_KEY_MISMATCH}: record {rec.smiles!r}"
-    path = cache_path(task.config.cache_dir, task.smiles, item.conf_id, method_for(
-        task.smiles, task.config.method))  # fmt: skip
+    method = method_for(task.smiles, task.config.method)
+    path = cache_path(task.config.cache_dir, task.smiles, item.conf_id, method)
     save_record(rec, path)
     detail = f"optimized on the GPU, {job.n_evals} energies"
     row = dict(cache_path=str(path), status="ok", warnings=rec.warnings, n_embedded=1)
@@ -174,17 +167,30 @@ def _record_rows(job: Finish, t0: float) -> list[dict] | str:
     return [batch._row(task.smiles, item.conf_id, **row)]
 
 
+def _record_rows(job: Finish) -> list[dict] | str:
+    """`_saved_record` that never raises (the worker contract of `batch`): a timeout is a
+    TIMEOUT row, any other exception a failure to retry on the CPU path."""
+    task, t0 = job.item.task, time.perf_counter()
+    signal.alarm(task.config.timeout_s)
+    try:
+        return _saved_record(job, t0)
+    except batch._Timeout:
+        detail = f"> {task.config.timeout_s}s finishing the GPU geometry"
+        row = batch._row(task.smiles, job.item.conf_id, reason=str(ReasonCode.TIMEOUT))
+        return [{**row, "detail": detail, "seconds": time.perf_counter() - t0}]
+    except Exception as exc:  # noqa: BLE001 - retried on the CPU path
+        log.exception("finishing %s failed", task.smiles)
+        return f"finishing: {type(exc).__name__}: {exc}"
+    finally:
+        signal.alarm(0)
+
+
 def finish(job: Finish) -> list[dict]:
     """Worker: the record of one GPU outcome, or the CPU path's rows when the GPU's run or the
     finishing failed (`RETRY_NOTE` in their detail). The memo learns only these rows."""
     task, failure = job.item.task, job.failure
     if job.xyz is not None:
-        t0 = time.perf_counter()
-        signal.alarm(task.config.timeout_s)
-        try:
-            got = _record_rows(job, t0)
-        finally:
-            signal.alarm(0)
+        got = _record_rows(job)
         if not isinstance(got, str):
             failures.record_outcome(got, task.config)
             return got
@@ -291,7 +297,7 @@ class _Scheduler:
         while self._busy():
             self._feed_gpu()
             if self.gpu in ("running", "closed"):
-                idle = not (self.finish or self.prep or self.cpu or self.in_flight)
+                idle = not (self.finish or self._can_prepare() or self.cpu or self.in_flight)
                 self._take_outcomes(block=idle)
             self._fill()
             self._collect()
@@ -348,16 +354,23 @@ class _Scheduler:
             failure = "" if got.reason is None else f"GPU: {got.reason}: {got.detail}"
             self.finish.append(Finish(item, got.xyz, got.restrained, failure, got.n_evals))
 
+    def _can_prepare(self) -> bool:
+        """Preparing pauses while `BACKLOG` GPU items wait (memory: each holds its mol here and
+        in the GPU's queue); the CPU path runs meanwhile."""
+        return bool(self.prep) and len(self.feed) + len(self.waiting) < BACKLOG
+
     def _next(self):
         if self.finish:
             return finish, self.finish.popleft()
-        if self.prep:
+        if self._can_prepare():
             return prepare, (self.prep.popleft(), self.min_atoms)
-        return batch.process_molecule, self.cpu.popleft()
+        if self.cpu:
+            return batch.process_molecule, self.cpu.popleft()
+        return None
 
     def _fill(self) -> None:
-        while (self.finish or self.prep or self.cpu) and len(self.in_flight) < self.pool.n + 2:
-            fn, job = self._next()
+        while len(self.in_flight) < self.pool.n + 2 and (nxt := self._next()) is not None:
+            fn, job = nxt
             self.in_flight[self.pool.submit(fn, job)] = (fn, job)
 
     def _collect(self) -> None:

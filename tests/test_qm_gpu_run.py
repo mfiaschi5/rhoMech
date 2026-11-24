@@ -103,6 +103,24 @@ def test_prepare_routes_the_species_the_gpu_does_not_take(tmp_path):
     assert kind == "rows" and rows[0]["detail"].startswith(failures.KNOWN_PREFIX)
 
 
+def test_every_open_shell_fixture_goes_to_the_cpu(tmp_path):
+    config = _config(tmp_path)
+    for name, (smiles, _) in OPEN_SHELL.items():
+        kind, route = gpu_run.prepare((_task(smiles, config), 1))
+        assert kind == "cpu", (name, route)
+
+
+def test_finish_never_raises_when_the_record_cannot_be_written(tmp_path):
+    blocked = tmp_path / "not_a_dir"
+    blocked.write_text("")
+    config = _config(blocked)
+    _, item = gpu_run.prepare((_task(MOLECULES["acetone"], config), 1))
+    _, ref = _cpu_record(MOLECULES["acetone"], tmp_path)
+    rows = gpu_run.finish(gpu_run.Finish(item, ref.coords_ang / BOHR_ANG, False, "", 3))
+    assert [r["status"] for r in rows] == ["failed"]  # the CPU retry cannot write it either
+    assert gpu_run.RETRY_NOTE in rows[0]["detail"]
+
+
 def test_finish_writes_the_record_of_a_gpu_geometry(tmp_path):
     config = _config(tmp_path)
     _, item = gpu_run.prepare((_task(MOLECULES["acetone"], config), 1))
@@ -140,8 +158,10 @@ def _fake_gpu(inbox, config, out):
     out.put(gpu_run._DONE)
 
 
-def test_execute_routes_finishes_and_retries_with_a_fake_gpu(tmp_path, monkeypatch):
+@pytest.mark.parametrize("feed", [1, gpu_run.FEED])
+def test_execute_routes_finishes_and_retries_with_a_fake_gpu(tmp_path, monkeypatch, feed):
     monkeypatch.setattr(gpu_run, "_gpu_thread", _fake_gpu)
+    monkeypatch.setattr(gpu_run, "FEED", feed)  # 1: every item its own send
     config = _config(tmp_path)
     memo = _task(MOLECULES["ethane"], config)
     failures.remember(memo.config, memo.smiles, 0, "OPT_NOT_CONVERGED", "x", 1.0)
@@ -154,6 +174,25 @@ def test_execute_routes_finishes_and_retries_with_a_fake_gpu(tmp_path, monkeypat
     assert counts == Counter(gpu=2, cpu_open_shell=1, memo=1, gpu_ok=1, gpu_retried_ok=1)
     by = {r[0]["smiles"]: r[0] for r in calls}
     assert all(by[t.smiles]["status"] == "ok" for t in tasks[:3])
+
+
+def test_a_second_run_computes_nothing(tmp_path, monkeypatch):
+    from ksmech.qm import batch
+
+    monkeypatch.setattr(gpu_run, "_gpu_thread", _fake_gpu)
+    seen = []
+    real = gpu_run.execute
+    monkeypatch.setattr(
+        gpu_run, "execute", lambda t, *a, **k: seen.append(len(t)) or real(t, *a, **k)
+    )
+    keys = [_canon(MOLECULES[n]) for n in ("acetone", "methyl_acetate", "ethanol")]
+    path, config = tmp_path / "manifest.parquet", _config(tmp_path)
+    for _ in range(2):
+        view = batch.featurize_molecules(
+            keys, [], path, n_workers=2, config=config, gpu_min_atoms=1
+        )
+    assert seen == [3, 0], seen
+    assert (view["status"] == "ok").all() and len(view) == 3  # the CPU retried two
 
 
 def test_execute_refuses_another_solvent(tmp_path):
@@ -188,4 +227,4 @@ def test_relax_many_takes_the_scf_cycle_limit(tmp_path):
     task = RelaxTask("a", prepare_mol(item.task.smiles), item.z, item.start, 0, 0)
     seen = []
     out = relax_many([task], QMConfig(optimizer="gpu-anc", scf_maxiter=2), on_result=seen.append)
-    assert out[0].reason is ReasonCode.SCF_NOT_CONVERGED and seen == out
+    assert out == [] and [r.reason for r in seen] == [ReasonCode.SCF_NOT_CONVERGED]

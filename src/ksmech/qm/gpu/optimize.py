@@ -734,10 +734,10 @@ def relax_many(
     its AO count is within `size_ratio` of the batch's smallest: every member pays for the
     padding to the largest. `carry` is `BatchedANC`'s (None: every step waits for its slowest
     SCF); the SCF cycle limit is `config.scf_maxiter`. `on_result(outcome)` is called with each
-    task's outcome once it is final, while the other tasks still run. `more(block)`, if given,
-    is asked for further tasks at every refill (blocking when nothing else is left to run): a
-    list (they join the queue in size order), or None once there will be no more; the result
-    then lists every task's outcome, those from `more` too."""
+    task's outcome once it is final, while the other tasks still run; the outcomes are then
+    not kept, and the result is []. `more(block)`, if given, is asked for further tasks at every
+    refill (blocking when nothing else is left to run): a list (they join the queue in size
+    order), or None once there will be no more."""
     from ksmech.qm.xtb_calc import QMConfig
 
     config = config or QMConfig(optimizer="tblite-anc")
@@ -745,49 +745,56 @@ def relax_many(
         torch.cuda.empty_cache()
         memory_bytes = 0.6 * torch.cuda.mem_get_info()[0]
     cfg = AncSettings(fmax=config.fmax, maxiter=config.maxiter)
-    queue = sorted((_Job(t, config) for t in tasks), key=lambda j: _nao(j.task.z))
-    tasks = list(tasks)
+    queue, keys = _queued([], tasks, config), [t.key for t in tasks]
     running: list[_Job] = []
     results: dict[str, RelaxOutcome] = {}
+    n_done = 0
     while queue or running or more is not None:
         if more is not None:
             got = more(not queue and not running)
-            if got is None:
-                more = None
-            elif got:
-                tasks += got
-                queue = sorted(queue + [_Job(t, config) for t in got], key=lambda j: _nao(j.task.z))
+            more = None if got is None else more
+            queue = _queued(queue, got or [], config)
+            keys += [t.key for t in got or []] if on_result is None else []
             if not queue and not running:
                 continue
         _fill(queue, running, capacity, memory_bytes, size_ratio)
-        opt = BatchedANC(
-            [j.spec for j in running],
-            solvent,
-            cfg,
-            rfo_dtype=rfo_dtype,
-            carry=carry,
-            max_iter=config.scf_maxiter,
-        )
-        # stop to refill, or with nothing queued to compact: a finished molecule left in the
-        # batch would still pay its geometry and gradient at every step
-        stop = int(refill * len(running)) if len(running) >= MIN_COMPACT else None
-        got = opt.run(stop_below=stop) if stop else (dict(enumerate(opt.run())), {})
-        done, states = got
-        del opt, got  # its SCF state and integrals, before the next batch allocates its own
-        nxt = []
-        for m, job in enumerate(running):
-            if m in states:
-                job.spec.state = states[m]
-                nxt.append(job)
-                continue
-            res = job.finish(done[m])
-            if res is None:
-                nxt.append(job)  # the walled run, from the start
-            else:
-                results[job.task.key] = res
-                if on_result is not None:
-                    on_result(res)
-        running = nxt
+        opt = BatchedANC([j.spec for j in running], solvent, cfg, rfo_dtype=rfo_dtype,
+                         carry=carry, max_iter=config.scf_maxiter)  # fmt: skip
+        running, ended = _run_batch(opt, running, refill)
+        del opt  # its SCF state and integrals, before the next batch allocates its own
+        for res in ended:
+            n_done += 1
+            if on_result is None:
+                results[res.key] = res
+            else:  # handed over, not kept: a long fed run would hold every outcome
+                on_result(res)
         if on_batch is not None:
-            on_batch(len(results), len(running), len(queue))
-    return [results[t.key] for t in tasks]
+            on_batch(n_done, len(running), len(queue))
+    return [results[k] for k in keys] if on_result is None else []
+
+
+def _queued(queue: list, new: list, config) -> list:
+    """The queue with the tasks `new` joined, smallest AO count first."""
+    if not new:
+        return queue
+    return sorted(queue + [_Job(t, config) for t in new], key=lambda j: _nao(j.task.z))
+
+
+def _run_batch(opt: BatchedANC, running: list, refill: float):
+    """Run one batch: stop to refill, or with nothing queued to compact (a finished molecule
+    left in the batch would still pay its geometry and gradient at every step). Returns (the
+    jobs still to run: resumed, or their walled run to start; the outcomes that are final)."""
+    stop = int(refill * len(running)) if len(running) >= MIN_COMPACT else None
+    done, states = opt.run(stop_below=stop) if stop else (dict(enumerate(opt.run())), {})
+    nxt, ended = [], []
+    for m, job in enumerate(running):
+        if m in states:
+            job.spec.state = states[m]
+            nxt.append(job)
+            continue
+        res = job.finish(done[m])
+        if res is None:
+            nxt.append(job)  # the walled run, from the start
+        else:
+            ended.append(res)
+    return nxt, ended

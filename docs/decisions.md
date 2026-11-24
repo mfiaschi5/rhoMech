@@ -11410,7 +11410,13 @@ after the carry-over. Branch `claude/gpu-xtb`. Code: `qm.gpu_run` (the driver),
   85 s on 12 workers before the GPU could start; at that rate a 100k-species run would leave
   the GPU idle for hours. `relax_many(more=...)` takes new tasks at every refill (in size
   order), and the driver sends them 256 at a time. The workers do finishing first, then
-  preparing, then the CPU path.
+  preparing, then the CPU path. This rests on the scale argument alone: on the smoke set it
+  measured no gain (485 s against 467 s with everything embedded first, one run each, noise
+  not measured), the set's 256 GPU species being one send.
+  - Preparing pauses while 4096 GPU items wait for an outcome (`BACKLOG`; each holds its mol
+    in the driver and in the GPU's queue), and `relax_many` with `on_result` keeps no
+    outcome: embedding (about 3 species/s on 12 workers) outruns the GPU above 80 atoms
+    (0.5-0.7 species/s), so a full source would otherwise end up in the main process.
   - A flush every 10 s of whatever was prepared (so the GPU starts sooner) was tried and
     dropped: 503 s against 485 s on the smoke set, the early batches being small.
 - **Finishing on the CPU** (`run_from`): tblite's single point at the GPU geometry gives the
@@ -11431,12 +11437,17 @@ after the carry-over. Branch `claude/gpu-xtb`. Code: `qm.gpu_run` (the driver),
   same starts (`stage4_reference_preload_64.json`): at 31-50 atoms 56 of 64 within 1e-5 Eh and
   63 within 1e-4; at 51-80 44-46 within 1e-5 and 58-60 within 1e-4, the rest other conformers
   (one 3.9e-2 Eh lower in one run). That is the parity gate's spread.
-- **Speed, a first estimate only.** The per-bin CPU timings of the reference (12 workers,
-  optimization alone: 0.012 to 6.6 s per molecule) put `--workers 12 --optimizer tblite-anc`
-  at about 760 s for these 384 species plus about 45 s of single points: about 1.7x. Stage 6
-  measures it end to end.
+- **Speed, an estimate on this sample only.** The per-bin CPU timings of the reference (12
+  workers, optimization alone: 0.012 to 6.6 s per molecule) put `--workers 12 --optimizer
+  tblite-anc` at about 760 s for these 384 species plus about 45 s of single points, against
+  467-503 s: about 1.7x. The sample is uniform over the size bins, 704 of the 763 CPU seconds
+  are above 80 atoms (where the GPU is 3x), and the estimate leaves out the CPU's embedding.
+  Stage 6 measures it end to end.
 - **Tests** (`tests/test_qm_gpu_run.py`): the ANC dispatch of gpu-anc on the CPU; `run_from`
   at a converged geometry equals the CPU record, from an unconverged one it polishes to it;
   the routes; finishing; the CPU retry leaves no tombstone; the driver with a fake GPU (memo,
-  routes, finishing, retry, every task's rows once); and with the GPU, records against
-  tblite-anc for four fixtures with two open shells routed, and the SCF cycle limit.
+  routes, finishing, retry, every task's rows once, fed one item at a time too); every
+  `OPEN_SHELL` fixture routed to the CPU; a record that cannot be written ends as rows, not
+  an exception (the finishing guards its whole body); a second run computes nothing; and with
+  the GPU, records against tblite-anc for four fixtures with two open shells routed, and the
+  SCF cycle limit.

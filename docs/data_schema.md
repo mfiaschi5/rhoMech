@@ -678,7 +678,9 @@ and so do the species the spin census refuses before QM (P8: `SPIN_CENSUS_REFUSE
 non-metal with u >= 2 that is not a Hund case or has no count, unless a counted exemption's).
 Under `--optimizer gpu-anc` (`qm.gpu_run`) the `detail` of an ok row says where the geometry was
 optimized: `optimized on the GPU, <n> energies`; empty for the CPU path; `GPU retried on the CPU
-(<the GPU's failure>)` when the GPU failed and the CPU's tblite-anc run made the row.
+(<the GPU's failure>)` when the GPU failed and the CPU's tblite-anc run made the row. The
+`seconds` of a GPU row are the worker's finishing time only (single point, polish, Fukui,
+sterics), not the batched optimization's share.
 A record whose own SMILES (`chem.unmapped_canonical` of the worker's molecule) is not the key it
 was computed for is not written: `RECORD_KEY_MISMATCH`, with the record's SMILES as the detail
 (its key would refuse it as STALE_ARTIFACT; 2026-11-10, a ring double bond's E/Z swapped by
