@@ -237,7 +237,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   or `--species-from FILE [--name N]` in place of `--source` (GFN2-xTB records under `data/cache/qm/`, manifest + reason-code table; see `docs/decisions.md`;
   the spawned workers run tblite on the system's LP64 OpenBLAS instead of the wheel's netlib copy
   (`qm.blas`, `KSMECH_BLAS=auto|bundled|PATH`; `--workers 1` and the web app keep the netlib copy;
-  a pod needs `libopenblas0-serial`); `--optimizer tblite-anc` optimizes in approximate normal
+  a pod needs `libopenblas0-serial`); `--optimizer gpu-anc [--gpu-min-atoms 31]` runs
+  tblite-anc's optimization batched on the GPU for the untagged closed shells of 31 atoms and
+  more, the rest on the CPU workers, every record under method `.../gpu-anc` (`qm.gpu_run`:
+  tblite's single point at the GPU geometry, a tblite-anc polish above fmax, GPU_POLISHED; a GPU
+  failure retried on the CPU; water only; no timeout on the GPU part); `--optimizer tblite-anc`
+  optimizes in approximate normal
   coordinates with RFO steps and restarted SCFs (`qm.anc`, method `.../tblite-anc`, 2-4x fewer
   energies than the default L-BFGS-B `.../tblite-lbfgs`; its `--maxiter` counts energies);
   `--solvent S` another ALPB solvent of `xtb_calc.ALPB_SOLVENTS` (one name each: methanol, dmso,

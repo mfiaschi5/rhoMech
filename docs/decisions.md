@@ -11387,3 +11387,56 @@ Measured on the code of parts 1 and 2 with the review fixes (queue jobs 34-41 an
   between two d28f9cb runs in 21.
 - **Open.** The Pd complex's systematic retry under carry. A cycle with one molecule could
   take the batched eigensolver path (pad it with a copy) to test the explanation.
+
+## 2026-11-25: GPU xTB stage 5: `ksmech-qm run --optimizer gpu-anc`
+
+Stage 5 of the GPU xTB plan (`docs/gpu_qm_spike.md`), the integration, approved by the user
+after the carry-over. Branch `claude/gpu-xtb`. Code: `qm.gpu_run` (the driver),
+`GFN2Calculator.run_from`, `relax_many(on_result, more)`.
+
+- **One method per run.** Every record of a gpu-anc run carries `GFN2-xTB/ALPB-water/gpu-anc`,
+  including the ones the CPU optimized (small species, open shells, spin tags): the token build
+  and every other reader take one method (`QMConfig().method` or `--method`), and a run
+  whose records split over two methods could not be read as one. The CPU path of a gpu-anc run
+  runs tblite-anc (`xtb_calc._ANC`; a plain `_OPTIMIZERS` entry would have fallen through to
+  L-BFGS). The manifest's `detail` of each ok row says where its geometry was optimized.
+- **Routing**, in a worker per task: the memo first (a remembered failure never reaches the
+  GPU), then the CPU path for more than one conformer, a spin tag, an unpaired electron, an
+  element above Rn, fewer than 31 atoms (`--gpu-min-atoms`; the GPU loses below about 30 atoms,
+  stage 4 and the SCF tuning) or a preparation that fails (the CPU path reports it). Every
+  route is counted in the run's summary. Water only; another medium is refused, as a run
+  without a CUDA device is.
+- **The GPU's queue is fed while the workers prepare.** Embedding the 384 smoke species took
+  85 s on 12 workers before the GPU could start; at that rate a 100k-species run would leave
+  the GPU idle for hours. `relax_many(more=...)` takes new tasks at every refill (in size
+  order), and the driver sends them 256 at a time. The workers do finishing first, then
+  preparing, then the CPU path.
+  - A flush every 10 s of whatever was prepared (so the GPU starts sooner) was tried and
+    dropped: 503 s against 485 s on the smoke set, the early batches being small.
+- **Finishing on the CPU** (`run_from`): tblite's single point at the GPU geometry gives the
+  gradient for free. Where max |g| (with the walls of a restrained run: its end point is
+  converged on the walled surface, not the bare one) is above fmax, tblite-anc polishes from
+  there: free as `_relax` (its walled retry then starting from the GPU point), or with the same
+  walls. The record gets GPU_POLISHED.
+- **Failures.** A GPU failure, or a failure while finishing, is rerun on the CPU path from the
+  start, and only that outcome reaches the memo: gpu-anc's tombstones are tblite-anc's
+  failures, never the GPU's (stage 4's potassium complex failed on the GPU only). A finishing
+  that times out is a TIMEOUT. The GPU part has no wall-clock timeout (`maxiter` bounds it);
+  `--scf-maxiter` now reaches the GPU's SCF (`BatchedANC(max_iter)`).
+- **Smoke runs** (the spike's 384 species, 64 per bin from 1 to 200 atoms, 12 workers, a
+  temporary cache; `data/processed/gpu_qm_spike/stage5_*`): 384/384 records in each of the
+  three runs; 256 on the GPU, 128 small on the CPU, 3-5 polished, no GPU failure retried.
+  Wall time 467 s with every species embedded first, 485 s fed 256 at a time, 503 s with the
+  10 s flush. Energies of the GPU records against production's tblite-anc end points from the
+  same starts (`stage4_reference_preload_64.json`): at 31-50 atoms 56 of 64 within 1e-5 Eh and
+  63 within 1e-4; at 51-80 44-46 within 1e-5 and 58-60 within 1e-4, the rest other conformers
+  (one 3.9e-2 Eh lower in one run). That is the parity gate's spread.
+- **Speed, a first estimate only.** The per-bin CPU timings of the reference (12 workers,
+  optimization alone: 0.012 to 6.6 s per molecule) put `--workers 12 --optimizer tblite-anc`
+  at about 760 s for these 384 species plus about 45 s of single points: about 1.7x. Stage 6
+  measures it end to end.
+- **Tests** (`tests/test_qm_gpu_run.py`): the ANC dispatch of gpu-anc on the CPU; `run_from`
+  at a converged geometry equals the CPU record, from an unconverged one it polishes to it;
+  the routes; finishing; the CPU retry leaves no tombstone; the driver with a fake GPU (memo,
+  routes, finishing, retry, every task's rows once); and with the GPU, records against
+  tblite-anc for four fixtures with two open shells routed, and the SCF cycle limit.

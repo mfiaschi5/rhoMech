@@ -189,6 +189,7 @@ class BatchedANC:
         rfo_dtype=F64,
         trace: bool = False,
         carry: float | None = None,
+        max_iter: int = 250,
     ) -> None:
         self.specs, self.cfg, self.rfo_dtype, self.tracing, self.carry = (
             specs,
@@ -198,7 +199,7 @@ class BatchedANC:
             carry,
         )
         mols = [(sp.z, sp.start, sp.charge, sp.unpaired) for sp in specs]
-        self.sb = S.SCFBatch(mols, solvent, accuracy=accuracy)
+        self.sb = S.SCFBatch(mols, solvent, accuracy=accuracy, max_iter=max_iter)
         nat = np.array([len(sp.z) for sp in specs])
         self.offsets = np.concatenate([[0], np.cumsum(nat)[:-1]])
         self.b, self.nmax = len(specs), int(nat.max())
@@ -720,6 +721,8 @@ def relax_many(
     memory_bytes: float | None = None,
     size_ratio: float = 1.5,
     carry: float | None = CARRY,
+    on_result=None,
+    more=None,
 ) -> list[RelaxOutcome]:
     """`qm.xtb_calc.GFN2Calculator._relax` with the tblite-anc settings of `config` (a QMConfig)
     for many molecules: a free run with the dissociation guard, `check_connectivity`, and on a
@@ -730,7 +733,11 @@ def relax_many(
     state carried over) and the next tasks, smallest first. A batch takes a molecule only if
     its AO count is within `size_ratio` of the batch's smallest: every member pays for the
     padding to the largest. `carry` is `BatchedANC`'s (None: every step waits for its slowest
-    SCF)."""
+    SCF); the SCF cycle limit is `config.scf_maxiter`. `on_result(outcome)` is called with each
+    task's outcome once it is final, while the other tasks still run. `more(block)`, if given,
+    is asked for further tasks at every refill (blocking when nothing else is left to run): a
+    list (they join the queue in size order), or None once there will be no more; the result
+    then lists every task's outcome, those from `more` too."""
     from ksmech.qm.xtb_calc import QMConfig
 
     config = config or QMConfig(optimizer="tblite-anc")
@@ -739,11 +746,28 @@ def relax_many(
         memory_bytes = 0.6 * torch.cuda.mem_get_info()[0]
     cfg = AncSettings(fmax=config.fmax, maxiter=config.maxiter)
     queue = sorted((_Job(t, config) for t in tasks), key=lambda j: _nao(j.task.z))
+    tasks = list(tasks)
     running: list[_Job] = []
     results: dict[str, RelaxOutcome] = {}
-    while queue or running:
+    while queue or running or more is not None:
+        if more is not None:
+            got = more(not queue and not running)
+            if got is None:
+                more = None
+            elif got:
+                tasks += got
+                queue = sorted(queue + [_Job(t, config) for t in got], key=lambda j: _nao(j.task.z))
+            if not queue and not running:
+                continue
         _fill(queue, running, capacity, memory_bytes, size_ratio)
-        opt = BatchedANC([j.spec for j in running], solvent, cfg, rfo_dtype=rfo_dtype, carry=carry)
+        opt = BatchedANC(
+            [j.spec for j in running],
+            solvent,
+            cfg,
+            rfo_dtype=rfo_dtype,
+            carry=carry,
+            max_iter=config.scf_maxiter,
+        )
         # stop to refill, or with nothing queued to compact: a finished molecule left in the
         # batch would still pay its geometry and gradient at every step
         stop = int(refill * len(running)) if len(running) >= MIN_COMPACT else None
@@ -761,6 +785,8 @@ def relax_many(
                 nxt.append(job)  # the walled run, from the start
             else:
                 results[job.task.key] = res
+                if on_result is not None:
+                    on_result(res)
         running = nxt
         if on_batch is not None:
             on_batch(len(results), len(running), len(queue))

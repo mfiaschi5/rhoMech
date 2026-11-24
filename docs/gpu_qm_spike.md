@@ -211,3 +211,23 @@ batches are small.
 Parity gate: 96/96 outcomes. One 127-atom Pd complex takes a walled retry the CPU does not.
 With carry it does so in every run (5 of 5), without carry in none (0 of 4). It still ends ok,
 at a minimum 2.8 mEh lower. Details in docs/decisions.md, 2026-11-23 and 2026-11-24.
+
+## Stage 5 result (2026-11-25)
+
+**`ksmech-qm run --optimizer gpu-anc` works end to end.** The GPU optimizes the untagged closed
+shells of 31 atoms and more, and the CPU workers do everything else. Every record is stored
+under `GFN2-xTB/ALPB-water/gpu-anc`.
+- **Finishing:** the workers write each record from tblite's single point at the GPU
+  geometry, with a short tblite-anc polish where tblite's gradient there is above fmax.
+- **Failures:** a GPU failure is rerun on the CPU, and only the CPU's outcome reaches the
+  failure memo.
+
+Smoke runs on the spike's 384 species (1-200 atoms):
+- 384/384 records in each of the three runs: 256 optimized on the GPU, 3-5 of them polished,
+  none retried on the CPU.
+- 467-503 s with 12 workers. A first estimate for the CPU alone is about 810 s, about 1.7x;
+  stage 6 measures it.
+- The GPU records' energies match production's tblite-anc from the same starts as closely as
+  the parity gate did.
+
+Details in docs/decisions.md, 2026-11-25.

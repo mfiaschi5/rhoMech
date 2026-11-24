@@ -467,6 +467,7 @@ def featurize_dataset(
     console: Console | None = None,
     retry_reasons: Collection[str] | None = None,
     step_ids: Collection[str] | None = None,
+    gpu_min_atoms: int | None = None,
 ) -> pd.DataFrame:
     """Featurize every unique molecule of `source` (of the steps `step_ids` only, when given);
     resumable. Returns this run's manifest rows. Earlier failures are retried (`retry_failed`),
@@ -483,6 +484,7 @@ def featurize_dataset(
         retry_failed=retry_failed,
         console=console,
         retry_reasons=retry_reasons,
+        gpu_min_atoms=gpu_min_atoms,
     )
 
 
@@ -497,11 +499,13 @@ def featurize_molecules(
     retry_failed: bool = True,
     console: Console | None = None,
     retry_reasons: Collection[str] | None = None,
+    gpu_min_atoms: int | None = None,
 ) -> pd.DataFrame:
     """Featurize the census-admitted molecules `smiles_list` (`--limit`: a random subset, seed
     0) with the manifest at `path`, which keeps the rows of earlier runs and `canon_failures`
     (the canonicalization and census rows of the collection); resumable. Returns this run's
-    manifest rows."""
+    manifest rows. A gpu-anc run (`config.optimizer`) runs through `qm.gpu_run`, with the GPU
+    taking the species of `gpu_min_atoms` atoms and more (default `gpu_run.GPU_MIN_ATOMS`)."""
     config = config or QMConfig()
     console = console or Console()
     if limit is not None and limit < len(smiles_list):
@@ -527,19 +531,34 @@ def featurize_molecules(
         if bar.n % _FLUSH_EVERY == 0:
             _write(path, build_manifest(smiles_list, n_conformers, config, rows, prev))
 
+    routes = None
     try:
-        execute(todo, n_workers, on_rows)
+        routes = _execute_run(todo, n_workers, on_rows, config, gpu_min_atoms)
     finally:
         bar.close()
         full = build_manifest(smiles_list, n_conformers, config, rows, prev)
         _write(path, full)
     view = run_view(full, smiles_list, config)
     print_summary(view, console)
+    if routes:
+        console.print("GPU routes and outcomes: " + ", ".join(f"{k} {v}" for k, v in sorted(
+            routes.items())))  # fmt: skip
     known = sum(str(r["detail"]).startswith(failures.KNOWN_PREFIX) for r in rows)
     if known:
         console.print(f"{known} known failures answered from the failure memo, not recomputed")
     console.print(f"wrote manifest: {path}")
     return view
+
+
+def _execute_run(todo, n_workers, on_rows, config: QMConfig, gpu_min_atoms):
+    """`execute`, or `qm.gpu_run.execute` for a gpu-anc run (its counts returned)."""
+    if config.optimizer != "gpu-anc":
+        execute(todo, n_workers, on_rows)
+        return None
+    from ksmech.qm import gpu_run
+
+    gpu_run.check_config(config)
+    return gpu_run.execute(todo, n_workers, on_rows, gpu_min_atoms or gpu_run.GPU_MIN_ATOMS)
 
 
 def _write(path: Path, manifest: pd.DataFrame) -> None:
