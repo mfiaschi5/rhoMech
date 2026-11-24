@@ -190,3 +190,24 @@ alone it does so in 1 of 4 runs. The other 15 walled retries match.
 
 What is left is the SCF straggler (a step runs as many cycles as its slowest molecule) and
 each cycle's fixed cost. Details in docs/decisions.md, 2026-11-23.
+
+## SCF carry-over result (2026-11-24)
+
+**The 2x bar is met at 51-80 atoms on a long queue (2.26x), but not at 31-50 (1.79x).**
+A molecule whose SCF is slow now keeps its SCF state into the next optimizer round, while the
+others take their steps. Before, each step waited for the slowest molecule's SCF. The SCF has
+per-molecule state and mixer (`SCFBatch.new_run/start/advance/result`). The optimizer runs in
+rounds (`BatchedANC(carry=...)`). `relax_many`'s default is carry 0.1: a round ends once at
+most a tenth of its SCFs still run.
+
+Against 12 CPU workers on the same species (optimization alone), 1024 conformers in flight:
+- 0.120 s per molecule at 31-50 atoms (CPU 0.214);
+- 0.302 at 51-80 (CPU 0.682).
+
+That is 8% and 6.5% faster than the same code without carry, and 16% and 9% faster than the
+SCF-tuning build. With 256 conformers carry gains nothing; above 80 atoms (3.2x) it costs 2.5-4%: the
+batches are small.
+
+Parity gate: 96/96 outcomes. One 127-atom Pd complex takes a walled retry the CPU does not.
+With carry it does so in every run (5 of 5), without carry in none (0 of 4). It still ends ok,
+at a minimum 2.8 mEh lower. Details in docs/decisions.md, 2026-11-23 and 2026-11-24.

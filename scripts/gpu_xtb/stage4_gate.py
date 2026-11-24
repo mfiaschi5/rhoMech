@@ -3,6 +3,8 @@
     uv run python scripts/gpu_xtb/stage4_gate.py steps [--per-bin 2] [--rfo fp64|fp32]
     uv run python scripts/gpu_xtb/stage4_gate.py check [--rfo fp64|fp32] [--capacity 256]
     uv run python scripts/gpu_xtb/stage4_gate.py time [--per-bin 64] [--seeds 1] [--bins 51-80]
+    (check and time: [--carry none|C], relax_many's carry, default its own, the file tagged
+    `_carry<C>` when given; every command: [--out FILE] in place of the default file)
 
 Molecules: the spike sample's species (`data/processed/gpu_qm_spike/mols.json`), embedded as
 production does (`prepare_mol`, `embed(mol, 1, seed=0)`), untagged closed shells, ALPB water.
@@ -151,7 +153,7 @@ def _compare(row: dict, out) -> dict:
     return c
 
 
-def check(root: Path, rfo: str, capacity: int) -> dict:
+def check(root: Path, rfo: str, capacity: int, carry: dict) -> dict:
     import time
 
     from ksmech.qm.embed import embed, prepare_mol
@@ -168,7 +170,7 @@ def check(root: Path, rfo: str, capacity: int) -> dict:
     memory = _record_memory()
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    outs = O.relax_many(tasks, capacity=capacity, rfo_dtype=dtype,
+    outs = O.relax_many(tasks, capacity=capacity, rfo_dtype=dtype, **carry,
                         on_batch=lambda *a: print("batch", a, flush=True))  # fmt: skip
     torch.cuda.synchronize()
     seconds = time.perf_counter() - t0
@@ -209,7 +211,7 @@ def _cpu12(root: Path, key: str) -> tuple[float, str]:
     raise FileNotFoundError("no stage 4 reference")
 
 
-def time_bins(root: Path, per_bin: int, seeds: int, bins: list[str] | None) -> dict:
+def time_bins(root: Path, per_bin: int, seeds: int, bins: list[str] | None, carry: dict) -> dict:
     import time
 
     sample = json.loads((root / SAMPLE).read_text())
@@ -224,7 +226,7 @@ def time_bins(root: Path, per_bin: int, seeds: int, bins: list[str] | None) -> d
             if got is not None]  # fmt: skip
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        res = O.relax_many(tasks)
+        res = O.relax_many(tasks, **carry)
         torch.cuda.synchronize()
         gpu = (time.perf_counter() - t0) / len(tasks)
         cpu12, label = _cpu12(root, key)
@@ -249,15 +251,21 @@ def main() -> None:
     ap.add_argument("--per-bin", type=int, default=2)
     ap.add_argument("--rfo", choices=("fp64", "fp32"), default="fp64")
     ap.add_argument("--root", type=Path, default=Path("/home/jacopo/Documents/ksmech"))
+    ap.add_argument("--carry", default=None, help="relax_many's carry: a number or none")
+    ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
+    carry = {}
+    if args.carry is not None:
+        carry["carry"] = None if args.carry.lower() == "none" else float(args.carry)
     if args.what == "check":
-        res = check(args.root, args.rfo, args.capacity)
+        res = check(args.root, args.rfo, args.capacity, carry)
     elif args.what == "time":
-        res = time_bins(args.root, args.per_bin, args.seeds, args.bins)
+        res = time_bins(args.root, args.per_bin, args.seeds, args.bins, carry)
     else:
         res = steps(json.loads((args.root / SAMPLE).read_text()), args.per_bin, args.rfo)
     tag = f"_s{args.seeds}" if args.what == "time" and args.seeds > 1 else ""
-    path = args.root / OUT / f"stage4_{args.what}_{args.rfo}{tag}.json"
+    tag += f"_carry{args.carry}" if args.carry is not None and args.what != "steps" else ""
+    path = args.out or args.root / OUT / f"stage4_{args.what}_{args.rfo}{tag}.json"
     path.write_text(json.dumps(res, indent=1, default=str) + "\n")
     print("wrote", path)
 

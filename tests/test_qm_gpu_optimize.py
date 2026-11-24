@@ -122,3 +122,183 @@ def test_a_resumed_optimization_reaches_the_same_minimum():
         assert got[m].converged and a.converged
         assert abs(got[m].energy - a.energy) < 1e-5
         assert kabsch_rmsd(got[m].xyz, a.xyz) < 0.05
+
+
+# --- carry-over: SCFs that run on into the next round -----------------------------------------
+
+
+class _GpuEnergy:
+    """One molecule's GPU energy and gradient for `qm.anc.optimize_anc`, each SCF restarted
+    from the last converged point (stage4_gate.py's `GpuObjective`)."""
+
+    def __init__(self, z, x0) -> None:
+        from ksmech.qm.gpu import scf as S
+
+        self.sb, self.start, self.log = S.SCFBatch([(z, x0, 0, 0)], True), None, []
+
+    def __call__(self, x):
+        import torch
+
+        self.sb.set_geometry(torch.as_tensor(x).cuda())
+        r, _ = self.sb.run_with_fallback(self.start)
+        e, g = self.sb.gradient(r)
+        if bool(r.converged[0]):
+            self.start = (r.qsh.clone(), r.dp.clone(), r.qp.clone())
+        self.log.append(float(e[0]))
+        return float(e[0]), g.cpu().numpy()
+
+
+@pytest.mark.gpu
+@gpu
+def test_carry_none_reproduces_qm_anc_driven_by_the_gpu_energy():
+    """Without a carry, one round is one step: every evaluation's energy is the CPU
+    optimizer's on the same GPU energy (to rounding), and so are the energy count and the end;
+    the per-molecule trace holds every step evaluation (the start's excluded)."""
+    from ksmech.qm.gpu import optimize as O
+
+    for name in ("methyl_acetate", "acrolein"):
+        t = _task(name)
+        obj = _GpuEnergy(t.z, t.start)
+        cpu = anc.optimize_anc(obj, t.z, t.start)
+        opt = O.BatchedANC([O.OptSpec(t.z, t.start, 0, 0)], trace=True)
+        res = opt.run()[0]
+        assert res.converged and cpu.converged and res.n_evals == cpu.n_evals
+        assert opt.rounds == res.n_evals  # the first evaluation's round, then one per step
+        gpu_e = np.array([e for e, _ in res.trace])
+        assert len(gpu_e) == res.n_evals - 1
+        assert np.abs(np.array(obj.log[1:]) - gpu_e).max() < 1e-9
+        assert np.abs(res.xyz - cpu.xyz).max() < 1e-7
+
+
+def _carry_specs(names):
+    from ksmech.qm.gpu import optimize as O
+
+    return [O.OptSpec(t.z, t.start, 0, 0) for t in (_task(n) for n in names)]
+
+
+@pytest.mark.gpu
+@gpu
+def test_carry_over_reaches_the_same_minima_with_the_same_counts():
+    """With carry 1 (one SCF cycle per round, so every evaluation waits several rounds while
+    the others step) and carry 0.25, a batch of fast and slow SCFs ends where carry None ends.
+    Per molecule the computation is the same; what differs is which molecules share a cycle's
+    eigensolve, and a cycle with one molecule active takes cuSOLVER's single-matrix path (1e-7
+    to 1e-6 Eh in the fp32 orbital energies), which can move an SCF's last cycle within its
+    1e-6 Eh convergence threshold: energies agree to far below 1e-6 Eh (measured 7e-11), and a
+    count may move by a step where such noise tips an accept/reject."""
+    from ksmech.qm.gpu import optimize as O
+
+    names = ("ethane", "acetone", "benzene", "acrolein", "methyl_acetate", "acetonitrile")
+    ref_opt = O.BatchedANC(_carry_specs(names))
+    ref = ref_opt.run()
+    for carry in (1.0, 0.25):
+        opt = O.BatchedANC(_carry_specs(names), carry=carry, trace=True)
+        got = opt.run()
+        for a, b in zip(ref, got, strict=True):
+            assert a.converged and b.converged and a.reason == b.reason
+            assert len(b.trace) == b.n_evals - 1  # every step evaluation traced once
+            assert abs(a.energy - b.energy) < 1e-6
+            assert abs(a.n_evals - b.n_evals) <= 2
+            assert np.abs(a.xyz - b.xyz).max() < 1e-4
+        if carry == 1.0:  # the SCFs did interleave: far more rounds than steps
+            assert opt.rounds > 2 * ref_opt.rounds
+
+
+@pytest.mark.gpu
+@gpu
+def test_the_guard_counts_a_waiting_trial_once():
+    """Every bond counts broken (factor 0.5), patience 5: the guard stops the run at its 5th
+    trial (the start included), carry or not. With carry 1 each evaluation waits several
+    rounds; a guard that counted a waiting trial each round would stop after one energy."""
+    from ksmech.qm.gpu import optimize as O
+
+    t = _task("ethanol")
+    guard = O._guard_spec(t.mol, 0.5)
+    assert guard[3] == 5
+
+    def specs():
+        return [O.OptSpec(t.z, t.start, 0, 0, guard=guard)] + _carry_specs(("acetone", "benzene"))
+
+    outs = {}
+    for carry in (None, 1.0):
+        opt = O.BatchedANC(specs(), carry=carry)
+        outs[carry] = opt.run()
+        if carry:  # the trials did wait: many more rounds than evaluations
+            assert opt.rounds > 2 * outs[carry][0].n_evals
+    for carry, out in outs.items():
+        assert out[0].reason.value == "CONNECTIVITY_CHANGED", carry
+        assert out[0].n_evals == 5, carry
+        assert out[1].converged and out[2].converged
+    assert outs[None][0].energy == pytest.approx(outs[1.0][0].energy, abs=1e-6)
+
+
+@pytest.mark.gpu
+@gpu
+def test_a_refill_stop_finishes_the_evaluations_in_flight():
+    """Stopped for a refill while evaluations are pending (carry 1), the batch first runs
+    them to their end and takes their steps: resumed in another batch, every molecule ends
+    where the uninterrupted batch ends, with the same energy count (to the batch-composition
+    noise of the resume test above)."""
+    from ksmech.qm.gpu import optimize as O
+
+    names = ("acetone", "methyl_acetate", "acrolein")
+    whole = O.BatchedANC(_carry_specs(names), carry=1.0).run()
+    opt = O.BatchedANC(_carry_specs(names), carry=1.0)
+    done, states = opt.run(stop_below=3)
+    assert states and opt.drained > 0  # stopped with evaluations in flight
+    assert all(s.n_evals > 1 for s in states.values())
+    specs = _carry_specs(names)
+    resumed = O.BatchedANC(
+        [O.OptSpec(sp.z, sp.start, 0, 0, state=states[m]) for m, sp in enumerate(specs)
+         if m in states], carry=1.0).run()  # fmt: skip
+    got = dict(done) | dict(zip(sorted(states), resumed, strict=True))
+    for m, a in enumerate(whole):
+        assert got[m].converged and a.converged
+        assert abs(got[m].energy - a.energy) < 1e-5
+        assert abs(got[m].n_evals - a.n_evals) <= 2
+
+
+@pytest.mark.gpu
+@gpu
+def test_a_guard_stopped_trial_traces_no_energy():
+    """The trial the guard stops is never evaluated: its trace entry's energy is NaN, carry or
+    not, also when another molecule's evaluation ends in the same round (methyl acetate and
+    acrolein still step at ethanol's 5th trial) and the carried SCF state still holds ethanol's
+    previous energy."""
+    from ksmech.qm.gpu import optimize as O
+
+    t = _task("ethanol")
+    guard = O._guard_spec(t.mol, 0.5)
+    partners = _carry_specs(("methyl_acetate", "acrolein", "ethanol"))
+    for carry in (None, 1.0):
+        opt = O.BatchedANC([O.OptSpec(t.z, t.start, 0, 0, guard=guard)] + partners, carry=carry,
+                           trace=True)  # fmt: skip
+        out = opt.run()[0]
+        assert out.reason.value == "CONNECTIVITY_CHANGED", carry
+        energies = np.array([e for e, _ in out.trace])
+        assert len(energies) == out.n_evals - 1 and np.isnan(energies[-1]), carry
+        assert np.isfinite(energies[:-1]).all(), carry
+
+
+@pytest.mark.gpu
+@gpu
+def test_a_failed_first_evaluation_does_not_fall_back_to_the_same_guess():
+    """A first evaluation starts from the SAD guess: when it fails there is nothing to fall back
+    to (`TbliteEnergy` re-raises without a previous result), so it fails after one SCF, with no
+    fresh start counted."""
+    from ksmech.qm.gpu import optimize as O
+
+    opt = O.BatchedANC(_carry_specs(("acetone", "benzene")))
+    opt.sb.econv, opt.sb.max_iter = 0.0, 6  # no SCF converges
+    cycles = {"n": 0}
+    iterate = opt.sb._iterate
+
+    def counted(s, idx):
+        cycles["n"] += 1
+        return iterate(s, idx)
+
+    opt.sb._iterate = counted
+    for out in opt.run():
+        assert out.reason.value == "SCF_NOT_CONVERGED" and out.fresh_starts == 0
+        assert out.n_evals == 1
+    assert cycles["n"] == 6  # one SCF to its limit, not a second from the same guess

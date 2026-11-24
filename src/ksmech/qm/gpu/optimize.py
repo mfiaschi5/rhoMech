@@ -5,10 +5,12 @@ Hessian once at the start, the approximate normal coordinates (ANC) rebuilt ever
 from the learned Hessian, RFO steps cut to a trust radius that grows and shrinks as there,
 uphill steps taken back, BFGS updates in the ANC basis, convergence on the largest gradient
 component (walls included). The energies and gradients of all still-running molecules come
-from one batched GFN2 evaluation (`SCFBatch`), each SCF restarted from the molecule's last
+from one batched GFN2 SCF state (`SCFBatch`), each SCF restarted from the molecule's last
 evaluated point and, if that fails, from the guess (as `geometry.TbliteEnergy`). The bond
 walls and the dissociation guard of `geometry` apply per molecule: the guard sees every trial
-geometry, the first included, before it is evaluated.
+geometry, the first included, once, before it is evaluated. With a `carry`, an SCF still
+running when most of its round has ended continues into the next round while the others step
+(`BatchedANC`).
 
 Coordinates are padded per molecule to the batch's largest 3N; padded ANC modes are inert
 (curvature 1, zero gradient), so a molecule's steps do not depend on the others.
@@ -76,7 +78,7 @@ class OptOutcome:
     gmax: float
     energy: float
     fresh_starts: int = 0
-    trace: list = field(default_factory=list)  # (energy, radius) per evaluation, when traced
+    trace: list = field(default_factory=list)  # (energy, radius) per step evaluation, traced
 
 
 # --- batched linear algebra of `qm.anc` ------------------------------------------------------
@@ -166,7 +168,17 @@ def _pair_tensors(specs, offsets, which: str):
 
 class BatchedANC:
     """`qm.anc.optimize_anc` (with `geometry.TbliteEnergy`'s restarts, walls and guard) for a
-    batch of molecules on the GPU. `rfo_dtype` float32 runs the RFO eigensolve in fp32."""
+    batch of molecules on the GPU. `rfo_dtype` float32 runs the RFO eigensolve in fp32.
+
+    The optimization runs in rounds. In each, every running molecule that is not waiting for an
+    evaluation proposes its next trial (stored, and frozen while its evaluation is pending), the
+    guard checks that trial once, its SCF starts from the molecule's last evaluated point, and
+    the batch's SCFs advance; each molecule whose evaluation ended then takes the step's update
+    (accept or reject, BFGS, trust radius, convergence test, basis). `carry` None: a round waits
+    for every SCF, one round per step as `qm.anc` steps. A number c: the round ends once at most
+    c x its running SCFs still run (`SCFBatch.advance`), and those carry their SCF state into the
+    next round beside the SCFs the finished molecules start. Per molecule the computation is the
+    same either way (trial, SCF start, mixer history, convergence rules)."""
 
     def __init__(
         self,
@@ -176,12 +188,14 @@ class BatchedANC:
         accuracy: float = 1.0,
         rfo_dtype=F64,
         trace: bool = False,
+        carry: float | None = None,
     ) -> None:
-        self.specs, self.cfg, self.rfo_dtype, self.tracing = (
+        self.specs, self.cfg, self.rfo_dtype, self.tracing, self.carry = (
             specs,
             cfg or AncSettings(),
             rfo_dtype,
             trace,
+            carry,
         )
         mols = [(sp.z, sp.start, sp.charge, sp.unpaired) for sp in specs]
         self.sb = S.SCFBatch(mols, solvent, accuracy=accuracy)
@@ -198,6 +212,9 @@ class BatchedANC:
         self.walls = _pair_tensors(specs, self.offsets, "walls")
         self.guard = _pair_tensors(specs, self.offsets, "guard")
         self.streak = torch.zeros(self.b, dtype=torch.long, device="cuda")
+        self.last_ratio = torch.full((self.b,), -1.0, dtype=F64, device="cuda")
+        self.drained = 0  # evaluations in flight that a refill stop finished (`run`)
+        self.rounds = 0
 
     def _pad(self, flat: torch.Tensor) -> torch.Tensor:
         ext = torch.cat([flat, flat.new_zeros(1, 3)])
@@ -225,7 +242,9 @@ class BatchedANC:
         return e, g.index_add(0, w["i"], pull).index_add(0, w["j"], -pull)
 
     def _guard(self, x: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
-        """DissociationGuard on the trial geometries of the active molecules: True = stop."""
+        """DissociationGuard on the new trial geometries of the molecules `active`, each trial
+        counted once, when it is proposed: True = stop. `last_ratio` keeps each molecule's
+        worst bond ratio at its last checked trial."""
         gd = self.guard
         if gd is None:
             return torch.zeros_like(active)
@@ -236,39 +255,152 @@ class BatchedANC:
             0, gd["mol"], gd["k"], "amax", include_self=False
         )
         self.streak = torch.where(active, torch.where(over, self.streak + 1, 0), self.streak)
-        self.last_ratio = worst
+        self.last_ratio = torch.where(active, worst, self.last_ratio)
         return active & (gd["patience"] > 0) & (self.streak >= gd["patience"])
 
-    def _evaluate(self, x: torch.Tensor, active: torch.Tensor):
-        """Energies (b,), gradients (nat, 3) and failure codes (b,) at x for the active
-        molecules: the guard first, then the SCF from each molecule's last evaluated point
-        (from the guess if that fails), the gradient, the walls."""
-        fail = torch.where(self._guard(x, active), FAIL_GUARD, FAIL_NONE)
-        go = active & (fail == FAIL_NONE)
-        self.sb.set_geometry(x)
-        r, fell = self.sb.run_with_fallback(self.start, go)
-        self.fresh_starts += fell.long()
-        e, g = self.sb.gradient(r)
-        ew, gw = self._wall_energy(x)
-        fail = torch.where(go & ~r.converged, FAIL_SCF, fail)
-        keep = go & r.converged
-        if self.start is None:
-            self.start = (r.qsh.clone(), r.dp.clone(), r.qp.clone())
-        else:  # each molecule's next SCF starts from its last evaluated point
-            sh, at = keep[self.atom_mol[self.sb.sh_atom]], keep[self.atom_mol]
-            self.start = (
-                torch.where(sh, r.qsh, self.start[0]),
-                torch.where(at[:, None], r.dp, self.start[1]),
-                torch.where(at[:, None], r.qp, self.start[2]),
-            )
-        return e + ew, g + gw, fail
+    # --- one round: proposals, evaluations started, SCFs advanced, updates ---------------------
 
-    def _rebuild(self, st: dict, which: torch.Tensor) -> None:
-        """New ANC bases of the molecules `which` from their Cartesian Hessians (the Lindh model
-        at the start, the learned one after): `qm.anc.optimize_anc`'s outer loop."""
+    def _propose(self, st: dict, which: torch.Tensor) -> None:
+        """The next trial of the molecules `which` (`qm.anc._State.step` up to its evaluation):
+        the RFO step in the ANC basis, cut to the trust radius, its predicted energy change and
+        the trial point, stored per molecule and left unchanged while the evaluation runs. The
+        RFO eigensolve covers only the molecules `which` (one host sync per round): with a carry,
+        the pending and the finished molecules would be solved for nothing; a molecule's step
+        moves with the solve's batch at rounding level only (1e-15)."""
+        vecs, h = st["vecs"], st["h"]
+        gq = (vecs.transpose(1, 2) @ self._pad(st["g"]).reshape(self.b, -1, 1))[:, :, 0]
         idx = torch.nonzero(which).squeeze(1)
         if not len(idx):
             return
+        s = torch.zeros_like(gq)
+        s[idx] = rfo_step(h[idx], gq[idx], self.rfo_dtype)
+        ns = torch.linalg.norm(s, dim=1)
+        cut = torch.where(ns > st["radius"], st["radius"] / ns.clamp(min=1e-300), 1.0)
+        s = s * cut[:, None]
+        ns = torch.linalg.norm(s, dim=1)
+        predicted = (gq * s).sum(1) + 0.5 * (s * (h @ s[:, :, None])[:, :, 0]).sum(1)
+        trial_pad = self._pad(st["x"]) + (vecs @ s[:, :, None]).reshape(self.b, self.nmax, 3)
+        st["trial"] = self._unpad_into(st["trial"], trial_pad, which)
+        st["s"] = torch.where(which[:, None], s, st["s"])
+        st["pred"] = torch.where(which, predicted, st["pred"])
+        st["ns"] = torch.where(which, ns, st["ns"])
+
+    def _launch(self, st: dict, init: torch.Tensor, step: torch.Tensor) -> torch.Tensor:
+        """Start the evaluations of the molecules `init` (their first, at x) and `step` (at
+        their proposed trial): the guard checks each new trial once; the SCFs of those it lets
+        through start from the molecule's last evaluated point (a step's from the guess if that
+        fails, within the same evaluation; a first evaluation starts from the guess and fails
+        alone, as `TbliteEnergy` re-raises without a previous result); the geometry takes the
+        new trials and keeps the pending ones. Returns the guard's stops."""
+        newly = init | step
+        st["trial"] = torch.where(init[self.atom_mol][:, None], st["x"], st["trial"])
+        stop = self._guard(st["trial"], newly)
+        go = newly & ~stop
+        at = (self.pending | newly)[self.atom_mol][:, None]
+        self.xeval = torch.where(at, st["trial"], st["x"])
+        self.sb.set_geometry(self.xeval)
+        self.sb.start(self.scf, go, self.start, fallback=step)
+        self.pending = self.pending | go
+        return stop
+
+    def _collect(self, ended: torch.Tensor):
+        """Energies (b,), gradients (nat, 3) (walls included) and failure codes (b,) of the
+        evaluations that ended (`ended`; the other rows are not meaningful); each of those
+        molecules' next SCF starts from this one's variables when it converged."""
+        r = self.sb.result(self.scf)
+        self.fresh_starts += (ended & self.scf.fell).long()
+        e, g = self.sb.gradient(r)
+        ew, gw = self._wall_energy(self.xeval)
+        fail = torch.where(ended & ~r.converged, FAIL_SCF, FAIL_NONE)
+        keep = ended & r.converged
+        sh, at = keep[self.atom_mol[self.sb.sh_atom]], keep[self.atom_mol]
+        self.start = (
+            torch.where(sh, r.qsh, self.start[0]),
+            torch.where(at[:, None], r.dp, self.start[1]),
+            torch.where(at[:, None], r.qp, self.start[2]),
+        )
+        return e + ew, g + gw, fail
+
+    def _apply_first(self, st: dict, first, e, g) -> None:
+        """A new molecule's first evaluation: its energy and gradient, one energy counted."""
+        am = first[self.atom_mol]
+        st["e"], st["g"] = torch.where(first, e, st["e"]), torch.where(am[:, None], g, st["g"])
+        st["n_evals"] += first.long()
+
+    def _apply_step(self, st: dict, done, e_new, g_new, fail) -> None:
+        """The rest of `qm.anc._State.step` for the molecules `done` whose evaluation of their
+        stored trial ended (or the guard stopped): the energy counted, the uphill rejection,
+        BFGS, the trust radius, the new point."""
+        cfg, vecs, h, s = self.cfg, st["vecs"], st["h"], st["s"]
+        st["n_evals"] += done.long()
+        st["micro"] += done.long()
+        de, predicted = e_new - st["e"], st["pred"]
+        ratio = torch.where(predicted < 0, de / torch.where(predicted < 0, predicted, -1.0), -1.0)
+        ok = done & (fail == FAIL_NONE)
+        reject = ok & (de > cfg.uphill) & (ratio < 0)
+        acc = ok & ~reject
+        y = (vecs.transpose(1, 2) @ self._pad(g_new - st["g"]).reshape(self.b, -1, 1))[:, :, 0]
+        st["h"] = torch.where(acc[:, None, None], bfgs(h, s, y), h)
+        r, ns = st["radius"], st["ns"]
+        grow = acc & (ratio > 0.75) & (ns > 0.8 * r)
+        shrink = reject | (acc & ~grow & (ratio < 0.25))
+        r = torch.where(grow, (2 * r).clamp(max=cfg.radius_max), r)
+        st["radius"] = torch.where(shrink, (r / 4).clamp(min=cfg.radius_min), r)
+        am = acc[self.atom_mol]
+        st["x"] = torch.where(am[:, None], st["trial"], st["x"])
+        st["g"] = torch.where(am[:, None], g_new, st["g"])
+        st["e"] = torch.where(acc, e_new, st["e"])
+        if self.tracing:
+            self.trace.append(tuple(t.cpu().numpy() for t in (e_new, st["radius"], acc, done)))
+
+    def _round(self, st: dict, active, reason, mode: str, launch: bool = True):
+        """One round. "init": the new molecules' first evaluations start; "step": also every
+        other running molecule not waiting proposes and starts its next one; "drain": nothing
+        starts and every evaluation in flight runs to its end. Then each molecule whose
+        evaluation ended is updated. Returns the running molecules and the failure codes."""
+        self.rounds += 1
+        stop = torch.zeros_like(active)
+        if launch and mode != "drain":
+            free = active & ~self.pending
+            step = free & ~self.need if mode == "step" else torch.zeros_like(free)
+            if mode == "step":
+                self._propose(st, step)
+            stop = self._launch(st, free & self.need, step)
+        self.sb.advance(self.scf, None if mode == "drain" else self.carry)
+        ended = self.pending & ~self.scf.running  # a geometry the SCF refused ends here too
+        self.pending = self.pending & ~ended
+        if int(ended.sum()):
+            e, g, fail = self._collect(ended)
+            e = torch.where(ended, e, torch.nan)  # a guard stop's energy: never evaluated
+        else:
+            e = torch.full((self.b,), torch.nan, dtype=F64, device="cuda")
+            g, fail = torch.zeros_like(st["x"]), torch.zeros_like(reason)
+        fail, done = torch.where(stop, FAIL_GUARD, fail), ended | stop
+        first = done & self.need
+        self._apply_first(st, first, e, g)
+        self.need = self.need & ~first
+        if mode != "init":
+            self._apply_step(st, done & ~first, e, g, fail)
+        reason = torch.where(done & (fail != FAIL_NONE), fail, reason)
+        active = active & (fail == FAIL_NONE)
+        active = active & ~self._finished(st, active & ~self.pending)
+        self._rebuild(st, first & active, active & (st["micro"] >= self.cfg.micro))
+        return active, reason
+
+    def _finished(self, st: dict, which: torch.Tensor) -> torch.Tensor:
+        gmax = self._gmax(st["g"])
+        return which & ((gmax <= self.cfg.fmax) | (st["n_evals"] >= self.cfg.maxiter))
+
+    def _rebuild(self, st: dict, new: torch.Tensor, due: torch.Tensor) -> None:
+        """New ANC bases: of the molecules `new` from the Lindh model Hessian, of those `due`
+        (`micro` steps since their last basis) from the learned Hessian in the old basis:
+        `qm.anc.optimize_anc`'s outer loop."""
+        which = new | due
+        idx = torch.nonzero(which).squeeze(1)
+        if not len(idx):
+            return
+        v, h = st["vecs"], st["h"]
+        st["hcart"] = torch.where(due[:, None, None], v @ h @ v.transpose(1, 2), st["hcart"])
         vecs, lam, _ = anc_basis(st["hcart"][idx], self._pad(st["x"])[idx], self.real[idx])
         mm, m = st["vecs"].shape[2], vecs.shape[2]
         st["vecs"][idx] = torch.nn.functional.pad(vecs, (0, mm - m))
@@ -277,44 +409,11 @@ class BatchedANC:
         )
         st["micro"][idx] = 0
 
-    def _step(self, st: dict, active: torch.Tensor) -> torch.Tensor:
-        """One RFO step of every active molecule (`qm.anc._State.step`); returns failures."""
-        cfg, vecs, h = self.cfg, st["vecs"], st["h"]
-        gq = (vecs.transpose(1, 2) @ self._pad(st["g"]).reshape(self.b, -1, 1))[:, :, 0]
-        s = rfo_step(h, gq, self.rfo_dtype)
-        ns = torch.linalg.norm(s, dim=1)
-        cut = torch.where(ns > st["radius"], st["radius"] / ns.clamp(min=1e-300), 1.0)
-        s = s * cut[:, None]
-        ns = torch.linalg.norm(s, dim=1)
-        predicted = (gq * s).sum(1) + 0.5 * (s * (h @ s[:, :, None])[:, :, 0]).sum(1)
-        trial_pad = self._pad(st["x"]) + (vecs @ s[:, :, None]).reshape(self.b, self.nmax, 3)
-        trial = self._unpad_into(st["x"], trial_pad, active)
-        e_new, g_new, fail = self._evaluate(trial, active)
-        st["n_evals"] += active.long()
-        st["micro"] += active.long()
-        de = e_new - st["e"]
-        ratio = torch.where(predicted < 0, de / torch.where(predicted < 0, predicted, -1.0), -1.0)
-        ok = active & (fail == FAIL_NONE)
-        reject = ok & (de > cfg.uphill) & (ratio < 0)
-        acc = ok & ~reject
-        y = (vecs.transpose(1, 2) @ self._pad(g_new - st["g"]).reshape(self.b, -1, 1))[:, :, 0]
-        st["h"] = torch.where(acc[:, None, None], bfgs(h, s, y), h)
-        r = st["radius"]
-        grow = acc & (ratio > 0.75) & (ns > 0.8 * r)
-        shrink = reject | (acc & ~grow & (ratio < 0.25))
-        r = torch.where(grow, (2 * r).clamp(max=cfg.radius_max), r)
-        st["radius"] = torch.where(shrink, (r / 4).clamp(min=cfg.radius_min), r)
-        am = acc[self.atom_mol]
-        st["x"] = torch.where(am[:, None], trial, st["x"])
-        st["g"] = torch.where(am[:, None], g_new, st["g"])
-        st["e"] = torch.where(acc, e_new, st["e"])
-        if self.tracing:
-            self.trace.append((e_new.cpu().numpy(), st["radius"].cpu().numpy(), acc.cpu().numpy()))
-        return fail
+    # --- the batch's start, its states, the loop -----------------------------------------------
 
     def _initial(self) -> tuple[dict, torch.Tensor]:
-        """Every molecule's start: resumed molecules from their state; new ones get their
-        first evaluation (from the SAD guess) and the Lindh model Hessian."""
+        """Every molecule's start: resumed molecules from their state; new ones the Lindh model
+        Hessian, their first evaluation (from the SAD guess) still to come (`self.need`)."""
         b, pdim = self.b, 3 * self.nmax
         mm = max(pdim - 5, 1)
         dev = {"device": "cuda"}
@@ -326,6 +425,10 @@ class BatchedANC:
         )
         st = {
             "x": x,
+            "trial": x.clone(),  # each molecule's last proposed point (pending: being evaluated)
+            "s": torch.zeros(b, mm, dtype=F64, **dev),  # its step, predicted change and |step|
+            "pred": torch.zeros(b, dtype=F64, **dev),
+            "ns": torch.zeros(b, dtype=F64, **dev),
             "radius": torch.full((b,), self.cfg.radius, dtype=F64, **dev),
             "n_evals": torch.zeros(b, dtype=torch.long, **dev),
             "micro": torch.zeros(b, dtype=torch.long, **dev),
@@ -345,12 +448,9 @@ class BatchedANC:
         st["hcart"] = torch.as_tensor(hcart, **dev)
         self.start = self.sb.guess()
         self._restore(st, resumed)
-        new = torch.as_tensor(~resumed, **dev) & (self.nat > 1)
-        e, g, fail = self._evaluate(st["x"], new)
-        am = new[self.atom_mol]
-        st["e"], st["g"] = torch.where(new, e, st["e"]), torch.where(am[:, None], g, st["g"])
-        st["n_evals"] += new.long()
-        return st, torch.where(new, fail, FAIL_NONE), new
+        self.need = torch.as_tensor(~resumed, **dev) & (self.nat > 1)
+        self.scf, self.pending, self.xeval = self.sb.new_run(), torch.zeros_like(self.need), x
+        return st, self.need.clone()
 
     def _restore(self, st: dict, resumed: np.ndarray) -> None:
         """Write the resumed molecules' states into the batch's tensors."""
@@ -396,35 +496,25 @@ class BatchedANC:
         )
 
     def run(self, stop_below: int | None = None):
-        """Optimize every molecule, one batched evaluation per step for all still running.
-        Without `stop_below`: the outcomes (one per spec). With it: stop once fewer molecules
-        than that are running and return ({index: outcome} of the finished, {index: MolState}
-        of the rest), for a driver to refill the batch."""
-        cfg = self.cfg
-        st, fail, new = self._initial()
-        reason = fail.clone()
-        active = (self.nat > 1) & (fail == FAIL_NONE)
-
-        def finished(active):
-            gmax = self._gmax(st["g"])
-            return active & ((gmax <= cfg.fmax) | (st["n_evals"] >= cfg.maxiter))
-
-        active = active & ~finished(active)
-        self._rebuild(st, active & new)
-        while bool(active.any()):
-            if stop_below is not None and int(active.sum()) < stop_below:
+        """Optimize every molecule. Without `stop_below`: the outcomes (one per spec). With it:
+        stop once fewer molecules than that are running and return ({index: outcome} of the
+        finished, {index: MolState} of the rest), for a driver to refill the batch. A `MolState`
+        holds no SCF in flight: at the stop, the evaluations still pending (with a `carry`) run
+        to their end and their steps are taken first (`drained` counts them), so nothing a
+        round started is lost; a molecule those steps converge is among the finished."""
+        st, _ = self._initial()
+        reason = torch.full((self.b,), FAIL_NONE, dtype=torch.long, device="cuda")
+        active, reason = self._round(st, self.nat > 1, reason, "init")
+        while True:
+            n_active, n_free = torch.stack([active.sum(), (active & ~self.pending).sum()]).tolist()
+            if not n_active:
                 break
-            fail = self._step(st, active)
-            reason = torch.where(active & (fail != FAIL_NONE), fail, reason)
-            active = active & (fail == FAIL_NONE)
-            active = active & ~finished(active)
-            due = active & (st["micro"] >= cfg.micro)
-            if bool(due.any()):
-                v, h = st["vecs"], st["h"]
-                st["hcart"] = torch.where(
-                    due[:, None, None], v @ h @ v.transpose(1, 2), st["hcart"]
-                )
-                self._rebuild(st, due)
+            if stop_below is not None and n_active < stop_below:
+                if n_active > n_free:
+                    self.drained += n_active - n_free
+                    active, reason = self._round(st, active, reason, "drain")
+                break
+            active, reason = self._round(st, active, reason, "step", launch=n_free > 0)
         outcomes = self._outcomes(st, reason)
         if stop_below is None:
             return outcomes
@@ -457,6 +547,7 @@ class BatchedANC:
                     float(gmax[m]),
                     float(e[m]),
                     int(fresh[m]),
+                    [(float(t[0][m]), float(t[1][m])) for t in self.trace if t[3][m]],
                 )
             )
         return out
@@ -588,6 +679,7 @@ class _Job:
 
 
 MIN_COMPACT = 8  # a batch smaller than this runs to its end
+CARRY = 0.1  # relax_many's round: done once at most a tenth of its SCFs still run
 
 
 def _nao(z: np.ndarray) -> int:
@@ -606,6 +698,17 @@ def molecule_bytes(z: np.ndarray) -> int:
     return 8 * (50 * nao * nao + 4 * p * p)
 
 
+def _fill(queue: list, running: list, capacity: int, memory_bytes: float, size_ratio: float):
+    """Move tasks from the queue (smallest first) into the batch while they fit."""
+    while queue and len(running) < capacity:
+        biggest = max([molecule_bytes(j.task.z) for j in running] + [0])
+        need = max(biggest, molecule_bytes(queue[0].task.z)) * (len(running) + 1)
+        smallest = min([_nao(j.task.z) for j in running] + [_nao(queue[0].task.z)])
+        if running and (need > memory_bytes or _nao(queue[0].task.z) > size_ratio * smallest):
+            break
+        running.append(queue.pop(0))
+
+
 def relax_many(
     tasks: list[RelaxTask],
     config=None,
@@ -616,6 +719,7 @@ def relax_many(
     on_batch=None,
     memory_bytes: float | None = None,
     size_ratio: float = 1.5,
+    carry: float | None = CARRY,
 ) -> list[RelaxOutcome]:
     """`qm.xtb_calc.GFN2Calculator._relax` with the tblite-anc settings of `config` (a QMConfig)
     for many molecules: a free run with the dissociation guard, `check_connectivity`, and on a
@@ -625,7 +729,8 @@ def relax_many(
     the rest); when fewer than `refill` x its size still run, it is rebuilt with them (their
     state carried over) and the next tasks, smallest first. A batch takes a molecule only if
     its AO count is within `size_ratio` of the batch's smallest: every member pays for the
-    padding to the largest."""
+    padding to the largest. `carry` is `BatchedANC`'s (None: every step waits for its slowest
+    SCF)."""
     from ksmech.qm.xtb_calc import QMConfig
 
     config = config or QMConfig(optimizer="tblite-anc")
@@ -637,19 +742,14 @@ def relax_many(
     running: list[_Job] = []
     results: dict[str, RelaxOutcome] = {}
     while queue or running:
-        while queue and len(running) < capacity:
-            biggest = max([molecule_bytes(j.task.z) for j in running] + [0])
-            need = max(biggest, molecule_bytes(queue[0].task.z)) * (len(running) + 1)
-            smallest = min([_nao(j.task.z) for j in running] + [_nao(queue[0].task.z)])
-            if running and (need > memory_bytes or _nao(queue[0].task.z) > size_ratio * smallest):
-                break
-            running.append(queue.pop(0))
-        opt = BatchedANC([j.spec for j in running], solvent, cfg, rfo_dtype=rfo_dtype)
+        _fill(queue, running, capacity, memory_bytes, size_ratio)
+        opt = BatchedANC([j.spec for j in running], solvent, cfg, rfo_dtype=rfo_dtype, carry=carry)
         # stop to refill, or with nothing queued to compact: a finished molecule left in the
         # batch would still pay its geometry and gradient at every step
         stop = int(refill * len(running)) if len(running) >= MIN_COMPACT else None
         got = opt.run(stop_below=stop) if stop else (dict(enumerate(opt.run())), {})
         done, states = got
+        del opt, got  # its SCF state and integrals, before the next batch allocates its own
         nxt = []
         for m, job in enumerate(running):
             if m in states:

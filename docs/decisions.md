@@ -11118,3 +11118,272 @@ per-cycle CUDA events.
     previous cycle's orbitals (the distance between consecutive cycles' orbitals not yet
     probed).
   - Below 30 atoms the CPU stays faster: stage 5's size routing.
+
+## 2026-11-23: GPU xTB carry-over, part 1: an incremental SCF with per-molecule state
+
+The SCF tuning above left a step running as many SCF cycles as its slowest molecule (13-29
+per step against 6.4 per molecule), at a nearly fixed 6-12 ms per cycle. The lever chosen is
+carry-over: a molecule whose SCF has not converged when most of its round has finished keeps
+its SCF state and continues in the next round, beside the molecules that took their step and
+started their next SCF. This first part makes the SCF incremental (`ksmech.qm.gpu.scf`); the
+optimizer that uses it comes next. Branch `claude/gpu-xtb`.
+
+- **Per-molecule mixer.** `Broyden` keeps each molecule's iteration count `it` and history
+  length `h` as (B,) tensors; `reset(which, q0)` restarts some molecules (iteration 0, empty
+  history) while the others continue, and a molecule outside `active` is frozen, not stepped
+  with a zero residual. Each step writes its slot h_m, the Gram row and column, and solves the
+  molecule's own system over its h_m slots, the unused slots identity rows with g = 0 (y = 0).
+  - A reset zeroes the molecule's history rows: an unused slot still multiplies its u row by
+    y = 0, and 0 x NaN is NaN, so a failed SCF's rows would otherwise reach later solves.
+  - Every molecule that does not take a Broyden step gets an identity system, so no NaN ever
+    reaches Cholesky or the LU fallback.
+  - The solve's width is the batch's largest h + 1, read exactly in the host sync the
+    Cholesky failure check already makes (`_spd_solve(..., also=h.max())`): no new sync per
+    cycle. A molecule whose SCF ended is retired from the mixer (`Broyden.retire`: its h
+    no longer counts), so an SCF that ran long, or hit the cycle limit, does not widen the
+    solves of the SCFs that follow it in the same state. The buffers grow by doubling and are
+    not shrunk.
+  - Equal to the list form (`BroydenReference`) run on each molecule alone to 1e-11, with
+    staggered resets, a paused molecule and buffer growth.
+- **Incremental SCF.** The state `SCFBatch.run` kept in locals is an `SCFRun`: the mixer, the
+  orbital buffers, each molecule's input potentials of its last cycle, output variables,
+  energy, last precise energy, cycle count, status, and the running, precise, may-fall-back
+  and fell-back flags. `new_run`, `start(state, which, start, fallback)`, `advance(state,
+  carry)` and `result(state)` drive it; `run` and `run_with_fallback` are built on them, so
+  every existing test exercises the one code path.
+  - The cycle limit (250), the fp32 -> precise switch and the two-precise-cycles rule are per
+    SCF and persist across `advance` calls.
+  - `start` resets every per-SCF quantity of the molecules it starts, the orbital buffers and
+    input potentials included. Each `run` used to get fresh zero buffers; with a persistent
+    state, a molecule that hit the cycle limit in the fp32 phase would otherwise build its
+    energy-weighted density from the previous SCF's C and F.
+  - **The fallback inside the evaluation.** With `fallback`, a molecule whose SCF from a
+    start ends unconverged restarts at once from the SAD guess, in the same state, while the
+    rest of the batch continues; `run_with_fallback` used to rerun those molecules in a
+    second `run` after the first had finished. The molecule's result is the guess run's (its
+    cycle count too, as `merge` reported), and `fell` marks it.
+  - `advance(carry=c)` returns, after one cycle at least, once at most c x the molecules
+    running at entry still run (c >= 1: exactly one cycle). Syncs per cycle: one
+    `nonzero(running)` at the top (it replaces `active.any()` and gives the carry count) and
+    one read of the ended and fallback counts (it replaces `finished.any()`), one fewer than
+    before.
+  - `result` returns copies: the optimizer will read a round's results and then restart the
+    molecules that ended, which zeroes their buffers in place.
+  - `set_geometry` touches only the integrals; the SCF state is in the `SCFRun`, so molecules
+    mid-SCF are undisturbed (their integrals recomputed at unchanged coordinates equal
+    the old ones to rounding).
+- **Correctness.** A molecule started beside one mid-run ends with the energy (1e-10), cycle
+  count and status it reaches alone from the same start; an `advance` with a carry followed by
+  an `advance(None)`, with a `set_geometry` at unchanged coordinates between them, gives one
+  `advance(None)`'s results; the fallback gives the guess run's result; with a 5-cycle limit,
+  SCFs started at different cycles each end after their own 5th, and `run_with_fallback`
+  equals `merge(run(start), run(None, retry), retry)` field by field (1e-12). Two limits on
+  such comparisons:
+  - The fp32 eigensolve of a single matrix differs from that of the same matrix in a batch
+    (another cuSOLVER path, 1e-7 to 1e-6 Eh in the orbital energies); in batches of two or
+    more it is bit for bit independent of the other matrices. The tests keep at least two
+    molecules running in every phase they compare.
+  - The metal fixtures' SCF is not reproducible run to run at 1e-10, before this change as
+    after (CuCl2 ends after 19 or 20 cycles, 2.9e-10 Eh apart; the atomic sums' order). The
+    carry test uses the organic fixtures.
+
+## 2026-11-23: GPU xTB carry-over, part 2: the optimizer in rounds
+
+Part 1 made the SCF incremental; this part makes `ksmech.qm.gpu.optimize.BatchedANC` use it,
+so a molecule whose SCF is slow no longer holds back the batch's next step. Branch
+`claude/gpu-xtb`.
+
+- **Rounds.** A round (`BatchedANC._round`): (a) every running molecule not waiting for an
+  evaluation proposes its next trial (`_propose`: the RFO step in its ANC basis, cut to the
+  trust radius, the predicted change, |s|, the trial point), stored per molecule and frozen
+  while its evaluation is pending; (b) the guard checks each new trial once, when it is
+  proposed (`_launch`); (c) the SCFs of the new evaluations start (`SCFBatch.start` from the
+  molecule's last converged point's variables, the fallback to the guess inside the same
+  evaluation), the geometry takes the new trials and keeps the pending ones, and the batch's
+  SCFs advance (`advance(carry)`); (d) each molecule whose evaluation ended takes the rest of
+  `qm.anc`'s step (`_collect`, `_apply_step`: energy, gradient and walls, the uphill
+  rejection, BFGS, the radius, x/g/e, the energy count, the convergence test, the basis
+  rebuild). Nothing of (d) happens to a molecule while its evaluation is pending.
+  - `carry` None: `advance` runs every SCF to its end, one round per step: the old loop.
+    A number c: the round ends once at most c x its running SCFs still run; those carry
+    their SCF state into the next round.
+  - A molecule's first evaluation (from the guess) is a pending evaluation without a step;
+    the batch's first round starts only those, the resumed molecules stepping from the
+    second round, as before. With carry None the sequence of evaluations, batches and refill
+    stops is therefore exactly the old one.
+  - An evaluation the SCF refuses (a bad geometry) ends in the round it starts, as
+    FAIL_SCF: "ended" is read from the SCF state (pending and no longer running), not only
+    from what `advance` returns.
+  - A guard-stopped trial is counted as an energy, as before (the count of `qm.anc`).
+  - `last_ratio` (the CONNECTIVITY_CHANGED detail) is now each molecule's worst bond ratio
+    at its last checked trial; before, it was overwritten by later evaluations of the other
+    molecules with the ratio at the stopped molecule's last accepted point. Only the detail
+    text changes.
+- **Refill stops.** `run(stop_below)` checks the running count at the top of a round; when
+  it stops with evaluations in flight it first runs them to their end and takes their steps
+  (a "drain" round, counted in `drained`), so a `MolState` never holds a half-done SCF and
+  nothing is lost; a molecule those steps converge is among the finished.
+- **Defaults.** `BatchedANC(carry=None)`, `relax_many(carry=0.25)` (`optimize.CARRY`, to be
+  tuned from measurements). `stage4_gate.py check|time` and `scf_profile.py` take `--carry`
+  (and the gate `--out`); the profiler's hooks moved to `_round`, `_propose`, `_collect`, and
+  its per-evaluation log is now per round.
+- **Same results.** Measured:
+  - Against the d28f9cb optimizer (on the part-1 SCF), carry None on the ten organic
+    fixtures, one batch and `relax_many` with refills: energies within 4e-15 Eh and points
+    within 6e-14 Bohr, identical counts, the same as the old code's own run-to-run spread
+    (2e-15 Eh, 3e-14 Bohr). Carry 0.25 and 1 (one SCF cycle per round): energies within
+    2e-10 Eh, identical counts.
+  - `stage4_gate.py steps --per-bin 2`, twice on a d28f9cb export and twice on the change:
+    the d28f9cb runs differ from each other in the energy counts of 4 of the 12 molecules
+    (21, 27, 117 and 127 atoms; per-step energies up to 2e-6 Eh apart, the single-molecule
+    SCF being not reproducible run to run there), the change's two runs from each other in 5
+    (those and the 94-atom one), and the change from d28f9cb only on those noisy molecules,
+    by as much; the other molecules agree.
+  - Parity gate (`check`, capacity 256): carry None and 0.25 both 96 of 96 outcomes as the
+    reference; against a d28f9cb run, carry None differs in the energy count of 21 species
+    and 0.25 of 24, the two d28f9cb runs from each other in 21; |dE| above 1e-6 Eh for 24, 25
+    and 24 species. Carry changes nothing beyond the gate's own noise.
+  - The tests (`tests/test_qm_gpu_optimize.py`): carry None equals `qm.anc.optimize_anc` on
+    the GPU energy (every evaluation to 1e-9 Eh, the same count); carry 1 and 0.25 reach the
+    carry-None minima with the same counts (tolerance 1e-6 Eh, 2 energies: with carry, which
+    molecules share a cycle's eigensolve changes, and a cycle with one molecule active takes
+    cuSOLVER's single-matrix path, 1e-7 to 1e-6 Eh in the fp32 orbital energies); the guard
+    stops a waiting molecule at its 5th trial, carry or not; a refill stop with evaluations
+    in flight resumes to the uninterrupted batch's minima and counts.
+- **Speed (first look; the tuning is next).** `scf_profile.py --seeds 16`, 1024 molecules:
+  - The solid numbers: the same energies used (49,288 with None, 49,158 with 0.25, 31-50)
+    in a third fewer SCF cycles (below).
+  - 31-50 atoms: 138.2 s with carry None, 129.0 s with 0.25 (-7%); 51-80: 342.0 s and
+    329.1 s (-4%); one run each, against a run-to-run spread of 2.6% and 0.6% (the two
+    `tuning_long` runs of the same queues). The parity gate's 96 species in small batches
+    (2-21 molecules) are slower with 0.25: 230 s against 196 s (one run; two d28f9cb runs
+    differ by 7%).
+  - With synchronized timers (31-50): SCF cycles 9,655 -> 6,349 (-34%), the active share
+    per cycle 0.26 -> 0.53, SCF time 109 s -> 79 s, rounds 511 -> 604. The share of SCF time
+    in cycles with under 10% of the batch active fell from 48% (d28f9cb's ceiling profile)
+    to 17%; what is left is in small batches (20-30 molecules): the refill drains and the
+    run's tail.
+  - The gain is eaten in part by the per-round work, which does not shrink with fewer
+    molecules: the geometry (`set_geometry`, every molecule), `result` and the gradient of
+    the whole batch, the RFO of every molecule: 33 s of the 120 s of rounds with 0.25,
+    against 27 s with None.
+  - Peak device memory per batch rose 10-25% (the parity gate's batches: 0.48-0.54 of
+    `molecule_bytes`' estimate before, 0.56-0.62 now): the persistent SCF state keeps C and F
+    through the gradient, and `result` copies the density matrices. Still within the
+    estimate.
+
+## 2026-11-24: GPU xTB carry-over, review fixes
+
+The carry-over change (parts 1 and 2 above) was reviewed; these fixes follow, branch
+`claude/gpu-xtb`, uncommitted on d28f9cb. The measurements of parts 1 and 2 were taken before
+them.
+
+- **A guard-stopped trial traces no energy.** With the SCF state now kept across rounds, the
+  trace entry of a trial the guard stopped took that molecule's previous SCF energy when
+  another molecule's evaluation ended in the same round (NaN when none did). `_round` now
+  sets the energy of every row whose evaluation did not end to NaN, as d28f9cb gave. The
+  optimizer state was never affected (a stop accepts nothing). Test:
+  `test_a_guard_stopped_trial_traces_no_energy`.
+- **No fallback on a first evaluation.** A new molecule's first SCF starts from the SAD guess;
+  with the fallback on, a failure reran the same SCF from the same guess (up to 250 more
+  cycles) and counted a fresh start. Production's `TbliteEnergy` re-raises when there is no
+  previous result. `SCFBatch.start` now takes `fallback` as a bool or a per-molecule mask, and
+  `_launch` passes the step evaluations only. Pre-existing at d28f9cb (its `_initial` used
+  `run_with_fallback` from the guess); only `fresh_starts` and cycles change, the outcome is
+  FAIL_SCF either way. Test: `test_a_failed_first_evaluation_does_not_fall_back_to_the_same_guess`.
+- **The Broyden history shrinks back.** It grows by doubling, and with carry-over the
+  `SCFRun` lives as long as the batch, so one SCF that reached the cycle limit left every
+  molecule's history at 256 slots (0.7-1.1 `molecule_bytes` per molecule at 20-37 atoms) for
+  the rest of the batch. `Broyden._reserve` now shrinks the buffers to the smallest chunk
+  multiple above twice the slots in use once that is a quarter of the capacity or less: 32
+  slots never shrink, 64 shrink to 16 whenever at most 7 are in use (with carry None, at the
+  start of every round, so a batch whose slowest SCF takes 33 or more cycles each round shrinks
+  and regrows each round, a few small copies), 256 after a limit-hitting SCF shrink at the next
+  solve once it has ended (the round where it ends still holds them through its gradient, below
+  the SCF-phase peak). `molecule_bytes` still does not count the history. `relax_many`
+  drops the finished `BatchedANC` before it builds the next batch, so the two batches' SCF
+  states and integrals no longer overlap at a refill. The SCF-phase peak of a long SCF
+  itself (the history at 256 slots while it runs) is unchanged and was there at d28f9cb.
+  Test: `test_a_long_scf_leaves_the_mixer_narrow_for_the_scfs_after_it`.
+- **One host read per cycle beside the running set, and an exact solve width.** The mixer
+  retires the SCFs that ended before its solve reads `h.max()` (`Broyden.next(..., retire,
+  also)`), so the width is exact at once (it stayed at an earlier long SCF's for one more solve
+  per round), and the ended and fallback counts ride on that same read (`also`), read by
+  themselves only in a cycle without a solve. Left as is: a cycle whose molecules are all at
+  their first iteration still runs one solve, now 1 wide and without a sync of its own;
+  skipping it would need host-side tracking of the iterations.
+- **The RFO eigensolve covers the proposing molecules only** (`_propose`, one `nonzero` per
+  round): with a carry the pending and finished molecules were solved for nothing. Checked:
+  a molecule's RFO step from a sub-batch equals the full batch's bit for bit at M+1 <= 32 and
+  within 2e-15 above (cuSOLVER's batched path), the old code's own run-to-run spread; so the
+  "carry None equals d28f9cb within 4e-15 Eh" of part 2 now holds to that rounding, not
+  re-measured.
+- **Parity gate on the fixed code** (`stage4_gate.py check --capacity 256 --carry 0.25`, one
+  run, queue job 37): 96 of 96 outcomes as the reference, the same one restrained-run
+  difference (the 127-atom species) as part 2's carry-0.25 run, energy counts different from
+  that run in 22 species (two d28f9cb runs differ in 21), 230.6 s against 230.0 s, peak memory
+  0.56-0.68 of `molecule_bytes` (0.56-0.69 before). The fixes change nothing beyond the gate's
+  own noise.
+
+## 2026-11-24: GPU xTB carry-over, part 3: measured, and the default carry 0.1
+
+Measured on the code of parts 1 and 2 with the review fixes (queue jobs 34-41 and 45;
+`data/processed/gpu_qm_spike/carry_*.json`). Branch `claude/gpu-xtb`.
+
+- **The ceiling, before the change** (d28f9cb, `carry_ceiling_<bin>.json`): cycles with under
+  10% of the batch active held 48% of the SCF time at 31-50 atoms and 37% at 51-80, the
+  first evaluations 12% and 9%. This bounds what carry can save; those cycles only get cheaper.
+- **The choice of c** (1024 conformers, `--seeds 16`, s/molecule):
+
+  | carry | 31-50 | 51-80 |
+  |---|---|---|
+  | 0.1 | 0.122, 0.117 | 0.304, 0.300 |
+  | 0.25 | 0.118, 0.118 | 0.309, 0.306 |
+  | 0.5 | 0.123 | 0.328 |
+  | None (same code) | 0.130 | 0.323 |
+
+  0.1 and 0.25 are not told apart (0.25 is 1% faster at 31-50, 0.1 is 2% faster at 51-80);
+  0.5 is worse, at 51-80 slower than none. The default is 0.1 (`optimize.CARRY`): equal on
+  the long queue and faster in the parity gate's small batches (204 s against 218-224 s).
+  Outcomes in every run are within d28f9cb's spread: 31-50 1017 ok and 7 SCF_NOT_CONVERGED,
+  51-80 1017-1018 ok, 6 SCF_NOT_CONVERGED, 0-1 OPT_NOT_CONVERGED; 121 and 109 walled.
+- **Against 12 CPU workers** (`stage4_reference_preload_64_relax.json`, `_relax` alone):
+
+  | case | carry 0.1 | carry None, same code | d28f9cb | CPU12 | speed-up |
+  |---|---|---|---|---|---|
+  | 31-50, 1024 in flight | 0.120 | 0.130 | 0.142-0.146 | 0.214 | 1.79x |
+  | 51-80, 1024 in flight | 0.302 | 0.323 | 0.330-0.332 | 0.682 | 2.26x |
+  | 31-50, 256 in flight | 0.208 | - | 0.19-0.20 | 0.214 | 1.03x |
+  | 51-80, 256 in flight | 0.475 | - | 0.47-0.48 | 0.682 | 1.44x |
+  | 81-120 | 1.383 | 1.349 | 1.391 | 4.367 | 3.16x |
+  | 121-200 | 2.054 | 1.978 | 1.977 | 6.595 | 3.21x |
+
+  - Carry gains 8% at 31-50 and 6.5% at 51-80 on the long queue against the same code
+    without it. Some of the gain over d28f9cb is from the review fixes without carry (the RFO
+    of the proposing molecules only, the mixer's exact width, one sync fewer per cycle).
+    The control is one run; two d28f9cb runs differ by 2.6% and 0.6%.
+  - With 256 conformers, and above 80 atoms, carry gains nothing: the batches are small, and
+    each round's fixed work (geometry, gradient and RFO of the whole batch) is paid more often.
+    Above 80 atoms it costs 2.5% (81-120) and 4% (121-200) against the same code without it
+    (one run each, `carry_time_81-200_s4_c{0.1,none}.json`); a size-dependent carry (None
+    above 80 atoms) would take that back.
+  - Peak memory is 0.55-0.68 of `molecule_bytes` (0.48-0.52 at d28f9cb), with or without
+    carry (0.57 without it above 80 atoms): the persistent SCF state lives through the
+    gradient.
+- **The spike's bar** (2x at 30-80 atoms): met at 51-80 on a long queue (2.26x), not at
+  31-50 (1.79x).
+- **Parity gate** (96 species, capacity 256): 96 of 96 outcomes in every run, carry or not.
+  Carry None on the same code: walls 96/96, as both d28f9cb runs. With carry (0.25 four
+  times, 0.1 once) the 127-atom Pd complex
+  `COc1cc[c]([Pd-]([NH2+]c2ccccc2OC)[P+](N=P23N(CC(C)C)CCN(CCN2CC(C)C)CCN3CC(C)C)(C(C)(C)C)C(C)(C)C)c(C)c1`
+  takes a walled retry the CPU does not: 5 of 5 runs, 0 of 4 without carry; alone on
+  d28f9cb it does in 1 of 4 (`tuning_pd_probe.json`). The outcome stays ok: 462-475 energies
+  against 219-231, an end point 2.8 mEh lower, 0.35 A RMSD from the CPU's. Per molecule the
+  computation is the same with or without carry. What differs is which molecules share a
+  cycle's fp32 eigensolve: the slowest SCF is often alone, and a cycle with one molecule
+  takes cuSOLVER's single-matrix path. That moves its orbital energies by 1e-7 to 1e-6 Eh,
+  the size of the SCF tolerance, and this flat path is sensitive to that. This explanation
+  is not shown by a measurement. Energy counts differ between two carry runs in 26 species,
+  between two d28f9cb runs in 21.
+- **Open.** The Pd complex's systematic retry under carry. A cycle with one molecule could
+  take the batched eigensolver path (pad it with a copy) to test the explanation.

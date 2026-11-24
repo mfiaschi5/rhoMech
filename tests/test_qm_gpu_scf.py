@@ -191,3 +191,278 @@ def test_refined_fp32_orbitals_reach_fp64_eigh():
         assert torch.abs(p - (c64[m] * occ64[m]) @ c64[m].T).max() < 5e-12  # eigh rounding
         x64 = (c64[m] * occ64[m] * e64[m]) @ c64[m].T
         assert torch.abs(st["x"][m] - x64).max() < 5e-12
+
+
+def _toy_residual(q, target):
+    import torch
+
+    return 0.3 * (target - q) + 0.05 * torch.sin(3 * q)
+
+
+@pytest.mark.gpu
+@gpu
+def test_broyden_molecules_at_their_own_iterations_equal_each_alone():
+    """Molecules restarted at different iterations (staggered `reset`s, one of them paused for
+    a while) match the list form run on each molecule alone, over more slots than a chunk."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    b, v, n_it = 5, 30, 16
+    q0 = torch.randn(b, v, dtype=torch.float64, device="cuda", generator=gen)
+    q1 = torch.randn(b, v, dtype=torch.float64, device="cuda", generator=gen)
+    target = torch.randn(b, v, dtype=torch.float64, device="cuda", generator=gen)
+    resets = {2: [0], 5: [1, 3], 9: [0]}  # iteration -> molecules restarted from q1
+    paused = {(4, 2), (5, 2), (6, 2)}  # (iteration, molecule) with no step
+    mixer = S.Broyden(q0, chunk=4)
+    refs = [S.BroydenReference(q0[m : m + 1]) for m in range(b)]
+    for it in range(n_it):
+        which = torch.zeros(b, dtype=torch.bool, device="cuda")
+        for m in resets.get(it, []):
+            which[m] = True
+            refs[m] = S.BroydenReference(q1[m : m + 1])
+        mixer.reset(which, q1)
+        active = torch.tensor([(it, m) not in paused for m in range(b)], device="cuda")
+        dq = torch.where(active[:, None], _toy_residual(mixer.q, target), 0.0)
+        q = mixer.next(dq, active)
+        for m in range(b):
+            if bool(active[m]):
+                r = refs[m].next(_toy_residual(refs[m].q, target[m : m + 1]), active[m : m + 1])
+                assert torch.abs(q[m] - r[0]).max() < 1e-11, (it, m)
+    assert int(mixer.h.max()) > 4  # the buffers grew
+
+
+@pytest.mark.gpu
+@gpu
+def test_broyden_reset_after_nans_gives_finite_steps():
+    """A molecule whose history went NaN, restarted by `reset`, steps as a fresh mixer does."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    gen = torch.Generator(device="cuda").manual_seed(2)
+    q0 = torch.randn(3, 20, dtype=torch.float64, device="cuda", generator=gen)
+    target = torch.randn(3, 20, dtype=torch.float64, device="cuda", generator=gen)
+    mixer = S.Broyden(q0)
+    on = torch.ones(3, dtype=torch.bool, device="cuda")
+    for it in range(5):
+        dq = _toy_residual(mixer.q, target)
+        if it >= 2:
+            dq[1] = torch.nan
+        mixer.next(dq, on)
+    assert not bool(torch.isfinite(mixer.q[1]).all())
+    mixer.reset(torch.tensor([False, True, False], device="cuda"), q0)
+    ref = S.BroydenReference(q0[1:2])
+    for _ in range(6):
+        q = mixer.next(_toy_residual(mixer.q, target), on)
+        r = ref.next(_toy_residual(ref.q, target[1:2]), on[1:2])
+        assert bool(torch.isfinite(q).all())
+        assert torch.abs(q[1] - r[0]).max() < 1e-11
+
+
+def _carry_batch():
+    from ksmech.qm.gpu import scf as S
+
+    # the fp32 eigensolve of one matrix differs from that of a batch (another solver path), so
+    # every phase below keeps two molecules of a kind running together: B twice, C twice
+    names = ["acetone", "methyl_acetate", "methyl_acetate", "acrolein", "acrolein"]
+    return S.SCFBatch([CASES[n] for n in names], True)
+
+
+@pytest.mark.gpu
+@gpu
+def test_an_scf_started_beside_one_mid_run_ends_as_alone():
+    """Molecules started while another one of the batch is mid-run (`advance` with a carry)
+    end with the energy, cycle count and status they reach run alone from the same start."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    sb = _carry_batch()
+    mask = lambda *ms: torch.tensor([m in ms for m in range(5)], device="cuda")  # noqa: E731
+    first = sb.run(active=mask(0, 3, 4))
+    start = (first.qsh, first.dp, first.qp)  # acetone from its converged charges, the rest new
+    alone = sb.run(start, mask(1, 2))
+    state = sb.new_run()
+    sb.start(state, mask(0, 3, 4))
+    for _ in range(3):
+        assert not bool(sb.advance(state, carry=1.0).any())  # exactly one cycle each
+    assert state.iters.tolist() == [3, 0, 0, 3, 3]
+    sb.start(state, mask(0, 1, 2), start)  # acetone restarted, the methyl acetates started
+    sb.advance(state)
+    r = sb.result(state)
+    assert r.status.tolist() == [S.SCF_OK] * 5
+    for m in (1, 2):
+        assert abs(float(r.energy[m] - alone.energy[m])) < 1e-10
+        assert int(r.iterations[m]) == int(alone.iterations[m])
+    ref = sb.run(start, mask(0, 1, 2))
+    assert int(r.iterations[0]) == int(ref.iterations[0])
+    assert abs(float(r.energy[0] - ref.energy[0])) < 1e-10
+    assert abs(float(r.energy[3] - first.energy[3])) < 1e-10  # the carried acroleins
+    assert int(r.iterations[3]) == int(first.iterations[3])
+
+
+@pytest.mark.gpu
+@gpu
+def test_advance_with_a_carry_returns_early_and_resumes():
+    """advance(carry) stops with molecules still running; advance(None) then completes them,
+    after a `set_geometry` at the same coordinates, with the results of one advance(None). The
+    organic fixtures (they end after 7 to 12
+    cycles): the metals' SCF is not reproducible run to run at 1e-10 (atomic sums; CuCl2 ends
+    after 19 or 20 cycles), with or without a carry."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    organics = [CASES[n] for n in CASES if n not in ("copper_dichloride", "tetrabromoferrate")]
+    sb = S.SCFBatch(organics, True)
+    b = len(organics)
+    on = torch.ones(b, dtype=torch.bool, device="cuda")
+    whole = sb.run()
+    state = sb.new_run()
+    sb.start(state, on)
+    ended = sb.advance(state, carry=0.5)
+    left = int(state.running.sum())
+    assert 0 < left <= b // 2 and int(ended.sum()) == b - left
+    assert not bool((ended & state.running).any())
+    sb.set_geometry(None)  # the integrals again at unchanged coordinates, mid-SCF
+    ended2 = sb.advance(state)
+    assert bool((ended | ended2).all()) and not bool((ended & ended2).any())
+    r = sb.result(state)
+    assert r.status.tolist() == [S.SCF_OK] * b
+    assert torch.abs(r.energy - whole.energy).max() < 1e-10
+    assert r.iterations.tolist() == whole.iterations.tolist()
+    assert torch.abs(r.density - whole.density).max() < 1e-10
+
+
+@pytest.mark.gpu
+@gpu
+def test_fallback_restarts_from_the_guess_within_the_evaluation():
+    """A start that fails (NaN variables for one molecule) falls back to the SAD guess in the
+    same evaluation: its result is the guess run's, marked as fell back, the rest untouched."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    sb = _carry_batch()
+    guess = sb.run()
+    start = [t.clone() for t in (guess.qsh, guess.dp, guess.qp)]
+    shells = sb.atom_mol[sb.sh_atom] == 3
+    start[0][shells] = torch.nan
+    plain = sb.run(start)
+    assert int(plain.status[3]) == S.SCF_NONFINITE
+    r, fell = sb.run_with_fallback(start)
+    assert fell.tolist() == [False, False, False, True, False]
+    assert r.status.tolist() == [S.SCF_OK] * 5
+    assert int(r.iterations[3]) == int(guess.iterations[3])
+    assert abs(float(r.energy[3] - guess.energy[3])) < 1e-10
+    keep = torch.arange(5, device="cuda") != 3
+    assert torch.abs(r.energy[keep] - plain.energy[keep]).max() < 1e-10
+    assert r.iterations[keep].tolist() == plain.iterations[keep].tolist()
+
+
+@pytest.mark.gpu
+@gpu
+def test_the_cycle_limit_holds_per_scf_and_the_fallback_matches_two_runs():
+    """With a limit of 5 cycles, SCFs started at different cycles each end after their own 5th
+    with SCF_MAXITER, and leave the mixer's solve width to the SCFs after them; the fallback
+    inside the evaluation gives what a run from the start merged with a run from the guess
+    gives."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    sb = _carry_batch()
+    sb.max_iter = 5
+    mask = lambda *ms: torch.tensor([m in ms for m in range(5)], device="cuda")  # noqa: E731
+    state = sb.new_run()
+    sb.start(state, mask(3, 4))
+    sb.advance(state, carry=1.0)
+    sb.advance(state, carry=1.0)
+    sb.start(state, mask(1, 2))
+    ended = sb.advance(state, carry=1.0)
+    assert ended.tolist() == [False] * 5 and state.iters.tolist() == [0, 1, 1, 3, 3]
+    ended = sb.advance(state, carry=1.0)
+    ended |= sb.advance(state, carry=1.0)
+    assert ended.tolist() == [False, False, False, True, True]
+    assert state.status[3:].tolist() == [S.SCF_MAXITER] * 2
+    assert sb.advance(state).tolist() == [False, True, True, False, False]
+    assert state.iters.tolist() == [0, 5, 5, 5, 5]
+    sb.start(state, mask(0))
+    sb.advance(state, carry=1.0)
+    sb.advance(state, carry=1.0)
+    assert state.mixer.hbound == 1  # the ended SCFs' slots no longer count
+    sb.advance(state)
+    r = sb.result(state)
+    assert r.iterations.tolist() == [5] * 5 and r.status.tolist() == [S.SCF_MAXITER] * 5
+    start = sb.guess()
+    got, fell = sb.run_with_fallback(start)
+    assert fell.tolist() == [True] * 5
+    ref = sb.merge(sb.run(start), sb.run(None, fell), fell)
+    for k in ("energy", "density", "wdensity", "qsh", "dp", "qp"):
+        assert torch.abs(getattr(got, k) - getattr(ref, k)).max() < 1e-12, k
+    assert got.iterations.tolist() == ref.iterations.tolist()
+    assert got.status.tolist() == ref.status.tolist()
+    for k in got.vin:
+        assert torch.abs(got.vin[k] - ref.vin[k]).max() < 1e-12, k
+
+
+@pytest.mark.gpu
+@gpu
+def test_a_long_scf_leaves_the_mixer_narrow_for_the_scfs_after_it():
+    """An SCF that runs to a 40-cycle limit grows the history to 64 slots; once it has ended,
+    the next SCFs' solves are narrow again (hbound exact at once: the ended SCFs are retired
+    before the solve reads its width) and the buffers shrink back to one chunk, and those SCFs
+    end as a fresh state's."""
+    import torch
+
+    from ksmech.qm.gpu import scf as S
+
+    sb = _carry_batch()
+    econv, sb.max_iter = sb.econv, 40
+    mask = lambda *ms: torch.tensor([m in ms for m in range(5)], device="cuda")  # noqa: E731
+    state = sb.new_run()
+    sb.econv = 0.0  # never converged: both acroleins run to the limit
+    sb.start(state, mask(3, 4))
+    sb.advance(state)
+    assert state.status[3:].tolist() == [S.SCF_MAXITER] * 2
+    assert state.mixer.df.shape[1] == 64 and state.mixer.hbound == 0
+    sb.econv = econv
+    sb.start(state, mask(0, 1, 2))
+    sb.advance(state)
+    assert state.mixer.df.shape[1] == state.mixer.chunk
+    r, ref = sb.result(state), sb.run(None, mask(0, 1, 2))
+    assert r.status[:3].tolist() == [S.SCF_OK] * 3
+    assert r.iterations[:3].tolist() == ref.iterations[:3].tolist()
+    assert torch.abs(r.energy[:3] - ref.energy[:3]).max() < 1e-10
+    assert torch.abs(r.density[:3] - ref.density[:3]).max() < 1e-10
+
+
+@pytest.mark.gpu
+@gpu
+def test_the_ended_counts_ride_on_the_mixers_host_read():
+    """A cycle makes one stacked host read besides the running set (`advance`): the mixer's
+    solve reads the ended and fallback counts with its own failure count and width; only a
+    cycle without a solve (the first of a fresh mixer) reads the counts by themselves."""
+    import torch
+
+    sb = _carry_batch()
+    state = sb.new_run()
+    sb.start(state, torch.ones(5, dtype=torch.bool, device="cuda"))
+    calls = {"n": 0}
+    orig = torch.Tensor.tolist
+
+    def counting(t):
+        calls["n"] += 1
+        return orig(t)
+
+    cycles = 0
+    torch.Tensor.tolist = counting
+    try:
+        while bool(state.running.any()):
+            sb.advance(state, carry=1.0)
+            cycles += 1
+    finally:
+        torch.Tensor.tolist = orig
+    assert cycles > 5 and calls["n"] == cycles  # one read per cycle, not two

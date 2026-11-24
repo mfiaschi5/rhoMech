@@ -417,65 +417,139 @@ class VarMap:
 
 class Broyden:
     """tblite's broyden (Johnson's modified Broyden, damping 0.4, the whole history) for every
-    molecule of a batch at once; molecules outside `active` keep their input unchanged.
+    molecule of a batch at once, each molecule at its own iteration: `reset` restarts some
+    molecules from new inputs while the others continue, and molecules outside `active` keep
+    their state unchanged (a later call continues them).
 
-    The history lives in preallocated buffers (grown by doubling), the Gram matrix of the
-    normalized residual differences is updated by one row per iteration, and the small system is
-    solved in its equilibrated form: with W = diag(omega), tblite's (W A W + 1e-4 I) c = W g is
-    (A + 1e-4 W^-2) y = g for y = W c, the products the update needs, an SPD matrix with unit
-    diagonal solved by Cholesky (LU, as tblite, for a molecule where that fails). Equal to
-    `BroydenReference` (the list form) to rounding."""
+    The history lives in preallocated buffers (grown by doubling, shrunk back once the molecules
+    still stepping use under a quarter of them: one long SCF does not leave a batch's mixer
+    wide for the rest of its life, `_reserve`), slot j of molecule m holding
+    its j-th normalized residual difference; the Gram matrix is updated by one row and column
+    per iteration, and each molecule's small system, over its own h_m slots (the unused ones
+    identity rows with g = 0, so y = 0 there), is solved in its equilibrated form: with
+    W = diag(omega), tblite's (W A W + 1e-4 I) c = W g is (A + 1e-4 W^-2) y = g for y = W c, the
+    products the update needs, an SPD matrix with unit diagonal solved by Cholesky (LU, as
+    tblite, for a molecule where that fails). Equal to `BroydenReference` (the list form) run
+    on each molecule alone, to rounding."""
 
     def __init__(self, q0: torch.Tensor, damping: float = 0.4, chunk: int = 16) -> None:
-        self.q, self.alpha, self.iter, self.h = q0.clone(), damping, 0, 0
-        self.qlast = self.dqlast = None
         b, v = q0.shape
+        self.q, self.alpha = q0.clone(), damping
+        self.qlast, self.dqlast = torch.zeros_like(q0), torch.zeros_like(q0)
+        self.it = torch.zeros(b, dtype=torch.long, device=q0.device)  # iterations done
+        self.h = torch.zeros_like(self.it)  # history slots in use
+        self.hbound = 0  # >= h.max(), exact after each solve (read in its host sync)
+        self.started = False  # no molecule past its first iteration yet: the plain step
+        self.chunk = chunk
+        self.read = None  # the `also` values of the last `next`'s host sync (None: no solve)
         self.df, self.u = q0.new_zeros(b, chunk, v), q0.new_zeros(b, chunk, v)
         self.winv2, self.a = q0.new_zeros(b, chunk), q0.new_zeros(b, chunk, chunk)
 
-    def _grow(self) -> None:
-        cap = self.df.shape[1]
-        if self.h < cap:
-            return
-        pad = torch.nn.functional.pad
-        self.df, self.u = pad(self.df, (0, 0, 0, cap)), pad(self.u, (0, 0, 0, cap))
-        self.winv2, self.a = pad(self.winv2, (0, cap)), pad(self.a, (0, cap, 0, cap))
+    def reset(self, which: torch.Tensor, q0: torch.Tensor) -> None:
+        """Restart the molecules `which` (B,) bool from q0's rows: iteration 0, an empty
+        history. Their history rows are zeroed, so a failed run's NaNs cannot reach a later
+        solve (y = 0 on an unused slot still multiplies its row)."""
+        w = which[:, None]
+        self.q = torch.where(w, q0, self.q)
+        self.it = torch.where(which, 0, self.it)
+        self.h = torch.where(which, 0, self.h)
+        for t in (self.qlast, self.dqlast, self.winv2):
+            t.masked_fill_(w, 0.0)
+        for t in (self.df, self.u, self.a):
+            t.masked_fill_(w[:, :, None], 0.0)
 
-    def next(self, dq: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
-        self.iter += 1
+    def retire(self, which: torch.Tensor) -> None:
+        """The molecules `which` stop: their history no longer counts toward the solve's width
+        (`hbound`). A retired molecule is `reset` before it steps again."""
+        self.it = torch.where(which, 0, self.it)
+        self.h = torch.where(which, 0, self.h)
+
+    def _reserve(self) -> None:
+        """Room for one more slot of every molecule (h <= hbound < capacity): the buffers
+        double when full, and shrink to the smallest chunk multiple of twice the slots in use
+        when that is a quarter of them or less (slots >= hbound are unused: dropping them loses
+        nothing)."""
+        cap = self.df.shape[1]
+        if self.hbound >= cap:
+            pad = torch.nn.functional.pad
+            self.df, self.u = pad(self.df, (0, 0, 0, cap)), pad(self.u, (0, 0, 0, cap))
+            self.winv2, self.a = pad(self.winv2, (0, cap)), pad(self.a, (0, cap, 0, cap))
+            return
+        new = self.chunk
+        while new <= 2 * self.hbound:
+            new *= 2
+        if new <= cap // 4:
+            own = {"memory_format": torch.contiguous_format}
+            self.df, self.u = self.df[:, :new].clone(**own), self.u[:, :new].clone(**own)
+            self.winv2, self.a = (
+                self.winv2[:, :new].clone(**own),
+                self.a[:, :new, :new].clone(**own),
+            )
+
+    def next(self, dq: torch.Tensor, active: torch.Tensor, retire=None, also=None) -> torch.Tensor:
+        """The next input of the active molecules from their residuals dq (B, V). `retire`: the
+        molecules whose SCF has just ended, retired (`retire`) before the solve reads its width.
+        `also`: a 1-d integer tensor read in the solve's host sync, into `self.read` (left None
+        when no solve ran, so the caller reads it itself)."""
+        if retire is not None:
+            self.retire(retire)
+        self.read = None
         q, act = self.q, active[:, None]
-        if self.iter == 1:
-            self.dqlast, self.qlast = dq.clone(), q.clone()
-            self.q = torch.where(act, q + self.alpha * dq, q)
-            return self.q
+        first = active & (self.it == 0)
+        self.it = self.it + active
+        step = q + self.alpha * dq
+        if self.started:
+            later = active & ~first
+            step = torch.where(later[:, None], self._update(dq, later, also), step)
+        self.started = True
+        self.dqlast, self.qlast = torch.where(act, dq, self.dqlast), torch.where(act, q, self.qlast)
+        self.q = torch.where(act, step, q)
+        return self.q
+
+    def _update(self, dq: torch.Tensor, later: torch.Tensor, also=None) -> torch.Tensor:
+        """The Broyden step of the molecules `later` (past their first iteration): a new slot
+        h_m each, the Gram row and column, the system over slots < h_m + 1."""
+        q, lat = self.q, later[:, None]
         norm = torch.sqrt((dq * dq).sum(1))
         om = torch.where(norm > 0.01 / 1e5, 0.01 / norm.clamp(min=1e-300), 1e5).clamp(min=1.0)
         df = dq - self.dqlast
         inv = 1.0 / torch.sqrt((df * df).sum(1)).clamp(min=np.finfo(float).eps)
         df = inv[:, None] * df
-        self._grow()
-        k = self.h
-        self.h = h = k + 1
-        self.df[:, k], self.winv2[:, k] = df, 1.0 / (om * om)
-        row = (self.df[:, :h] @ df[:, :, None])[:, :, 0]
-        self.a[:, k, :h], self.a[:, :h, k] = row, row
-        g = (self.df[:, :h] @ dq[:, :, None])[:, :, 0]
-        y = _spd_solve(self.a[:, :h, :h] + torch.diag_embed(1e-4 * self.winv2[:, :h]), g)
-        self.u[:, k] = self.alpha * df + inv[:, None] * (q - self.qlast)
-        new = q + self.alpha * dq - (y[:, None, :] @ self.u[:, :h])[:, 0]
-        self.dqlast, self.qlast = torch.where(act, dq, self.dqlast), torch.where(act, q, self.qlast)
-        self.q = torch.where(act, new, q)
-        return self.q
+        self._reserve()
+        hn, k, ar = self.hbound + 1, self.h, torch.arange(len(q), device=q.device)
+        self.df[ar, k] = torch.where(lat, df, self.df[ar, k])
+        self.winv2[ar, k] = torch.where(later, 1.0 / (om * om), self.winv2[ar, k])
+        self.h = self.h + later
+        valid = torch.arange(hn, device=q.device)[None, :] < self.h[:, None]  # (B, hn)
+        dfs = self.df[:, :hn]
+        row = torch.where(valid & lat, (dfs @ df[:, :, None])[:, :, 0], 0.0)
+        self.a[ar, k, :hn] = torch.where(lat, row, self.a[ar, k, :hn])
+        self.a[ar, :hn, k] = torch.where(lat, row, self.a[ar, :hn, k])
+        g = torch.where(valid & lat, (dfs @ dq[:, :, None])[:, :, 0], 0.0)
+        pair = (valid & lat)[:, :, None] & valid[:, None, :]
+        eye = torch.eye(hn, dtype=q.dtype, device=q.device)
+        m = torch.where(pair, self.a[:, :hn, :hn] + torch.diag_embed(1e-4 * self.winv2[:, :hn]),
+                        eye)  # fmt: skip
+        extra = self.h.max()[None] if also is None else torch.cat([self.h.max()[None], also])
+        y, read = _spd_solve(m, g, also=extra)
+        self.hbound, self.read = read[0], (read[1:] if also is not None else None)
+        self.u[ar, k] = torch.where(lat, self.alpha * df + inv[:, None] * (q - self.qlast),
+                                    self.u[ar, k])  # fmt: skip
+        return q + self.alpha * dq - (y[:, None, :] @ self.u[:, :hn])[:, 0]
 
 
-def _spd_solve(a: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-    """a y = g for a batch of SPD matrices: Cholesky, LU where Cholesky fails."""
+def _spd_solve(a: torch.Tensor, g: torch.Tensor, also=None):
+    """a y = g for a batch of SPD matrices: Cholesky, LU where Cholesky fails. `also` (a 1-d
+    integer tensor or None) is read in the same host sync as the failure check; returns y and
+    its values (a list, or None)."""
     chol, info = torch.linalg.cholesky_ex(a)
     y = torch.cholesky_solve(g[:, :, None], chol)[:, :, 0]
     bad = info != 0
-    if bool(bad.any()):
+    extra = bad.new_zeros(0, dtype=torch.long) if also is None else also.long().reshape(-1)
+    nbad, *values = torch.cat([bad.sum()[None].long(), extra]).tolist()
+    if nbad:
         y[bad] = torch.linalg.solve(a[bad], g[bad][:, :, None])[:, :, 0]
-    return y
+    return y, (values if also is not None else None)
 
 
 class BroydenReference:
@@ -539,6 +613,28 @@ SCF_OK, SCF_MAXITER, SCF_BAD_GEOMETRY, SCF_NONFINITE = 0, 1, 2, 3
 SCF_STATUS = {SCF_MAXITER: "no convergence within the cycle limit",
               SCF_BAD_GEOMETRY: "non-finite integrals or S not positive definite",
               SCF_NONFINITE: "non-finite Fock matrix, eigensolve or energy"}  # fmt: skip
+
+
+@dataclass
+class SCFRun:
+    """The SCF state of a batch, per molecule, kept between `SCFBatch.advance` calls: the
+    mixer, the orbital buffers (c, p, x, f, emo, occ, ts of `SCFBatch._cycle`), each
+    molecule's input potentials of its last cycle, output variables, energies, cycle count and
+    status, and which molecules run, are in the precise phase, may still fall back to the SAD
+    guess, and fell back."""
+
+    mixer: Broyden
+    st: dict
+    vin: dict
+    qout: torch.Tensor  # (B, V) the last cycle's output variables
+    energy: torch.Tensor  # (B,)
+    elast: torch.Tensor  # (B,) the last precise cycle's energy, inf after an fp32 one
+    iters: torch.Tensor  # (B,) cycles of the current SCF
+    status: torch.Tensor  # (B,) SCF_MAXITER while running
+    running: torch.Tensor  # (B,) bool
+    precise: torch.Tensor  # (B,) bool
+    may_fall_back: torch.Tensor  # (B,) bool
+    fell: torch.Tensor  # (B,) bool
 
 
 class SCFBatch:
@@ -661,67 +757,135 @@ class SCFBatch:
 
     SWITCH = 1e-4  # residual RMS below which a molecule's cycles turn fp64-accurate
 
-    def run(self, start=None, active=None) -> SCFResult:
-        """The SCF from `start` (qsh, dp, qp), default the SAD guess, for the molecules
-        `active` (default all; bad geometries never run). A molecule that fails stops alone:
-        its status says why (SCF_STATUS)."""
-        qsh, dp, qp = start if start is not None else self.guess()
-        mixer = Broyden(self.vars.pack(qsh, dp, qp))
+    def new_run(self, start=None) -> SCFRun:
+        """An SCF state with no molecule running: each molecule's SCF variables at `start`
+        (qsh, dp, qp), default the SAD guess, its status SCF_MAXITER (SCF_BAD_GEOMETRY for a
+        bad geometry), its energy NaN and no cycle run, as a molecule `run` leaves inactive."""
+        q0 = self.vars.pack(*(start if start is not None else self.guess()))
         b, n = self.vars.b, self.lay.nmax
         st = {k: torch.zeros(b, n, n, **_f64()) for k in ("c", "p", "x", "f")}
         st.update(emo=torch.zeros(b, n, **_f64()), occ=torch.zeros(b, n, **_f64()),
                   ts=torch.zeros(b, **_f64()))  # fmt: skip
-        go = torch.ones(b, dtype=torch.bool, device="cuda") if active is None else active.clone()
-        active = go & ~self.g.bad
-        status = torch.full((b,), SCF_MAXITER, dtype=torch.long, device="cuda")
-        status[self.g.bad] = SCF_BAD_GEOMETRY
-        precise = torch.zeros(b, dtype=torch.bool, device="cuda")
-        elast = torch.full((b,), torch.inf, **_f64())
-        energy = torch.full((b,), torch.nan, **_f64())
-        iters = torch.zeros(b, dtype=torch.long, device="cuda")
-        qout, vin = mixer.q.clone(), self._zero_potentials()
-        sh_mol = self.atom_mol[self.sh_atom]
-        for it in range(1, self.max_iter + 1):
-            if not bool(active.any()):
-                break
-            this = precise.clone()
-            pot = self._potentials(*self.vars.unpack(mixer.q))
-            _keep_input(vin, pot, active[sh_mol], active[self.atom_mol])
-            idx = torch.nonzero(active).squeeze(1)
-            failed = self._cycle(st, pot, active, this, idx)
-            qo = mulliken(self.g, self.lay, st["p"], self.n0sh, self.db.hb.nat, idx)
-            qout = torch.where(active[:, None], self.vars.pack(*qo), qout)
-            dq = qout - mixer.q
-            enew = self._energy(st["p"], st["ts"], self._potentials(*qo, slot="out"))
-            energy = torch.where(active, enew, energy)
-            err = torch.sqrt((dq * dq).sum(1) / self.vars.nvar)
-            bad = active & (failed | ~torch.isfinite(energy) | ~torch.isfinite(err))
-            done = active & this & ((energy - elast).abs() < self.econv) & (err < self.pconv)
-            elast = torch.where(this, energy, torch.inf)
-            iters = torch.where(active, it, iters)
-            status = torch.where(bad, SCF_NONFINITE, torch.where(done & ~bad, SCF_OK, status))
-            finished = done | bad
-            if bool(finished.any()):
-                self._wdensity(st, torch.nonzero(finished).squeeze(1))
-            active = active & ~finished
-            precise |= active & (err < self.SWITCH)
-            mixer.next(torch.where(active[:, None], dq, 0.0), active)
-        if bool(active.any()):
-            self._wdensity(st, torch.nonzero(active).squeeze(1))
-        qsh, dp, qp = self.vars.unpack(qout)
-        return SCFResult(energy, status == SCF_OK, iters, st["p"], st["x"], st["emo"],
-                         st["occ"], qsh, dp, qp, status, vin)  # fmt: skip
+        no = torch.zeros(b, dtype=torch.bool, device="cuda")
+        status = torch.where(self.g.bad, SCF_BAD_GEOMETRY, SCF_MAXITER)
+        return SCFRun(Broyden(q0), st, self._zero_potentials(), q0.clone(),
+                      torch.full((b,), torch.nan, **_f64()), torch.full((b,), torch.inf, **_f64()),
+                      torch.zeros(b, dtype=torch.long, device="cuda"), status, no.clone(),
+                      no.clone(), no.clone(), no.clone())  # fmt: skip
+
+    def start(self, state: SCFRun, which, start=None, fallback=False) -> None:
+        """(Re)start the SCF of the molecules `which` (B,) bool from the rows of `start` (full
+        batch (qsh, dp, qp)), default the SAD guess, at the current geometry; the others keep
+        their state, mid-run or not. A bad geometry gets SCF_BAD_GEOMETRY and does not run.
+        With `fallback` (True, or a (B,) bool mask of the molecules it applies to) and a
+        `start`, a molecule whose SCF then ends unconverged (SCF_MAXITER, SCF_NONFINITE)
+        restarts once from the guess within the same evaluation, as `TbliteEnergy` restarts
+        tblite, and is marked in `state.fell`. A molecule whose `start` is the guess itself
+        (an optimization's first point) takes no fallback: tblite's would rerun the same SCF."""
+        bad = self.g.bad
+        go = which & ~bad
+        self._reset(state, which, self.vars.pack(*(start if start is not None else self.guess())))
+        state.status = torch.where(which, torch.where(bad, SCF_BAD_GEOMETRY, SCF_MAXITER),
+                                   state.status)  # fmt: skip
+        state.running = (state.running & ~which) | go
+        fb = go & fallback if start is not None else torch.zeros_like(go)
+        state.may_fall_back = torch.where(which, fb, state.may_fall_back)
+        state.fell = state.fell & ~which
+
+    def _reset(self, s: SCFRun, which, q0) -> None:
+        """Every per-SCF quantity of the molecules `which` as a fresh SCF from q0 has it."""
+        s.mixer.reset(which, q0)
+        s.qout = torch.where(which[:, None], q0, s.qout)
+        s.energy = torch.where(which, torch.nan, s.energy)
+        s.elast = torch.where(which, torch.inf, s.elast)
+        s.iters = torch.where(which, 0, s.iters)
+        s.precise = s.precise & ~which
+        for t in s.st.values():
+            t.masked_fill_(which.view(-1, *([1] * (t.dim() - 1))), 0.0)
+        sh, at = which[self.atom_mol[self.sh_atom]], which[self.atom_mol]
+        for k, t in s.vin.items():
+            s.vin[k] = torch.where((sh if k == "vsh" else at).view(-1, *([1] * (t.dim() - 1))),
+                                   0.0, t)  # fmt: skip
+
+    def advance(self, state: SCFRun, carry: float | None = None) -> torch.Tensor:
+        """SCF cycles of the running molecules; returns the molecules (B,) bool whose SCF ended
+        during the call (converged or failed; a fallback restart is not an end). carry=None
+        runs until none is running; with a number, the call returns once at most carry x the
+        molecules running at entry still run (after one cycle at least; carry >= 1: exactly
+        one), and those keep their state for the next call."""
+        ended = torch.zeros_like(state.running)
+        idx = torch.nonzero(state.running).squeeze(1)
+        n0, cycles = len(idx), 0
+        while len(idx) and not (carry is not None and cycles and len(idx) <= carry * n0):
+            ended |= self._iterate(state, idx)
+            cycles += 1
+            idx = torch.nonzero(state.running).squeeze(1)
+        return ended
+
+    def _iterate(self, s: SCFRun, idx) -> torch.Tensor:
+        """One cycle of the running molecules (indices `idx`); returns those whose SCF ended."""
+        on, this = s.running, s.precise.clone()
+        s.iters = s.iters + on
+        pot = self._potentials(*self.vars.unpack(s.mixer.q))
+        _keep_input(s.vin, pot, on[self.atom_mol[self.sh_atom]], on[self.atom_mol])
+        failed = self._cycle(s.st, pot, on, this, idx)
+        qo = mulliken(self.g, self.lay, s.st["p"], self.n0sh, self.db.hb.nat, idx)
+        s.qout = torch.where(on[:, None], self.vars.pack(*qo), s.qout)
+        dq = s.qout - s.mixer.q
+        enew = self._energy(s.st["p"], s.st["ts"], self._potentials(*qo, slot="out"))
+        s.energy = torch.where(on, enew, s.energy)
+        err = torch.sqrt((dq * dq).sum(1) / self.vars.nvar)
+        bad = on & (failed | ~torch.isfinite(s.energy) | ~torch.isfinite(err))
+        done = on & this & ((s.energy - s.elast).abs() < self.econv) & (err < self.pconv) & ~bad
+        s.elast = torch.where(on, torch.where(this, s.energy, torch.inf), s.elast)
+        unconv = bad | (on & ~done & (s.iters >= self.max_iter))
+        s.status = torch.where(bad, SCF_NONFINITE, torch.where(done, SCF_OK, s.status))
+        retry = unconv & s.may_fall_back
+        final = done | (unconv & ~retry)
+        s.running = on & ~final & ~retry
+        s.precise = s.precise | (s.running & (err < self.SWITCH))
+        counts = torch.stack([final.sum(), retry.sum()])  # read in the mixer's solve's sync
+        s.mixer.next(torch.where(s.running[:, None], dq, 0.0), s.running, final | retry, counts)
+        nfinal, nretry = s.mixer.read if s.mixer.read is not None else counts.tolist()
+        if nfinal:
+            self._wdensity(s.st, torch.nonzero(final).squeeze(1))
+        if nretry:  # the fallback: the same evaluation again from the SAD guess
+            self._reset(s, retry, self.vars.pack(*self.guess()))
+            s.status = torch.where(retry, SCF_MAXITER, s.status)
+            s.running, s.fell = s.running | retry, s.fell | retry
+            s.may_fall_back = s.may_fall_back & ~retry
+        return final
+
+    def result(self, state: SCFRun) -> SCFResult:
+        """Every molecule's SCF result as it stands (a running one's last cycle), as copies:
+        later `start` and `advance` calls do not change it."""
+        qsh, dp, qp = self.vars.unpack(state.qout.clone())
+        st = {k: state.st[k].clone() for k in ("p", "x", "emo", "occ")}
+        return SCFResult(state.energy.clone(), state.status == SCF_OK, state.iters.clone(),
+                         st["p"], st["x"], st["emo"], st["occ"], qsh, dp, qp,
+                         state.status.clone(), dict(state.vin))  # fmt: skip
+
+    def run(self, start=None, active=None) -> SCFResult:
+        """The SCF from `start` (qsh, dp, qp), default the SAD guess, for the molecules
+        `active` (default all; bad geometries never run). A molecule that fails stops alone:
+        its status says why (SCF_STATUS)."""
+        state = self.new_run(start)
+        self.start(state, self._which(active), start)
+        self.advance(state)
+        return self.result(state)
 
     def run_with_fallback(self, start, active=None) -> tuple[SCFResult, torch.Tensor]:
         """`run` from `start`; the molecules it leaves unconverged run again from the SAD guess
-        (as `TbliteEnergy` restarts tblite). Returns the merged result and who fell back."""
-        r = self.run(start, active)
-        retry = ~r.converged & ~self.g.bad
-        if active is not None:
-            retry &= active
-        if start is None or not bool(retry.any()):
-            return r, torch.zeros_like(retry)
-        return self.merge(r, self.run(None, retry), retry), retry
+        (as `TbliteEnergy` restarts tblite). Returns the result and who fell back."""
+        state = self.new_run(start)
+        self.start(state, self._which(active), start, fallback=True)
+        self.advance(state)
+        return self.result(state), state.fell.clone()
+
+    def _which(self, active) -> torch.Tensor:
+        if active is None:
+            return torch.ones(self.vars.b, dtype=torch.bool, device="cuda")
+        return active.clone()
 
     def merge(self, a: SCFResult, b: SCFResult, take_b: torch.Tensor) -> SCFResult:
         """`a` with the molecules `take_b` from `b`."""

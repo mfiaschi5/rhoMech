@@ -36,6 +36,7 @@ from ksmech.qm.gpu import optimize as O  # noqa: E402
 from ksmech.qm.gpu import scf as S  # noqa: E402
 
 T = defaultdict(float)
+PHASE = {"now": "step"}
 N = defaultdict(int)
 
 
@@ -56,7 +57,7 @@ def instrument() -> None:
     sb = S.SCFBatch
     sb.set_geometry = timed("geometry", sb.set_geometry)
     sb.gradient = timed("gradient", sb.gradient)
-    sb.run = timed("scf_run", sb.run)
+    sb.advance = timed("scf_run", sb.advance)  # the cycles of every SCF evaluation
     orig_pot = sb._potentials
 
     def pot(self, *a, slot="in"):
@@ -84,69 +85,80 @@ def instrument() -> None:
         return timed("cycle", orig_cycle)(self, st, p, active, precise, idx)
 
     sb._cycle = cycle
-    O.BatchedANC._evaluate = timed("evaluate", O.BatchedANC._evaluate)
-    O.BatchedANC._step = timed("step", O.BatchedANC._step)
-    orig_rf = sb.run_with_fallback
+    O.BatchedANC._round = timed("round", O.BatchedANC._round)  # one optimizer round, all in it
+    O.BatchedANC._propose = timed("propose", O.BatchedANC._propose)
+    orig_collect = O.BatchedANC._collect
 
-    def rf(self, start, active=None):
-        r, fell = orig_rf(self, start, active)
-        N["evals"] += int(active.sum()) if active is not None else len(r.energy)
-        N["fallbacks"] += int(fell.sum())
-        it = r.iterations[active] if active is not None else r.iterations
-        N["scf_cycles_sum"] += int(it.sum())
-        return r, fell
+    def collect(self, ended):  # every round whose evaluations ended: count them
+        N["evals"] += int(ended.sum())
+        N["fallbacks"] += int((ended & self.scf.fell).sum())
+        N["scf_cycles_sum"] += int(self.scf.iters[ended].sum())
+        return orig_collect(self, ended)
 
-    sb.run_with_fallback = rf
+    O.BatchedANC._collect = timed("collect", collect)
 
 
 def evals_log() -> list:
-    """Per `_evaluate`: CUDA events around it, the batch size, the live molecules and the SCF
-    cycles of the batch, kept as device tensors and read once at the end (no extra sync)."""
-    rows, orig = [], O.BatchedANC._evaluate
+    """Per optimizer round (`BatchedANC._round`): CUDA events around it, the batch size, the
+    evaluations that ended in it and the SCF cycles it ran, the counts kept as device tensors
+    and read once at the end (no extra sync)."""
+    rows, orig, orig_collect = [], O.BatchedANC._round, O.BatchedANC._collect
+    orig_iterate = S.SCFBatch._iterate
 
-    def ev(self, x, active):
-        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        a.record()
-        out = orig(self, x, active)
-        b.record()
-        rows.append((self.b, active.sum(), a, b, self._last_cycles))
+    def rnd(self, *a, **k):
+        ev = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        self._ended_n, self.sb._cycles = 0, 0
+        ev[0].record()
+        out = orig(self, *a, **k)
+        ev[1].record()
+        rows.append((self.b, self._ended_n, ev[0], ev[1], self.sb._cycles))
         return out
 
-    orig_run = S.SCFBatch.run
+    def collect(self, ended):
+        self._ended_n = ended.sum()
+        return orig_collect(self, ended)
 
-    def run(self, start=None, active=None):
-        r = orig_run(self, start, active)
-        self._cycles = r.iterations.max()
-        return r
+    def iterate(self, s, idx):
+        self._cycles += 1
+        return orig_iterate(self, s, idx)
 
-    O.BatchedANC._evaluate = ev
-    S.SCFBatch.run = run
-    O.BatchedANC._last_cycles = property(lambda self: self.sb._cycles)
+    O.BatchedANC._round, O.BatchedANC._collect, S.SCFBatch._iterate = rnd, collect, iterate
     return rows
 
 
 def cycles_log() -> list:
-    """Per SCF cycle: an event at its start (the input potentials), the batch size and the
-    active molecules; a cycle's time is up to the next cycle's start in the same SCF."""
+    """Per SCF cycle: an event at its start (the input potentials), the batch size, the
+    active molecules and the round's mode; a cycle's time is up to the next cycle's start in
+    the same `advance` call (one round's SCF cycles)."""
     rows, sb = [], S.SCFBatch
-    orig_pot, orig_cycle, orig_run = sb._potentials, sb._cycle, sb.run
+    orig_pot, orig_cycle, orig_advance = sb._potentials, sb._cycle, sb.advance
 
     def pot(self, *a, slot="in"):
         if slot == "in":
             ev = torch.cuda.Event(enable_timing=True)
             ev.record()
-            rows.append([self._run_id, self.vars.b, None, ev])
+            rows.append([self._run_id, self.vars.b, None, ev, PHASE["now"]])
         return orig_pot(self, *a, slot=slot)
 
     def cycle(self, st, p, active, precise, idx=None):
         rows[-1][2] = active.sum()
         return orig_cycle(self, st, p, active, precise, idx)
 
-    def run(self, start=None, active=None):
+    def advance(self, state, carry=None):  # one round's SCF cycles
         self._run_id = len(rows)
-        return orig_run(self, start, active)
+        return orig_advance(self, state, carry)
 
-    S.SCFBatch._potentials, S.SCFBatch._cycle, S.SCFBatch.run = pot, cycle, run
+    S.SCFBatch._potentials, S.SCFBatch._cycle, S.SCFBatch.advance = pot, cycle, advance
+    orig_round = O.BatchedANC._round
+
+    def rnd(self, st, active, reason, mode, launch=True):  # "initial": the batch's first round
+        PHASE["now"] = "initial" if mode == "init" else "step"
+        try:
+            return orig_round(self, st, active, reason, mode, launch)
+        finally:
+            PHASE["now"] = "step"
+
+    O.BatchedANC._round = rnd
     return rows
 
 
@@ -156,9 +168,13 @@ def cycle_costs(rows: list) -> dict:
     recs = []
     for a, b in zip(rows[:-1], rows[1:], strict=True):
         if a[0] == b[0] and a[2] is not None:
-            recs.append((a[1], int(a[2]), a[3].elapsed_time(b[3])))
+            recs.append((a[1], int(a[2]), a[3].elapsed_time(b[3]), a[4]))
     total, out = sum(r[2] for r in recs), {}
-    for lo, hi in ((0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.01)):
+    for phase in ("initial", "step"):
+        sel = [r for r in recs if r[3] == phase]
+        share = sum(r[2] for r in sel) / max(total, 1e-9)
+        out[f"phase_{phase}"] = {"cycles": len(sel), "share": round(share, 3)}
+    for lo, hi in ((0, 0.05), (0.05, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.01)):
         sel = [r for r in recs if lo <= r[1] / r[0] < hi]
         if sel:
             out[f"{lo}-{hi}"] = {
@@ -172,7 +188,8 @@ def cycle_costs(rows: list) -> dict:
 
 
 def drain(rows: list) -> dict:
-    """Wall share and seconds per molecule-energy by the live molecules of the step."""
+    """Wall share and seconds per molecule-energy by the evaluations that ended in the round
+    (`steps`: rounds; with carry None a round is a step and every live molecule ends in it)."""
     torch.cuda.synchronize()
     edges = [0, 8, 16, 32, 64, 128, 256, 10**9]
     out = {}
@@ -213,7 +230,7 @@ def report(wall: float, nmol: int) -> dict:
     out["sections_s"] = {k: round(v, 3) for k, v in sorted(T.items(), key=lambda kv: -kv[1])}
     out["counts"] = dict(N)
     ev = max(N["evals"], 1)
-    out["ms_per_mol_eval"] = 1e3 * T["evaluate"] / ev
+    out["ms_per_mol_eval"] = 1e3 * T["round"] / ev
     out["scf_cycles_per_eval"] = N["scf_cycles_sum"] / ev
     out["active_share_per_cycle"] = (N["cyc_fp32_mols"] + N["cyc_fp64_mols"]) / max(
         N["cyc_batch_mols"], 1
@@ -234,12 +251,16 @@ def main() -> None:
     ap.add_argument(
         "--evals-log",
         action="store_true",
-        help="per evaluation (batch, live, cycles, seconds), no other timer",
+        help="per optimizer round (batch, evaluations ended, cycles, seconds), no other timer",
     )
     ap.add_argument("--cycles-log", action="store_true", help="per SCF cycle, no other timer")
     ap.add_argument("--cache", type=Path, required=True)
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--carry", default=None, help="relax_many's carry: a number or none")
     args = ap.parse_args()
+    carry = {}
+    if args.carry is not None:
+        carry["carry"] = None if args.carry.lower() == "none" else float(args.carry)
     tasks = tasks_for(args.bin, args.per_bin, args.seeds, args.cache)
     from ksmech.qm.xtb_calc import QMConfig
 
@@ -250,7 +271,7 @@ def main() -> None:
         from torch.profiler import ProfilerActivity, profile
 
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            O.relax_many(tasks, config)
+            O.relax_many(tasks, config, **carry)
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
         print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=25))
         return
@@ -261,7 +282,7 @@ def main() -> None:
         instrument()
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    outs = O.relax_many(tasks, config)
+    outs = O.relax_many(tasks, config, **carry)
     torch.cuda.synchronize()
     res = report(time.perf_counter() - t0, len(tasks))
     res["outcomes"] = dict(Counter("ok" if r.reason is None else str(r.reason) for r in outs))
