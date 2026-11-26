@@ -11451,3 +11451,54 @@ after the carry-over. Branch `claude/gpu-xtb`. Code: `qm.gpu_run` (the driver),
   an exception (the finishing guards its whole body); a second run computes nothing; and with
   the GPU, records against tblite-anc for four fixtures with two open shells routed, and the
   SCF cycle limit.
+
+## 2026-11-26: GPU xTB stage 6: the end-to-end benchmark
+
+Report: `docs/gpu_qm_benchmark.md`. Scripts: `scripts/gpu_xtb/stage6_{sample,job,compare}`.
+Data: `data/processed/gpu_qm_benchmark/`.
+
+- **Design:**
+  - Three arms of `ksmech-qm run --workers 12`, identical except `--optimizer`: `tblite`
+    (production's L-BFGS-B), `tblite-anc` and `gpu-anc`.
+  - Each (set, arm) has a fresh cache and processed dir. Each arm must have written all its ok
+    records during the arm itself, with no memo hits.
+  - One GPU-queue job ran everything (job 50, 01:50-04:22), so fits stayed off the machine for
+    the CPU arms too.
+  - Before every arm the job waits for 85% CPU idle over 5 s and for no pytest or ksmech fit.
+    During the arm it logs `vmstat`, `nvidia-smi` and foreign pytest or fit processes; none
+    ran. The CPU arms averaged 75.7% CPU, the 12 workers plus under one thread.
+  - The gate's patterns are anchored to a python running pytest or a fit: a first version
+    matched the shell of a command that only mentioned "bin/pytest" and waited forever.
+- **Inputs:**
+  - 1,000 random species of the full ReactMech v19 QM manifest (any status, seed 0), the
+    realistic mix;
+  - the spike's 64 species per size bin, which give per-bin figures for a short queue only.
+- **Result on the slice:**
+  - gpu-anc 511 and 562 s (two runs, a 10% spread), tblite-anc 871 s, tblite-lbfgs 2,892 s.
+  - That is 1.55-1.70x for the GPU over the same optimizer on the CPU, 3.3x for tblite-anc
+    over tblite-lbfgs, and 5.1-5.7x for gpu-anc over production.
+  - Outcomes: the same for gpu-anc and tblite-anc (994 ok). tblite-lbfgs made 983.
+  - Records of the 758 GPU-optimized species against tblite-anc: 77% within 1e-5 Eh and 99%
+    within 1e-3, median RMSD 0.002 Å; no bias in the sign of the tail. tblite-lbfgs against
+    tblite-anc: 5% within 1e-5, median RMSD 0.16 Å.
+  - gpu-anc is not reproducible bit for bit: its two runs differ beyond 1e-4 Eh on 25 of 758
+    species (batch composition changes a molecule's path).
+  - These rates hold for a 1,000-species queue; a whole source is unmeasured.
+  - Production's manifest seconds are 1.7x the lbfgs arm's for the same species, growing with
+    size. Those records predate the OpenBLAS preload (ba36049), the likely cause.
+- **Per bin** (64 species): gpu-anc against tblite-anc is 0.77x at 31-50 atoms, 0.94x at 51-80,
+  1.36x at 81-120 and 1.85x at 121-200. A 64-species queue is too short for the GPU below 80
+  atoms. Below 31 atoms gpu-anc equals tblite-anc bit for bit, plus about 4 s of CUDA start-up.
+- **Verdict:**
+  - The spike's 2x bar for the GPU's own gain is not met end to end: 1.6x on the realistic
+    mix. Against production's optimizer gpu-anc is 5x, but 3.3x of that tblite-anc gives on
+    the CPU alone.
+  - The gpu-anc run is GPU-bound: after its first quarter the CPU is 15-29% busy, the GPU
+    64-82%.
+- **Levers, not built and needing approval:**
+  - CPU workers taking GPU-eligible species while idle: at most about 2.3x over tblite-anc,
+    estimated;
+  - a higher GPU threshold for short sources;
+  - not retrying a GPU OPT_NOT_CONVERGED on the CPU: the 3 such species failed again there.
+- Either switch of optimizer is a new method tag and a full QM recompute. The default stays
+  `tblite` until the user decides.

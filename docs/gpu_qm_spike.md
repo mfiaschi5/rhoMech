@@ -231,3 +231,20 @@ Smoke runs on the spike's 384 species (1-200 atoms):
   the parity gate did.
 
 Details in docs/decisions.md, 2026-11-25.
+
+## Stage 6 result (2026-11-26)
+
+**End to end on 1,000 random ReactMech species with 12 workers, gpu-anc makes records 1.6x
+faster than tblite-anc (1.55-1.70x over two runs) and 5.1-5.7x faster than production's
+tblite-lbfgs.** tblite-anc alone is 3.3x faster than tblite-lbfgs.
+- **Outcomes:** gpu-anc and tblite-anc end with the same outcomes.
+- **Records:** on the 758 species the GPU optimized, gpu-anc's records lie within 1e-5 Eh of
+  tblite-anc's for 77% and within 1e-3 for 99%, median RMSD 0.002 Å, with no bias. The
+  optimizer change alone moves them far more: median RMSD 0.16 Å.
+- **Scope:** the rates hold for a 1,000-species queue; a whole source is unmeasured.
+- **Per bin, on 64-species queues:** the GPU loses at 31-80 atoms (0.77x and 0.94x) and wins
+  above 80 (1.36x and 1.85x).
+- **Bottleneck:** the run is GPU-bound, with the CPU mostly idle.
+
+The spike's 2x bar for the GPU over the CPU is not met end to end. Report:
+`docs/gpu_qm_benchmark.md`; details in docs/decisions.md, 2026-11-26.
