@@ -11190,3 +11190,948 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
 - **The three cheap tests close with no positive result by the registered rules.** Neither an
   energy nor the backward model reranks the first step better; the product, used greedily, makes
   it worse, and used through the search gives an unproven +3-5 points.
+
+## 2026-11-22: GPU xTB stage 1: the batched one-electron integrals pass the gate
+
+Stage 1 of the GPU xTB plan (approved up to this gate). It answers the question of
+docs/gpu_qm_spike.md: can the batched GFN2 integrals with their gradients fit the non-SCF
+budget? The gate was one third of the spike's budget per molecule and energy.
+
+- **What was built.**
+  - `native/ksxtb` is a CUDA library with a C interface. It computes S, H0, the dipole and
+    quadrupole integrals D and Q, and the H0 gradient contraction of tblite's
+    `get_hamiltonian_gradient` for a closed shell, all in fp64 and for a whole batch of
+    molecules.
+  - `ksmech.qm.gpu.reference` is a plain numpy port of tblite 0.7.0 (integral/multipole.f90,
+    xtb/h0.f90), term by term. It is the oracle, not an engine.
+  - `ksmech.qm.gpu.native` builds the library, packs a batch and holds device memory in torch
+    tensors.
+  - The GFN2 parameters are parsed from tblite's and mctc-lib's Fortran tables, never retyped
+    (`native/ksxtb/tools/extract_gfn2.py` writes `src/ksmech/qm/gpu/gfn2_params.json`).
+- **Correctness.**
+  - Against tblite on the spike's real molecules (16 per size bin, 96 in all, from 1 to 200
+    atoms): S within 1.2e-15, H0 within 1.7e-13. D and Q agree with tblite's molecular dipole
+    and quadrupole, rebuilt from tblite's density, within 1.6e-14 and 4.3e-13.
+  - The analytic gradient contraction agrees with central differences of the functional it
+    differentiates to about 3e-9, the error of the differences, in every bin.
+  - Every element of GFN2 (Z = 1-86) was checked on the GPU against tblite: 165 Z-H and Z-Z
+    diatomics, S within 1.6e-15, H0 within 2.5e-13. tblite's SCF fails on seven lanthanide
+    hydrides; their homodiatomics pass.
+  - The CUDA kernels agree with the numpy reference within 1e-15 on the ten fixtures,
+    H3PO4, DMSO, MeBr, CuCl2 and FeBr4-, every angular class with d-d pairs included.
+  - Tests: `tests/test_qm_gpu.py`. The marker `gpu` covers the kernels: S and H0 of every
+    fixture and of every element's Z-Z diatomic against tblite; D, Q and the gradient against
+    the reference.
+  - **Not yet checked against tblite's gradient.** The gradient contraction is transcribed
+    from tblite. It matches the derivative of its own functional and the numpy port, but it is
+    first compared with tblite's gradient in stage 3, where the SCF supplies real P, W and
+    potentials.
+  - Script: `scripts/gpu_xtb/stage1_gate.py check-tblite | check-fd | time`. Results are in
+    `data/processed/gpu_qm_spike/stage1_*.json` (local).
+- **Speed.** Forward (S, H0, D, Q) plus gradient pass, ms per molecule, RTX 4080 SUPER, at the
+  best of batches 64/256/1024:
+
+  | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+  |---|---|---|---|---|---|---|
+  | GPU integrals + gradient | 0.011 | 0.024 | 0.063 | 0.14 | 0.32 | 0.50 |
+  | gate (budget / 3) | 0.020 | 0.27 | 0.77 | 2.27 | 8.3 | 12.3 |
+  | cpu12, one tblite SP + gradient (spike) | 0.4 | 2.8 | 7.6 | 21 | 77 | 119 |
+
+  Every bin passes. From 16 atoms up the margin is 10-40x, and the integrals take 2-8% of the
+  spike's whole non-SCF budget. The timings were taken with the QMugs store build loading the
+  CPU (load ~16), with CUDA events around the launches. The GPU was otherwise idle.
+- **Design choices.**
+  - **Thread mapping.** One thread per (shell pair, spherical AO pair), with the AO pair as the
+    slow index (thread t takes pair t % n). A warp therefore shares one AO pair, so its
+    branches are uniform, and the cartesian loops unroll at compile time, so the 1D tables stay
+    in registers. ptxas spills 128 B in the d-d gradient kernel and 4 B in the off-site s-p
+    forward kernel, nothing elsewhere. The kernels use 78-254 registers, so occupancy is low;
+    that is left for later, as the gate passes without it.
+  - **1D integrals.** Obara-Saika over the product Gaussian plus the transfer relation
+    (x - B) = (x - A) + (A - B).
+  - **Gradient.** The B-centred multipoles are folded into per-pair weights, so only the
+    A-centred derivatives are computed and contracted at once. No derivative matrix is stored,
+    and the gradient is accumulated with fp64 atomics.
+  - **Kernels.** One kernel per angular class (9 off-site, 9 on-site).
+  - **tblite cutoff quirk, kept.** tblite's `integral_cutoff(acc)` clips with its bounds
+    reversed, so it returns 25 for every accuracy. The primitive screening and the neighbour
+    cutoff, min(sqrt(50 / min alpha), 40) Bohr, reproduce that.
+- **Toolchain.**
+  - CUDA 13.0's crt headers clash with glibc 2.42 (`rsqrtf` declared noexcept), whatever the
+    host compiler.
+  - The 13.3 wheels fix it, but need `-allow-unsupported-compiler` for gcc 16. The checks
+    against tblite cover that risk.
+  - The toolchain is a venv of its own, `~/.local/share/ksxtb/tc13x`. Five wheels are pinned
+    together, all at 13.3: `nvidia-cuda-nvcc`, `-crt`, `-nvvm`, `-runtime`, `-cccl`. Mixed
+    versions fail the CCCL check.
+  - `KSXTB_NVCC` overrides the path. cudart is linked statically, so the library does not
+    collide with torch's 13.0 runtime.
+- **Scope.** Closed and open shells alike (the terms do not depend on the spin), ALPB water
+  or the gas phase. The other ALPB solvents' records are not extracted yet.
+- **Open.**
+  - **Licensing.** The kernels and the reference follow tblite (LGPL-3.0-or-later) line by
+    line, and the parameters are tblite's. rhoMech has no LICENSE file. The user decides before
+    any public push.
+  - **What decides the rest.** Stage 2 (H0's coordination numbers, repulsion, D4, the
+    electrostatics and ALPB, with gradients) and the SCF's eigensolver now decide the engine.
+    Stage 2 waits for the user's approval.
+
+## 2026-11-22: GPU xTB stage 2: every non-integral GFN2 term on the GPU, exact against tblite
+
+Stage 2 of the GPU xTB plan (`docs/gpu_qm_spike.md`), approved by the user after stage 1.
+Branch `claude/gpu-xtb`.
+
+- **What was built.**
+  - `ksmech.qm.gpu.terms`: a torch (fp64, CPU) reference of every GFN2 term beyond the
+    one-electron integrals. Each is an energy of the geometry and of the SCF variables (shell
+    charges, atomic charges, dipoles, quadrupoles), and autograd gives its gradient and its
+    potentials. The terms: the dexp CN and the self-energies, repulsion, ES2, ES3, AES (radii
+    from the CN), D4 (two-body with the SCF charges, ATM with zero-charge C6, its own erf CN),
+    ALPB (GBOBC Born radii, P16 kernel, the shape term), CDS (smoothed SASA, H-bond term on the
+    charges), the shift and the Fermi entropy. `total_energy` and `total_gradient` assemble
+    tblite's energy and gradient at a given density with stage 1's integrals.
+  - `native/ksxtb/src/classical.cu` and `ksmech.qm.gpu.classical`: the same terms batched on
+    the GPU in fp64. `ksxtb_geometry` computes both CNs, the multipole radii and the Born radii;
+    `ksxtb_classical` the energies, the four potentials and the gradient at given SCF
+    variables, with an external dE/dCN (the H0 self-energies') chained in.
+    `classical.total_at_density` is the whole GPU energy and gradient at a density.
+  - The extractor also reads mctc-lib v0.5.2's covalent radii, dftd4 v4.2.0's element data
+    and its `reference.inc` DATA statements, and tblite's GFN2 ALPB, CDS and shift records of
+    water. The 230-point Lebedev grid comes from scipy (`lebedev_rule(25)`, the same rule).
+- **Correctness.**
+  - Reference vs tblite, at tblite's converged density: total energy within 1e-12 Eh, gas and
+    water, on the ten fixtures, CuCl2 and FeBr4- (entropy included). Gradient within 5e-12
+    Eh/Bohr at SCF accuracy 1e-6. At accuracy 1e-2 the gap is 4e-8 and falls with the
+    accuracy: tblite's H0 gradient uses the potential of the last SCF input charges. This also
+    checks stage 1's H0 gradient against tblite, the item stage 1 left open.
+  - The cutoffs: nine spike molecules of 67-139 atoms (extents to 61 Bohr), and dimers placed in
+    the D4 switching windows (50 and 25 Bohr, width 0.05) and on both sides of the Born cutoff
+    (35 A). Without the switch, or without the Born cutoff, those tests fail.
+  - Every element: a hydride Z-H for Z = 1..86 in water (charged atoms, so ALPB, the H-bond
+    term and D4's charge scaling read every element's tables) matches tblite's energy within
+    3.4e-13 Eh. Seven even lanthanides need the other spin parity: GFN2's valence electron
+    count is not Z.
+  - CUDA vs the reference, random SCF variables, on the fixtures, the windows, a 92-atom chain
+    of 71 Bohr and the 86 hydrides: every term's energy within 6.4e-16 relative, the
+    potentials and the gradient within 6.1e-16.
+  - The whole GPU pipeline vs tblite (stage 1 + stage 2): 48 spike molecules, 8 per bin, ALPB
+    water: energy within 4e-12 Eh, gradient within 2.6e-11 Eh/Bohr.
+- **Speed.** Per molecule and energy, best of batches 64/256/1024, ALPB water, RTX 4080 SUPER, CUDA
+  events, machine idle (load ~2):
+
+  | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+  |---|---|---|---|---|---|---|
+  | stage 2 (geometry pass + one evaluation with gradient), ms | 0.006 | 0.024 | 0.062 | 0.16 | 0.51 | 1.00 |
+  | gate (budget / 3) | 0.020 | 0.27 | 0.77 | 2.27 | 8.3 | 12.3 |
+  | all non-SCF work of one energy + gradient (stage 1 + 2), ms | 0.026 | 0.080 | 0.19 | 0.49 | 1.32 | 2.53 |
+  | gate (2 x budget / 3) | 0.040 | 0.53 | 1.53 | 4.53 | 16.7 | 24.7 |
+  | one evaluation alone (per-SCF-cycle upper bound), ms | 0.006 | 0.025 | 0.061 | 0.16 | 0.50 | 0.98 |
+
+  Every bin passes both gates. From 16 atoms up the non-SCF work takes 5-10% of the spike's
+  budget. The smallest bin is the tightest (0.026 of 0.040 ms), launch overhead dominating.
+  The ATM triples and the surface grid make stage 2 grow faster than stage 1 with size: at
+  >120 atoms it is 1.0 ms against stage 1's 0.5. Batch 1024 at >120 atoms was skipped for
+  memory (stage 1's matrices).
+- **Design choices.**
+  - **Reference in torch, not numpy.** Autograd gives exact gradients and potentials of
+    energy expressions, so the hand-derived CUDA gradients are checked against an independent
+    derivation, to 1e-15 rather than a finite difference's 1e-8. The total against tblite checks
+    the energy expressions.
+  - **No derivative tensors.** tblite stores dCN/dR, dBorn/dR and dSASA/dR as (3, nat, nat).
+    The kernels accumulate the per-atom adjoints (dE/dCN of both CNs, dE/dmultipole radius,
+    dE/dBorn radius) with atomics, then one chain pass over the pairs turns them into gradient.
+    The surface gradient is weighted by tension + hbond q^2 in the same pass that computes the
+    surface.
+  - **One thread per atom pair**, the pairs of a molecule contiguous in (i, j < i) order, so the
+    ATM pass finds the C6 of (i, k) and (j, k) by index. It loops k < j from the (i, j) thread,
+    reading zero-charge C6 the pair pass stored. One thread per (atom, grid point) for the
+    surface, per atom for the D4 weights and on-site terms, per molecule for the ALPB shape.
+  - **Exactness over speed where they differ.** The SASA neighbour test uses the contact
+    distance instead of tblite's list cutoff; they select the same neighbours.
+- **Scope.** Closed and open shells alike (the terms do not depend on the spin), ALPB water
+  or the gas phase. The other ALPB solvents' records are not extracted yet.
+- **Open.**
+  - **Licensing.** The dftd4 reference tables (LGPL-3.0) join tblite's in the open licence
+    question. rhoMech has no LICENSE file; the user decides before any public push.
+  - **The SCF (stage 3).** Each SCF cycle needs the potentials, an evaluation at the cycle's
+    charges, on top of the eigensolver. No gate counts that yet. `evaluate` has no
+    potentials-only mode: it always runs the ATM, surface and chain passes, so the table's
+    evaluation time is an upper bound. With six evaluations per energy added to the non-SCF
+    work, molecules of <=15 atoms come to 0.064 ms, over their 0.06 ms budget (they go to the
+    CPU anyway); from 16 atoms up it is 17-29% of the budget. Stage 3 waits for the user's
+    approval.
+
+## 2026-11-22: GPU xTB stage 3: the batched GFN2 SCF single point
+
+Stage 3 of the GPU xTB plan (`docs/gpu_qm_spike.md`), approved by the user after stage 2.
+Branch `claude/gpu-xtb`.
+
+- **What was built.** `ksmech.qm.gpu.scf.SCFBatch`: tblite's SCF for a batch of molecules,
+  with the SAD guess (charge / nat, split over the shells by reference occupation). Each cycle:
+  1. the stage 2 potentials of the input charges and multipoles;
+  2. the Fock matrix (tblite's add_vao_to_h1 and add_vmp_to_h1);
+  3. the Cholesky-orthogonalized eigenproblem on matrices padded to the batch's largest AO
+     count;
+  4. tblite's Fermi filling per spin channel from one set of orbitals, and the entropy;
+  5. Mulliken shell charges and atomic multipoles, the output energy;
+  6. tblite's modified Broyden mixer (damping 0.4, whole history), per molecule.
+
+  The convergence criteria are tblite's: |dE| < 1e-6 accuracy, RMS residual < 2e-5 accuracy.
+  Converged molecules are frozen and no longer diagonalized. `gradient()` gives the energy and
+  gradient at the output density.
+- **Correctness.**
+  - **Fock build.** At tblite's converged charges it gives tblite's orbital energies to 1e-11
+    and its density to 1e-10 (tblite's own residual at accuracy 1e-6).
+  - **Tight tier.** Both sides at accuracy 1e-6, same fixed point. Fixtures (gas and water,
+    CuCl2 and FeBr4- included) and 48 spike molecules: energy within 4e-12 Eh, gradient within
+    8.6e-11 Eh/Bohr.
+  - **Production tier.** Accuracy 1. The GPU's energy lands where tblite's does (the same mixer
+    path: 8.55e-9 against 8.67e-9 from the converged energy at 51-80 atoms). The gradient
+    contracts the H0 term with the last cycle's input potentials, as tblite does
+    (`gradient(potentials="input")`, the default).
+    - Against tblite at accuracy 1: 2e-7 at 51-80 atoms, at most 5e-6 on the spike bins, and
+      1.1e-5 on the fixture batch.
+    - That last one misses the plan's 1e-5 gate as written. There tblite is itself 1.0e-5 from
+      the converged gradient and the GPU 1.5e-6, so the two differ by how far each SCF went.
+    - Against the converged gradient the GPU is never farther than tblite (at most 1.7e-5).
+    - The output-potential variant, consistent with the density, was farther from both.
+    - 9-25 cycles, no failures.
+- **Speed.** Single point with gradient, accuracy 1, ALPB water, ms per molecule, best of batches
+  64/256/1024, RTX 4080 SUPER idle (the QMugs pretraining run sharing the GPU had finished):
+
+  | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+  |---|---|---|---|---|---|---|
+  | GPU, fresh (SAD guess) | 0.36 | 0.71 | 1.57 | 3.9 | 9.9 | 25 |
+  | GPU, restarted (previous charges, atoms moved <= 0.01 Bohr) | 0.26 | 0.56 | 1.26 | 3.1 | 7.6 | 17.6 |
+  | cpu12 (spike measurement 1) | 0.4 | 2.8 | 7.6 | 21 | 77 | 119 |
+  | fresh, speed-up over cpu12 | 1.1x | 3.9x | 4.8x | 5.4x | 7.8x | 4.8x |
+  | SCF cycles, mean | 12.6 | 12.5 | 12.7 | 13.0 | 13.4 | 13.8 |
+
+  **Gate passed:** at 51-80 atoms the fresh single point takes 3.9 ms, against at most 10.5 (half
+  of cpu12). The largest batches did not fit in 16 GB (>= 1024 molecules from 51 atoms,
+  >= 256 above 120): the padded multipole integrals (9 n^2 per molecule) dominate memory, so
+  above 120 atoms only batch 64 ran, and that bin's speed-up is batch-limited. cpu12 is one
+  core of a loaded 12-worker run divided by 12, as the spike defined it. These are single
+  points: the optimizer's whole record (stage 4) decides the end-to-end gain.
+
+  **Building the batch is outside those times.** The host packing (`SCFBatch(...)`: basis,
+  H0 scale, pair lists, parameter tables, padded layout) costs 0.8, 2.5 and 7.3 ms per molecule
+  at <=15, 51-80 and >120 atoms. That was 25 ms at 51-80 atoms before `h0_params` was
+  vectorized. With it, a lone fresh single point at 51-80 atoms is 6.4 ms, 3.3x cpu12; below 16
+  atoms it is slower than the CPU. An optimizer builds its batch once and pays this per record,
+  not per step.
+- **Design choices.**
+  - **Precision.** Each molecule's cycles run in fp32 (transform, eigensolve, density) until
+    its residual RMS falls below 1e-4, then in fp64. Convergence is declared only after two fp64
+    cycles, so the energy test compares fp64 energies. On average 10.9 fp32 and 2.2 fp64 cycles
+    per molecule at 51-80 atoms.
+  - **Tried and dropped: fp32 eigensolve refined in fp64.** Ogita and Aishima's refinement,
+    restricted to pairs of orbitals of different occupation, took the density from fp32's
+    1e-5 to 1e-14 in two steps. But its eight fp64 GEMMs cost more than an fp64 eigensolve on this
+    GPU (fp64 at 1/64 of fp32): 1.31 against 1.09 ms per molecule at n = 230, batch 256.
+  The per-step timings below (13.5 -> 0.6, 1.37 -> 0.26, ...) were taken while a QMugs
+  pretraining run shared the GPU; they compare steps, not absolute speed.
+  - **Light evaluations.** The SCF calls stage 2 twice per cycle (potentials of the input,
+    energy of the output). The geometry pass now also computes everything charge-independent
+    (zero-charge D4 weights and C6, the ATM energy, the surface areas). An SCF evaluation does
+    energies and potentials only, the gradient pass runs once at the end. 13.5 -> 0.6 ms per
+    molecule per SCF at 51-80 atoms.
+  - **Fused kernels** (`native/ksxtb/src/scf.cu`): the Fock build (1.37 -> 0.26 ms per SCF), the
+    Mulliken sums (0.83 -> 0.39) and tblite's Fermi filling, one warp per molecule and spin
+    with no host sync (1.6 -> 0.2).
+- **Scope.** Closed shells are the target. Open shells run (restricted, Fermi filling per
+  spin) and match tblite, but the fp32 phase slows Broyden on CuCl2 and FeBr4- (34-54 cycles at
+  accuracy 1e-6 against 18 in fp64).
+- **Open.**
+  - **Failures are batch-fatal.** A non-positive-definite S or a non-finite F raises in
+    `cholesky` or `eigh` for the whole batch, and there are no reason codes yet. An optimizer
+    will meet such geometries, so per-molecule isolation (SCF_NOT_CONVERGED, non-finite) is
+    stage 4's first item.
+  - **Memory** caps the batch: 256 molecules at 51-120 atoms, 64 above.
+  - **Licensing**, as before.
+  - **Stage 4 (the batched optimizer)** waits for the user's approval. The single point is the
+    optimizer's inner step. A restarted SCF (from the previous geometry's charges) is what it
+    will run.
+
+## 2026-11-23: GPU xTB stage 4: the batched ANC optimizer, production's relax for many molecules
+
+Stage 4 of the GPU xTB plan (`docs/gpu_qm_spike.md`), approved by the user after stage 3.
+Branch `claude/gpu-xtb`.
+
+- **What was built.**
+  - **SCF failure isolation.** A molecule with non-finite integrals, an S that is not positive
+    definite, or a failing eigensolve stops alone with a status. A poisoned batch member leaves
+    the others at the clean batch's results (1e-12). Unconverged restarts rerun from the guess,
+    as `geometry.TbliteEnergy` does.
+  - **`ksmech.qm.gpu.lindh`.** Lindh's model Hessian with array masks: equal to `qm.anc`'s loops
+    to 3e-16, about 20x faster. The CPU path keeps its loops, so its records do not move.
+  - **`ksmech.qm.gpu.optimize.BatchedANC`.** `qm.anc.optimize_anc` for a batch: padded ANC
+    bases, RFO, BFGS, trust radius, uphill rejection, rebuilds every 20 steps. Each SCF restarts
+    from the molecule's last evaluated point, and the walls and the dissociation guard apply
+    per molecule. A molecule's state (`MolState`) can leave one batch and resume in another.
+  - **`relax_many`.** `GFN2Calculator._relax` with the tblite-anc settings for many molecules:
+    a free run with the guard, `check_connectivity`, a walled run from the start on a broken
+    bond, checked again. Guard and wall pairs come from `DissociationGuard` and `bond_walls`.
+    Batches are filled smallest first, under a capacity (1024), a memory budget (60% of free
+    device memory; ~48 n_ao^2 doubles per molecule, measured) and an AO-count ratio (1.5). They
+    are rebuilt with the running molecules plus queued ones whenever fewer than 75% still run.
+- **Correctness.**
+  - **Optimizer alone** (`stage4_gate.py steps`): `qm.anc` driven by the same GPU energy against
+    `BatchedANC`, 12 species of 5-141 atoms. Energies agree step by step until the SCF's
+    discrete stopping (accuracy 1) perturbs them at 1e-9 (steps 2-39). Energy counts agree in
+    11 of 12, end points within 1e-3 A in 10. One flexible 117-atom species took another path
+    to a minimum 2e-3 Eh higher.
+  - **Against production** (`stage4_gate.py check`, `stage4_reference.json`): 96 untagged
+    closed-shell spike species, embedded as `qm.batch._compute` does; production's tblite-anc
+    `_relax` on the CPU against `relax_many`.
+    All from one run of the committed build (b5de1bb's batching):
+    - Outcomes: all 96 converged on both sides; the walled retry was needed by the same 15.
+    - Energies used: median ratio 1.0 in every bin, 1.03 in total.
+    - End points: 71 in the same minimum (Kabsch RMSD < 0.05 A and |dE| < 1e-5 Eh), 20 lower,
+      5 higher. Of those 25, 11 lie in the same flat basin (|dE| < 1e-4, RMSD < 0.05) and 11
+      are other conformers (RMSD > 0.1 A): about one species in nine lands in another conformer
+      than the CPU's, lower more often than higher.
+    - tblite's max|gradient| at the GPU's end point: below fmax at all 81 free runs (an earlier
+      run had two above by 1e-6), so no CPU polish here. The walled runs converge on the
+      gradient with the walls, as on the CPU, and tblite's own gradient there is large on both.
+  - **Batch independence.** A run stopped and resumed in another batch lands where it lands
+    alone, within 4e-6 Eh and 6e-3 A: the padded fp32 SCF cycles depend on the batch. GPU
+    records are reproducible to that level, not bit for bit.
+- **fp32 RFO, tried and dropped.** One 9-atom species never converged (500 energies against the
+  CPU's 10), and the whole sample was no faster (263 against 267 s).
+- **Speed.** Seconds per optimized molecule, GPU free of other work (gpu-unlock installed; its
+  effect on these fp64-bound kernels was not measured). cpu12 is production's CPU speed: the
+  reference rerun with the workers started as `qm.batch` starts them (spawned, one thread,
+  OpenBLAS preloaded; `stage4_reference.py --preload`), mean seconds per molecule / 12. The
+  preload makes tblite 1.4-2.2x faster than without it, the same outcomes in every bin.
+
+  | atoms | <=15 | 16-30 | 31-50 | 51-80 | 81-120 | >120 |
+  |---|---|---|---|---|---|---|
+  | cpu12 | 0.012 | 0.057 | 0.19 | 0.68 | 4.4 | 6.6 |
+  | GPU, 64 species per bin | 0.16 | 0.46 | 0.41 | 1.02 | 2.4 | 2.8 |
+  | ratio | 0.07x | 0.12x | 0.46x | 0.67x | 1.8x | 2.3x |
+  | GPU, 256 in flight (4 embedding seeds) | | | | 0.58 | 1.42 | 2.03 |
+  | ratio | | | | 1.17x | 3.1x | 3.3x |
+
+  The spike's bar, 2x at 30-80 atoms, is missed: at 51-80 atoms the GPU is even with 12 CPU
+  workers when enough molecules are in flight, slower when not. Above 80 atoms it is 3x. A
+  molecule-energy costs 7.6 ms in the 51-80-atom run against a batched restarted single
+  point's 3.1 ms (stage 3, before the unlock and 4a): the SCF is 47 of 63 s in a profile, and
+  each step waits for its batch's slowest SCF. The cycles per phase of a restarted SCF are not
+  yet measured. Below ~30 atoms the per-step latency dominates; those species are the CPU's
+  (stage 5's size routing).
+- **Failures.** From the 1280 starts of the timing runs (64 or 256 per bin), the GPU failed 6.
+  Production's CPU `_relax` from the same starts fails 5 of them identically (two
+  SCF_NOT_CONVERGED after 1 and 16 energies, three OPT_NOT_CONVERGED at 500). The sixth, a
+  potassium complex (`C#CC[O+]([K])C(=CC(=O)c1ccccc1)SC`), converges on the CPU after 322
+  energies and not on the GPU in 500: a GPU-only failure, which a CPU retry would catch. One of
+  the five was converged by an earlier GPU run of the same start: near the limit, the outcome
+  depends on the SCF noise.
+- **Open.**
+  - The per-step overhead (7.6 against 3.1 ms per molecule-energy): skipping finished molecules'
+    potential and Mulliken work inside the SCF, and fewer host syncs, are the next levers.
+  - Licensing, as before. Stage 5 (integration as `--optimizer gpu-anc`) waits for the user.
+
+## 2026-11-23: GPU xTB SCF tuning: one fp32 eigensolve per cycle, the precise phase by refinement
+
+After stage 4 the user chose to tune the GPU SCF before stage 5 integration. Branch
+`claude/gpu-xtb`. Measurements: `scripts/gpu_xtb/scf_profile.py` runs `relax_many`
+(production's path) on one size bin's spike species, with section timers, per-evaluation or
+per-cycle CUDA events.
+
+- **Where the time was** (51-80 atoms, 64 species x 4 embedding seeds = 256 conformers):
+  - An SCF in a step runs as many cycles as its slowest molecule: 11.5 per SCF against 6.45
+    per molecule. One cycle costs 6-12 ms almost whatever the number of active molecules
+    (about 10 ms with 2 active, 12 ms with 43). Cycles with under 10% of the batch active take
+    28-34% of the SCF time.
+  - The fp64 eigensolve has a fixed cost per call: 4.4 ms for one matrix, 10 ms for 16 (fp32:
+    1.1 and 2.5 ms), 0.27 ms per matrix at 256. It ran every cycle on the few molecules in the
+    precise phase: 49 of 163 s.
+  - The mixer took 2 ms per cycle, about 40 small ops plus a batched LU solve of ~1 ms.
+  - Steps with at most 8 live molecules (the end of a finite set: the 500-energy
+    non-convergers, the walled retries) took 28% of the wall time at 19 ms per
+    molecule-energy. In full batches a molecule-energy already cost 2.4 ms against the CPU's
+    9.3.
+- **Changes.**
+  - **Mixer.** Preallocated history, the Gram matrix updated by one row per iteration, and
+    tblite's system (W A W + 1e-4 I) c = W g solved in its equilibrated form,
+    (A + 1e-4 W^-2) y = g with y = W c: an SPD matrix with unit diagonal, solved by Cholesky,
+    LU where Cholesky fails. Equal to the list form (`BroydenReference`) to 1e-11 over 12
+    iterations.
+  - **Precise phase.** One fp32 eigensolve per cycle for every active molecule. For the
+    precise ones, the occupied orbitals are then refined in fp64 (`refine_occupied`):
+    - Ogita and Aishima's refinement in the AO basis, restricted to the occupied columns and
+      to pairs of different occupation; pairs of equal occupation get only the
+      orthonormalization. Two steps take the density from fp32's error to 1e-14.
+    - Near-degenerate pairs (< 1e-3 Eh) are not rotated.
+    - An fp64 eigensolve is kept only for a molecule with a near-degenerate pair that holds a
+      fractionally occupied orbital (more than 1e-8 from an integer), or whose last step
+      still rotated by more than 1e-7.
+    - That falls back on 1 of 64 sample species at 51-80 atoms and 0 of 64 at 31-50, and on
+      the two metal fixtures (CuCl2, FeBr4-).
+    - Two earlier rules were dropped:
+      - Falling back on any non-integer occupation sent 20% of the sample to fp64 eigh:
+        every molecule with a gap below ~1.4 eV.
+      - Falling back on a near-degenerate pair whose occupations differ by more than 1e-8
+        was flaky. CuCl2's half-filled degenerate pair split its occupations by 8e-6 to
+        3e-5 on a quiet GPU and by less than 1e-8 under load: the split follows the fp32
+        eigenvalues' noise.
+    - Stage 3 rejected this refinement on 1.31 against 1.09 ms per molecule. That was measured
+      while a pretraining run shared the GPU, at batch 256, with eight full-size GEMMs. Here
+      the GEMMs are restricted to the occupied columns (17 us at n = 200), and what is saved
+      is the fixed cost per call of an fp64 eigensolve at the small precise-phase batches.
+  - **Energy-weighted density.** Computed as C_k sqrt(f) (C_k^T F C_k) sqrt(f) C_k^T over the
+    occupied columns, from the last cycle's F (kept per molecule). At exact eigenvectors this
+    equals tblite's C diag(f e) C^T. It is unchanged by rotations among orbitals of equal
+    occupation, which the refinement leaves unresolved (the plain form was 8e-7 off in the
+    gradient). So a refined molecule's occupied orbital energies are Rayleigh quotients: their
+    sum is exact, each one within ~2e-7 where fp32 mixed them. Only tests read them.
+  - **Kernel layouts, no change in the numbers.**
+    - Thread-per-pair kernels spread a warp's lanes over the pair list. Consecutive pairs share
+      an atom, so their atomic adds serialized 32 ways.
+    - ATM's k loop is rotated per pair.
+    - Mulliken is tiled (32 AOs x 8 row slices, shared-memory reduction) and runs only for
+      the active molecules.
+    - The ALPB shape term runs one warp per molecule.
+    - No measurable change in wall time from the first three: 124 against 121 s, within
+      run-to-run noise. The ALPB change came later and was not timed on its own.
+- **Correctness.**
+  - All GPU xTB tests pass: SCF on tblite within 1e-10 Eh and 1e-9 Eh/Bohr at accuracy 1e-6.
+  - The refined density and energy-weighted density are within 7e-12 of fp64 eigh on 128
+    sample species.
+  - Parity gate (`stage4_gate.py check`), 96 species against production's tblite-anc
+    `_relax`, run on the committed build:
+    - 96/96 outcomes, energy ratio 1.08.
+    - Walled retries: the CPU's 15, plus one more. A 127-atom Pd complex broke a bond in its
+      free run on the GPU and took the walled retry (474 energies, end 2.8e-3 Eh below the
+      CPU's); the CPU did not need it (223).
+      - This comes and goes. Run alone four times (`tuning_pd_probe.json`), the GPU needs no
+        walls three times (222-231 energies, ends within 3e-5 Eh of the CPU's) and takes
+        the walled retry once (463 energies).
+      - Its SCF at the start takes no fp64 fallback.
+      - Its free run passes near the guard's threshold, and the GPU's run-to-run rounding
+        decides which side it lands on.
+    - 71 same minimum (as before), 14 lower, 11 higher. The higher ones are at most 1.8e-4 Eh
+      above the CPU's, as before.
+    - Between builds, 30 of 96 end energies moved by more than 1e-6 (the previous rule's run
+      against the pre-tuning check): on flat surfaces the optimizer's path follows the
+      rounding. The pre-tuning check is kept as `stage4_check_fp64_stage4.json`.
+  - Peak device memory per batch is within `molecule_bytes`' estimate from 15 molecules up
+    (about half of it, see below); above it for 2-9-molecule batches (up to 9.5x, small in
+    absolute terms).
+- **Speed.** Seconds per optimized molecule, untagged closed shells.
+  - **The CPU baseline.** The reference rerun on the same 64 species per bin, the workers
+    started as `qm.batch` starts them, timing the optimization alone (`_relax`, without the
+    reference's end-point single point, ~2%): `stage4_reference_preload_64_relax.json`. That
+    is 0.214 and 0.682 s per molecule, 4.42 and 9.27 ms per energy. Two CPU runs differ by ~1%.
+  - **The GPU.** Every 31-80-atom row except the before-tuning one is from `f453642`.
+
+  | | 31-50 atoms | 51-80 atoms |
+  |---|---|---|
+  | cpu12, 64 species, `_relax` alone | 0.214 | 0.682 |
+  | GPU before tuning, 256 conformers | 0.24 | 0.55-0.57 |
+  | GPU after, 256 conformers (round 2-3 builds) | 0.19-0.20 | 0.47-0.48 |
+  | ratio | 1.1x | 1.45x |
+  | GPU after, 1024 conformers (16 seeds), two runs | 0.142-0.146 | 0.330-0.332 |
+  | ratio | 1.47-1.51x | 2.06-2.07x |
+
+  - **Why 1024.** It is closer to production, where a stream of species keeps the batches
+    full: steps with at most 8 live molecules take 8% of its time, against 28-35% with 256.
+  - **Repeat spread.** The two final runs differ by 3% at 31-50 and 1% at 51-80. One earlier
+    1024-conformer run of the round-3 build (before the final fallback rule) gave 0.134 s at
+    31-50 (1.60x), 8% faster. Whether the rule or run-to-run variation made that difference
+    is not separated.
+  - **Failures in the 1024-conformer runs.** 6-7 SCF_NOT_CONVERGED per bin and, in one run,
+    one OPT_NOT_CONVERGED at 51-80. The CPU was not run on those starts (seeds 1-15). Stage 4
+    found most such failures identical on the CPU.
+  - **Above 80 atoms** (`stage4_gate.py time --seeds 4`, 256 conformers,
+    `tuning_time_81-200_s4.json`):
+    - 81-120: 1.39 s per molecule against stage 4's 1.42, 3.1x the 16-species cpu12.
+    - 121-200: 1.98 against 2.03, 3.3x.
+    - The same failures as stage 4: two OPT_NOT_CONVERGED at 81-120.
+    - Peak device memory is 0.51 of `molecule_bytes`' estimate in every batch of 15 or more,
+      up to 244 molecules. The estimate (50 n_ao^2) is now twice the need, so batches stop at
+      half the size the budget would allow.
+  - **The bar.** The spike's 2x at 30-80 atoms is not met: about 2x at 51-80 on a long queue,
+    1.5x at 31-50.
+  - **Data.** In `data/processed/gpu_qm_spike/`: `tuning_*.json` (profiles, drains, per-cycle
+    costs, long queues) and `tuning_long_*_r{1,2}.json` (the final runs).
+- **What is left.**
+  - A step still runs as many SCF cycles as its slowest molecule (13-29 per step against 6.4
+    per molecule).
+  - A cycle has a fixed cost: the fp32 eigensolve's latency (1.7 ms for 2 matrices), ~300
+    kernel launches, ~9 host syncs.
+  - Levers, not built: carrying an unconverged SCF over to the next step instead of waiting
+    for it (per-molecule mixer histories); an fp32 cycle without an eigensolve, refining the
+    previous cycle's orbitals (the distance between consecutive cycles' orbitals not yet
+    probed).
+  - Below 30 atoms the CPU stays faster: stage 5's size routing.
+
+## 2026-11-23: GPU xTB carry-over, part 1: an incremental SCF with per-molecule state
+
+The SCF tuning above left a step running as many SCF cycles as its slowest molecule (13-29
+per step against 6.4 per molecule), at a nearly fixed 6-12 ms per cycle. The lever chosen is
+carry-over: a molecule whose SCF has not converged when most of its round has finished keeps
+its SCF state and continues in the next round, beside the molecules that took their step and
+started their next SCF. This first part makes the SCF incremental (`ksmech.qm.gpu.scf`); the
+optimizer that uses it comes next. Branch `claude/gpu-xtb`.
+
+- **Per-molecule mixer.** `Broyden` keeps each molecule's iteration count `it` and history
+  length `h` as (B,) tensors; `reset(which, q0)` restarts some molecules (iteration 0, empty
+  history) while the others continue, and a molecule outside `active` is frozen, not stepped
+  with a zero residual. Each step writes its slot h_m, the Gram row and column, and solves the
+  molecule's own system over its h_m slots, the unused slots identity rows with g = 0 (y = 0).
+  - A reset zeroes the molecule's history rows: an unused slot still multiplies its u row by
+    y = 0, and 0 x NaN is NaN, so a failed SCF's rows would otherwise reach later solves.
+  - Every molecule that does not take a Broyden step gets an identity system, so no NaN ever
+    reaches Cholesky or the LU fallback.
+  - The solve's width is the batch's largest h + 1, read exactly in the host sync the
+    Cholesky failure check already makes (`_spd_solve(..., also=h.max())`): no new sync per
+    cycle. A molecule whose SCF ended is retired from the mixer (`Broyden.retire`: its h
+    no longer counts), so an SCF that ran long, or hit the cycle limit, does not widen the
+    solves of the SCFs that follow it in the same state. The buffers grow by doubling and are
+    not shrunk.
+  - Equal to the list form (`BroydenReference`) run on each molecule alone to 1e-11, with
+    staggered resets, a paused molecule and buffer growth.
+- **Incremental SCF.** The state `SCFBatch.run` kept in locals is an `SCFRun`: the mixer, the
+  orbital buffers, each molecule's input potentials of its last cycle, output variables,
+  energy, last precise energy, cycle count, status, and the running, precise, may-fall-back
+  and fell-back flags. `new_run`, `start(state, which, start, fallback)`, `advance(state,
+  carry)` and `result(state)` drive it; `run` and `run_with_fallback` are built on them, so
+  every existing test exercises the one code path.
+  - The cycle limit (250), the fp32 -> precise switch and the two-precise-cycles rule are per
+    SCF and persist across `advance` calls.
+  - `start` resets every per-SCF quantity of the molecules it starts, the orbital buffers and
+    input potentials included. Each `run` used to get fresh zero buffers; with a persistent
+    state, a molecule that hit the cycle limit in the fp32 phase would otherwise build its
+    energy-weighted density from the previous SCF's C and F.
+  - **The fallback inside the evaluation.** With `fallback`, a molecule whose SCF from a
+    start ends unconverged restarts at once from the SAD guess, in the same state, while the
+    rest of the batch continues; `run_with_fallback` used to rerun those molecules in a
+    second `run` after the first had finished. The molecule's result is the guess run's (its
+    cycle count too, as `merge` reported), and `fell` marks it.
+  - `advance(carry=c)` returns, after one cycle at least, once at most c x the molecules
+    running at entry still run (c >= 1: exactly one cycle). Syncs per cycle: one
+    `nonzero(running)` at the top (it replaces `active.any()` and gives the carry count) and
+    one read of the ended and fallback counts (it replaces `finished.any()`), one fewer than
+    before.
+  - `result` returns copies: the optimizer will read a round's results and then restart the
+    molecules that ended, which zeroes their buffers in place.
+  - `set_geometry` touches only the integrals; the SCF state is in the `SCFRun`, so molecules
+    mid-SCF are undisturbed (their integrals recomputed at unchanged coordinates equal
+    the old ones to rounding).
+- **Correctness.** A molecule started beside one mid-run ends with the energy (1e-10), cycle
+  count and status it reaches alone from the same start; an `advance` with a carry followed by
+  an `advance(None)`, with a `set_geometry` at unchanged coordinates between them, gives one
+  `advance(None)`'s results; the fallback gives the guess run's result; with a 5-cycle limit,
+  SCFs started at different cycles each end after their own 5th, and `run_with_fallback`
+  equals `merge(run(start), run(None, retry), retry)` field by field (1e-12). Two limits on
+  such comparisons:
+  - The fp32 eigensolve of a single matrix differs from that of the same matrix in a batch
+    (another cuSOLVER path, 1e-7 to 1e-6 Eh in the orbital energies); in batches of two or
+    more it is bit for bit independent of the other matrices. The tests keep at least two
+    molecules running in every phase they compare.
+  - The metal fixtures' SCF is not reproducible run to run at 1e-10, before this change as
+    after (CuCl2 ends after 19 or 20 cycles, 2.9e-10 Eh apart; the atomic sums' order). The
+    carry test uses the organic fixtures.
+
+## 2026-11-23: GPU xTB carry-over, part 2: the optimizer in rounds
+
+Part 1 made the SCF incremental; this part makes `ksmech.qm.gpu.optimize.BatchedANC` use it,
+so a molecule whose SCF is slow no longer holds back the batch's next step. Branch
+`claude/gpu-xtb`.
+
+- **Rounds.** A round (`BatchedANC._round`): (a) every running molecule not waiting for an
+  evaluation proposes its next trial (`_propose`: the RFO step in its ANC basis, cut to the
+  trust radius, the predicted change, |s|, the trial point), stored per molecule and frozen
+  while its evaluation is pending; (b) the guard checks each new trial once, when it is
+  proposed (`_launch`); (c) the SCFs of the new evaluations start (`SCFBatch.start` from the
+  molecule's last converged point's variables, the fallback to the guess inside the same
+  evaluation), the geometry takes the new trials and keeps the pending ones, and the batch's
+  SCFs advance (`advance(carry)`); (d) each molecule whose evaluation ended takes the rest of
+  `qm.anc`'s step (`_collect`, `_apply_step`: energy, gradient and walls, the uphill
+  rejection, BFGS, the radius, x/g/e, the energy count, the convergence test, the basis
+  rebuild). Nothing of (d) happens to a molecule while its evaluation is pending.
+  - `carry` None: `advance` runs every SCF to its end, one round per step: the old loop.
+    A number c: the round ends once at most c x its running SCFs still run; those carry
+    their SCF state into the next round.
+  - A molecule's first evaluation (from the guess) is a pending evaluation without a step;
+    the batch's first round starts only those, the resumed molecules stepping from the
+    second round, as before. With carry None the sequence of evaluations, batches and refill
+    stops is therefore exactly the old one.
+  - An evaluation the SCF refuses (a bad geometry) ends in the round it starts, as
+    FAIL_SCF: "ended" is read from the SCF state (pending and no longer running), not only
+    from what `advance` returns.
+  - A guard-stopped trial is counted as an energy, as before (the count of `qm.anc`).
+  - `last_ratio` (the CONNECTIVITY_CHANGED detail) is now each molecule's worst bond ratio
+    at its last checked trial; before, it was overwritten by later evaluations of the other
+    molecules with the ratio at the stopped molecule's last accepted point. Only the detail
+    text changes.
+- **Refill stops.** `run(stop_below)` checks the running count at the top of a round; when
+  it stops with evaluations in flight it first runs them to their end and takes their steps
+  (a "drain" round, counted in `drained`), so a `MolState` never holds a half-done SCF and
+  nothing is lost; a molecule those steps converge is among the finished.
+- **Defaults.** `BatchedANC(carry=None)`, `relax_many(carry=0.25)` (`optimize.CARRY`, to be
+  tuned from measurements). `stage4_gate.py check|time` and `scf_profile.py` take `--carry`
+  (and the gate `--out`); the profiler's hooks moved to `_round`, `_propose`, `_collect`, and
+  its per-evaluation log is now per round.
+- **Same results.** Measured:
+  - Against the d28f9cb optimizer (on the part-1 SCF), carry None on the ten organic
+    fixtures, one batch and `relax_many` with refills: energies within 4e-15 Eh and points
+    within 6e-14 Bohr, identical counts, the same as the old code's own run-to-run spread
+    (2e-15 Eh, 3e-14 Bohr). Carry 0.25 and 1 (one SCF cycle per round): energies within
+    2e-10 Eh, identical counts.
+  - `stage4_gate.py steps --per-bin 2`, twice on a d28f9cb export and twice on the change:
+    the d28f9cb runs differ from each other in the energy counts of 4 of the 12 molecules
+    (21, 27, 117 and 127 atoms; per-step energies up to 2e-6 Eh apart, the single-molecule
+    SCF being not reproducible run to run there), the change's two runs from each other in 5
+    (those and the 94-atom one), and the change from d28f9cb only on those noisy molecules,
+    by as much; the other molecules agree.
+  - Parity gate (`check`, capacity 256): carry None and 0.25 both 96 of 96 outcomes as the
+    reference; against a d28f9cb run, carry None differs in the energy count of 21 species
+    and 0.25 of 24, the two d28f9cb runs from each other in 21; |dE| above 1e-6 Eh for 24, 25
+    and 24 species. Carry changes nothing beyond the gate's own noise.
+  - The tests (`tests/test_qm_gpu_optimize.py`): carry None equals `qm.anc.optimize_anc` on
+    the GPU energy (every evaluation to 1e-9 Eh, the same count); carry 1 and 0.25 reach the
+    carry-None minima with the same counts (tolerance 1e-6 Eh, 2 energies: with carry, which
+    molecules share a cycle's eigensolve changes, and a cycle with one molecule active takes
+    cuSOLVER's single-matrix path, 1e-7 to 1e-6 Eh in the fp32 orbital energies); the guard
+    stops a waiting molecule at its 5th trial, carry or not; a refill stop with evaluations
+    in flight resumes to the uninterrupted batch's minima and counts.
+- **Speed (first look; the tuning is next).** `scf_profile.py --seeds 16`, 1024 molecules:
+  - The solid numbers: the same energies used (49,288 with None, 49,158 with 0.25, 31-50)
+    in a third fewer SCF cycles (below).
+  - 31-50 atoms: 138.2 s with carry None, 129.0 s with 0.25 (-7%); 51-80: 342.0 s and
+    329.1 s (-4%); one run each, against a run-to-run spread of 2.6% and 0.6% (the two
+    `tuning_long` runs of the same queues). The parity gate's 96 species in small batches
+    (2-21 molecules) are slower with 0.25: 230 s against 196 s (one run; two d28f9cb runs
+    differ by 7%).
+  - With synchronized timers (31-50): SCF cycles 9,655 -> 6,349 (-34%), the active share
+    per cycle 0.26 -> 0.53, SCF time 109 s -> 79 s, rounds 511 -> 604. The share of SCF time
+    in cycles with under 10% of the batch active fell from 48% (d28f9cb's ceiling profile)
+    to 17%; what is left is in small batches (20-30 molecules): the refill drains and the
+    run's tail.
+  - The gain is eaten in part by the per-round work, which does not shrink with fewer
+    molecules: the geometry (`set_geometry`, every molecule), `result` and the gradient of
+    the whole batch, the RFO of every molecule: 33 s of the 120 s of rounds with 0.25,
+    against 27 s with None.
+  - Peak device memory per batch rose 10-25% (the parity gate's batches: 0.48-0.54 of
+    `molecule_bytes`' estimate before, 0.56-0.62 now): the persistent SCF state keeps C and F
+    through the gradient, and `result` copies the density matrices. Still within the
+    estimate.
+
+## 2026-11-24: GPU xTB carry-over, review fixes
+
+The carry-over change (parts 1 and 2 above) was reviewed; these fixes follow, branch
+`claude/gpu-xtb`, uncommitted on d28f9cb. The measurements of parts 1 and 2 were taken before
+them.
+
+- **A guard-stopped trial traces no energy.** With the SCF state now kept across rounds, the
+  trace entry of a trial the guard stopped took that molecule's previous SCF energy when
+  another molecule's evaluation ended in the same round (NaN when none did). `_round` now
+  sets the energy of every row whose evaluation did not end to NaN, as d28f9cb gave. The
+  optimizer state was never affected (a stop accepts nothing). Test:
+  `test_a_guard_stopped_trial_traces_no_energy`.
+- **No fallback on a first evaluation.** A new molecule's first SCF starts from the SAD guess;
+  with the fallback on, a failure reran the same SCF from the same guess (up to 250 more
+  cycles) and counted a fresh start. Production's `TbliteEnergy` re-raises when there is no
+  previous result. `SCFBatch.start` now takes `fallback` as a bool or a per-molecule mask, and
+  `_launch` passes the step evaluations only. Pre-existing at d28f9cb (its `_initial` used
+  `run_with_fallback` from the guess); only `fresh_starts` and cycles change, the outcome is
+  FAIL_SCF either way. Test: `test_a_failed_first_evaluation_does_not_fall_back_to_the_same_guess`.
+- **The Broyden history shrinks back.** It grows by doubling, and with carry-over the
+  `SCFRun` lives as long as the batch, so one SCF that reached the cycle limit left every
+  molecule's history at 256 slots (0.7-1.1 `molecule_bytes` per molecule at 20-37 atoms) for
+  the rest of the batch. `Broyden._reserve` now shrinks the buffers to the smallest chunk
+  multiple above twice the slots in use once that is a quarter of the capacity or less: 32
+  slots never shrink, 64 shrink to 16 whenever at most 7 are in use (with carry None, at the
+  start of every round, so a batch whose slowest SCF takes 33 or more cycles each round shrinks
+  and regrows each round, a few small copies), 256 after a limit-hitting SCF shrink at the next
+  solve once it has ended (the round where it ends still holds them through its gradient, below
+  the SCF-phase peak). `molecule_bytes` still does not count the history. `relax_many`
+  drops the finished `BatchedANC` before it builds the next batch, so the two batches' SCF
+  states and integrals no longer overlap at a refill. The SCF-phase peak of a long SCF
+  itself (the history at 256 slots while it runs) is unchanged and was there at d28f9cb.
+  Test: `test_a_long_scf_leaves_the_mixer_narrow_for_the_scfs_after_it`.
+- **One host read per cycle beside the running set, and an exact solve width.** The mixer
+  retires the SCFs that ended before its solve reads `h.max()` (`Broyden.next(..., retire,
+  also)`), so the width is exact at once (it stayed at an earlier long SCF's for one more solve
+  per round), and the ended and fallback counts ride on that same read (`also`), read by
+  themselves only in a cycle without a solve. Left as is: a cycle whose molecules are all at
+  their first iteration still runs one solve, now 1 wide and without a sync of its own;
+  skipping it would need host-side tracking of the iterations.
+- **The RFO eigensolve covers the proposing molecules only** (`_propose`, one `nonzero` per
+  round): with a carry the pending and finished molecules were solved for nothing. Checked:
+  a molecule's RFO step from a sub-batch equals the full batch's bit for bit at M+1 <= 32 and
+  within 2e-15 above (cuSOLVER's batched path), the old code's own run-to-run spread; so the
+  "carry None equals d28f9cb within 4e-15 Eh" of part 2 now holds to that rounding, not
+  re-measured.
+- **Parity gate on the fixed code** (`stage4_gate.py check --capacity 256 --carry 0.25`, one
+  run, queue job 37): 96 of 96 outcomes as the reference, the same one restrained-run
+  difference (the 127-atom species) as part 2's carry-0.25 run, energy counts different from
+  that run in 22 species (two d28f9cb runs differ in 21), 230.6 s against 230.0 s, peak memory
+  0.56-0.68 of `molecule_bytes` (0.56-0.69 before). The fixes change nothing beyond the gate's
+  own noise.
+
+## 2026-11-24: GPU xTB carry-over, part 3: measured, and the default carry 0.1
+
+Measured on the code of parts 1 and 2 with the review fixes (queue jobs 34-41 and 45;
+`data/processed/gpu_qm_spike/carry_*.json`). Branch `claude/gpu-xtb`.
+
+- **The ceiling, before the change** (d28f9cb, `carry_ceiling_<bin>.json`): cycles with under
+  10% of the batch active held 48% of the SCF time at 31-50 atoms and 37% at 51-80, the
+  first evaluations 12% and 9%. This bounds what carry can save; those cycles only get cheaper.
+- **The choice of c** (1024 conformers, `--seeds 16`, s/molecule):
+
+  | carry | 31-50 | 51-80 |
+  |---|---|---|
+  | 0.1 | 0.122, 0.117 | 0.304, 0.300 |
+  | 0.25 | 0.118, 0.118 | 0.309, 0.306 |
+  | 0.5 | 0.123 | 0.328 |
+  | None (same code) | 0.130 | 0.323 |
+
+  0.1 and 0.25 are not told apart (0.25 is 1% faster at 31-50, 0.1 is 2% faster at 51-80);
+  0.5 is worse, at 51-80 slower than none. The default is 0.1 (`optimize.CARRY`): equal on
+  the long queue and faster in the parity gate's small batches (204 s against 218-224 s).
+  Outcomes in every run are within d28f9cb's spread: 31-50 1017 ok and 7 SCF_NOT_CONVERGED,
+  51-80 1017-1018 ok, 6 SCF_NOT_CONVERGED, 0-1 OPT_NOT_CONVERGED; 121 and 109 walled.
+- **Against 12 CPU workers** (`stage4_reference_preload_64_relax.json`, `_relax` alone):
+
+  | case | carry 0.1 | carry None, same code | d28f9cb | CPU12 | speed-up |
+  |---|---|---|---|---|---|
+  | 31-50, 1024 in flight | 0.120 | 0.130 | 0.142-0.146 | 0.214 | 1.79x |
+  | 51-80, 1024 in flight | 0.302 | 0.323 | 0.330-0.332 | 0.682 | 2.26x |
+  | 31-50, 256 in flight | 0.208 | - | 0.19-0.20 | 0.214 | 1.03x |
+  | 51-80, 256 in flight | 0.475 | - | 0.47-0.48 | 0.682 | 1.44x |
+  | 81-120 | 1.383 | 1.349 | 1.391 | 4.367 | 3.16x |
+  | 121-200 | 2.054 | 1.978 | 1.977 | 6.595 | 3.21x |
+
+  - Carry gains 8% at 31-50 and 6.5% at 51-80 on the long queue against the same code
+    without it. Some of the gain over d28f9cb is from the review fixes without carry (the RFO
+    of the proposing molecules only, the mixer's exact width, one sync fewer per cycle).
+    The control is one run; two d28f9cb runs differ by 2.6% and 0.6%.
+  - With 256 conformers, and above 80 atoms, carry gains nothing: the batches are small, and
+    each round's fixed work (geometry, gradient and RFO of the whole batch) is paid more often.
+    Above 80 atoms it costs 2.5% (81-120) and 4% (121-200) against the same code without it
+    (one run each, `carry_time_81-200_s4_c{0.1,none}.json`); a size-dependent carry (None
+    above 80 atoms) would take that back.
+  - Peak memory is 0.55-0.68 of `molecule_bytes` (0.48-0.52 at d28f9cb), with or without
+    carry (0.57 without it above 80 atoms): the persistent SCF state lives through the
+    gradient.
+- **The spike's bar** (2x at 30-80 atoms): met at 51-80 on a long queue (2.26x), not at
+  31-50 (1.79x).
+- **Parity gate** (96 species, capacity 256): 96 of 96 outcomes in every run, carry or not.
+  Carry None on the same code: walls 96/96, as both d28f9cb runs. With carry (0.25 four
+  times, 0.1 once) the 127-atom Pd complex
+  `COc1cc[c]([Pd-]([NH2+]c2ccccc2OC)[P+](N=P23N(CC(C)C)CCN(CCN2CC(C)C)CCN3CC(C)C)(C(C)(C)C)C(C)(C)C)c(C)c1`
+  takes a walled retry the CPU does not: 5 of 5 runs, 0 of 4 without carry; alone on
+  d28f9cb it does in 1 of 4 (`tuning_pd_probe.json`). The outcome stays ok: 462-475 energies
+  against 219-231, an end point 2.8 mEh lower, 0.35 A RMSD from the CPU's. Per molecule the
+  computation is the same with or without carry. What differs is which molecules share a
+  cycle's fp32 eigensolve: the slowest SCF is often alone, and a cycle with one molecule
+  takes cuSOLVER's single-matrix path. That moves its orbital energies by 1e-7 to 1e-6 Eh,
+  the size of the SCF tolerance, and this flat path is sensitive to that. This explanation
+  is not shown by a measurement. Energy counts differ between two carry runs in 26 species,
+  between two d28f9cb runs in 21.
+- **Open.** The Pd complex's systematic retry under carry. A cycle with one molecule could
+  take the batched eigensolver path (pad it with a copy) to test the explanation.
+
+## 2026-11-25: GPU xTB stage 5: `ksmech-qm run --optimizer gpu-anc`
+
+Stage 5 of the GPU xTB plan (`docs/gpu_qm_spike.md`), the integration, approved by the user
+after the carry-over. Branch `claude/gpu-xtb`. Code: `qm.gpu_run` (the driver),
+`GFN2Calculator.run_from`, `relax_many(on_result, more)`.
+
+- **One method per run.** Every record of a gpu-anc run carries `GFN2-xTB/ALPB-water/gpu-anc`,
+  including the ones the CPU optimized (small species, open shells, spin tags): the token build
+  and every other reader take one method (`QMConfig().method` or `--method`), and a run
+  whose records split over two methods could not be read as one. The CPU path of a gpu-anc run
+  runs tblite-anc (`xtb_calc._ANC`; a plain `_OPTIMIZERS` entry would have fallen through to
+  L-BFGS). The manifest's `detail` of each ok row says where its geometry was optimized.
+- **Routing**, in a worker per task: the memo first (a remembered failure never reaches the
+  GPU), then the CPU path for more than one conformer, a spin tag, an unpaired electron, an
+  element above Rn, fewer than 31 atoms (`--gpu-min-atoms`; the GPU loses below about 30 atoms,
+  stage 4 and the SCF tuning) or a preparation that fails (the CPU path reports it). Every
+  route is counted in the run's summary. Water only; another medium is refused, as a run
+  without a CUDA device is.
+- **The GPU's queue is fed while the workers prepare.** Embedding the 384 smoke species took
+  85 s on 12 workers before the GPU could start; at that rate a 100k-species run would leave
+  the GPU idle for hours. `relax_many(more=...)` takes new tasks at every refill (in size
+  order), and the driver sends them 256 at a time. The workers do finishing first, then
+  preparing, then the CPU path. This rests on the scale argument alone: on the smoke set it
+  measured no gain (485 s against 467 s with everything embedded first, one run each, noise
+  not measured), the set's 256 GPU species being one send.
+  - Preparing pauses while 4096 GPU items wait for an outcome (`BACKLOG`; each holds its mol
+    in the driver and in the GPU's queue), and `relax_many` with `on_result` keeps no
+    outcome: embedding (about 3 species/s on 12 workers) outruns the GPU above 80 atoms
+    (0.5-0.7 species/s), so a full source would otherwise end up in the main process.
+  - A flush every 10 s of whatever was prepared (so the GPU starts sooner) was tried and
+    dropped: 503 s against 485 s on the smoke set, the early batches being small.
+- **Finishing on the CPU** (`run_from`): tblite's single point at the GPU geometry gives the
+  gradient for free. Where max |g| (with the walls of a restrained run: its end point is
+  converged on the walled surface, not the bare one) is above fmax, tblite-anc polishes from
+  there: free as `_relax` (its walled retry then starting from the GPU point), or with the same
+  walls. The record gets GPU_POLISHED.
+- **Failures.** A GPU failure, or a failure while finishing, is rerun on the CPU path from the
+  start, and only that outcome reaches the memo: gpu-anc's tombstones are tblite-anc's
+  failures, never the GPU's (stage 4's potassium complex failed on the GPU only). A finishing
+  that times out is a TIMEOUT. The GPU part has no wall-clock timeout (`maxiter` bounds it);
+  `--scf-maxiter` now reaches the GPU's SCF (`BatchedANC(max_iter)`).
+- **Smoke runs** (the spike's 384 species, 64 per bin from 1 to 200 atoms, 12 workers, a
+  temporary cache; `data/processed/gpu_qm_spike/stage5_*`): 384/384 records in each of the
+  three runs; 256 on the GPU, 128 small on the CPU, 3-5 polished, no GPU failure retried.
+  Wall time 467 s with every species embedded first, 485 s fed 256 at a time, 503 s with the
+  10 s flush. Energies of the GPU records against production's tblite-anc end points from the
+  same starts (`stage4_reference_preload_64.json`): at 31-50 atoms 56 of 64 within 1e-5 Eh and
+  63 within 1e-4; at 51-80 44-46 within 1e-5 and 58-60 within 1e-4, the rest other conformers
+  (one 3.9e-2 Eh lower in one run). That is the parity gate's spread.
+- **Speed, an estimate on this sample only.** The per-bin CPU timings of the reference (12
+  workers, optimization alone: 0.012 to 6.6 s per molecule) put `--workers 12 --optimizer
+  tblite-anc` at about 760 s for these 384 species plus about 45 s of single points, against
+  467-503 s: about 1.7x. The sample is uniform over the size bins, 704 of the 763 CPU seconds
+  are above 80 atoms (where the GPU is 3x), and the estimate leaves out the CPU's embedding.
+  Stage 6 measures it end to end.
+- **Tests** (`tests/test_qm_gpu_run.py`): the ANC dispatch of gpu-anc on the CPU; `run_from`
+  at a converged geometry equals the CPU record, from an unconverged one it polishes to it;
+  the routes; finishing; the CPU retry leaves no tombstone; the driver with a fake GPU (memo,
+  routes, finishing, retry, every task's rows once, fed one item at a time too); every
+  `OPEN_SHELL` fixture routed to the CPU; a record that cannot be written ends as rows, not
+  an exception (the finishing guards its whole body); a second run computes nothing; and with
+  the GPU, records against tblite-anc for four fixtures with two open shells routed, and the
+  SCF cycle limit.
+
+## 2026-11-26: GPU xTB stage 6: the end-to-end benchmark
+
+Report: `docs/gpu_qm_benchmark.md`. Scripts: `scripts/gpu_xtb/stage6_{sample,job,compare}`.
+Data: `data/processed/gpu_qm_benchmark/`.
+
+- **Design:**
+  - Three arms of `ksmech-qm run --workers 12`, identical except `--optimizer`: `tblite`
+    (production's L-BFGS-B), `tblite-anc` and `gpu-anc`.
+  - Each (set, arm) has a fresh cache and processed dir. Each arm must have written all its ok
+    records during the arm itself, with no memo hits.
+  - One GPU-queue job ran everything (job 50, 01:50-04:22), so fits stayed off the machine for
+    the CPU arms too.
+  - Before every arm the job waits for 85% CPU idle over 5 s and for no pytest or ksmech fit.
+    During the arm it logs `vmstat`, `nvidia-smi` and foreign pytest or fit processes; none
+    ran. The CPU arms averaged 75.7% CPU, the 12 workers plus under one thread.
+  - The gate's patterns are anchored to a python running pytest or a fit: a first version
+    matched the shell of a command that only mentioned "bin/pytest" and waited forever.
+- **Inputs:**
+  - 1,000 random species of the full ReactMech v19 QM manifest (any status, seed 0), the
+    realistic mix;
+  - the spike's 64 species per size bin, which give per-bin figures for a short queue only.
+- **Result on the slice:**
+  - gpu-anc 511 and 562 s (two runs, a 10% spread), tblite-anc 871 s, tblite-lbfgs 2,892 s.
+  - That is 1.55-1.70x for the GPU over the same optimizer on the CPU, 3.3x for tblite-anc
+    over tblite-lbfgs, and 5.1-5.7x for gpu-anc over production.
+  - Outcomes: the same for gpu-anc and tblite-anc (994 ok). tblite-lbfgs made 983.
+  - Records of the 758 GPU-optimized species against tblite-anc: 77% within 1e-5 Eh and 99%
+    within 1e-3, median RMSD 0.002 Å; no bias in the sign of the tail. tblite-lbfgs against
+    tblite-anc: 5% within 1e-5, median RMSD 0.16 Å.
+  - gpu-anc is not reproducible bit for bit: its two runs differ beyond 1e-4 Eh on 25 of 758
+    species (batch composition changes a molecule's path).
+  - These rates hold for a 1,000-species queue; a whole source is unmeasured.
+  - Production's manifest seconds are 1.7x the lbfgs arm's for the same species, growing with
+    size. Those records predate the OpenBLAS preload (ba36049), the likely cause.
+- **Per bin** (64 species): gpu-anc against tblite-anc is 0.77x at 31-50 atoms, 0.94x at 51-80,
+  1.36x at 81-120 and 1.85x at 121-200. A 64-species queue is too short for the GPU below 80
+  atoms. Below 31 atoms gpu-anc equals tblite-anc bit for bit, plus about 4 s of CUDA start-up.
+- **Verdict:**
+  - The spike's 2x bar for the GPU's own gain is not met end to end: 1.6x on the realistic
+    mix. Against production's optimizer gpu-anc is 5x, but 3.3x of that tblite-anc gives on
+    the CPU alone.
+  - The gpu-anc run is GPU-bound: after its first quarter the CPU is 15-29% busy, the GPU
+    64-82%.
+- **Levers, not built and needing approval:**
+  - CPU workers taking GPU-eligible species while idle: at most about 2.3x over tblite-anc,
+    estimated;
+  - a higher GPU threshold for short sources;
+  - not retrying a GPU OPT_NOT_CONVERGED on the CPU: the 3 such species failed again there.
+- Either switch of optimizer is a new method tag and a full QM recompute. The default stays
+  `tblite` until the user decides.
+
+## 2026-11-26: GPU xTB work sharing: idle CPU workers take the GPU queue's species
+
+- **What** (the user: "Build work sharing"; 7ff4056): in a gpu-anc run, a worker with nothing
+  else to do takes a sent GPU item the GPU has not yet batched, smallest first, of at most
+  `--gpu-share-max-atoms` atoms (default 80, 0 off), and runs it on the CPU path.
+  - One locked claim per item: the GPU claims it as a batch takes it (`relax_many(claim=...)`;
+    `None` is the old path bit for bit), the scheduler when a worker takes it.
+  - Shared rows carry "shared from the GPU's queue" in their detail, route `cpu_shared`.
+  - Workers steal only into an idle slot (fewer than n jobs in flight), never into the pool's
+    prefetch, where a stolen job would wait.
+- **Measured** (`docs/gpu_qm_benchmark.md`, "Work sharing"):
+  - No gain on the 1,000-species ReactMech slice: 534.7 s with sharing against 537.0 s
+    without. The GPU's last batch of large molecules sets the end. Sharing brings that batch
+    forward, but the busy workers slow the GPU's driving thread on the 8-core host, and the
+    batch runs longer.
+  - On 64-species queues: -29% at 31-50 atoms, -16% at 51-80.
+  - The shared records equal tblite-anc's bit for bit. A species' record now depends on the
+    run's timing, as gpu-anc's batch composition already made it (stage 6: 25 of 758 species
+    differ beyond 1e-4 Eh between two runs).
+  - Three of the eight arms were contaminated by a video player from 22:13 and are not used.
+- **Default 80, on:** harmless on the long queue, a gain on short ones. 80 atoms bounds the
+  largest job a worker takes (67 worker seconds on the slice).
+- **Not built:** a cure for the GPU's large-molecule tail (duplicating the GPU's last molecules
+  on idle workers, or capping the sharing workers so the GPU's thread keeps a core). The
+  default optimizer stays `tblite`.
+
+## 2026-11-26: the GPU engine and the ANC optimizer move to their own package, speedChem
+
+- **What** (the user: separate this code into a new repo that ksmech depends on, so that new
+  QM optimization methods go there). The user's choices:
+  - **Boundary:** the engine and the optimizers;
+  - **Hosting:** public GitHub under LGPL-3.0;
+  - **Name:** speedChem;
+  - **History:** kept.
+- **The package** `speedchem` (repo `mfiaschi5/speedChem`, local checkout `~/Documents/speedChem`):
+  - `speedchem.gpu` (the former `ksmech.qm.gpu`, with the CUDA sources of `native/ksxtb` as package
+    data in `gpu/csrc/`);
+  - `speedchem.anc` (the former `ksmech.qm.anc`);
+  - `speedchem.bonds` (the bond walls, the dissociation guard and the connectivity check, out of
+    `qm.geometry`);
+  - `speedchem.reasons` (a StrEnum with `ReasonCode`'s values);
+  - `speedchem.settings.RelaxSettings` (relax_many's settings; ksmech passes its `QMConfig`);
+  - `speedchem.units`.
+  - It imports nothing of ksmech. Its tests take tblite as the reference and their own copy of
+    the fixed molecule set.
+  - The history of the moved files came over by git-filter-repo (16 commits from the branch
+    claude/gpu-xtb at 62f1188).
+- **Behaviour unchanged:**
+  - The code moved without edits beyond imports and paths.
+  - The messages of the bond checks are the same.
+  - `qm.geometry` re-exports the moved names and wraps `DissociationGuard` and
+    `check_connectivity`, which raise `QMError(CONNECTIVITY_CHANGED)` here as before; speedchem
+    raises its own `ConnectivityChanged`.
+  - Reason codes cross the boundary by value: the StrEnums compare equal by `==`, never by `is`.
+- **The CUDA library** builds on first use from the installed package into
+  `SPEEDCHEM_BUILD_DIR` (default `~/.cache/speedchem`), since an installed package may be
+  read-only. `KSXTB_ARCH` sets the architecture (default sm_89). `native/ksxtb/build/` is gone.
+- **torch** stays in ksmech's cuda and rocm groups. speedchem declares it only as the optional
+  extra `gpu`, so `uv sync --group rocm` still picks the torch build. `speedchem.anc` and
+  `speedchem.bonds` import without torch, as the CPU workers need.
+- **Provenance:** QM record headers trace the code by ksmech's commit (`code_git_hash`, tracing
+  only, not compared). The speedchem version a commit used is pinned in `uv.lock` once
+  speedchem is a git source at a fixed commit. While it is a local editable path (until the
+  push), a speedchem change leaves no trace on a record, as an uncommitted ksmech change
+  would without its dirty flag: no QM batch for keeps runs before the git pin.
+- **Licence:** LGPL-3.0-or-later, the licence of tblite and dftd4. The engine reimplements
+  their GFN2 and D4 and ships parameter tables extracted from tblite, mctc-lib and dftd4
+  (`NOTICE`). The texts are SPDX's copies (gnu.org refused the connection). rhoMech's own
+  licence is still open.
+- **Left in ksmech:** the gpu-anc driver (`qm.gpu_run`), the tblite optimizers of `qm.geometry`,
+  the records, the batch and the stage scripts of `scripts/gpu_xtb/` (now importing speedchem).
+  `share_job.sh` names test files that are now in speedChem; it is the record of job 51 and is
+  left as it ran.
+- **Pushed and pinned** (the user created the empty public repo `mfiaschi5/speedChem` and asked
+  for the push): main at 04d1add. ksmech's `pyproject.toml` takes it as a git source pinned to
+  that commit (`uv.lock`), so ksmech's commit fixes speedchem's.
+- **Gate** (GPU-queue job 52):
+  - speedChem's tests: 36 GPU and 83 CPU passed. ksmech's GPU driver tests: 3 passed.
+  - `stage4_gate.py check` ran on the pre-extraction code (62f1188) and twice on speedchem. All
+    three runs match the tblite-anc reference in 96 of 96 outcomes, and old and new agree in
+    96/96 outcomes.
+  - Their end energies differ as much between the two speedchem runs as between old and new:
+    median 5e-9 to 1e-8 Eh, 10-12 species beyond 1e-5, maximum 4e-3 to 2e-2. That is the
+    GPU's run-to-run nondeterminism (stage 6), not the move.

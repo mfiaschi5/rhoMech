@@ -667,7 +667,7 @@ the cache, unused by the engine.
 | `fukui_fmo_plus`, `fukui_fmo_minus` | float64, (n,) | frozen-orbital: Mulliken population of LUMO / HOMO |
 | `homo_ev`, `lumo_ev`, `chemical_potential_ev`, `hardness_ev`, `electrophilicity_ev` | float64, () | NaN without a frontier pair |
 | `buried_volume` | float64, (n,) | %Vbur, radius 3.5 A, hydrogens included, each atom as centre |
-| `warnings` | str, () | comma-separated codes: `FUKUI_SCF_FAIL`, `VBUR_FAIL`, `NO_FRONTIER`, `RESTRAINED_GEOM`, `EMBED_UFF_FALLBACK`, `EMBED_RANDOM_COORDS` |
+| `warnings` | str, () | comma-separated codes: `FUKUI_SCF_FAIL`, `VBUR_FAIL`, `NO_FRONTIER`, `RESTRAINED_GEOM`, `EMBED_UFF_FALLBACK`, `EMBED_RANDOM_COORDS`, `GPU_POLISHED` (gpu-anc: tblite-anc finished the GPU's geometry, whose gradient on tblite was above fmax) |
 
 ### Manifest: `data/processed/<source>/qm_manifest.parquet`
 
@@ -676,6 +676,11 @@ One row per (`smiles`, `conformer_id`, `method`): `smiles`, `conformer_id`, `cac
 `seconds`, `n_embedded`, `method`. Fragments that cannot be canonicalized get `conformer_id = -1`,
 and so do the species the spin census refuses before QM (P8: `SPIN_CENSUS_REFUSED`, a
 non-metal with u >= 2 that is not a Hund case or has no count, unless a counted exemption's).
+Under `--optimizer gpu-anc` (`qm.gpu_run`) the `detail` of an ok row says where the geometry was
+optimized: `optimized on the GPU, <n> energies`; empty for the CPU path; `GPU retried on the CPU
+(<the GPU's failure>)` when the GPU failed and the CPU's tblite-anc run made the row. The
+`seconds` of a GPU row are the worker's finishing time only (single point, polish, Fukui,
+sterics), not the batched optimization's share.
 A record whose own SMILES (`chem.unmapped_canonical` of the worker's molecule) is not the key it
 was computed for is not written: `RECORD_KEY_MISMATCH`, with the record's SMILES as the detail
 (its key would refuse it as STALE_ARTIFACT; 2026-11-10, a ring double bond's E/Z swapped by

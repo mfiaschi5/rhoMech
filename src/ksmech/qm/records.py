@@ -53,6 +53,7 @@ class ReasonCode(StrEnum):
     EMBED_UFF_FALLBACK = "EMBED_UFF_FALLBACK"
     EMBED_RANDOM_COORDS = "EMBED_RANDOM_COORDS"
     EMBED_RELAXED_BOUNDS = "EMBED_RELAXED_BOUNDS"
+    GPU_POLISHED = "GPU_POLISHED"  # gpu-anc: tblite-anc finished the GPU's geometry (`qm.gpu_run`)
 
 
 class QMError(Exception):

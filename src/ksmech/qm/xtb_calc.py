@@ -47,8 +47,15 @@ from ksmech.qm.records import DEFAULT_CACHE_DIR, QMError, QMRecord, ReasonCode
 from ksmech.qm.sterics import buried_volume_per_atom
 
 log = logging.getLogger(__name__)
-_OPTIMIZERS = ("tblite", "tblite-anc", "xtb")
-_OPT_TAGS = {"tblite": "tblite-lbfgs", "tblite-anc": "tblite-anc", "xtb": "xtb-opt"}
+OPTIMIZERS = ("tblite", "tblite-anc", "xtb", "gpu-anc")
+_OPT_TAGS = {
+    "tblite": "tblite-lbfgs",
+    "tblite-anc": "tblite-anc",
+    "xtb": "xtb-opt",
+    "gpu-anc": "gpu-anc",
+}
+# `speedchem.anc` on tblite; gpu-anc also on the GPU (`qm.gpu_run`)
+_ANC = ("tblite-anc", "gpu-anc")
 # The ALPB solvents of GFN2 in tblite (and xtb), by the one name each the method string carries:
 # tblite also takes aliases and any case ('h2o', 'DMSO', 'dichloromethane'), which would give one
 # solvent two method strings and two cache keys (docs/decisions.md, 2026-11-09).
@@ -63,7 +70,8 @@ GAS = "gas"  # the medium part of a gas-phase method; `--solvent gas` on the com
 
 @dataclass(frozen=True)
 class QMConfig:
-    optimizer: str = "tblite"  # "tblite": scipy L-BFGS on tblite; "xtb": the xtb binary
+    optimizer: str = "tblite"  # "tblite": scipy L-BFGS on tblite; "xtb": the xtb binary;
+    # "gpu-anc": tblite-anc's optimization, run batched on the GPU where `qm.gpu_run` routes it
     solvent: str | None = "water"  # ALPB implicit solvent for every calculation; None = gas phase
     fmax: float = 3e-4  # max |gradient| in Hartree/Bohr
     maxiter: int = 500  # optimizer iterations
@@ -78,8 +86,8 @@ class QMConfig:
     spin_tag: str | None = None  # set per species by `qm.spin.config_for`, never by hand
 
     def __post_init__(self) -> None:
-        if self.optimizer not in _OPTIMIZERS:
-            raise ValueError(f"optimizer must be one of {_OPTIMIZERS}, got {self.optimizer!r}")
+        if self.optimizer not in OPTIMIZERS:
+            raise ValueError(f"optimizer must be one of {OPTIMIZERS}, got {self.optimizer!r}")
         if self.solvent and self.solvent not in ALPB_SOLVENTS:
             raise ValueError(f"solvent must be None or in {ALPB_SOLVENTS}, got {self.solvent!r}")
 
@@ -151,6 +159,14 @@ def _single_point(z, xyz_bohr, charge, unpaired, solvent, integrals, scf_maxiter
         raise QMError(ReasonCode.SCF_NOT_CONVERGED, str(exc)) from exc
 
 
+def _gmax(res, walls, xyz_bohr: np.ndarray) -> float:
+    """Largest |gradient| component of a tblite result, plus the walls' (if any) at xyz."""
+    grad = np.asarray(res.get("gradient"))
+    if walls is not None:
+        grad = grad + walls.energy_gradient(xyz_bohr)[1]
+    return float(np.abs(grad).max())
+
+
 def _fukui_fd(z, xyz_bohr, charge, unpaired, q_n, solvent, scf_maxiter=250) -> fukui.FukuiFD | None:
     """Finite-difference Fukui from the N+1 and N-1 systems; None if either SCF fails."""
     u_ion = fukui.unpaired_for_ionized(unpaired)
@@ -175,7 +191,7 @@ class GFN2Calculator:
         if cfg.optimizer == "xtb":
             return optimize_xtb(z, xyz_bohr, charge, unpaired, cfg.solvent)
         args = (z, xyz_bohr, charge, unpaired, cfg.fmax, cfg.maxiter, cfg.solvent, walls)
-        if cfg.optimizer == "tblite-anc":
+        if cfg.optimizer in _ANC:
             guard = DissociationGuard(mol, cfg.conn_cov_factor) if walls is None else None
             return optimize_tblite_anc(*args, scf_maxiter=cfg.scf_maxiter, guard=guard)
         return optimize_tblite(*args, scf_maxiter=cfg.scf_maxiter)
@@ -225,24 +241,67 @@ class GFN2Calculator:
         _, xyz, restrained = min(kept, key=lambda k: k[0])
         return xyz, restrained
 
-    def run(self, mol: Chem.Mol, conf_id: int = 0) -> QMRecord:
-        """Full pipeline for one conformer. Raises QMError(reason) on failure."""
+    def _prepare(self, mol: Chem.Mol, conf_id: int):
+        """(smiles, z, start Bohr, charge, unpaired, the species' config) of one conformer."""
         smiles = chem.unmapped_canonical(mol)
         _check_atom_order(mol, smiles)
         z = np.array([a.GetAtomicNum() for a in mol.GetAtoms()], dtype=np.int32)
         start = mol.GetConformer(conf_id).GetPositions() / BOHR_ANG
         charge, unpaired, tag = qm_spin.spin_for_qm(mol, smiles)
-        config = replace(self.config, spin_tag=tag)
+        return smiles, z, start, charge, unpaired, replace(self.config, spin_tag=tag)
+
+    def run(self, mol: Chem.Mol, conf_id: int = 0) -> QMRecord:
+        """Full pipeline for one conformer. Raises QMError(reason) on failure."""
+        smiles, z, start, charge, unpaired, config = self._prepare(mol, conf_id)
         if config.given_geometry:
             check_connectivity(mol, start * BOHR_ANG, config.conn_cov_factor)
             xyz_bohr, restrained = start, False
-        elif tag is not None:
+        elif config.spin_tag is not None:
             xyz_bohr, restrained = self._relax_tagged(mol, z, start, charge, unpaired)
         else:
             xyz_bohr, restrained = self._relax(mol, z, start, charge, unpaired)
-        xyz_ang = xyz_bohr * BOHR_ANG
         res = _single_point(z, xyz_bohr, charge, unpaired, config.solvent, True, config.scf_maxiter)
-        rec = self._assemble(res, z, xyz_ang, smiles, conf_id, charge, unpaired)
+        ident = (smiles, charge, unpaired)
+        return self._record(mol, conf_id, ident, z, xyz_bohr, restrained, res, config)
+
+    def run_from(
+        self, mol: Chem.Mol, conf_id: int, xyz_bohr: np.ndarray, restrained: bool
+    ) -> QMRecord:
+        """The record at a geometry optimized elsewhere (the GPU's ANC run, `qm.gpu_run`; with
+        bond walls if `restrained`), for an untagged species: tblite's single point there, and
+        where its gradient (walls included) exceeds fmax a tblite-anc polish from that point
+        (GPU_POLISHED: free, as `_relax`, or with the same walls), then the rest as `run`."""
+        smiles, z, _, charge, unpaired, config = self._prepare(mol, conf_id)
+        if config.spin_tag is not None:
+            raise ValueError(f"{smiles}: a tagged species is optimized on the CPU (`run`)")
+        sp = (z, xyz_bohr, charge, unpaired, config.solvent, True, config.scf_maxiter)
+        res = _single_point(*sp)
+        walls = bond_walls(mol, config.wall_factor, config.wall_k) if restrained else None
+        polished = _gmax(res, walls, xyz_bohr) > config.fmax
+        if polished:
+            xyz_bohr, restrained = self._polish(mol, z, xyz_bohr, charge, unpaired, walls)
+            res = _single_point(z, xyz_bohr, *sp[2:])
+        rec = self._record(
+            mol, conf_id, (smiles, charge, unpaired), z, xyz_bohr, restrained, res, config
+        )
+        if polished:
+            rec.add_warning(ReasonCode.GPU_POLISHED)
+        return rec
+
+    def _polish(self, mol, z, xyz_bohr, charge, unpaired, walls) -> tuple[np.ndarray, bool]:
+        """tblite-anc from a nearly converged point: with its walls, or free as `_relax` (whose
+        walled retry then starts from that point)."""
+        if walls is None:
+            return self._relax(mol, z, xyz_bohr, charge, unpaired)
+        xyz = self._optimize(mol, z, xyz_bohr, charge, unpaired, walls)
+        check_connectivity(mol, xyz * BOHR_ANG, self.config.conn_cov_factor)
+        return xyz, True
+
+    def _record(self, mol, conf_id, ident, z, xyz_bohr, restrained, res, config) -> QMRecord:
+        """The record of the single point `res` at xyz_bohr (`ident`: smiles, charge, unpaired):
+        assembled, then the warnings, Fukui and sterics."""
+        smiles, charge, unpaired = ident
+        rec = self._assemble(res, z, xyz_bohr * BOHR_ANG, smiles, conf_id, charge, unpaired)
         rec.method = config.method
         if restrained:
             rec.add_warning(ReasonCode.RESTRAINED_GEOM)

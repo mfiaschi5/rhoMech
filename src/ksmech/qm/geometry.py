@@ -3,7 +3,7 @@ a tagged species' optimization (`kick`, `formed_bonds`; open-shell plan P4).
 
 tblite has no optimizer, so the default backend runs scipy L-BFGS-B on tblite energies and
 gradients (Cartesian, Bohr), each SCF from the guess. `optimize_tblite_anc` runs the ANC / RFO
-steps of `qm.anc` instead, each SCF restarted from the previous point's wavefunction
+steps of `speedchem.anc` instead, each SCF restarted from the previous point's wavefunction
 (`TbliteEnergy`), and may stop a free run as soon as a bond has dissociated
 (`DissociationGuard`). The other backend shells out to the `xtb` binary (`--opt --gfn 2`).
 """
@@ -15,28 +15,32 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from rdkit import Chem
 from scipy.optimize import minimize
+from speedchem import bonds as _bonds
+from speedchem.anc import AncSettings, optimize_anc
+from speedchem.bonds import (  # noqa: F401 - re-exported: rhoMech's callers import them from here
+    DISSOCIATED_PATIENCE,
+    SKIP_BOND_ELEMENTS,
+    WallRestraint,
+    bond_stretch_ratios,
+    bond_walls,
+)
+from speedchem.reasons import ConnectivityChanged
+from speedchem.units import BOHR_ANG
 from tblite.interface import Calculator, TBLiteRuntimeError
 
-from ksmech.qm.anc import AncSettings, optimize_anc
 from ksmech.qm.records import QMError, ReasonCode
 
-BOHR_ANG = 0.529177210903
 _XTB_TIMEOUT_S = 600
-# Bonds to these ionic/very electropositive elements are not tested: their contacts with the
-# rest of the molecule are electrostatic, and covalent-radius ratios mean little for them.
-SKIP_BOND_ELEMENTS = frozenset({3, 11, 12, 19})  # Li, Na, Mg, K
 SCF_MAXITER = 250  # tblite's own default SCF cycle limit
 # the fixed symmetry-breaking displacement of P2's scan (scripts/probes/spin_scan.py)
 KICK_ANG = 0.02
 KICK_SEED = 0
 FORMED_FACTOR = 1.2  # a non-bonded pair closer than this x r_cov sum is a formed bond (the walls)
-DISSOCIATED_PATIENCE = 5  # the ANC path's free run stops after this many steps with a bond broken
 
 
 def new_calculator(
@@ -56,42 +60,6 @@ def new_calculator(
     if save_integrals:
         calc.set("save-integrals", 1)
     return calc
-
-
-@dataclass(frozen=True)
-class WallRestraint:
-    """Flat-bottom harmonic walls E = k * max(0, d - d0)^2 on selected atom pairs."""
-
-    pairs: np.ndarray  # (m, 2) atom indices
-    d0_bohr: np.ndarray  # (m,) wall onset distances
-    k: float  # Hartree / Bohr^2
-
-    def energy_gradient(self, xyz_bohr: np.ndarray) -> tuple[float, np.ndarray]:
-        grad = np.zeros_like(xyz_bohr)
-        if not len(self.pairs):
-            return 0.0, grad
-        i, j = self.pairs[:, 0], self.pairs[:, 1]
-        vec = xyz_bohr[i] - xyz_bohr[j]
-        dist = np.linalg.norm(vec, axis=1)
-        over = np.maximum(dist - self.d0_bohr, 0.0)
-        pull = (2.0 * self.k * over / np.maximum(dist, 1e-12))[:, None] * vec
-        np.add.at(grad, i, pull)
-        np.add.at(grad, j, -pull)
-        return float(self.k * (over**2).sum()), grad
-
-
-def bond_walls(mol: Chem.Mol, wall_factor: float, k: float) -> WallRestraint:
-    """Walls on every input bond (Li, Na, Mg, K bonds excluded) at `wall_factor` x radii sum."""
-    table = Chem.GetPeriodicTable()
-    pairs, d0 = [], []
-    for bond in mol.GetBonds():
-        a, b = bond.GetBeginAtom(), bond.GetEndAtom()
-        if a.GetAtomicNum() in SKIP_BOND_ELEMENTS or b.GetAtomicNum() in SKIP_BOND_ELEMENTS:
-            continue
-        pairs.append((a.GetIdx(), b.GetIdx()))
-        radii = table.GetRcovalent(a.GetAtomicNum()) + table.GetRcovalent(b.GetAtomicNum())
-        d0.append(wall_factor * radii / BOHR_ANG)
-    return WallRestraint(np.array(pairs, dtype=int).reshape(-1, 2), np.array(d0), k)
 
 
 def optimize_tblite(
@@ -182,41 +150,15 @@ class TbliteEnergy:
         return energy, grad
 
 
-class DissociationGuard:
-    """A `TbliteEnergy` guard: CONNECTIVITY_CHANGED once an input bond (Li, Na, Mg and K bonds
-    excepted) has been longer than `factor` x its covalent-radius sum at `patience` trial
-    geometries in a row. In the benchmark of 2026-11-09 no free run that ended with its bonds
-    intact ever passed 1.3x on the way (99 runs), while a bond that broke passed it within a few
-    dozen steps and stayed: the free run need not go on to its end."""
-
-    def __init__(self, mol: Chem.Mol, factor: float, patience: int = DISSOCIATED_PATIENCE) -> None:
-        table = Chem.GetPeriodicTable()
-        z = [a.GetAtomicNum() for a in mol.GetAtoms()]
-        pairs = [
-            (b.GetBeginAtomIdx(), b.GetEndAtomIdx())
-            for b in mol.GetBonds()
-            if z[b.GetBeginAtomIdx()] not in SKIP_BOND_ELEMENTS
-            and z[b.GetEndAtomIdx()] not in SKIP_BOND_ELEMENTS
-        ]
-        self.pairs = np.array(pairs, dtype=int).reshape(-1, 2)
-        radius = table.GetRcovalent
-        self.rcov = np.array([radius(z[i]) + radius(z[j]) for i, j in pairs])
-        self.factor, self.patience, self.streak = factor, patience, 0
+class DissociationGuard(_bonds.DissociationGuard):
+    """`speedchem.bonds.DissociationGuard` raising `QMError(CONNECTIVITY_CHANGED)`, as every
+    caller here expects (a `TbliteEnergy` guard)."""
 
     def __call__(self, xyz_bohr: np.ndarray) -> None:
-        if not len(self.pairs):
-            return
-        d = np.linalg.norm(xyz_bohr[self.pairs[:, 0]] - xyz_bohr[self.pairs[:, 1]], axis=1)
-        ratio = d * BOHR_ANG / self.rcov
-        k = int(ratio.argmax())
-        self.streak = self.streak + 1 if ratio[k] > self.factor else 0
-        if self.streak >= self.patience:
-            i, j = self.pairs[k]
-            raise QMError(
-                ReasonCode.CONNECTIVITY_CHANGED,
-                f"bond ({i},{j}) at {ratio[k]:.2f}x, beyond {self.factor}x for "
-                f"{self.patience} steps of the optimization",
-            )
+        try:
+            super().__call__(xyz_bohr)
+        except ConnectivityChanged as exc:
+            raise QMError(ReasonCode.CONNECTIVITY_CHANGED, exc.detail) from None
 
 
 def optimize_tblite_anc(
@@ -286,30 +228,13 @@ def optimize_xtb(
     return np.array(rows, dtype=float) / BOHR_ANG
 
 
-def bond_stretch_ratios(mol: Chem.Mol, xyz_ang: np.ndarray) -> list[tuple[int, int, float]]:
-    """(i, j, d_ij / (r_cov_i + r_cov_j)) for every input bond, skipping Li, Na, Mg and K bonds."""
-    table = Chem.GetPeriodicTable()
-    out = []
-    for bond in mol.GetBonds():
-        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        zi, zj = bond.GetBeginAtom().GetAtomicNum(), bond.GetEndAtom().GetAtomicNum()
-        if zi in SKIP_BOND_ELEMENTS or zj in SKIP_BOND_ELEMENTS:
-            continue
-        d = float(np.linalg.norm(xyz_ang[i] - xyz_ang[j]))
-        out.append((i, j, d / (table.GetRcovalent(zi) + table.GetRcovalent(zj))))
-    return out
-
-
 def check_connectivity(mol: Chem.Mol, xyz_ang: np.ndarray, cov_factor: float) -> None:
-    """Raise CONNECTIVITY_CHANGED if an input bond stretched beyond `cov_factor` x the sum of
-    covalent radii. New close contacts are ignored.
-    """
-    broken = [(i, j, r) for i, j, r in bond_stretch_ratios(mol, xyz_ang) if r > cov_factor]
-    if broken:
-        shown = ", ".join(f"({i},{j}) {r:.2f}x" for i, j, r in broken[:6])
-        raise QMError(
-            ReasonCode.CONNECTIVITY_CHANGED, f"{len(broken)} bond(s) beyond {cov_factor}x: {shown}"
-        )
+    """`speedchem.bonds.check_connectivity`: `QMError(CONNECTIVITY_CHANGED)` if an input bond
+    stretched beyond `cov_factor` x the sum of covalent radii. New close contacts are ignored."""
+    try:
+        _bonds.check_connectivity(mol, xyz_ang, cov_factor)
+    except ConnectivityChanged as exc:
+        raise QMError(ReasonCode.CONNECTIVITY_CHANGED, exc.detail) from None
 
 
 def kick(shape: tuple[int, ...]) -> np.ndarray:

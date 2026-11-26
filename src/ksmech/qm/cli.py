@@ -27,7 +27,7 @@ from ksmech.qm.records import DEFAULT_CACHE_DIR, ReasonCode
 from ksmech.qm.thermo_batch import make_tasks, print_summary, run_thermo, write_report
 from ksmech.qm.thermo_cache import DEFAULT_THERMO_DIR, ThermoConfig
 from ksmech.qm.thermo_reopt import REOPT_FMAX, REOPT_MAXITER, REOPT_ROUNDS, REOPT_THRESHOLD_CM
-from ksmech.qm.xtb_calc import ALPB_SOLVENTS, GAS, QMConfig, solvent_option
+from ksmech.qm.xtb_calc import ALPB_SOLVENTS, GAS, OPTIMIZERS, QMConfig, solvent_option
 
 DEFAULT_ROOT = DEFAULT_CACHE_DIR.parent  # data/cache: qm/, tokens/, bond_index/, thermo/
 SOLVENT_CHOICES = (*ALPB_SOLVENTS, GAS)
@@ -84,7 +84,21 @@ def _add_run_parser(sub) -> None:
     )
     run.add_argument("--workers", type=int, default=1)
     run.add_argument("--n-conformers", type=int, default=1)
-    run.add_argument("--optimizer", choices=["tblite", "tblite-anc", "xtb"], default="tblite")
+    run.add_argument("--optimizer", choices=list(OPTIMIZERS), default="tblite")
+    run.add_argument(
+        "--gpu-min-atoms",
+        type=int,
+        default=None,
+        help="gpu-anc: the GPU takes species of this many atoms (with H) and more, the CPU "
+        "workers the rest (default 31)",
+    )
+    run.add_argument(
+        "--gpu-share-max-atoms",
+        type=int,
+        default=None,
+        help="gpu-anc: an idle CPU worker takes a GPU species of at most this many atoms the "
+        "GPU has not started (work sharing; default 80, 0: none)",
+    )
     run.add_argument(
         "--solvent",
         choices=SOLVENT_CHOICES,
@@ -124,7 +138,12 @@ def _add_thermo_parser(sub) -> None:
     th.add_argument("--steps-from", type=Path, default=None, help="with one --source: its steps")
     th.add_argument("--workers", type=int, default=1)
     th.add_argument("--limit", type=int, default=None, help="random subset (seed 0), for pilots")
-    th.add_argument("--optimizer", choices=["tblite", "tblite-anc", "xtb"], default="tblite")
+    th.add_argument(
+        "--optimizer",
+        choices=list(OPTIMIZERS),
+        default="tblite",
+        help="the optimizer of the records read (their method)",
+    )
     th.add_argument("--solvent", choices=SOLVENT_CHOICES, default="water")
     th.add_argument("--timeout", type=int, default=3600, help="seconds per molecule")
     th.add_argument("--scf-maxiter", type=int, default=250, help="SCF cycles per gradient")
@@ -314,6 +333,8 @@ def _run_options(args: argparse.Namespace, config: QMConfig, console: Console) -
         retry_failed=not args.no_retry_failed,
         console=console,
         retry_reasons=args.retry_reason,
+        gpu_min_atoms=args.gpu_min_atoms,
+        gpu_share_max_atoms=args.gpu_share_max_atoms,
     )
 
 
@@ -386,6 +407,15 @@ def main(argv: list[str] | None = None) -> int:
         conn_cov_factor=args.conn_cov_factor,
         cache_dir=args.cache_dir,
     )
+    if config.optimizer == "gpu-anc":
+        from ksmech.qm import gpu_run
+
+        try:
+            gpu_run.check_config(config)
+            gpu_run.check_device()
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
     return cmd_run(args, config, console)
 
 
