@@ -1,7 +1,9 @@
 """The search towards a product on pathway benchmarks (reaction-network plan, section 5 "with a
 product"): per case the arrival (EXACT, SKELETON or none) within the node budget, the rank of
 the recorded pathway among the pathways found, how many recorded step targets the best pathway
-passes through, the nodes expanded and the cuts; over the cases the arrival rates, the share of
+passes through, whether the best pathway's first step makes the first recorded target
+(`first_step_hit`, the walk's first-step top-1 with the product known), the nodes expanded and
+the cuts; over the cases the arrival rates, the share of
 recorded pathways found at rank 1 and within k, and the mean expansions.
 
 The recorded pathway is matched by its sequence of pool keys (`Case.recorded`), so a found
@@ -59,6 +61,24 @@ def targets_passed_in(pools, step_targets, skips: Counter) -> int | None:
     return passed
 
 
+def first_step_hit(res, start, step_targets) -> bool | None:
+    """Does the best pathway's first child hold the first recorded step target? None when the
+    case has no first target, it cannot be read, or the start already holds it; False when no
+    pathway was found (a miss, as the walk counts NOT_PROPOSED)."""
+    if not step_targets or not step_targets[0]:
+        return None
+    try:
+        target = target_from_smiles(step_targets[0])
+    except Exception:  # noqa: BLE001 - not a first target to score
+        return None
+    if arrival(target, start.species, start.skeletons, (EXACT,)):
+        return None
+    if not res.search.pathways or len(res.search.pathways[0].nodes) < 2:
+        return False
+    child = res.graph.states[res.search.pathways[0].nodes[1]]
+    return arrival(target, child.species, child.skeletons, (EXACT,)) is not None
+
+
 def evaluate_case(expander, case: Case, params: SearchParams = DEFAULT_PARAMS, levels=LEVELS,
                   caps=(8, 2)) -> dict:  # fmt: skip
     """One case's row (module docstring)."""
@@ -87,6 +107,7 @@ def evaluate_case(expander, case: Case, params: SearchParams = DEFAULT_PARAMS, l
         "recorded_rank": recorded_rank(res, case.recorded),
         "step_targets": len([t for t in case.step_targets if t]),
         "step_targets_passed": targets_passed(res, case.step_targets, skips),
+        "first_step_hit": first_step_hit(res, start, case.step_targets),
         "cuts": dict(res.search.cuts),
     }
     return row | {"skips": dict(skips)}
@@ -139,6 +160,7 @@ def summary(rows: list[dict], k: int) -> dict:
     rate = lambda f: sum(map(f, done)) / n if n else 0.0  # noqa: E731
     with_rec = [r for r in done if r["recorded_steps"] is not None]
     ranks = [r["recorded_rank"] for r in with_rec]
+    firsts = [r["first_step_hit"] for r in done if r.get("first_step_hit") is not None]
     skips: Counter = Counter()
     for r in done:
         skips.update(r["skips"])
@@ -152,6 +174,8 @@ def summary(rows: list[dict], k: int) -> dict:
         "n_with_recorded": len(with_rec),
         "recorded_top1": sum(x == 1 for x in ranks) / max(len(ranks), 1),
         f"recorded_top{k}": sum(x is not None and x <= k for x in ranks) / max(len(ranks), 1),
+        "n_first_step": len(firsts),
+        "first_step_top1": sum(firsts) / max(len(firsts), 1),
         "mean_expanded": float(np.mean([r["expanded"] for r in done])) if done else 0.0,
         "skips": dict(sorted(skips.items())),
     }

@@ -23,11 +23,13 @@ from rich.table import Table
 
 from ksmech.data import provenance as prov
 
-BIDIR_KEYS = ("backward_run", "backward_checkpoint", "roundtrip_lambda")
+BIDIR_KEYS = ("backward_run", "backward_run_source", "backward_checkpoint", "roundtrip_lambda")
 
 
 def add_options(s) -> None:
     s.add_argument("--backward-run", help="a backward run: search from both sides (item I1)")
+    s.add_argument("--backward-run-source", help="the backward run's models directory "
+                   "(default: --run-source)")  # fmt: skip
     s.add_argument("--backward-checkpoint", default="best", choices=["best", "last"])
     s.add_argument("--roundtrip-lambda", type=float, default=1.0,
                    help="lambda of log P_b(-R | child) in the pathways' cost (I5)")  # fmt: skip
@@ -47,7 +49,8 @@ def backward_expander(args, ckpt: Path, cfg):
 
     if _direction(load_model(ckpt, "cpu")[1]) != "forward":
         raise ValueError(f"{ckpt}: not a forward run")
-    bckpt = args.models_dir / args.run_source / args.backward_run / f"{args.backward_checkpoint}.pt"
+    source = getattr(args, "backward_run_source", None) or args.run_source
+    bckpt = args.models_dir / source / args.backward_run / f"{args.backward_checkpoint}.pt"
     model, payload = load_model(bckpt, "cpu")
     if _direction(payload) != "backward":
         raise ValueError(f"{bckpt}: not a backward run (ksmech-train fit --direction backward)")

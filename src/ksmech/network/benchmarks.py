@@ -13,6 +13,12 @@ A `Case` is a start pool, a target, and what the benchmark records about the way
 
 A chain that is not ingested whole is counted as CHAIN_NOT_INGESTED, a benchmark row whose start
 or final product does not parse as BENCHMARK_UNPARSED.
+
+The human benchmark's frozen halves (`freeze_halves`, written once by
+`scripts/benchmark_halves.py` as `human_benchmark/halves.json`, 2026-11-26): the pathways
+inspected by hand before the halves were drawn are all in `dev`; every other pathway goes to
+`dev` or `test` by the parity of sha256(pathway_id). Design work reads `dev`; `test` is read
+once per configuration adopted.
 """
 
 from __future__ import annotations
@@ -106,6 +112,35 @@ def human_benchmark_cases(
             continue
         out.append(Case(p.pathway_id, p.reactants, target, None, tuple(p.targets), "benchmark"))
     return out
+
+
+HALVES_FILE = "halves.json"
+
+
+def freeze_halves(pathway_ids, inspected) -> dict:
+    """{'dev': [...], 'test': [...], 'inspected': [...], 'rule': ...} (module docstring)."""
+    import hashlib
+
+    inspected = set(inspected)
+    unknown = inspected - set(pathway_ids)
+    if unknown:
+        raise ValueError(f"inspected pathways not in the benchmark: {sorted(unknown)[:3]}")
+    halves: dict[str, list] = {"dev": [], "test": []}
+    for pid in sorted(set(pathway_ids)):
+        odd = int(hashlib.sha256(pid.encode()).hexdigest(), 16) % 2
+        halves["test" if odd and pid not in inspected else "dev"].append(pid)
+    rule = "inspected -> dev; else sha256(pathway_id) even -> dev, odd -> test"
+    return halves | {"inspected": sorted(inspected), "rule": rule}
+
+
+def load_half(processed_dir: Path = DEFAULT_PROCESSED_DIR, half: str = "dev") -> set[str]:
+    """The pathway ids of one frozen half of the human benchmark."""
+    import json
+
+    from ksmech.data import human_benchmark as hb
+
+    path = Path(processed_dir) / hb.NAME / HALVES_FILE
+    return set(json.loads(path.read_text())[half])
 
 
 def load_cases(

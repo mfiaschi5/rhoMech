@@ -12,6 +12,11 @@ of the first `--top` completions at its child; the beam is reranked for each of 
 lambda, `roundtrip_hits_<split>_<part><suffix>_<backward run>_lam<lambda>.json`, which
 `ksmech-eval compare` pairs with another lambda's or with the decode's hits.
 
+`--energy` reranks by -E(child) / RT instead (`network.rerank.EnergyScorer`: the GFN2 total
+energies of the child's fragments from their QM records), files tagged `_energy` in place of
+the backward run; `--backward-run-source` is the backward run's models directory when it is
+not the forward one's.
+
 `--species-file FILE` decodes only and writes the child species of the first `--top`
 completions that have no usable tokens (`{"species": [...]}`, `qm.species.read_species_file`),
 then prints the batch's commands: `ksmech-qm run --species-from FILE`, `ksmech-qm bond-index`,
@@ -44,6 +49,10 @@ def add_parser(sub) -> None:
     decode_args(r)
     r.add_argument("--backward-run", help="the backward run under <models-dir>/<run-source>/ "
                    "(required unless --species-file)")  # fmt: skip
+    r.add_argument("--backward-run-source", help="the backward run's models directory "
+                   "(default: --run-source, else --source)")  # fmt: skip
+    r.add_argument("--energy", action="store_true", help="rerank by -E(child) / RT of the "
+                   "GFN2 records instead of a backward run")  # fmt: skip
     r.add_argument("--backward-checkpoint", default="best", choices=["best", "last"])
     r.add_argument("--lambdas", nargs="+", type=float, default=[0.25, 0.5, 1.0, 2.0],
                    help="weights of log P_b(-R | child); 0 is always added")  # fmt: skip
@@ -54,12 +63,13 @@ def add_parser(sub) -> None:
     r.set_defaults(direction=FORWARD)
 
 
-def _checkpoint(args, run: str, which: str, direction: str):
+def _checkpoint(args, run: str, which: str, direction: str, source: str | None = None):
     """(path, model, payload) of a run's checkpoint; ValueError when it was trained in the
     other direction."""
     from ksmech.train.loop import load_model
 
-    ckpt = args.models_dir / (args.run_source or args.source) / run / f"{which}.pt"
+    source = source or args.run_source or args.source
+    ckpt = args.models_dir / source / run / f"{which}.pt"
     model, payload = load_model(ckpt, "cpu")
     trained = payload.get("provenance", {}).get("config", {}).get("train", {})
     if trained.get("direction", FORWARD) != direction:
@@ -127,31 +137,47 @@ def _print(console: Console, report: dict, title: str) -> None:
         console.print(f"  {code}: {n}")
 
 
+def _scorer(args):
+    """(the scorer, the rerank's config, its inputs, the files' tag) of --energy or
+    --backward-run; (None, ...) when neither is given."""
+    from ksmech.eval import cli
+    from ksmech.network.pools import ModelExpander
+    from ksmech.network.rerank import EnergyScorer
+
+    if args.energy:
+        return EnergyScorer(), {"energy": "gfn2_total_over_rt"}, {}, "energy"
+    if not args.backward_run:
+        return None, {}, {}, ""
+    bckpt, bmodel, bpayload = _checkpoint(args, args.backward_run, args.backward_checkpoint,
+                                          BACKWARD, args.backward_run_source)  # fmt: skip
+    rerank = {"backward_run": args.backward_run,
+              "backward_run_source": args.backward_run_source,
+              "backward_checkpoint": cli._checkpoint_text(args.backward_checkpoint, bpayload),
+              "backward_score": "marginal"}  # fmt: skip
+    scorer = ModelExpander(bmodel, TokenCache(args.tokens_dir))
+    return scorer, rerank, prov.file_input(bckpt), args.backward_run
+
+
 def cmd_roundtrip(args, console: Console) -> int:
     from ksmech.eval import cli
     from ksmech.eval.roundtrip import roundtrip_report, roundtrip_rows
-    from ksmech.network.pools import ModelExpander
 
     ckpt, decode, samples, config, inputs, caps = _setup(args, console)
     if args.species_file is not None:
         return _species_file(args, console, decode, samples, config, inputs)
-    if not args.backward_run:
-        console.print("[red]--backward-run is required (or --species-file)[/red]")
+    scorer, rerank, extra, name = _scorer(args)
+    if scorer is None:
+        console.print("[red]--backward-run or --energy is required (or --species-file)[/red]")
         return 2
-    bckpt, bmodel, bpayload = _checkpoint(args, args.backward_run, args.backward_checkpoint,
-                                          BACKWARD)  # fmt: skip
-    scorer = ModelExpander(bmodel, TokenCache(args.tokens_dir))
     lambdas = sorted({0.0, *args.lambdas})
     outcomes, sibling_skips, sibling_inputs = cli._outcomes(args, console)
     skips: Counter = Counter()
     rows = roundtrip_rows(samples, decode, scorer, lambdas, args.top, outcomes, skips)
     report = roundtrip_report(rows, lambdas) | {"skips": dict(sorted(skips.items()))}
-    rerank = {"backward_run": args.backward_run,
-              "backward_checkpoint": cli._checkpoint_text(args.backward_checkpoint, bpayload),
-              "top": args.top, "backward_score": "marginal"}  # fmt: skip
-    inputs = inputs | prov.file_input(bckpt) | sibling_inputs
+    rerank = rerank | {"top": args.top}
+    inputs = inputs | extra | sibling_inputs
     suffix = cli.decode_suffix(args, args.run_source or args.source, caps)
-    stem = f"{args.split}_{args.part}{suffix}_{args.backward_run}"
+    stem = f"{args.split}_{args.part}{suffix}_{name}"
     out = ckpt.parent / f"roundtrip_report_{stem}.json"
     header = prov.stamp("roundtrip", ROUNDTRIP_VERSION, inputs, config | {"rerank": rerank})
     prov.write_json(out, report | {"per_sample": rows}, header)
@@ -161,6 +187,6 @@ def cmd_roundtrip(args, console: Console) -> int:
         path = ckpt.parent / f"roundtrip_hits_{stem}_lam{lam}.json"
         prov.write_json(path, {"per_sample": hits},
                         prov.stamp("decode_hits", cli.DECODE_VERSION, inputs, conf))  # fmt: skip
-    _print(console, report, f"{args.run} + {args.backward_run}, {args.split} {args.part}")
+    _print(console, report, f"{args.run} + {name}, {args.split} {args.part}")
     console.print(f"wrote {out.name} and {len(lambdas)} hit files beside it")
     return 0

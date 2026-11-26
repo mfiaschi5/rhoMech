@@ -134,6 +134,19 @@ def test_a_pool_without_tokens_fails_its_node(expander):
     assert ex.proposals == [] and ex.failure == "MISSING_TOKENS"
 
 
+def test_a_failed_build_fails_its_node_with_the_qm_reason(expander, monkeypatch):
+    from ksmech.eval import embedding
+    from ksmech.qm.records import QMError
+
+    def fail(keys, loader, qm=None):
+        raise QMError("SCF_NOT_CONVERGED", "BO")
+
+    monkeypatch.setattr(embedding, "ensure_pool", fail)
+    builder = ModelExpander(expander.model, expander.loader, expander.cfg, build_missing=True)
+    ex = builder.expand(pool_state(MECL_OH))
+    assert ex.proposals == [] and ex.failure == "QM_FAILED:SCF_NOT_CONVERGED"
+
+
 def test_search_towards_reaches_a_proposed_child(expander):
     start = pool_state(MECL_OH)
     first = expander.expand(start).proposals[0].child

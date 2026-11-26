@@ -8,8 +8,9 @@ with the pool (the remaining change, `network.target`). `pool_state` keeps the m
 SMILES has and numbers the other atoms after them, hydrogens included.
 
 `ModelExpander` expands a state with the trained model: the tokens of its fragments (computed
-with GFN2-xTB first when `build_missing`, else a missing one fails the node as MISSING_TOKENS,
-STALE_ARTIFACT or NO_BOND_INDEX), the sample with its Lewis structure, `model.decode.decode_pool`
+with GFN2-xTB first when `build_missing`, a fragment whose GFN2 fails then failing the node as
+QM_FAILED:<reason>; else a missing one fails it as MISSING_TOKENS, STALE_ARTIFACT or
+NO_BOND_INDEX), the sample with its Lewis structure, `model.decode.decode_pool`
 with the stored samples' checks (`eval.decode.lewis_apply`), and B + R written on the pool's
 mapped molecule (`arrows.apply.apply_edit`; a product RDKit cannot sanitize is PRODUCT_INVALID).
 The decoder merges completions by the child's pool key. The END_MECH head is not read.
@@ -145,6 +146,7 @@ class ModelExpander:
         from ksmech.arrows.lewis import MissingBondIndex, reactant_lewis
         from ksmech.arrows.reactants import MissingTokens, ReactantTokens
         from ksmech.arrows.steps import reactant_sample, with_lewis
+        from ksmech.qm.records import QMError
 
         try:
             if self.build_missing:
@@ -158,6 +160,8 @@ class ModelExpander:
             return None, exc.reason
         except MissingBondIndex:
             return None, "NO_BOND_INDEX"
+        except QMError as exc:  # --build-missing: a fragment's GFN2 failed; the node fails
+            return None, f"QM_FAILED:{exc.reason}"
 
     def expand(self, state: PoolState) -> Expansion:
         from ksmech.eval.decode import lewis_apply
