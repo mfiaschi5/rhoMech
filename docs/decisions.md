@@ -11062,3 +11062,92 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
     subset and the coverage are reported beside it.
   - A test that helps is then read once on the test half. The redesign it supports (a learned
     energy head; an outcome prior with the search) goes back to the user.
+
+## 2026-11-26: the cheap tests, test 3's proxy registered before its read
+
+- **Why.** The 10-case pilot of test 3 had run with `--build-missing`, against the registration
+  (no `--build-missing`), and GFN2 ran serially inside the search (3 to over 45 min a case). On
+  that cost estimate the user chose a zero-cost proxy. The registered search was then found to
+  be cheap without `--build-missing`, so it runs as registered too; the proxy is read beside it.
+- **The pilot does not count.** Its 10 cases are all one-step pathways, where the first target
+  is the final product, so 8/10 against the walk's 6/10 measures only "the target is among the
+  children". It also ran another configuration than the registration.
+- **The remaining-change bound cannot score the benchmark.** `human_benchmark_cases` reads
+  products without atom maps (the parquet has none), so `target.steps_lower_bound` is None for
+  every case. No atom map is inferred: it would be a fabricated label.
+- **The proxy** (`network.rerank.target_score`, `evaluate --walk --rerank target`).
+  - The score is s = -D(child). D is the one-sided deficit of the case's final product in the
+    child pool: over the product's inventory entries, what the pool lacks of them. The inventory
+    holds the bonds by (elements, RDKit bond type), with explicit H and aromaticity perceived,
+    and the atoms with a charge or an unpaired electron by (element, charge, radicals).
+  - It is one-sided because the by-products are unknown. It is map-free, so it sees proton
+    transfers and charges, but not which atom of an element a bond goes to: site selectivity
+    within the same bond types is invisible to it.
+- **The rule, with nothing chosen.** Lexicographic among the first 5 distinct children (lambda =
+  inf): D first, the forward log P on ties; a child without a score keeps its place. No lambda
+  is selected. PMechDB val cannot select one, since a single step's product is its own target
+  and the right child has D = 0 by construction. The grid 0.25, 0.5, 1, 2 is reported only.
+- **The read.**
+  - The measure is dev-half first-step top-1, lambda inf against 0, per seed and pooled, with
+    the exact two-sided sign test over cases.
+  - The headline is the cases with n_steps >= 2. The one-step cases are reported apart: there
+    the first target is the final product, and the proxy is tautological.
+  - Beside it: the share of first steps where the 5 children's D are not all equal
+    (`distinct` >= 2; a tie changes no rank), counted before the hits were read, and the top-5
+    ceiling.
+  - It helps when the pooled p < 0.05 and both seeds gain at least 2 points on the headline.
+  - The read is asymmetric. A gain says that knowing the product sets the first step. A null
+    does not close test 3, since the proxy may be blind where the search is not.
+- **Written before the read.** This entry was written at 21:42 (sha256 3ff75deb of the scratch
+  copy), after the walks had started and before any hit was read; only the `distinct` counts
+  were read first.
+
+## 2026-11-26: the cheap tests, the read of tests 1, 2 and the proxy
+
+- **Halves.** `human_benchmark/halves.json` has dev 182 and test 168 (the 42 inspected in dev),
+  sha256 0c568d90...b42b. The dev half has 175 ranked first steps (17 one-step pathways, 158
+  of two or more).
+- **QM for the reads.** 5,997 child species (the first 5 completions of PMechDB closed_base val,
+  both seeds, and the dev half's first 5 children) got GFN2, `bond-index` and tokens:
+  - 5,669 succeeded (94.5%, below the 97% gate of `--min-success`; continued, since the failures
+    are counted and an unscored child keeps its place);
+  - the failures were 202 SPIN_CENSUS_REFUSED, 72 SCF_NOT_CONVERGED, 39 OPT_NOT_CONVERGED, 12
+    EMBED_FAILED, 2 UNEXPECTED and 1 SPIN_PARITY.
+  - Incident: a Monitor waiting on `pgrep -f` matched the chain's own command line and the chain
+    was stopped during `bond-index`. The first backward walks read NO_BOND_INDEX and were
+    discarded; `bond-index` was rerun (2,558 built) and the walks again.
+- **Test 2, energy: null.** PMechDB closed_base val own top-1 (%) by lambda:
+
+  | lambda | 0 | 0.01 | 0.03 | 0.1 | 0.3 | 1 |
+  |---|---|---|---|---|---|---|
+  | s0 | 64.05 | 63.89 | 64.78 | 62.52 | 58.08 | 52.91 |
+  | s1 | 65.91 | 66.32 | 65.91 | 62.92 | 56.87 | 51.13 |
+
+  - lambda* = 0.03 (mean 65.35 against 64.98).
+  - Dev first step at 0.03: s0 58.3 -> 57.1 (gained 5, lost 7, p 0.77); s1 59.4 -> 60.0
+    (7 / 6, p 1.0); pooled 12 / 13, p 1.0.
+  - The first 5 children were all scored in 147 / 175 (s0) and 146 / 175 (s1) cases.
+- **Test 1, backward (pmechdb/bwd_s0): null.** PMechDB closed_base val own top-1 (%):
+
+  | lambda | 0 | 0.25 | 0.5 | 1 | 2 | 4 |
+  |---|---|---|---|---|---|---|
+  | s0 | 64.05 | 63.0 | 61.79 | 59.61 | 57.92 | 55.01 |
+  | s1 | 65.91 | 65.35 | 63.33 | 59.61 | 56.14 | 53.96 |
+
+  - lambda* = 0 by the rule: the rerank changes nothing.
+  - For information, dev at 0.25: s0 4 / 4 (p 1), s1 4 / 7 (p 0.55), pooled 8 / 11 (p 0.65).
+- **The proxy: it hurts on the headline.**
+  - The deficit is not tied in 117 / 158 (s0) and 124 / 158 (s1) first steps of two-or-more-step
+    pathways.
+  - Two or more steps, lambda inf: s0 59.5 -> 44.9 (gained 6, lost 29, p 1.2e-4); s1 58.9 ->
+    46.2 (6 / 26, p 5.4e-4); pooled 12 / 55, p 1.0e-7. The top-5 ceiling is 82-83%.
+  - One step (tautological): s0 47.1 -> 70.6, s1 64.7 -> 82.4, pooled 7 / 0.
+  - The grid on the headline: 0.25 pooled 3 / 2; 0.5 3 / 5; 1 3 / 8; 2 6 / 14 (none p < 0.05).
+  - Reading: on a pathway of two or more steps, the recorded first step is often not the child
+    that brings the pool closest to the product's inventory. The mechanisms are not greedy
+    towards the product, so a product prior used one step at a time misleads. This is no
+    verdict on test 3: a search that looks ahead is not a greedy distance.
+- **The test half is not read.** None of the three helps by the registered rule.
+- **Test 3 runs as registered** (no `--build-missing`, both seeds, dev half), started after this
+  read. The `--build-missing` pilot also showed that one fragment's failed GFN2 ended the run;
+  since f8042ed it fails the node (QM_FAILED:<reason>), counted.
