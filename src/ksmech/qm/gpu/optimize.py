@@ -699,15 +699,19 @@ def molecule_bytes(z: np.ndarray) -> int:
     return 8 * (50 * nao * nao + 4 * p * p)
 
 
-def _fill(queue: list, running: list, capacity: int, memory_bytes: float, size_ratio: float):
-    """Move tasks from the queue (smallest first) into the batch while they fit."""
+def _fill(queue: list, running: list, capacity: int, memory_bytes: float, size_ratio: float,
+          claim=None):  # fmt: skip
+    """Move tasks from the queue (smallest first) into the batch while they fit. A task whose
+    `claim(key)` is False (another worker has it) leaves the queue without running."""
     while queue and len(running) < capacity:
         biggest = max([molecule_bytes(j.task.z) for j in running] + [0])
         need = max(biggest, molecule_bytes(queue[0].task.z)) * (len(running) + 1)
         smallest = min([_nao(j.task.z) for j in running] + [_nao(queue[0].task.z)])
         if running and (need > memory_bytes or _nao(queue[0].task.z) > size_ratio * smallest):
             break
-        running.append(queue.pop(0))
+        job = queue.pop(0)
+        if claim is None or claim(job.task.key):
+            running.append(job)
 
 
 def relax_many(
@@ -723,6 +727,7 @@ def relax_many(
     carry: float | None = CARRY,
     on_result=None,
     more=None,
+    claim=None,
 ) -> list[RelaxOutcome]:
     """`qm.xtb_calc.GFN2Calculator._relax` with the tblite-anc settings of `config` (a QMConfig)
     for many molecules: a free run with the dissociation guard, `check_connectivity`, and on a
@@ -737,7 +742,9 @@ def relax_many(
     task's outcome once it is final, while the other tasks still run; the outcomes are then
     not kept, and the result is []. `more(block)`, if given, is asked for further tasks at every
     refill (blocking when nothing else is left to run): a list (they join the queue in size
-    order), or None once there will be no more."""
+    order), or None once there will be no more. `claim(key)`, if given, is asked for each task as
+    a batch takes it: False drops the task (work sharing, `qm.gpu_run`: a CPU worker has it), and
+    it has no outcome."""
     from ksmech.qm.xtb_calc import QMConfig
 
     config = config or QMConfig(optimizer="tblite-anc")
@@ -757,7 +764,9 @@ def relax_many(
             keys += [t.key for t in got or []] if on_result is None else []
             if not queue and not running:
                 continue
-        _fill(queue, running, capacity, memory_bytes, size_ratio)
+        _fill(queue, running, capacity, memory_bytes, size_ratio, claim)
+        if not running:  # every task the fill met was claimed elsewhere
+            continue
         opt = BatchedANC([j.spec for j in running], solvent, cfg, rfo_dtype=rfo_dtype,
                          carry=carry, max_iter=config.scf_maxiter)  # fmt: skip
         running, ended = _run_batch(opt, running, refill)
@@ -770,7 +779,7 @@ def relax_many(
                 on_result(res)
         if on_batch is not None:
             on_batch(n_done, len(running), len(queue))
-    return [results[k] for k in keys] if on_result is None else []
+    return [results[k] for k in keys if k in results] if on_result is None else []
 
 
 def _queued(queue: list, new: list, config) -> list:

@@ -468,6 +468,7 @@ def featurize_dataset(
     retry_reasons: Collection[str] | None = None,
     step_ids: Collection[str] | None = None,
     gpu_min_atoms: int | None = None,
+    gpu_share_max_atoms: int | None = None,
 ) -> pd.DataFrame:
     """Featurize every unique molecule of `source` (of the steps `step_ids` only, when given);
     resumable. Returns this run's manifest rows. Earlier failures are retried (`retry_failed`),
@@ -485,6 +486,7 @@ def featurize_dataset(
         console=console,
         retry_reasons=retry_reasons,
         gpu_min_atoms=gpu_min_atoms,
+        gpu_share_max_atoms=gpu_share_max_atoms,
     )
 
 
@@ -500,12 +502,15 @@ def featurize_molecules(
     console: Console | None = None,
     retry_reasons: Collection[str] | None = None,
     gpu_min_atoms: int | None = None,
+    gpu_share_max_atoms: int | None = None,
 ) -> pd.DataFrame:
     """Featurize the census-admitted molecules `smiles_list` (`--limit`: a random subset, seed
     0) with the manifest at `path`, which keeps the rows of earlier runs and `canon_failures`
     (the canonicalization and census rows of the collection); resumable. Returns this run's
     manifest rows. A gpu-anc run (`config.optimizer`) runs through `qm.gpu_run`, with the GPU
-    taking the species of `gpu_min_atoms` atoms and more (default `gpu_run.GPU_MIN_ATOMS`)."""
+    taking the species of `gpu_min_atoms` atoms and more (default `gpu_run.GPU_MIN_ATOMS`) and
+    idle workers those of at most `gpu_share_max_atoms` it has not started (default
+    `gpu_run.GPU_SHARE_MAX_ATOMS`, 0: none)."""
     config = config or QMConfig()
     console = console or Console()
     if limit is not None and limit < len(smiles_list):
@@ -533,7 +538,8 @@ def featurize_molecules(
 
     routes = None
     try:
-        routes = _execute_run(todo, n_workers, on_rows, config, gpu_min_atoms)
+        gpu = (gpu_min_atoms, gpu_share_max_atoms)
+        routes = _execute_run(todo, n_workers, on_rows, config, gpu)
     finally:
         bar.close()
         full = build_manifest(smiles_list, n_conformers, config, rows, prev)
@@ -550,15 +556,19 @@ def featurize_molecules(
     return view
 
 
-def _execute_run(todo, n_workers, on_rows, config: QMConfig, gpu_min_atoms):
-    """`execute`, or `qm.gpu_run.execute` for a gpu-anc run (its counts returned)."""
+def _execute_run(todo, n_workers, on_rows, config: QMConfig, gpu: tuple):
+    """`execute`, or `qm.gpu_run.execute` for a gpu-anc run (its counts returned); `gpu` is
+    (min_atoms, share_max_atoms), None for the defaults."""
     if config.optimizer != "gpu-anc":
         execute(todo, n_workers, on_rows)
         return None
     from ksmech.qm import gpu_run
 
     gpu_run.check_config(config)
-    return gpu_run.execute(todo, n_workers, on_rows, gpu_min_atoms or gpu_run.GPU_MIN_ATOMS)
+    min_atoms, share = gpu
+    min_atoms = min_atoms or gpu_run.GPU_MIN_ATOMS
+    share = gpu_run.GPU_SHARE_MAX_ATOMS if share is None else share
+    return gpu_run.execute(todo, n_workers, on_rows, min_atoms, share)
 
 
 def _write(path: Path, manifest: pd.DataFrame) -> None:

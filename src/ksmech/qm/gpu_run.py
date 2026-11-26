@@ -18,6 +18,15 @@
   polish from there (record warning GPU_POLISHED); Fukui, sterics, the record. Every record
   carries the run's one method, `GFN2-xTB/ALPB-water/gpu-anc`, the CPU-optimized ones too: the
   token build reads one method. The manifest's detail of a record says where it was optimized.
+- **Work sharing.** A worker with nothing else to do (finishing, preparing and the CPU path
+  come first) takes a sent GPU item the GPU has not yet put in a batch, smallest first, of at
+  most `share_max_atoms` atoms (`GPU_SHARE_MAX_ATOMS`; 0: none), and runs it on the CPU path
+  (`SHARE_NOTE` in the row's detail, route `cpu_shared`). The GPU queue's batches are formed
+  by AO count, so most of its items wait there long after the workers are done preparing. Who
+  optimizes an item is decided once, under a lock (`_Claims`): the GPU claims it as a batch
+  takes it (`relax_many`'s `claim`), a worker when it takes it; the loser drops it. The
+  route of a species, and so its record (the GPU's geometry or tblite-anc's, alike to
+  1e-5 Eh for most), then depends on the run's timing.
 - **Failures.** A GPU failure, or a failure while finishing, is retried on the CPU path from
   the start (`batch._run_molecule`), counted; only that outcome reaches the failure memo, so
   gpu-anc's tombstones hold tblite-anc's failures, never the GPU's.
@@ -29,6 +38,7 @@ Water only (the GPU engine's ALPB); a run with another medium is refused.
 
 from __future__ import annotations
 
+import heapq
 import logging
 import queue
 import signal
@@ -55,12 +65,14 @@ log = logging.getLogger(__name__)
 
 OPTIMIZER = "gpu-anc"
 GPU_MIN_ATOMS = 31  # atoms with H; below, the CPU workers are faster
+GPU_SHARE_MAX_ATOMS = 80  # work sharing: the largest GPU item a CPU worker takes (atoms with H)
 MAX_Z = 86  # the GPU engine's GFN2 parameters
 FEED = 256  # prepared GPU items sent to its queue at a time (all that are left at the end)
 BACKLOG = 4096  # preparing pauses while this many GPU items wait for their outcome
 _POLL_S = 0.2
 _DONE = object()
 RETRY_NOTE = "GPU retried on the CPU"
+SHARE_NOTE = "shared from the GPU's queue"
 
 
 @dataclass(frozen=True)
@@ -203,7 +215,34 @@ def finish(job: Finish) -> list[dict]:
     return rows
 
 
+def share(task: batch.MolTask) -> list[dict]:
+    """Worker: the CPU path of a GPU item a worker took from the GPU's queue (`SHARE_NOTE`)."""
+    rows = batch.process_molecule(task)
+    for r in rows:
+        r["detail"] = f"{r['detail']}; {SHARE_NOTE}" if r["detail"] else SHARE_NOTE
+    return rows
+
+
 # --- the driver ----------------------------------------------------------------------------
+
+
+class _Claims:
+    """Who optimizes each GPU item: the first to claim it, the GPU (as a batch takes it) or a
+    CPU worker (work sharing). Called from the GPU thread and the scheduler."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.owner: dict[str, str] = {}
+
+    def _claim(self, key: str, who: str) -> bool:
+        with self.lock:
+            return self.owner.setdefault(key, who) == who
+
+    def gpu(self, key: str) -> bool:
+        return self._claim(key, "gpu")
+
+    def cpu(self, key: str) -> bool:
+        return self._claim(key, "cpu")
 
 
 class _Pool:
@@ -261,13 +300,13 @@ class _Inbox:
                 for it in got]  # fmt: skip
 
 
-def _gpu_thread(inbox: _Inbox, config: QMConfig, out: queue.Queue) -> None:
-    """`relax_many` over the GPU items as they arrive in `inbox`, each outcome put on `out` as
-    it is final; an exception is put there too, and `_DONE` last."""
+def _gpu_thread(inbox: _Inbox, config: QMConfig, out: queue.Queue, claims: _Claims) -> None:
+    """`relax_many` over the GPU items as they arrive in `inbox` and the GPU claims them, each
+    outcome put on `out` as it is final; an exception is put there too, and `_DONE` last."""
     try:
         from ksmech.qm.gpu.optimize import relax_many
 
-        relax_many([], config, on_result=out.put, more=inbox.more)
+        relax_many([], config, on_result=out.put, more=inbox.more, claim=claims.gpu)
     except Exception as exc:  # noqa: BLE001 - its molecules are retried on the CPU path
         log.exception("the GPU optimization failed")
         out.put(exc)
@@ -277,10 +316,15 @@ def _gpu_thread(inbox: _Inbox, config: QMConfig, out: queue.Queue) -> None:
 
 class _Scheduler:
     """The pool's work, in this order of priority: finishing the GPU's outcomes, preparing the
-    tasks (the GPU's queue grows meanwhile, `FEED` items at a time), the CPU tasks."""
+    tasks (the GPU's queue grows meanwhile, `FEED` items at a time), the CPU tasks, and in an
+    idle worker a GPU item the GPU has not claimed (work sharing)."""
 
-    def __init__(self, pool: _Pool, on_rows, counts: Counter, min_atoms: int) -> None:
+    def __init__(self, pool: _Pool, on_rows, counts: Counter, min_atoms: int,
+                 share_max_atoms: int = 0) -> None:  # fmt: skip
         self.pool, self.on_rows, self.counts, self.min_atoms = pool, on_rows, counts, min_atoms
+        self.share_max_atoms = share_max_atoms
+        self.claims = _Claims()
+        self.shareable: list = []  # heap of (atoms, key): the sent items a worker may take
         self.finish: deque = deque()
         self.prep: deque = deque()
         self.cpu: deque = deque()
@@ -321,6 +365,7 @@ class _Scheduler:
             else:
                 self._start_gpu()
                 self.waiting.update((it.task.smiles, it) for it in self.feed)
+                self._shareable(self.feed)
                 self.inbox.put(self.feed)
             self.feed = []
         if not preparing and not self.feed and self.gpu == "running":
@@ -329,7 +374,7 @@ class _Scheduler:
 
     def _start_gpu(self) -> None:
         if self.gpu == "idle":
-            args = (self.inbox, self.config, self.out)
+            args = (self.inbox, self.config, self.out, self.claims)
             threading.Thread(target=_gpu_thread, args=args, daemon=True).start()
             self.gpu = "running"
 
@@ -359,6 +404,23 @@ class _Scheduler:
         in the GPU's queue); the CPU path runs meanwhile."""
         return bool(self.prep) and len(self.feed) + len(self.waiting) < BACKLOG
 
+    def _shareable(self, items: list[GpuItem]) -> None:
+        for it in items:
+            if len(it.z) <= self.share_max_atoms:
+                heapq.heappush(self.shareable, (len(it.z), it.task.smiles))
+
+    def _steal(self):
+        """The smallest sent GPU item the GPU has not claimed, now claimed for a worker, or
+        None. Only into an idle worker: a stolen job parked in the pool's queue would wait."""
+        if len(self.in_flight) >= self.pool.n or self.gpu not in ("running", "closed"):
+            return None
+        while self.shareable:
+            _, key = heapq.heappop(self.shareable)
+            if key in self.waiting and self.claims.cpu(key):
+                self.counts["cpu_shared"] += 1
+                return share, self.waiting.pop(key).task
+        return None
+
     def _next(self):
         if self.finish:
             return finish, self.finish.popleft()
@@ -366,7 +428,7 @@ class _Scheduler:
             return prepare, (self.prep.popleft(), self.min_atoms)
         if self.cpu:
             return batch.process_molecule, self.cpu.popleft()
-        return None
+        return self._steal()
 
     def _fill(self) -> None:
         while len(self.in_flight) < self.pool.n + 2 and (nxt := self._next()) is not None:
@@ -430,10 +492,12 @@ class _Scheduler:
                 self.counts["gpu_polished"] += 1
 
 
-def execute(tasks: list, n_workers: int, on_rows, min_atoms: int = GPU_MIN_ATOMS) -> Counter:
+def execute(tasks: list, n_workers: int, on_rows, min_atoms: int = GPU_MIN_ATOMS,
+            share_max_atoms: int = GPU_SHARE_MAX_ATOMS) -> Counter:  # fmt: skip
     """`batch.execute` for a gpu-anc run (module docstring): every task's rows reach `on_rows`
-    once. Returns the counts by route (`gpu`, `cpu_<route>`, `memo`) and by GPU outcome
-    (`gpu_ok`, `gpu_failed`, `gpu_retried_ok`, `gpu_retried_failed`, `gpu_polished`, ...)."""
+    once. Returns the counts by route (`gpu`, `cpu_<route>`, `memo`; `cpu_shared`, the GPU
+    items a worker took, among `gpu`) and by GPU outcome (`gpu_ok`, `gpu_failed`,
+    `gpu_retried_ok`, `gpu_retried_failed`, `gpu_polished`, ...)."""
     counts: Counter = Counter()
     if not tasks:
         return counts
@@ -442,7 +506,7 @@ def execute(tasks: list, n_workers: int, on_rows, min_atoms: int = GPU_MIN_ATOMS
     with single_threaded_children(), blas.preloaded_children():
         pool = _Pool(max(n_workers, 1))
         try:
-            _Scheduler(pool, on_rows, counts, min_atoms).run(tasks, config)
+            _Scheduler(pool, on_rows, counts, min_atoms, share_max_atoms).run(tasks, config)
         finally:
             pool.close()
     return counts

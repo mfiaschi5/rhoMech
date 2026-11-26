@@ -7,6 +7,7 @@ marked `gpu` run the real batched optimizer against tblite-anc on the CPU.
 
 from __future__ import annotations
 
+import threading
 import types
 from collections import Counter
 
@@ -143,12 +144,14 @@ def test_a_gpu_failure_is_retried_on_the_cpu_and_leaves_no_tombstone(tmp_path):
     assert not failures.tombstone_path(tmp_path, item.task.smiles, 0, METHOD).exists()
 
 
-def _fake_gpu(inbox, config, out):
-    """The GPU thread: the CPU's tblite-anc geometry for the first item it gets, a failure for
+def _fake_gpu(inbox, config, out, claims):
+    """The GPU thread: the CPU's tblite-anc geometry for the first item it claims, a failure for
     the rest (the items as the driver feeds them, `more` read until it closes)."""
     k = 0
     while (got := inbox.more(True)) is not None:
         for task in got:
+            if not claims.gpu(task.key):
+                continue
             calc = GFN2Calculator(config)
             xyz = None if k else calc._relax(task.mol, task.z, task.start, 0, 0)[0]
             reason = None if k == 0 else ReasonCode.OPT_NOT_CONVERGED
@@ -169,11 +172,63 @@ def test_execute_routes_finishes_and_retries_with_a_fake_gpu(tmp_path, monkeypat
     tasks = [_task(MOLECULES[n], config) for n in names]
     tasks += [_task(OPEN_SHELL["methyl"][0], config), memo]
     calls = []
-    counts = gpu_run.execute(tasks, 2, calls.append, min_atoms=1)
+    counts = gpu_run.execute(tasks, 2, calls.append, min_atoms=1, share_max_atoms=0)
     assert sorted(r[0]["smiles"] for r in calls) == sorted(t.smiles for t in tasks)
     assert counts == Counter(gpu=2, cpu_open_shell=1, memo=1, gpu_ok=1, gpu_retried_ok=1)
     by = {r[0]["smiles"]: r[0] for r in calls}
     assert all(by[t.smiles]["status"] == "ok" for t in tasks[:3])
+
+
+def test_the_first_claim_of_an_item_wins_in_either_order():
+    claims = gpu_run._Claims()
+    assert claims.gpu("a") and claims.gpu("a") and not claims.cpu("a")
+    assert claims.cpu("b") and not claims.gpu("b")
+
+
+def test_a_batch_fill_drops_the_tasks_claimed_elsewhere():
+    from ksmech.qm.gpu.optimize import _fill
+
+    def job(key, smiles):
+        z = np.array([a.GetAtomicNum() for a in Chem.AddHs(Chem.MolFromSmiles(smiles)).GetAtoms()])
+        return types.SimpleNamespace(task=types.SimpleNamespace(key=key, z=z))
+
+    queue = [job("a", "CC"), job("b", "CCC"), job("c", "CCCC")]
+    running = []
+    _fill(queue, running, 8, 1e12, 10.0, claim=lambda key: key != "b")
+    assert [j.task.key for j in running] == ["a", "c"] and not queue
+
+
+def _gated_gpu(gate):
+    """The GPU thread of `_fake_gpu`, claiming nothing until `gate` is set."""
+
+    def run(inbox, config, out, claims):
+        assert gate.wait(120), "no item was shared"
+        _fake_gpu(inbox, config, out, claims)
+
+    return run
+
+
+def test_an_idle_worker_takes_the_items_the_gpu_has_not_claimed(tmp_path, monkeypatch):
+    gate = threading.Event()
+    monkeypatch.setattr(gpu_run, "_gpu_thread", _gated_gpu(gate))
+    config = _config(tmp_path)
+    tasks = [_task(MOLECULES[n], config) for n in ("acetone", "methyl_acetate")]  # 10, 11 atoms
+    calls = []
+
+    def on_rows(rows):
+        calls.append(rows)
+        gate.set()  # the shared item is done: the GPU may claim what is left
+
+    counts = gpu_run.execute(tasks, 2, on_rows, min_atoms=1, share_max_atoms=10)
+    assert counts == Counter(gpu=2, cpu_shared=1, gpu_ok=1)
+    by = {r[0]["smiles"]: r[0] for r in calls}
+    assert len(calls) == 2 and all(r["status"] == "ok" for r in by.values())
+    shared = by[tasks[0].smiles]
+    assert gpu_run.SHARE_NOTE in shared["detail"] and gpu_run.RETRY_NOTE not in shared["detail"]
+    assert by[tasks[1].smiles]["detail"].startswith("optimized on the GPU")
+    _, ref = _cpu_record(MOLECULES["acetone"], tmp_path)
+    rec = load_record(cache_path(tmp_path, ref.smiles, 0, METHOD))
+    assert abs(rec.energy_ha - ref.energy_ha) < 1e-10  # the CPU path (the workers: OpenBLAS)
 
 
 def test_a_second_run_computes_nothing(tmp_path, monkeypatch):
@@ -209,7 +264,7 @@ def test_gpu_anc_records_match_tblite_anc(tmp_path):
     tasks = [_task(MOLECULES[n], config) for n in names]
     tasks += [_task(OPEN_SHELL[n][0], config) for n in ("methyl", "dichlorocarbene")]
     calls = []
-    counts = gpu_run.execute(tasks, 2, calls.append, min_atoms=1)
+    counts = gpu_run.execute(tasks, 2, calls.append, min_atoms=1, share_max_atoms=0)
     assert counts["gpu"] == 4 and counts["cpu_open_shell"] + counts["cpu_spin_tag"] == 2
     assert counts["gpu_ok"] + counts["gpu_polished"] >= 4 and not counts["gpu_retried_ok"]
     for n in names:
@@ -228,3 +283,18 @@ def test_relax_many_takes_the_scf_cycle_limit(tmp_path):
     seen = []
     out = relax_many([task], QMConfig(optimizer="gpu-anc", scf_maxiter=2), on_result=seen.append)
     assert out == [] and [r.reason for r in seen] == [ReasonCode.SCF_NOT_CONVERGED]
+
+
+@pytest.mark.gpu
+@gpu
+def test_relax_many_drops_the_tasks_claimed_elsewhere(tmp_path):
+    from ksmech.qm.gpu.optimize import RelaxTask, relax_many
+
+    tasks = []
+    for k, name in enumerate(("acetone", "methyl_acetate")):
+        _, item = gpu_run.prepare((_task(MOLECULES[name], _config(tmp_path)), 1))
+        tasks.append(RelaxTask(str(k), prepare_mol(item.task.smiles), item.z, item.start, 0, 0))
+    config = QMConfig(optimizer="gpu-anc")
+    assert relax_many(tasks, config, claim=lambda key: False) == []  # no batch is run
+    out = relax_many(tasks, config, claim=lambda key: key == "1")
+    assert [r.key for r in out] == ["1"] and out[0].reason is None

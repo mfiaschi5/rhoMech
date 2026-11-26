@@ -93,6 +93,13 @@ def _add_run_parser(sub) -> None:
         "workers the rest (default 31)",
     )
     run.add_argument(
+        "--gpu-share-max-atoms",
+        type=int,
+        default=None,
+        help="gpu-anc: an idle CPU worker takes a GPU species of at most this many atoms the "
+        "GPU has not started (work sharing; default 80, 0: none)",
+    )
+    run.add_argument(
         "--solvent",
         choices=SOLVENT_CHOICES,
         default="water",
@@ -327,6 +334,7 @@ def _run_options(args: argparse.Namespace, config: QMConfig, console: Console) -
         console=console,
         retry_reasons=args.retry_reason,
         gpu_min_atoms=args.gpu_min_atoms,
+        gpu_share_max_atoms=args.gpu_share_max_atoms,
     )
 
 
