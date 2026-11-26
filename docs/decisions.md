@@ -11502,3 +11502,29 @@ Data: `data/processed/gpu_qm_benchmark/`.
   - not retrying a GPU OPT_NOT_CONVERGED on the CPU: the 3 such species failed again there.
 - Either switch of optimizer is a new method tag and a full QM recompute. The default stays
   `tblite` until the user decides.
+
+## 2026-11-26: GPU xTB work sharing: idle CPU workers take the GPU queue's species
+
+- **What** (the user: "Build work sharing"; 7ff4056): in a gpu-anc run, a worker with nothing
+  else to do takes a sent GPU item the GPU has not yet batched, smallest first, of at most
+  `--gpu-share-max-atoms` atoms (default 80, 0 off), and runs it on the CPU path.
+  - One locked claim per item: the GPU claims it as a batch takes it (`relax_many(claim=...)`;
+    `None` is the old path bit for bit), the scheduler when a worker takes it.
+  - Shared rows carry "shared from the GPU's queue" in their detail, route `cpu_shared`.
+  - Workers steal only into an idle slot (fewer than n jobs in flight), never into the pool's
+    prefetch, where a stolen job would wait.
+- **Measured** (`docs/gpu_qm_benchmark.md`, "Work sharing"):
+  - No gain on the 1,000-species ReactMech slice: 534.7 s with sharing against 537.0 s
+    without. The GPU's last batch of large molecules sets the end. Sharing brings that batch
+    forward, but the busy workers slow the GPU's driving thread on the 8-core host, and the
+    batch runs longer.
+  - On 64-species queues: -29% at 31-50 atoms, -16% at 51-80.
+  - The shared records equal tblite-anc's bit for bit. A species' record now depends on the
+    run's timing, as gpu-anc's batch composition already made it (stage 6: 25 of 758 species
+    differ beyond 1e-4 Eh between two runs).
+  - Three of the eight arms were contaminated by a video player from 22:13 and are not used.
+- **Default 80, on:** harmless on the long queue, a gain on short ones. 80 atoms bounds the
+  largest job a worker takes (67 worker seconds on the slice).
+- **Not built:** a cure for the GPU's large-molecule tail (duplicating the GPU's last molecules
+  on idle workers, or capping the sharing workers so the GPU's thread keeps a core). The
+  default optimizer stays `tblite`.

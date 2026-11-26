@@ -167,3 +167,47 @@ tblite-anc on the CPU, and those 235 records are bit-identical to tblite-anc's (
 Raw data: `data/processed/gpu_qm_benchmark/runs/<set>__<arm>/` holds `wall.json`, `run.log`,
 the manifest, the records, `vmstat.txt`, `gpu.csv`, `state.txt`, `foreign.txt` and
 `busy.txt`. `compare.txt` and `bench_summary.json` hold the comparison.
+
+## Work sharing (2026-11-26, after stage 6)
+
+The first lever of the reading above, built at 7ff4056: a CPU worker with nothing else to do
+takes a sent GPU item the GPU has not yet put in a batch, smallest first, of at most
+`--gpu-share-max-atoms` atoms (default 80, 0 off), and runs it on the CPU path (tblite-anc).
+A locked claim table decides each item once: the GPU claims it as a batch takes it
+(`relax_many`'s `claim`), a worker when it takes it, and the loser drops it. The benchmark is
+`scripts/gpu_xtb/share_job.sh` and `share_compare.py`, one GPU-queue job (job 51, 21:48-22:53),
+with outputs in `data/processed/gpu_qm_benchmark/share/`. It used stage 6's inputs and 12 workers.
+
+| Set | gpu-anc, sharing off | gpu-anc, sharing on (80) | tblite-anc | Species shared |
+|---|---|---|---|---|
+| ReactMech, 1,000 | 537.0 s | 534.7 s | (contaminated) | 164 (31-80 atoms) |
+| ReactMech, second run on | | 571.4 s (contaminated) | | 171 |
+| ReactMech, cap 120 | | 531.9 s (contaminated) | | 141 (up to 114 atoms) |
+| 64 species, 31-50 atoms | 40.4 s | 28.7 s | 27.1 s | 32 |
+| 64 species, 51-80 atoms | 76.5 s | 64.1 s | 72.1 s | 21 |
+
+- **Contamination.** A video player and Discord ran from 22:13. They were busy in 18-30 of the
+  30-second samples of the ReactMech tblite-anc arm (1,057 s against stage 6's 871 s), of the
+  second run with sharing and of the cap-120 arm. Those three arms are not used. The two arms
+  that decide (off, 537.0 s, and on, 534.7 s) ran before 22:13 with no desktop load. Each
+  64-species arm had 1-3 such samples, the same in all three arms of a bin.
+- **On the realistic mix, no gain.** The CPU did take work: 164 species, 1,709 worker seconds,
+  with the CPU 10-34% idle from 120 to 330 s against 54-85% without sharing. But the run's
+  end is set by the GPU's last batch, the 48 species of 289-422 basis functions, some with
+  hundreds of energy evaluations, which finish at about 533 s in every arm.
+  - With sharing the GPU reached them sooner (their group started at 237 s against 311 s).
+  - It then ran that batch more slowly (295 s against 223 s). The host has 8 physical cores,
+    and 12 busy workers slow the thread that drives the GPU, whose use was 50-70% in both arms.
+  - Raising the cap to 120 atoms did not change this (531.9 s, contaminated).
+- **On short queues, a gain.** At 31-50 atoms sharing cuts the run by 29% (40.4 to 28.7 s),
+  level with tblite-anc. At 51-80 atoms it cuts it by 16% (76.5 to 64.1 s), 11% faster than
+  tblite-anc. With a short queue the CPU takes the species the GPU would batch thinly.
+- **Records.** The shared species are tblite-anc's records to the last bit (164 of 164: dE 0,
+  RMSD 1e-15 Å). The GPU-optimized ones agree with tblite-anc as in stage 6 (78% within
+  1e-5 Eh, 99% within 1e-3). A species' route, and so its record, now depends on the run's
+  timing.
+- **Default.** Sharing stays on at 80 atoms. It costs nothing on the long queue and saves 16-29%
+  on short ones.
+- **What would shorten the long queue** (not built): the GPU's large-molecule tail. Idle
+  workers could duplicate the GPU's last few molecules and keep whichever finishes first, or
+  the number of sharing workers could be capped so that the GPU's thread keeps a core.
