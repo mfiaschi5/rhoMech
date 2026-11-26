@@ -11576,3 +11576,14 @@ Data: `data/processed/gpu_qm_benchmark/`.
   the records, the batch and the stage scripts of `scripts/gpu_xtb/` (now importing speedchem).
   `share_job.sh` names test files that are now in speedChem; it is the record of job 51 and is
   left as it ran.
+- **Pushed and pinned** (the user created the empty public repo `mfiaschi5/speedChem` and asked
+  for the push): main at 04d1add. ksmech's `pyproject.toml` takes it as a git source pinned to
+  that commit (`uv.lock`), so ksmech's commit fixes speedchem's.
+- **Gate** (GPU-queue job 52):
+  - speedChem's tests: 36 GPU and 83 CPU passed. ksmech's GPU driver tests: 3 passed.
+  - `stage4_gate.py check` ran on the pre-extraction code (62f1188) and twice on speedchem. All
+    three runs match the tblite-anc reference in 96 of 96 outcomes, and old and new agree in
+    96/96 outcomes.
+  - Their end energies differ as much between the two speedchem runs as between old and new:
+    median 5e-9 to 1e-8 Eh, 10-12 species beyond 1e-5, maximum 4e-3 to 2e-2. That is the
+    GPU's run-to-run nondeterminism (stage 6), not the move.

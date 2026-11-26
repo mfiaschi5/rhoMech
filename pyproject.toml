@@ -86,8 +86,8 @@ constraint-dependencies = [
 ]
 
 [tool.uv.sources]
-# a local checkout while the extraction is reviewed; a git source pinned to a commit once pushed
-speedchem = { path = "../../../../speedChem", editable = true }
+# pinned to a commit: the QM records' code trace (ksmech's commit) then fixes speedchem's too
+speedchem = { git = "https://github.com/mfiaschi5/speedChem", rev = "04d1add0c4ffc607e1e6b6dfae415cf0767726a7" }
 torch = [
     { index = "pytorch-rocm", group = "rocm" },
     { index = "pytorch-cu130", group = "cuda" },

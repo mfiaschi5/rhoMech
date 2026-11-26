@@ -462,7 +462,7 @@ requires-dist = [
     { name = "rdkit" },
     { name = "rich" },
     { name = "scipy" },
-    { name = "speedchem", editable = "../../../../speedChem" },
+    { name = "speedchem", git = "https://github.com/mfiaschi5/speedChem?rev=04d1add0c4ffc607e1e6b6dfae415cf0767726a7" },
     { name = "tblite" },
     { name = "tqdm" },
 ]
@@ -1117,29 +1117,11 @@ wheels = [
 [[package]]
 name = "speedchem"
 version = "0.1.0"
-source = { editable = "../../../../speedChem" }
+source = { git = "https://github.com/mfiaschi5/speedChem?rev=04d1add0c4ffc607e1e6b6dfae415cf0767726a7#04d1add0c4ffc607e1e6b6dfae415cf0767726a7" }
 dependencies = [
     { name = "numpy" },
     { name = "rdkit" },
     { name = "scipy" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy" },
-    { name = "rdkit" },
-    { name = "scipy" },
-    { name = "torch", marker = "extra == 'gpu'", index = "https://download.pytorch.org/whl/cu130" },
-]
-provides-extras = ["gpu"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "tblite", specifier = "==0.7.0" },
-    { name = "torch", specifier = "==2.14.1", index = "https://download.pytorch.org/whl/cu130" },
 ]
 
 [[package]]
