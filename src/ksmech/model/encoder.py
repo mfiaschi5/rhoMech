@@ -330,10 +330,11 @@ class DenseEncoder(nn.Module):
         lin1, act, lin2 = self.pair_init
         return pair_linear(lin2, act(pair_linear(lin1, channels, True)), True)
 
-    def forward(self, batch: dict, inp: dict, z_hat, defined, dense_warmup: bool = False):
-        """(h, p_atoms, aux): token vectors (B, N + 1, d), MECH at 0; symmetrized atom-pair
-        vectors (B, A, A, d_p), or `PairVectors` for the orbital-pair anchor head; no
-        auxiliary loss."""
+    def pair_track(self, batch: dict, inp: dict, z_hat, defined, atoms_only: bool = False):
+        """(h, p): the token vectors (B, N + 1, d) and the whole pair track (B, N + 1, N + 1,
+        d_p) after the last layer; with `atoms_only` the last layer updates the atom pairs only
+        and p is that (B, A, A, d_p) block (`last_update_atoms`). The pretraining head reads the
+        orbital cells of the whole track (`train.pretrain`)."""
         run = Recompute(self.cfg.checkpoint and self.training)
         split = getattr(self.cfg, "split_pair_init", False)
         with frozen(z_hat.device.type):
@@ -345,12 +346,19 @@ class DenseEncoder(nn.Module):
         else:
             p = run(self._init_dense if self.splitk else self.pair_init, channels)
         keys = attention_keys(batch, self.scope)
-        atoms_only = bool(getattr(self.cfg, "last_update_atoms", False)) and self.layers[-1].update
-        atoms_only = atoms_only and not self.orbital_pairs
         last = len(self.layers) - 1
         for k, layer in enumerate(self.layers):
             extra = (batch["bond_order"],) if atoms_only and k == last else ()
             h, p = run(layer, h, p, keys, *extra)
+        return h, p
+
+    def forward(self, batch: dict, inp: dict, z_hat, defined, dense_warmup: bool = False):
+        """(h, p_atoms, aux): token vectors (B, N + 1, d), MECH at 0; symmetrized atom-pair
+        vectors (B, A, A, d_p), or `PairVectors` for the orbital-pair anchor head; no
+        auxiliary loss."""
+        atoms_only = bool(getattr(self.cfg, "last_update_atoms", False)) and self.layers[-1].update
+        atoms_only = atoms_only and not self.orbital_pairs
+        h, p = self.pair_track(batch, inp, z_hat, defined, atoms_only)
         a = batch["bond_order"].shape[1]
         pa = p if atoms_only else p[:, 1 : a + 1, 1 : a + 1]
         pa = (pa + pa.transpose(1, 2)) / 2

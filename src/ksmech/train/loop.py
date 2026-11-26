@@ -130,6 +130,11 @@ class TrainConfig:
     #   so a source of few templates does not outweigh a varied one; 0: every sample once
     probe: str = ""  # validation parts of other sources scored every epoch and never used for
     #   best.pt, e.g. reactmech=molecule,rmechdb=rc_molecule: the out-of-distribution curve
+    init_from: str = ""  # a pretraining checkpoint (`train.pretrain`, data/models/qmugs/<run>/
+    #   best.pt): its encoder and its statistics start the run, the decoder fresh (phase 3)
+    init_stats: str = "checkpoint"  # with init_from: 'checkpoint' standardizes the inputs with
+    #   the pretraining's statistics, 'run' with the run's own (token and pair statistics fitted
+    #   on its training part), the encoder still the checkpoint's (docs/decisions.md 2026-11-23)
 
 
 # PMechDB and rmechdb: isolated steps, no stop labels; the minimum over a joint run's sources is
@@ -789,6 +794,42 @@ def load_model(path: Path, device: torch.device | str = "cpu") -> tuple[KSMech, 
     return model.to(device), ckpt
 
 
+PRETRAIN_KIND = "pretrain_run"  # the provenance kind of a `train.pretrain` run
+INIT_STATS = ("checkpoint", "run")  # TrainConfig.init_stats
+
+
+def initial_model(cfg: TrainConfig, model_cfg: ModelConfig, train: list, stats) -> KSMech:
+    """A fresh model on the run's statistics; with `init_from`, the encoder of a pretraining
+    checkpoint, the decoder fresh, with that checkpoint's statistics (the ones its encoder was
+    trained on) or, under `init_stats='run'`, the run's own. The checkpoint must be clean, a
+    pretraining run, and read the run's pair features; its encoder must fit this
+    configuration's (a strict load)."""
+    if cfg.init_stats not in INIT_STATS:
+        raise ValueError(f"--init-stats {cfg.init_stats!r}: one of {INIT_STATS}")
+    if not cfg.init_from:
+        return KSMech(model_cfg, fit_feature_stats(train, *token_columns(model_cfg)), stats)
+    path = Path(cfg.init_from)
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    header = prov.Provenance.from_dict(ckpt["provenance"])
+    prov.require_clean(header, path)
+    if header.kind != PRETRAIN_KIND:
+        raise ValueError(f"--init-from {path}: a {header.kind} checkpoint, not {PRETRAIN_KIND}")
+    names = tuple(ckpt["pair_stats"])
+    if names != tuple(stats.names):
+        raise ValueError(f"--init-from {path}: pair features {names}, the run reads {stats.names}")
+    if cfg.init_stats == "run":
+        model = KSMech(model_cfg, fit_feature_stats(train, *token_columns(model_cfg)), stats)
+    else:
+        pair = PairStats.from_dict(ckpt["pair_stats"], names)
+        model = KSMech(model_cfg, FeatureStats.from_dict(ckpt["feature_stats"]), pair)
+    prefix = "encoder."
+    encoder = {k[len(prefix) :]: v for k, v in ckpt["state_dict"].items() if k.startswith(prefix)}
+    model.encoder.load_state_dict(encoder)
+    what = "encoder" if cfg.init_stats == "run" else "encoder and statistics"
+    log.info("%s from %s (epoch %s)", what, path, ckpt.get("epoch"))
+    return model
+
+
 def _optimizer(model: KSMech, cfg: TrainConfig) -> torch.optim.AdamW:
     """AdamW; weight decay on the matrices only (not on biases or norm scales). On a GPU the
     fused kernel: one launch for every parameter, and a step it skips on the device when told
@@ -852,6 +893,8 @@ def _run_header(cfg: TrainConfig, model_cfg: ModelConfig, parts: dict, stats_pat
             inputs |= prov.file_input(path)
     if stats_path is not None:
         inputs |= prov.file_input(stats_path)
+    if cfg.init_from:
+        inputs |= prov.file_input(cfg.init_from)
     config = {"train": train_config(cfg), "model": model_cfg.to_dict()}
     config["sample_version"] = SAMPLE_VERSION
     extra = {"parts": parts} | run_notes(cfg, stats_path)
@@ -959,8 +1002,7 @@ def fit(
     del by_source  # `train` alone holds the training samples, so packing them frees them
     extra = OPEN_SHELL_BLOCK if model_cfg.open_shell else ()
     stats_path, stats = run_pair_stats(cfg, train, processed_dir, model_cfg.pair_cells, extra)
-    feature_stats = fit_feature_stats(train, *token_columns(model_cfg))
-    model = KSMech(model_cfg, feature_stats, stats).to(device)
+    model = initial_model(cfg, model_cfg, train, stats).to(device)
     if cfg.compile:
         compile_encoder(model, cfg.compile_scope)
     parts = {"train": train_info, "val": val_info} | ({"test": held[1]} if held[1] else {})

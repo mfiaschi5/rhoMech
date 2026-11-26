@@ -7,6 +7,13 @@
         --split pmechdb=molecule,rmechdb=rc_molecule --val-cohort pmechdb=closed_base
     ksmech-train fit --run backward_s0 --direction backward   # the previous-step model
 
+    ksmech-train pretrain --run qmugs_s0 --preset general --no-fragment-embedding  # phase 3
+    ksmech-train fit --run ft_s0 ... --init-from data/models/qmugs/qmugs_s0/best.pt
+
+`pretrain` trains the encoder on the QMugs store (`train.pretrain`; data/models/qmugs/<run>/);
+`--init-from` starts a run from its encoder and statistics, with the same model flags;
+`--init-stats run` keeps the encoder but standardizes with the run's own statistics.
+
 `--direction backward` reads the backward store (`arrows.backward`, `<source>/backward/`) and
 records the direction in run.json; the default, forward, is unchanged.
 
@@ -40,6 +47,7 @@ from ksmech.train.loop import (
     rocm_override,
     select_device,
 )
+from ksmech.train.pretrain import MODELS_SOURCE, PretrainConfig, fit_pretrain
 
 
 def _add_fields(parser: argparse.ArgumentParser, cls, defaults: dict | None = None) -> None:
@@ -75,6 +83,16 @@ def build_parser(preset: str | None = None) -> argparse.ArgumentParser:
                    help="the flags of a preset as defaults")  # fmt: skip
     _add_fields(f, TrainConfig)
     _add_fields(f, ModelConfig, PRESETS.get(preset or "", {}))
+    pt = sub.add_parser("pretrain", help="pretrain the encoder on the QMugs store (phase 3)")
+    pt.add_argument("--run", required=True, help="run name: data/models/qmugs/<run>/")
+    pt.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
+    pt.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    pt.add_argument("--device", default="auto", help="auto | cpu | cuda (ROCm is cuda)")
+    pt.add_argument("--preset", choices=sorted(PRESETS), default=preset,
+                    help="the flags of a preset as defaults")  # fmt: skip
+    _add_fields(pt, PretrainConfig)
+    _add_fields(pt, TrainConfig, {"epochs": 10})
+    _add_fields(pt, ModelConfig, PRESETS.get(preset or "", {}))
     return parser
 
 
@@ -119,10 +137,27 @@ def cmd_fit(args) -> int:
     return 0
 
 
+def cmd_pretrain(args) -> int:
+    cfg, model_cfg = _config(TrainConfig, args), _config(ModelConfig, args)
+    pcfg = _config(PretrainConfig, args)
+    run_dir = Path(args.models_dir) / MODELS_SOURCE / args.run
+    if (run_dir / "run.json").exists():
+        print(f"{run_dir} exists: choose another --run", file=sys.stderr)
+        return 2
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _logging(run_dir)
+    if args.preset:
+        flags = {k: getattr(model_cfg, k) for k in PRESETS[args.preset]}
+        logging.getLogger(__name__).info("preset %s: %s", args.preset, flags)
+    best = fit_pretrain(cfg, pcfg, model_cfg, run_dir, select_device(args.device))
+    logging.getLogger(__name__).info("best epoch %s: %s", best["epoch"], best)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser(_preset(argv)).parse_args(argv)
     with processed_root(args.processed_dir):
-        return {"fit": cmd_fit}[args.command](args)
+        return {"fit": cmd_fit, "pretrain": cmd_pretrain}[args.command](args)
 
 
 if __name__ == "__main__":

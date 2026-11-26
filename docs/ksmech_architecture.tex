@@ -46,7 +46,7 @@
 
 \title{\textbf{ksmech}: a localized-orbital transformer\\for elementary-step reaction mechanism prediction\\[4pt]\large Theoretical framework and architecture specification}
 \author{Project design document}
-\date{6 November 2026 (v10: electron bookkeeping and open-shell tokens and physics, open-shell plan P6 and P7, approved 5 November 2026; the open-shell head and decode screen of P9, approved 6 November 2026; v10.1: the reaction network, Section~\ref{sec:network}, approved 10 November 2026)}
+\date{6 November 2026 (v10: electron bookkeeping and open-shell tokens and physics, open-shell plan P6 and P7, approved 5 November 2026; the open-shell head and decode screen of P9, approved 6 November 2026; v10.1: the reaction network, Section~\ref{sec:network}, approved 10 November 2026; v10.2: the encoder pretraining of Section~\ref{sec:pretrain}, its objective chosen 22 November 2026)}
 
 \begin{document}
 \maketitle
@@ -681,6 +681,22 @@ Most entries are zero in every label. Their terms stay in the likelihood: the mo
 
 \paragraph{Resonance augmentation.} A drawn reactant pool is one of its resonance drawings. In training, each molecule of a sample's reactant pool is drawn as a random valid resonance form (Section~\ref{sec:resonance}) with no more formal charges than the molecule as drawn (the charge-separated minor forms are not drawn), and the label set is recomputed for that drawing: the parsimonious class of Section~\ref{sec:labels} with the drawn form's $\vb{B}'_{\mathrm{reac}}$ in place of $\vb{B}_{\mathrm{reac}}$. A form keeps the drawn Kekul\'e structure of every ring its change does not need. The formal charges of the atom tokens, $\vb{B}$ and the bond-order pair feature follow the drawing; the orbital tokens and every other feature belong to the wavefunction and do not. Up to $8$ drawings of the pool are precomputed per sample, and each epoch draws one at random. The model thus learns the step, not the drawing. The resonance pairs are extra equivalence examples: the two drawings of each pair are one pool, and the model is trained to give them the same prediction.
 
+\subsection{Encoder pretraining}
+\label{sec:pretrain}
+The encoder can be pretrained on single molecules (QMugs, Appendix~\ref{app:data}) before the mechanism objective. The target is a quantity of every (occupied, virtual) pair of LMOs of one molecule that no input holds: its second-order donor--acceptor energy, the intramolecular face of the covalent Klopman--Salem term. The exact LMOs have no occupied--virtual Fock element, since the two blocks are localized apart. Each LMO is therefore restricted to its own centres $\mathcal{A}_r$ (Section~\ref{sec:tokens}): its AO coefficients off $\mathcal{A}_r$ are set to zero, giving the column $\vb{t}_r$. The whole restricted set, occupied and virtual, is orthonormalized symmetrically, $\vb{T}'=\vb{T}(\vb{T}^{\top}\vb{S}\vb{T})^{-1/2}$, and the Fock matrix is read in that basis, $\vb{F}'=\vb{T}'^{\top}\vb{F}\,\vb{T}'$. Then
+\begin{equation}
+E^{(2)}_{rs}=n_r\,\frac{|F'_{rs}|^{2}}{F'_{ss}-F'_{rr}},\qquad n_r=2,
+\end{equation}
+which is NBO's second-order estimate on the restricted LMOs. It is defined where the denominator exceeds $0.1$~eV and for closed shells only, and it is invariant to the phase of every LMO. On the fixture molecules it ranks the interactions as NBO does:
+\begin{itemize}[nosep]
+\item the ester resonance $n_{\mathrm{O}}\to\pi^{*}_{\mathrm{C=O}}$ of methyl acetate is the largest term, at $52$~kcal/mol;
+\item $n_{\mathrm{O}}\to\sigma^{*}_{\mathrm{CC}}$ of acetone is $24$;
+\item in ethane each $\sigma_{\mathrm{CH}}$ gives most to the antiperiplanar $\sigma^{*}_{\mathrm{CH}}$, $3.1$.
+\end{itemize}
+Within each fixture molecule the correlation of $\log E^{(2)}$ with the square of the cross-centre coupling, the nearest input, is at most $0.46$.
+
+A head on the final pair track predicts $y_{rs}=\log_{10}(E^{(2)}_{rs}/\mathrm{eV}+10^{-4})$. It is an MLP $d_p\to d_p\to 1$ on the vector of each (occupied, virtual) cell, the mean of its two orientations. The loss is the Huber loss ($\delta=1$) over the defined cells of the batch. In half of the molecules of every batch the reactant-pose channels (centroid distance, cross-centre coupling, the two alignment cosines, $g_2$) are left undefined, as they are on an intermolecular cell of a pool. The track therefore also learns the interaction from the orbital descriptors, $G$ and the graph alone. A mechanism run started from a pretrained encoder takes its weights and its input statistics; the decoder starts fresh.
+
 \section{Labels, interpretation and step application}
 
 \subsection{Edit labels}
@@ -947,7 +963,7 @@ Here O carries three lone pairs (6 electrons) in the reactant and two in the pro
 \item \textbf{ReactMech}: $\sim$30k mechanisms in 67 classes, $\sim$105k elementary steps; class-wise out-of-distribution evaluation.
 \item \textbf{FlowER dataset}: $\sim$2.14M template-generated elementary steps from USPTO-Full (numeric-suffix lines, train, validation and test); scale-up.
 \item \textbf{mech-USPTO-31K}: expert-validated mechanisms for the published-benchmark comparison.
-\item \textbf{QMugs}: $\sim$665k drug-like molecules with GFN2-xTB and DFT properties; encoder pretraining.
+\item \textbf{QMugs}: $\sim$665k drug-like molecules with GFN2-xTB and DFT properties; encoder pretraining (Section~\ref{sec:pretrain}), on GFN2-xTB single points at its own geometries for a seeded subset.
 \end{itemize}
 
 \begin{thebibliography}{99}

@@ -159,6 +159,13 @@ choice hard to undo and is confirmed again before its build.
   E_Z, the canonical frontier inputs.
 - Phase 3, after phase 2: QM pretraining (QMugs), and, if the completion still limits the decode,
   R generated as an alternating path, valid by construction.
+  State (2026-11-22, decisions.md "phase 3, the orbital-pair pretraining target"): the user
+  chose the orbital-pair target, the donor-acceptor energy E2 of every (occupied, virtual)
+  cell of a QMugs molecule (`physics.donor_acceptor`, spec v10.2). Built: the target, the
+  pretraining samples and store (`ksmech-pretrain`), `ksmech-train pretrain` and `fit
+  --init-from`. Running: the 50k subset's tokens and the Wiberg sidecars. Next: the store, a
+  pretraining run with arm e's flags, fullrm_e from it on two seeds, read on the three
+  sources.
 
 **Done when.** Phase 1: the arms' `ood_report` files and their comparison are in
 `docs/decisions.md`, with the choice of what phase 2 starts from. Phase 2: its

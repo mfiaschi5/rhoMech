@@ -10642,3 +10642,345 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   - pretraining that makes the orbital-pair channels worth reading (phase 3).
   mech-USPTO-31K stays an evaluation set (never trained on): its loader would give a fourth
   source to read these arms on.
+
+## 2026-11-22: phase 3, the orbital-pair pretraining target and its build
+
+- **Why.** The step after arm e on the full ReactMech store (2026-11-20) is phase 3 of the
+  out-of-distribution plan: pretraining that makes the orbital-pair channels worth reading.
+  The spec named QMugs for it but defined no objective.
+  - Four objectives were put to the user: the orbital-pair donor-acceptor energy, QMugs's DFT
+    targets (charges, ESP, bond orders, HOMO/LUMO, all per atom, bond or molecule), both
+    together, or masked reconstruction of the descriptors.
+  - User choice: the orbital pairs.
+- **The target** (`physics.donor_acceptor`, spec v10.2 "Encoder pretraining"). It is NBO's
+  second-order energy on the token file's LMOs.
+  - Each LMO is restricted to its own centres, the atoms at or above tau_atom of its
+    population (`ks_terms.centre_restricted`, the same restriction as the cross-coupling
+    input). The whole restricted set, occupied and virtual, is Lowdin-orthonormalized under S.
+  - E2(r, s) = 2 |F'_rs|^2 / (F'_ss - F'_rr) in eV. It is undefined where the denominator is
+    at or below 0.1 eV, and refused for a molecule with an open-shell token (OPEN_SHELL) or a
+    near-singular restricted set (DEGENERATE_BASIS).
+  - No new QM is needed: S, F and the LMO coefficients are in every token file.
+  - Unrestricted (the exact LMOs), the occupied-virtual block vanishes below 1e-5 eV
+    (Brillouin; a test). Every coupling the target reports therefore comes from the
+    restriction.
+- **Checked on the fixture molecules** (gas-phase single points; ALPB-water records give the
+  same order):
+  - methyl acetate: n_O(ether) -> pi*(C=O), the ester resonance, 52 kcal/mol, the largest term
+    (NBO ~45-50);
+  - acetone: n_O -> sigma*(C-C), 24, the two equal;
+  - acrolein: pi(C=C) -> pi*(C=O), 20;
+  - methylamine: n_N -> sigma*(C-H) anti, 8;
+  - ethane: each sigma(C-H) gives most to the antiperiplanar sigma*(C-H), 3.1 (NBO ~2.5).
+  - Every E2 is >= 0, and the smallest eigenvalue of T^T S T is >= 0.65.
+  - Within one molecule, log E2 correlates with log cc^2 (the nearest input, the WH cross
+    coupling squared) at 0.0 to 0.46, and with log|g| at -0.5 to 0.3. The target is not a copy
+    of an input.
+- **The pretraining** (`train.pretrain`, `ksmech-train pretrain`).
+  - The dense encoder's whole pair track is read on every (occupied, virtual) cell
+    (`DenseEncoder.pair_track`, split out of `forward`, bit for bit as before).
+  - A head, an MLP d_p -> d_p -> 1, predicts y = log10(E2 / eV + 1e-4). The floor puts every
+    cell below ~0.002 kcal/mol at -4 decades, so the head learns the near and the far cells
+    alike.
+  - The loss is Huber (delta 1 decade) over the defined cells of the batch.
+  - In half of the molecules of every batch (`--mask-geometry 0.5`) the reactant-pose channels
+    are undefined: centroid distance, cross coupling, align and dihedral cosines, g2. An
+    intermolecular cell of a pool has none of them. Without the mask the head could read the
+    interaction off the cross coupling and teach the track nothing an intermolecular cell can
+    use.
+  - Validation, with and without the pose channels (`val_*`, `val_masked_*`):
+    - the loss;
+    - the pooled correlation r;
+    - whether each molecule's strongest cell is the top-1 / within the top-5 predicted, the
+      analogue of the anchor ranking within one molecule;
+    - the mean absolute error on the strong cells (E2 > 0.1 eV).
+  - `best.pt` is the lowest val loss. A checkpoint is what `load_model` reads, with the head
+    beside it.
+  - The dense encoder only: flex and sparse have no pair state.
+- **`fit --init-from`** (`train.loop.initial_model`).
+  - The run takes the pretraining checkpoint's encoder (a strict load) and its input
+    statistics. These are the statistics the encoder was trained on; refitting them on the
+    mechanism data would rescale every input the pretrained first layers read.
+  - The decoder starts fresh.
+  - Refused:
+    - a checkpoint that is not a `pretrain_run`;
+    - one from a dirty tree;
+    - one whose pair features differ from the run's.
+  - The checkpoint is an input of run.json.
+- **Data** (`pretrain.samples`, `ksmech-pretrain species|samples`).
+  - 50,000 molecules drawn with seed 0 from the distinct keys of the 150,000 `ok` QMugs records
+    (`select_species`).
+  - The validation part is 5% by a hash of the key (`part_of`), so a larger subset keeps the
+    parts of a smaller one.
+  - A sample is the one-molecule pool's `reactant_sample` and Lewis structure, the very code of
+    the mechanism samples, with E2 as `PretrainSample.pair_target` (NaN where undefined). The
+    store and views have the mechanism store's layout and provenance.
+  - Every molecule without a sample is counted by its code: MISSING_TOKENS, NO_BOND_INDEX,
+    OPEN_SHELL, DEGENERATE_BASIS, MULTI_FRAGMENT, CORRESPONDENCE.
+  - `ksmech-orbitals build --method` reads the QMugs records' method, GFN2-xTB/ALPB-water/given.
+- **Costs measured.**
+  - Tokens: 0.6 s and 0.56 MB per molecule (12 random records), so ~28 GB for the 50k.
+  - Wiberg sidecars: 20 ms and 4 KB per record.
+  - A sample: 3-10 s depending on the load, 105 kB stored; median 166 tokens, at most 488.
+    Most of the time is `stage_a._intra`, the per-cell Python loop of the pose features, slow
+    on QMugs's larger molecules and left as it is: it builds every mechanism store.
+  - The largest E2 per molecule: median 50 kcal/mol, at most 140 (30 molecules).
+- **Build** (started 2026-11-22 12:57).
+  - Unit `ksmech-qmugs-tokens`, script `data/processed/qmugs/pretrain/build_tokens.sh`, from
+    the clean worktree `qmugs-tokens` at main 8e9a385, so tokens and sidecars carry committed
+    code.
+  - It builds the 50k molecules' tokens and the Wiberg sidecars of every QMugs record.
+- **Next.**
+  - The store.
+  - A pretraining run with arm e's model flags.
+  - fullrm_e started from it on two seeds, read like fullrm_e on the three sources: the human
+    benchmark walk, PMechDB closed_base ood, the ReactMech scaffold test. The permutation
+    importance of the gap block says whether the orbital-pair channels are now read.
+
+## 2026-11-22: phase 3, the store, the gate and the read, registered before the runs
+
+- **The store** (unit `ksmech-qmugs-store`, `data/processed/qmugs/pretrain/build_store.sh`, from
+  the clean worktree `qmugs-tokens` at 16b1a4f, 12 processes, 15:43 to 18:32).
+  - 49,045 samples of the 50,000 molecules: 46,547 train, 2,498 val; 4.5 GB.
+  - Skipped: MISSING_TOKENS 936, OPEN_SHELL 12, DEGENERATE_BASIS 7; no MULTI_FRAGMENT,
+    CORRESPONDENCE or NO_BOND_INDEX.
+  - The 936 are the molecules whose RDKit re-canonicalization changes the key (cage
+    stereocentres): their QM record is filed under QMugs's SMILES, their tokens are looked up
+    under the canonical one (915 missing_qm, 21 stale_qm in the token build). Left out, not
+    rebuilt: 1.9% of the subset.
+  - The Wiberg sidecars: the serial pass over all 150k QMugs records was stopped at 7,677 and
+    replaced by a pass over the subset only (`build_wbi_subset.sh`, 47,497 built, 0 failed).
+  - `ksmech-data provenance` reads the views clean, code 16b1a4f.
+- **The gate's baselines** (val, 2,498 molecules; is the molecule's strongest E2 cell the
+  top-1 / in the top-5 of the defined cells, ranked by an input column, with the rank rule of
+  `train.pretrain.eval_sums`):
+
+  | ranking | top-1 | top-5 |
+  |---|---|---|
+  | \|g\| | 0.04% | 0.5% |
+  | \|g2\| | 0.0% | 0.1% |
+  | beta^2 \|g\| (cross_coupling^2 x \|g\|) | 0.8% | 21.5% |
+
+  - |g| almost never ranks the strongest cell first. One reading, not tested: the gap factor
+    is large for the frontier pairs, not for the geminal and vicinal pairs where E2 peaks.
+    Either way the gate agreed with the user (val_masked_top1 against |g|) is passed by almost
+    any learned ranking.
+  - The registered gate is therefore two conditions on `best.pt`, both needed:
+    1. the agreed one: val_masked_top5 above |g|'s 0.5% by its 95% binomial interval;
+    2. the stricter one: val_top5 above beta^2 |g|'s 21.5% by its 95% interval (about +-1.6
+       points at n = 2,498), i.e. the encoder ranks the cells better than the textbook
+       second-order formula on its own inputs.
+  - If either fails, no fine-tune: the numbers go to the user first.
+- **The pretraining run** `qmugs_e_s0` (`data/models/qmugs/`), seed 0, 10 epochs,
+  `--mask-geometry 0.5`, arm e's model flags (`--preset general --encoder dense
+  --no-fragment-embedding`) and fullrm_pipeline.sh's EXTRA (`--amp fp16 --compile
+  --compile-scope step --half-pair-norm --split-pair-init --pair-linear-splitk
+  --last-update-atoms --no-checkpoint --pin-memory --load-workers 8 --workers 4
+  --eval-cell-budget 2200000`), from the worktree at 16b1a4f. `last_update_atoms` changes no
+  parameter and the pretraining head reads the whole pair track (`pair_track` without
+  `atoms_only`), so the fine-tune's strict load holds.
+- **The fine-tunes** `ftq_e_s0`, `ftq_e_s1`: fullrm_e_s0 / s1 exactly (BASE, JOINT and EXTRA
+  of `scripts/ood_fullrm.sh` and `fullrm_pipeline.sh`, the full ReactMech store, same seeds)
+  plus `--init-from data/models/qmugs/qmugs_e_s0/best.pt`. One pretraining checkpoint serves
+  both seeds: the pretraining's own seed noise is not measured.
+- **The read**, against fullrm_e_s0 / s1 (the 2026-11-22 walks), two seeds a side, so a
+  difference under about 3 points of top-1 is noise (seed against seed 1.2 points for fullrm,
+  up to 6 for the pilot's arms):
+  1. human benchmark, first step top-1 on the 334 cases every run ranks and on the 267 unseen
+     ones: hits summed over the seeds, the exact two-sided sign test on the cases where the
+     sums differ; every-step top-1 and pathways walked whole as secondary numbers;
+  2. PMechDB closed_base val (`ksmech-eval ood`): top-1, no loss expected beyond the noise;
+  3. ReactMech scaffold test: top-1 and R exact, no loss expected;
+  4. the permutation importance of the pair gap block on PMechDB closed_base (1.6-2.4 points
+     for fullrm_e): whether the orbital-pair channels are now read.
+  - Pretraining helps if the first-step top-1 rises by more than 3 points with a sign test
+    p < 0.05 on the 334 cases, without loss on 2 and 3. A rise of the gap block's importance
+    without a rise of the benchmark says the channels are read but do not transfer.
+- **Known gap.** With `--init-from`, run.json still lists the run's own pair-statistics file
+  as an input although the model uses the checkpoint's statistics.
+
+## 2026-11-23: phase 3, the read: the QMugs encoder is not shown to help the transfer
+
+- **The gate** (registered 2026-11-22) passed by far. `qmugs_e_s0`'s `best.pt` (epoch 9 of 10,
+  code 16b1a4f, clean): val_top1 79.9%, val_top5 99.7%, val_masked_top1 73.3%,
+  val_masked_top5 98.1%, val r 0.993 on log10(E2 + 1e-4), strong-cell MAE 0.028. Against
+  |g|'s 0.5% and beta^2 |g|'s 21.5% top-5, both conditions hold by tens of points.
+- **The runs.** `ftq_e_s0` and `ftq_e_s1` are fullrm_e_s0 / s1 plus `--init-from
+  data/models/qmugs/qmugs_e_s0/best.pt`.
+  - Code e480941, clean, from the worktree `qmugs-tokens`. That worktree's `data/cache`,
+    `data/raw` and `data/processed` entries are symlinks to the main checkout's, because
+    relative inputs resolve against the imported package's repo root.
+    `data/processed_full/pmechdb` is a new link to `../processed/pmechdb`, so
+    `--processed-dir data/processed_full` finds both sources.
+  - GPU queue unit `ksmech-gpu-queue`, with the gpu-xtb session first.
+    - One preemption, at 01:39, during data loading of s0: no step was taken and no
+      checkpoint was written.
+    - Then s0 and s1 ran uninterrupted from 03:04 to 14:10.
+  - About 605 s an epoch, the same as fullrm_e (607-616 s), so the gpu-unlock of 2026-11-22
+    is not a timing confound here.
+  - Both fullrm_e_s1 and ftq_e_s1 log "step 207460 / 207330": the planned total is an
+    estimate.
+  - The smoke run's anchor NLL at the first steps was higher with the pretrained encoder
+    (26.8 against 10.1 from a fresh init).
+- **Validation curves.**
+  - The pretrained encoder gives a head start. After epoch 0, PMechDB closed_base top-1 is
+    50.2 / 49.4 against 40.1 / 43.1, and R exact 42.2 / 41.7 against 30.4 / 35.4.
+  - The head start is gone by epoch 2. From there on both arms are within fullrm's seed
+    spread.
+  - `best.pt`: PMechDB top-1 68.8 / 67.4 against 65.7 / 70.4; overall 95.9 / 95.7 against
+    95.7 / 96.1.
+- **The read** (as registered; `data/models/pmechdb+reactmech/ftq_read_2026-11-23.py` and
+  its `.out`):
+  - **The unseen set.** It was rebuilt with `data.benchmark_checks`: PMechDB molecule train
+    from `overlap_pmechdb_molecule.json`, and the 85,349 steps of ReactMech scaffold train.
+    - `splits_scaffold.json` was read without the provenance check. The moved store reads
+      STALE_ARTIFACT without the processed-root mapping.
+    - The counts match 2026-11-20: ReactMech makes 16 first targets, 5 of them not made by
+      PMechDB, and 283 cases are made by neither.
+    - The script reproduces fullrm_e's registered numbers exactly: 68.6 / 69.8, 66.7 on the
+      unseen, 32 to 36 seed against seed.
+  - The table:
+
+  | | fullrm_e s0 / s1 | ftq_e s0 / s1 | mean, fullrm / ftq |
+  |---|---|---|---|
+  | 1. first step top-1 (334) | 68.6 / 69.8 | 70.1 / 65.9 | 69.2 / 68.0 |
+  | first step top-1, unseen (267) | 65.2 / 68.2 | 68.2 / 63.7 | 66.7 / 65.9 |
+  | first step top-5 (334) | 88.3 / 88.6 | 89.8 / 90.4 | 88.5 / 90.1 |
+  | every step top-1 (n ~ 670) | 68.0 / 67.0 | 68.7 / 68.3 | 67.5 / 68.5 |
+  | pathways walked whole | 47.4 / 49.1 | 48.3 / 48.9 | 48.3 / 48.6 |
+  | 2. PMechDB closed_base top-1 (1,238) | 65.5 / 70.4 | 68.7 / 67.4 | 68.0 / 68.1 |
+  | 3. ReactMech scaffold test top-1 / R exact (11,589) | 99.2 / 99.2, 98.5 / 97.0 | 99.2 / 99.1, 97.0 / 98.5 | = |
+  | 4. pair gap block, d top-1 on PMechDB | -1.6 / -2.4 | -2.0 / -0.8 | -2.0 / -1.4 |
+
+  - **Sign tests.** These are exact and two-sided, on hits summed over the seeds.
+    - First step, all 334 cases: ftq ahead 49, fullrm ahead 57 (p = 0.50).
+    - Unseen first steps: 42 to 46 (p = 0.75).
+    - Both seeds right: 192 against 197.
+    - PMechDB closed_base: 164 to 154 (p = 0.61).
+    - ReactMech scaffold test: 66 to 72 (p = 0.67).
+  - **The ftq seeds are 4.2 points apart** (42 to 28, p = 0.12), against fullrm's 1.2. The
+    3-point noise band registered from fullrm's spread is therefore, if anything, too narrow
+    for this arm.
+  - The ood and walk code is the same for both arms. Between fullrm's reports (80783ad,
+    2efdae3) and ftq's (e480941) only the processed-root handling of `ood_cli` and
+    `--init-from` changed. Every report is clean.
+- **What it says.**
+  - **Not shown to help.** By the registered rule (more than 3 points and p < 0.05 on the 334
+    cases), the pretrained encoder with its QMugs statistics does not improve the third source.
+    - The difference is -1.2 points (p = 0.50), within the noise.
+    - It is not shown to hurt either: there is no loss on 2 or 3, and the top-5 and every-step
+      numbers lean the other way by about a point.
+  - **The orbital-pair channels are still not read.** The gap block's importance is unchanged
+    (-0.8 to -2.0 points against -1.6 to -2.4), so an E2 target that the encoder learns well
+    on QMugs does not make the fine-tuned ranking use the gap channels.
+  - **What did change** (post hoc, not registered, one permutation repeat). The fine-tuned
+    models lean less on the Lewis channels and more on the distances:
+    - On PMechDB, permuting the Lewis block costs -27.1 / -22.2 points of top-1 against
+      -31.5 / -40.1, and the distances -30.1 / -31.4 against -21.2 / -26.2.
+    - On ReactMech scaffold test, Lewis costs -33.1 / -24.5 against -71.0 / -65.5, and the
+      distances -57.8 / -56.5 against -30.3 / -35.8.
+    - The decoder's physics term alone ranks 14.0 / 9.1% top-1 on PMechDB against 7.0 / 7.1%.
+    - It holds on both seeds and both sources, but the benchmark does not move with it.
+- **Confounds.**
+  - `--init-from` carries the QMugs statistics as well as the encoder: the std of g is 0.053
+    on QMugs against 0.857 on the mechanism data, the frontier weights' 2-4x smaller, and the
+    inter flag's 0, read as 1.0. So "pretraining" above means pretrained encoder plus QMugs
+    statistics; the two are not separated.
+  - One pretraining checkpoint serves both seeds.
+- **Walks.** They ran with the NTFS archive mounted read-only and
+  `find data/cache/qm -maxdepth 1 -xtype l | wc -l` = 0, so no case was lost on
+  STALE_ARTIFACT. Stops for ftq: MISSING_TOKENS 110 / 105 against 106 / 101.
+- **Next, each the user's choice, nothing started.**
+  - The statistics ablation: the same fine-tune with the statistics refitted on the mechanism
+    data, which separates the encoder from the scale shift.
+  - Or close phase 3 with this null and turn to data of another kind (2026-11-20's verdict).
+
+## 2026-11-23: phase 3, the statistics ablation, registered before the runs
+
+- **Why.** `--init-from` gives the fine-tune the pretraining's input statistics as well as its
+  encoder. On the mechanism data those statistics are far off: g's std is 0.053 on QMugs
+  against 0.857, the frontier weights' 2-4x smaller, and the inter flag has std 0, read as 1.0.
+  So the encoder meets standardized inputs up to ~16x larger than it was trained on. The null
+  of the read above may be the encoder's, or this scale shift's.
+- **The switch.** `TrainConfig.init_stats` (`--init-stats checkpoint|run`).
+  - The default, `checkpoint`, is the behaviour of ftq_e, bit for bit.
+  - `run` loads the same encoder, but the token and pair statistics are fitted on the run's
+    training part, as for a fresh run.
+  - So the encoder sees inputs of unit scale on the mechanism data, as it saw on QMugs. The
+    meaning of each standardized value changes with the shift of mean and std; the ablation
+    accepts that.
+  - With `run`, run.json's pair-statistics input is the one the model uses, so the known gap
+    of 2026-11-22 does not apply.
+- **The runs.** `ftqs_e_s0` and `ftqs_e_s1`: ftq_e_s0 / s1 exactly, plus `--init-stats run`.
+  - The same pretraining checkpoint, `qmugs_e_s0/best.pt`, and the same seeds.
+  - From a clean worktree at the commit that adds the switch, as a low job of the GPU queue.
+  - About 11.5 h, then `ksmech-eval ood` on the two sources and the human-benchmark walk.
+- **The read.** As registered on 2026-11-22, items 1-4, with the same script
+  (`ftq_read_2026-11-23.py`, its arms extended), against fullrm_e (the reference) and ftq_e.
+  - **The statistics were the obstacle** if ftqs_e's first-step top-1 on the 334 cases is
+    more than 3 points above fullrm_e's with a sign test p < 0.05, with no loss on PMechDB
+    closed_base or ReactMech scaffold test.
+  - **The encoder does not transfer** (and phase 3 closes with a null) if ftqs_e is within 3
+    points of fullrm_e, or not significant.
+  - Below fullrm_e by more than 3 points with p < 0.05: the pretrained encoder hurts once its
+    inputs are rescaled.
+  - Secondary: ftqs_e against ftq_e by the same test; whether the gap block's importance rises
+    above 2.4 points; whether the shift from the Lewis channels to the distances seen in ftq_e
+    holds.
+
+## 2026-11-24: phase 3, the statistics ablation read: the encoder does not transfer, phase 3 closes
+
+- **The runs.** ftqs_e_s0 and ftqs_e_s1, as registered on 2026-11-23.
+  - Built from the worktree at b6877bf; run.json states `init_stats: run`, and train.log
+    says "encoder from data/models/qmugs/qmugs_e_s0/best.pt (epoch 9)", without "and
+    statistics".
+  - Preempted six times by the priority GPU session between 20:59 and 00:04. Each restart
+    began again from step 0, because no checkpoint exists before the end of the first epoch.
+  - Trained without a break from 02:30 to 13:39; best epochs 22 and 24 of 30.
+  - The ood reports and the walks are clean (b6877bf, `code_dirty` false). The walks ran
+    with the NTFS archive mounted.
+- **The read.** By the registered script with a third arm, `ftqs_read_2026-11-24.py` and its
+  `.out` beside the runs. It reproduces the fullrm and ftq numbers of 2026-11-23 exactly.
+
+  | | fullrm_e s0 / s1 | ftq_e s0 / s1 | ftqs_e s0 / s1 | mean, fullrm / ftq / ftqs |
+  |---|---|---|---|---|
+  | 1. first step top-1 (334) | 68.6 / 69.8 | 70.1 / 65.9 | 68.6 / 69.8 | 69.2 / 68.0 / 69.2 |
+  | first step top-1, unseen (267) | 65.2 / 68.2 | 68.2 / 63.7 | 65.5 / 67.0 | 66.7 / 65.9 / 66.3 |
+  | first step top-5 (334) | 88.3 / 88.6 | 89.8 / 90.4 | 90.1 / 90.7 | 88.5 / 90.1 / 90.4 |
+  | every step top-1 (n ~ 675) | 68.0 / 67.0 | 68.7 / 68.3 | 67.7 / 66.4 | 67.5 / 68.5 / 67.1 |
+  | pathways walked whole | 47.4 / 49.1 | 48.3 / 48.9 | 47.4 / 49.7 | 48.3 / 48.6 / 48.6 |
+  | 2. PMechDB closed_base top-1 (1,238) | 65.5 / 70.4 | 68.7 / 67.4 | 70.6 / 66.6 | 68.0 / 68.1 / 68.6 |
+  | 3. ReactMech scaffold test top-1 (11,589) | 99.2 / 99.2 | 99.2 / 99.1 | 99.3 / 99.2 | = |
+  | 4. pair gap block, d top-1 on PMechDB | -1.6 / -2.4 | -2.0 / -0.8 | -0.6 / -2.0 | -2.0 / -1.4 / -1.3 |
+
+  - **Sign tests.** Exact and two-sided, on hits summed over the seeds.
+    - First step, all 334 cases:
+      - ftqs ahead 53, fullrm ahead 48 (p = 0.69);
+      - ftqs against ftq: 46 to 39 (p = 0.52).
+    - Unseen first steps: 45 to 42 against fullrm (p = 0.83); 35 to 34 against ftq (p = 1.0).
+    - Both seeds right: 202 for ftqs, 197 for fullrm, 192 for ftq.
+    - PMechDB closed_base: 154 to 135 against fullrm (p = 0.29); 147 to 136 against ftq
+      (p = 0.55).
+    - ReactMech scaffold test: 68 to 47 against fullrm (p = 0.06); 64 to 32 against ftq
+      (p = 0.001). That is about 0.1 point of top-1 on a saturated set, so it is a gain at
+      most, not a loss.
+  - ftqs's seeds agree better than ftq's: 27 to 31 (p = 0.69), against 42 to 28.
+- **What it says.**
+  - **The encoder does not transfer.** By the registered rule, ftqs_e is within 3 points of
+    fullrm_e: 0.0 points, p = 0.69. Pretraining on QMugs E2 does not improve the third
+    source, either with the QMugs statistics or with the mechanism data's own. Phase 3 closes
+    with a null.
+  - **The statistics were not the obstacle.** Against ftq_e the change is +1.2 points
+    (p = 0.52), within the noise. Seed agreement and top-5 lean slightly to ftqs, which is not
+    a read.
+  - **The gap block is still not read.** Its importance is -0.6 / -2.0 points, not above 2.4.
+  - **The shift from the Lewis channels to the distances belongs to the encoder, not the
+    statistics.** It holds, and is if anything larger, with refitted statistics:
+    - On PMechDB, permuting the Lewis block costs -20.7 / -19.5 points, and the distances
+      -35.2 / -32.0.
+    - On ReactMech, Lewis costs -26.2 / -25.3 and the distances -63.1 / -63.3, against
+      fullrm's -71.0 / -65.5 and -30.3 / -35.8.
+    - This is a post hoc note on one permutation repeat. The benchmark does not move with it.
+- **For later GPU-queue fits.** A low job that is preempted before its first epoch ends loses
+  everything. A checkpoint inside the epoch would help if the card is shared again; it was not
+  built here.
