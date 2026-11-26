@@ -10927,3 +10927,60 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   - Secondary: ftqs_e against ftq_e by the same test; whether the gap block's importance rises
     above 2.4 points; whether the shift from the Lewis channels to the distances seen in ftq_e
     holds.
+
+## 2026-11-24: phase 3, the statistics ablation read: the encoder does not transfer, phase 3 closes
+
+- **The runs.** ftqs_e_s0 and ftqs_e_s1, as registered on 2026-11-23.
+  - Built from the worktree at b6877bf; run.json states `init_stats: run`, and train.log
+    says "encoder from data/models/qmugs/qmugs_e_s0/best.pt (epoch 9)", without "and
+    statistics".
+  - Preempted six times by the priority GPU session between 20:59 and 00:04. Each restart
+    began again from step 0, because no checkpoint exists before the end of the first epoch.
+  - Trained without a break from 02:30 to 13:39; best epochs 22 and 24 of 30.
+  - The ood reports and the walks are clean (b6877bf, `code_dirty` false). The walks ran
+    with the NTFS archive mounted.
+- **The read.** By the registered script with a third arm, `ftqs_read_2026-11-24.py` and its
+  `.out` beside the runs. It reproduces the fullrm and ftq numbers of 2026-11-23 exactly.
+
+  | | fullrm_e s0 / s1 | ftq_e s0 / s1 | ftqs_e s0 / s1 | mean, fullrm / ftq / ftqs |
+  |---|---|---|---|---|
+  | 1. first step top-1 (334) | 68.6 / 69.8 | 70.1 / 65.9 | 68.6 / 69.8 | 69.2 / 68.0 / 69.2 |
+  | first step top-1, unseen (267) | 65.2 / 68.2 | 68.2 / 63.7 | 65.5 / 67.0 | 66.7 / 65.9 / 66.3 |
+  | first step top-5 (334) | 88.3 / 88.6 | 89.8 / 90.4 | 90.1 / 90.7 | 88.5 / 90.1 / 90.4 |
+  | every step top-1 (n ~ 675) | 68.0 / 67.0 | 68.7 / 68.3 | 67.7 / 66.4 | 67.5 / 68.5 / 67.1 |
+  | pathways walked whole | 47.4 / 49.1 | 48.3 / 48.9 | 47.4 / 49.7 | 48.3 / 48.6 / 48.6 |
+  | 2. PMechDB closed_base top-1 (1,238) | 65.5 / 70.4 | 68.7 / 67.4 | 70.6 / 66.6 | 68.0 / 68.1 / 68.6 |
+  | 3. ReactMech scaffold test top-1 (11,589) | 99.2 / 99.2 | 99.2 / 99.1 | 99.3 / 99.2 | = |
+  | 4. pair gap block, d top-1 on PMechDB | -1.6 / -2.4 | -2.0 / -0.8 | -0.6 / -2.0 | -2.0 / -1.4 / -1.3 |
+
+  - **Sign tests.** Exact and two-sided, on hits summed over the seeds.
+    - First step, all 334 cases:
+      - ftqs ahead 53, fullrm ahead 48 (p = 0.69);
+      - ftqs against ftq: 46 to 39 (p = 0.52).
+    - Unseen first steps: 45 to 42 against fullrm (p = 0.83); 35 to 34 against ftq (p = 1.0).
+    - Both seeds right: 202 for ftqs, 197 for fullrm, 192 for ftq.
+    - PMechDB closed_base: 154 to 135 against fullrm (p = 0.29); 147 to 136 against ftq
+      (p = 0.55).
+    - ReactMech scaffold test: 68 to 47 against fullrm (p = 0.06); 64 to 32 against ftq
+      (p = 0.001). That is about 0.1 point of top-1 on a saturated set, so it is a gain at
+      most, not a loss.
+  - ftqs's seeds agree better than ftq's: 27 to 31 (p = 0.69), against 42 to 28.
+- **What it says.**
+  - **The encoder does not transfer.** By the registered rule, ftqs_e is within 3 points of
+    fullrm_e: 0.0 points, p = 0.69. Pretraining on QMugs E2 does not improve the third
+    source, either with the QMugs statistics or with the mechanism data's own. Phase 3 closes
+    with a null.
+  - **The statistics were not the obstacle.** Against ftq_e the change is +1.2 points
+    (p = 0.52), within the noise. Seed agreement and top-5 lean slightly to ftqs, which is not
+    a read.
+  - **The gap block is still not read.** Its importance is -0.6 / -2.0 points, not above 2.4.
+  - **The shift from the Lewis channels to the distances belongs to the encoder, not the
+    statistics.** It holds, and is if anything larger, with refitted statistics:
+    - On PMechDB, permuting the Lewis block costs -20.7 / -19.5 points, and the distances
+      -35.2 / -32.0.
+    - On ReactMech, Lewis costs -26.2 / -25.3 and the distances -63.1 / -63.3, against
+      fullrm's -71.0 / -65.5 and -30.3 / -35.8.
+    - This is a post hoc note on one permutation repeat. The benchmark does not move with it.
+- **For later GPU-queue fits.** A low job that is preempted before its first epoch ends loses
+  everything. A checkpoint inside the epoch would help if the card is shared again; it was not
+  built here.
