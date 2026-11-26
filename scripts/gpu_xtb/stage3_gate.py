@@ -28,9 +28,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from speedchem.gpu import scf as S
 
 from ksmech.qm.geometry import new_calculator
-from ksmech.qm.gpu import scf as S
 
 SAMPLE = Path("data/processed/gpu_qm_spike/mols.json")
 OUT = Path("data/processed/gpu_qm_spike")

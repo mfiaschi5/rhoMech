@@ -11528,3 +11528,51 @@ Data: `data/processed/gpu_qm_benchmark/`.
 - **Not built:** a cure for the GPU's large-molecule tail (duplicating the GPU's last molecules
   on idle workers, or capping the sharing workers so the GPU's thread keeps a core). The
   default optimizer stays `tblite`.
+
+## 2026-11-26: the GPU engine and the ANC optimizer move to their own package, speedChem
+
+- **What** (the user: separate this code into a new repo that ksmech depends on, so that new
+  QM optimization methods go there). The user's choices:
+  - **Boundary:** the engine and the optimizers;
+  - **Hosting:** public GitHub under LGPL-3.0;
+  - **Name:** speedChem;
+  - **History:** kept.
+- **The package** `speedchem` (repo `mfiaschi5/speedChem`, local checkout `~/Documents/speedChem`):
+  - `speedchem.gpu` (the former `ksmech.qm.gpu`, with the CUDA sources of `native/ksxtb` as package
+    data in `gpu/csrc/`);
+  - `speedchem.anc` (the former `ksmech.qm.anc`);
+  - `speedchem.bonds` (the bond walls, the dissociation guard and the connectivity check, out of
+    `qm.geometry`);
+  - `speedchem.reasons` (a StrEnum with `ReasonCode`'s values);
+  - `speedchem.settings.RelaxSettings` (relax_many's settings; ksmech passes its `QMConfig`);
+  - `speedchem.units`.
+  - It imports nothing of ksmech. Its tests take tblite as the reference and their own copy of
+    the fixed molecule set.
+  - The history of the moved files came over by git-filter-repo (16 commits from the branch
+    claude/gpu-xtb at 62f1188).
+- **Behaviour unchanged:**
+  - The code moved without edits beyond imports and paths.
+  - The messages of the bond checks are the same.
+  - `qm.geometry` re-exports the moved names and wraps `DissociationGuard` and
+    `check_connectivity`, which raise `QMError(CONNECTIVITY_CHANGED)` here as before; speedchem
+    raises its own `ConnectivityChanged`.
+  - Reason codes cross the boundary by value: the StrEnums compare equal by `==`, never by `is`.
+- **The CUDA library** builds on first use from the installed package into
+  `SPEEDCHEM_BUILD_DIR` (default `~/.cache/speedchem`), since an installed package may be
+  read-only. `KSXTB_ARCH` sets the architecture (default sm_89). `native/ksxtb/build/` is gone.
+- **torch** stays in ksmech's cuda and rocm groups. speedchem declares it only as the optional
+  extra `gpu`, so `uv sync --group rocm` still picks the torch build. `speedchem.anc` and
+  `speedchem.bonds` import without torch, as the CPU workers need.
+- **Provenance:** QM record headers trace the code by ksmech's commit (`code_git_hash`, tracing
+  only, not compared). The speedchem version a commit used is pinned in `uv.lock` once
+  speedchem is a git source at a fixed commit. While it is a local editable path (until the
+  push), a speedchem change leaves no trace on a record, as an uncommitted ksmech change
+  would without its dirty flag: no QM batch for keeps runs before the git pin.
+- **Licence:** LGPL-3.0-or-later, the licence of tblite and dftd4. The engine reimplements
+  their GFN2 and D4 and ships parameter tables extracted from tblite, mctc-lib and dftd4
+  (`NOTICE`). The texts are SPDX's copies (gnu.org refused the connection). rhoMech's own
+  licence is still open.
+- **Left in ksmech:** the gpu-anc driver (`qm.gpu_run`), the tblite optimizers of `qm.geometry`,
+  the records, the batch and the stage scripts of `scripts/gpu_xtb/` (now importing speedchem).
+  `share_job.sh` names test files that are now in speedChem; it is the record of job 51 and is
+  left as it ran.

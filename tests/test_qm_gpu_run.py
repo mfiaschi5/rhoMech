@@ -24,9 +24,23 @@ from ksmech.qm.records import ReasonCode, cache_path, is_valid_cache_file, load_
 from ksmech.qm.spin import config_for
 from ksmech.qm.xtb_calc import GFN2Calculator, QMConfig
 from tests.fixtures.molecules import MOLECULES, OPEN_SHELL
-from tests.test_qm_gpu import gpu
 
 METHOD = "GFN2-xTB/ALPB-water/gpu-anc"
+
+
+def _gpu_ready() -> bool:
+    """A CUDA device and the nvcc of speedchem.gpu (or its library already built)."""
+    import os
+    from pathlib import Path
+
+    import torch
+    from speedchem.gpu import native
+
+    nvcc = Path(os.environ.get("KSXTB_NVCC", str(native.DEFAULT_NVCC)))
+    return torch.cuda.is_available() and (nvcc.exists() or native.LIB.exists())
+
+
+gpu = pytest.mark.skipif(not _gpu_ready(), reason="no CUDA device or ksxtb toolchain")
 
 
 def _config(tmp_path, optimizer="gpu-anc") -> QMConfig:
@@ -186,7 +200,7 @@ def test_the_first_claim_of_an_item_wins_in_either_order():
 
 
 def test_a_batch_fill_drops_the_tasks_claimed_elsewhere():
-    from ksmech.qm.gpu.optimize import _fill
+    from speedchem.gpu.optimize import _fill
 
     def job(key, smiles):
         z = np.array([a.GetAtomicNum() for a in Chem.AddHs(Chem.MolFromSmiles(smiles)).GetAtoms()])
@@ -276,7 +290,7 @@ def test_gpu_anc_records_match_tblite_anc(tmp_path):
 @pytest.mark.gpu
 @gpu
 def test_relax_many_takes_the_scf_cycle_limit(tmp_path):
-    from ksmech.qm.gpu.optimize import RelaxTask, relax_many
+    from speedchem.gpu.optimize import RelaxTask, relax_many
 
     _, item = gpu_run.prepare((_task(MOLECULES["acetone"], _config(tmp_path)), 1))
     task = RelaxTask("a", prepare_mol(item.task.smiles), item.z, item.start, 0, 0)
@@ -288,7 +302,7 @@ def test_relax_many_takes_the_scf_cycle_limit(tmp_path):
 @pytest.mark.gpu
 @gpu
 def test_relax_many_drops_the_tasks_claimed_elsewhere(tmp_path):
-    from ksmech.qm.gpu.optimize import RelaxTask, relax_many
+    from speedchem.gpu.optimize import RelaxTask, relax_many
 
     tasks = []
     for k, name in enumerate(("acetone", "methyl_acetate")):

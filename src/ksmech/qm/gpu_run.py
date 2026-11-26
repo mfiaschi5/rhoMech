@@ -280,7 +280,7 @@ class _Inbox:
     def more(self, block: bool):
         """The RelaxTasks put since the last call ([] if none; waiting for some when `block`),
         or None once closed and empty."""
-        from ksmech.qm.gpu.optimize import RelaxTask
+        from speedchem.gpu.optimize import RelaxTask
 
         if self.closed:
             return None
@@ -304,7 +304,7 @@ def _gpu_thread(inbox: _Inbox, config: QMConfig, out: queue.Queue, claims: _Clai
     """`relax_many` over the GPU items as they arrive in `inbox` and the GPU claims them, each
     outcome put on `out` as it is final; an exception is put there too, and `_DONE` last."""
     try:
-        from ksmech.qm.gpu.optimize import relax_many
+        from speedchem.gpu.optimize import relax_many
 
         relax_many([], config, on_result=out.put, more=inbox.more, claim=claims.gpu)
     except Exception as exc:  # noqa: BLE001 - its molecules are retried on the CPU path

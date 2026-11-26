@@ -36,11 +36,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from speedchem import anc
+from speedchem.gpu import optimize as O
+from speedchem.gpu import scf as S
 
-from ksmech.qm import anc
 from ksmech.qm.geometry import BOHR_ANG
-from ksmech.qm.gpu import optimize as O
-from ksmech.qm.gpu import scf as S
 
 SAMPLE = Path("data/processed/gpu_qm_spike/mols.json")
 OUT = Path("data/processed/gpu_qm_spike")

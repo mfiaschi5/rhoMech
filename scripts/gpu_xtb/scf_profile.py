@@ -30,10 +30,9 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
+from speedchem.gpu import optimize as O  # noqa: E402
+from speedchem.gpu import scf as S  # noqa: E402
 from stage4_gate import SAMPLE, embed_many  # noqa: E402
-
-from ksmech.qm.gpu import optimize as O  # noqa: E402
-from ksmech.qm.gpu import scf as S  # noqa: E402
 
 T = defaultdict(float)
 PHASE = {"now": "step"}

@@ -241,9 +241,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   tblite-anc's optimization batched on the GPU for the untagged closed shells of 31 atoms and
   more, the rest on the CPU workers, every record under method `.../gpu-anc` (`qm.gpu_run`:
   tblite's single point at the GPU geometry, a tblite-anc polish above fmax, GPU_POLISHED; a GPU
-  failure retried on the CPU; water only; no timeout on the GPU part); `--optimizer tblite-anc`
-  optimizes in approximate normal
-  coordinates with RFO steps and restarted SCFs (`qm.anc`, method `.../tblite-anc`, 2-4x fewer
+  failure retried on the CPU; water only; no timeout on the GPU part; `--gpu-share-max-atoms 80`:
+  idle CPU workers take the GPU queue's species up to that size, 0 off; the GPU engine and its
+  batched optimizer are the package speedchem, github.com/mfiaschi5/speedChem, LGPL-3.0, its
+  CUDA library built into `~/.cache/speedchem`); `--optimizer tblite-anc` optimizes in
+  approximate normal coordinates with RFO steps and restarted SCFs (`speedchem.anc`, method
+  `.../tblite-anc`, 2-4x fewer
   energies than the default L-BFGS-B `.../tblite-lbfgs`; its `--maxiter` counts energies);
   `--solvent S` another ALPB solvent of `xtb_calc.ALPB_SOLVENTS` (one name each: methanol, dmso,
   thf, ...) or `gas`, a method of its own (`GFN2-xTB/ALPB-S/...`) whose records sit beside the

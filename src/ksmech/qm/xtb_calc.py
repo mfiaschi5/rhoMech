@@ -54,7 +54,8 @@ _OPT_TAGS = {
     "xtb": "xtb-opt",
     "gpu-anc": "gpu-anc",
 }
-_ANC = ("tblite-anc", "gpu-anc")  # `qm.anc` on tblite here; gpu-anc also on the GPU (`qm.gpu_run`)
+# `speedchem.anc` on tblite; gpu-anc also on the GPU (`qm.gpu_run`)
+_ANC = ("tblite-anc", "gpu-anc")
 # The ALPB solvents of GFN2 in tblite (and xtb), by the one name each the method string carries:
 # tblite also takes aliases and any case ('h2o', 'DMSO', 'dichloromethane'), which would give one
 # solvent two method strings and two cache keys (docs/decisions.md, 2026-11-09).

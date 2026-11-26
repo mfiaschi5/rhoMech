@@ -26,10 +26,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from speedchem.gpu import native
+from speedchem.gpu.basis import mol_basis
 
 from ksmech.qm.geometry import new_calculator
-from ksmech.qm.gpu import native
-from ksmech.qm.gpu.basis import mol_basis
 
 SAMPLE = Path("data/processed/gpu_qm_spike/mols.json")
 OUT = Path("data/processed/gpu_qm_spike")

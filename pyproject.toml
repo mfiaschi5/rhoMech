@@ -16,6 +16,8 @@ dependencies = [
     "tqdm",
     "rich",
     "lightgbm>=4.7.0",
+    # the GPU GFN2 engine and the ANC optimizer (github.com/mfiaschi5/speedChem, LGPL-3.0)
+    "speedchem",
 ]
 
 [project.scripts]
@@ -84,6 +86,8 @@ constraint-dependencies = [
 ]
 
 [tool.uv.sources]
+# a local checkout while the extraction is reviewed; a git source pinned to a commit once pushed
+speedchem = { path = "../../../../speedChem", editable = true }
 torch = [
     { index = "pytorch-rocm", group = "rocm" },
     { index = "pytorch-cu130", group = "cuda" },
@@ -121,5 +125,5 @@ markers = [
     "diagnostic: checks the classifier's labels (lone pair, sigma, ...), which are never model input",
     "serve: serve app tests: stubs or synthetic chemistry, never xTB",
     "e2e: Playwright wrapper, skipped unless KSMECH_E2E=1",
-    "gpu: CUDA kernels of ksmech.qm.gpu, skipped without a device or the ksxtb toolchain",
+    "gpu: the CUDA engine of speedchem.gpu, skipped without a device or the ksxtb toolchain",
 ]

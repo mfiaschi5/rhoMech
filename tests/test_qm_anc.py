@@ -1,10 +1,10 @@
-"""qm.anc (Lindh model Hessian, ANC / RFO steps) and its GFN2 path in qm.geometry."""
+"""speedchem.anc (Lindh model Hessian, ANC / RFO steps) and its GFN2 path in qm.geometry."""
 
 import numpy as np
 import pytest
+from speedchem import anc
 from tblite.interface import TBLiteRuntimeError
 
-from ksmech.qm import anc
 from ksmech.qm.embed import embed, prepare_mol
 from ksmech.qm.geometry import (
     BOHR_ANG,
