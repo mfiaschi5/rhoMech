@@ -9,7 +9,17 @@ import pytest
 from ksmech.network.benchmarks import Case, freeze_halves, load_half
 from ksmech.network.evaluate import evaluate_case, summary
 from ksmech.network.pools import pool_state
-from ksmech.network.rerank import NO_RECORD, EnergyScorer, Rerank, Score, reorder_places
+from ksmech.network.rerank import (
+    NO_RECORD,
+    UNPARSED,
+    EnergyScorer,
+    Rerank,
+    Score,
+    inventory,
+    reorder_places,
+    target_deficit,
+    target_score,
+)
 from ksmech.network.search import Proposal, SearchParams
 from ksmech.network.walk import walk_case, walk_summary
 from tests.test_network_evaluate import DETOUR, SN2, START, TOY
@@ -30,7 +40,7 @@ def test_a_rerank_gives_the_hit_rank_per_lambda_and_counts_the_unscored():
     assert rr.lambdas == (0.0, 1.0)
     skips = Counter()
     out = rr.ranks(props, 1, skips)
-    assert out == {"full": False, "by_lambda": {"0": 2, "1": 1}}
+    assert out == {"full": False, "by_lambda": {"0": 2, "1": 1}, "distinct": 2}
     assert skips == {f"RERANK_UNSCORED:{NO_RECORD}": 1}
     assert rr.ranks(props, None, Counter())["by_lambda"] == {"0": None, "1": None}
     assert Rerank(rr.score, (1.0,), top=1).ranks(props, 2, Counter())["by_lambda"]["1"] == 3
@@ -41,7 +51,7 @@ def test_the_walk_reads_every_lambda_and_still_moves_to_the_target_child():
                            (2.0,))  # fmt: skip
     row = walk_case(TOY, Case("w", START, "CO", None, ("CO",), "benchmark"), favour_detour)
     assert row["steps"][0]["rank"] == 1
-    assert row["steps"][0]["rerank"] == {"full": True, "by_lambda": {"0": 1, "2": 2}}
+    assert row["steps"][0]["rerank"] == {"full": True, "by_lambda": {"0": 1, "2": 2}, "distinct": 2}
     detour = walk_case(TOY, Case("d", START, "CO", None, ("[CH2-]Cl", "CO"), "benchmark"),
                        favour_detour)  # fmt: skip
     assert [s["rank"] for s in detour["steps"]] == [2, 1] and detour["stop"] is None
@@ -101,3 +111,26 @@ def test_the_halves_put_the_inspected_in_dev_and_are_read_back(tmp_path, monkeyp
     assert {c.case_id for c in _cases(args, Counter())} == set(halves["dev"])
     with pytest.raises(ValueError):
         _cases(SimpleNamespace(**{**vars(args), "set": "reactmech"}), Counter())
+
+
+def test_lambda_inf_ranks_by_the_score_then_the_forward_log_p():
+    logps, scores = [-0.1, -1.0, -2.0, -3.0], [-2.0, None, -1.0, -1.0]
+    assert reorder_places(logps, scores, float("inf")) == [2, 1, 3, 0]
+
+
+def test_the_target_deficit_counts_what_the_product_needs_and_the_pool_lacks():
+    want = inventory("CO")
+    assert target_deficit(want, inventory("CO.[Cl-]")) == 0  # by-products cost nothing
+    assert target_deficit(want, inventory("CCl.[OH-]")) == 1  # the C-O bond
+    assert target_deficit(inventory("C[O-]"), inventory("CO")) == 1  # the charged O
+    assert inventory("C1CC") == UNPARSED
+
+
+def test_the_target_score_is_bound_per_case_and_reports_its_ties():
+    rr = Rerank(None, (float("inf"),), top=3, case_score=target_score)
+    bound = rr.for_case(Case("t", START, "CO"))
+    assert bound.case_score is None and Rerank(lambda p: 0.0, ()).for_case(None).score
+    props = [Proposal(pool_state(x), lp) for x, lp in ((DETOUR, -0.2), (SN2, -1.0), ("CO", -4.0))]
+    out = bound.ranks(props, 1, Counter())
+    assert out["by_lambda"]["0"] == 2 and out["by_lambda"]["inf"] == 1
+    assert out["distinct"] == 2  # SN2's child and CO tie at D = 0

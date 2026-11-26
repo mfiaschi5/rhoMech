@@ -17,7 +17,8 @@ over the cases.
 
 With a `network.rerank.Rerank` each ranked step also holds `rerank`: the target child's rank
 after the first `top` children are reranked, per lambda, and whether all of them were scored
-(`full`). The walk still moves to the child that holds the target, so one walk reads every
+(`full`), and how many distinct scores they had (`distinct`: 1 is a tie that changes no rank).
+The walk still moves to the child that holds the target, so one walk reads every
 lambda; the summary adds the first step's top-k per lambda (`first_step_rerank`).
 """
 
@@ -78,6 +79,7 @@ def walk_case(expander, case: Case, rerank=None) -> dict:
     except Exception as exc:  # noqa: BLE001 - the case is reported, not dropped
         return {"case": case.case_id, "failure": f"UNPARSED:{type(exc).__name__}"}
     steps, stop, skips = [], None, Counter()
+    rerank = None if rerank is None else rerank.for_case(case)
     for smiles in case.step_targets:
         if not smiles:
             stop = "STEP_TARGET_MISSING"

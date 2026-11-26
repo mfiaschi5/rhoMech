@@ -120,7 +120,7 @@ def _evaluate_parser(sub) -> None:
                    "one frozen half (<processed-dir>/human_benchmark/halves.json)")  # fmt: skip
     e.add_argument(
         "--rerank",
-        choices=["backward", "energy"],
+        choices=["backward", "energy", "target"],
         help="--walk only: rerank "
         "the first --rerank-top children by log P_f + lambda s (network.rerank)",
     )
@@ -279,6 +279,9 @@ def _rerank(args, ckpt, cfg):
 
     if args.rerank is None:
         return None
+    if args.rerank == "target":
+        return rerank.Rerank(None, tuple(args.rerank_lambdas), args.rerank_top,
+                             case_score=rerank.target_score)  # fmt: skip
     if args.rerank == "energy":
         score = rerank.energy_score(rerank.EnergyScorer())
     else:
@@ -293,8 +296,8 @@ def _walk_tag(args) -> str:
     tag = args.set + (f"_{args.part}" if args.part != "all" else "")
     tag += f"_{args.half}" if getattr(args, "half", None) else ""
     tag += f"_n{args.limit}" if args.limit is not None else ""
-    if getattr(args, "rerank", None) == "energy":
-        tag += "_rerank-energy"
+    if getattr(args, "rerank", None) in ("energy", "target"):
+        tag += f"_rerank-{args.rerank}"
     elif getattr(args, "rerank", None) == "backward":
         tag += f"_rerank-{args.backward_run}"
     return tag
@@ -318,7 +321,7 @@ def _walk(args, console: Console, ckpt, expander, cases, counts, rerank=None) ->
     if getattr(args, "half", None):
         config["half"] = args.half
     if rerank is not None:
-        config["rerank"] = {"kind": args.rerank, "lambdas": list(rerank.lambdas),
+        config["rerank"] = {"kind": args.rerank, "lambdas": [f"{x:g}" for x in rerank.lambdas],
                             "top": rerank.top}  # fmt: skip
         if args.rerank == "backward":
             config["rerank"] |= {
