@@ -477,7 +477,10 @@ Main CLI entry points are added phase by phase and listed here as they land:
   `roundtrip_report_<split>_<part><suffix>_<BWD>.json` and one `decode_hits` file per lambda,
   `roundtrip_hits_..._lam<lambda>.json`, beside the forward checkpoint, for `compare`;
   `--species-file` decodes only and lists the child species without tokens for `ksmech-qm run
-  --species-from`, `bond-index` and `ksmech-orbitals build --species-from`);
+  --species-from`, `bond-index` and `ksmech-orbitals build --species-from`; `--backward-run-source
+  S` the backward run's models directory; `--energy` in place of `--backward-run` reranks by
+  -E(child) / RT, the GFN2 total energies of the child's fragments from their records
+  (`network.rerank.EnergyScorer`), files tagged `_energy`);
   `uv run ksmech-eval compare --a HITS... --b HITS... [--k 1] [--metric own|any] [--out FILE]` (two arms of decode runs
   paired by sample: A fails when its mean top-k is below B's by more than max(2 x pooled SD, 1 point),
   the exact one-sided McNemar test on majority-of-seeds hits and every seed pair; arms decoded on other
@@ -527,12 +530,20 @@ Main CLI entry points are added phase by phase and listed here as they land:
   (heavy-atom connectivity, up to protons), mechanism classes up to the order of independent steps
   with p(class | reaches); the web app's network imports `network.graph` and `network.keys`),
   `uv run ksmech-network evaluate --set reactmech|human_benchmark --run NAME [--run-source S]
-  [--part val] [--limit N] [the search options]` (per case the arrival, the recorded pathway's rank by
-  its pool-key sequence, the step targets passed, the expansions; the rates over the cases;
-  `network_eval_<set>[_<part>][_n<limit>].json` beside the checkpoint; `--walk`: no search, each
+  [--part val] [--half dev|test] [--limit N] [the search options]` (per case the arrival, the recorded pathway's rank by
+  its pool-key sequence, the step targets passed, whether the best pathway's first step makes the
+  first recorded target (`first_step_hit`), the expansions; the rates over the cases;
+  `network_eval_<set>[_<part>][_<half>][_n<limit>].json` beside the checkpoint; `--half`: one
+  frozen half of the human benchmark, `human_benchmark/halves.json`, written once by `uv run python
+  scripts/benchmark_halves.py --inspected FILE` (the pathways read by hand all in dev; design
+  reads dev, test once per adopted configuration); `--walk`: no search, each
   recorded step target ranked among the children of the pool the walk has reached, the walk
   moving to that child (`network.walk`: the first step's top-1/3/5, every step's, the pathways
-  walked whole, the stop codes), `network_walk_<set>[...].json`)
+  walked whole, the stop codes), `network_walk_<set>[...].json`; `--walk --rerank
+  backward|energy [--rerank-lambdas ...] [--rerank-top 5]`: each step's first children also
+  reranked by log P_f + lambda x the backward model's log P of -R (`--backward-run`,
+  `--backward-run-source`) or -E(child) / RT (`network.rerank`), the target's rank per lambda,
+  the first step's top-k per lambda in `first_step_rerank`, files tagged `_rerank-<BWD|energy>`)
 
   With `--backward-run BWD [--backward-checkpoint best] [--roundtrip-lambda 1]`, `search` and
   `evaluate` search from both sides (item I1, `network.bidirectional`): the forward run from the

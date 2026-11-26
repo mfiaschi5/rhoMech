@@ -10984,3 +10984,81 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
 - **For later GPU-queue fits.** A low job that is preempted before its first epoch ends loses
   everything. A checkpoint inside the epoch would help if the card is shared again; it was not
   built here.
+
+## 2026-11-26: where the model fails on the human benchmark, and three cheap tests registered before their runs
+
+- **Why.** The user asked where the model fails, then for fixes, then for substantial
+  alternatives "starting again with what was learned". Of five redesigns put to them, the
+  user chose to run first the cheap tests that could refute the two leading ones: an energy in
+  the score, and a prior on the reaction's outcome.
+- **The error analysis** (read-only; the script and dumps are git-ignored beside
+  `data/models/pmechdb+reactmech/fullrm_e_s0/`, with `error_examples_human_benchmark.html`).
+  - **Population.** 42 of the 334 ranked first steps are missed by all six joint runs
+    (fullrm, ftq and ftqs, two seeds each). 149 are right in all six, and 143 change with the
+    seed. The first pools of the 42 were expanded again with fullrm_e_s0 and s1 (CPU); the
+    ranks match the walk files.
+  - **A hand classification of the 42** (indicative, by one reader):
+
+    | group | cases |
+    |---|---|
+    | another accepted mechanism or granularity: the model's step is acceptable | 14 |
+    | wrong selectivity (site, nucleophile, intra- against intermolecular, nucleophilic catalysis) | 10 |
+    | uphill or absurd proton transfers | 7 |
+    | counter-ions (Na+, K+, Li+) bonded | 4 |
+    | concerted rearrangements or migrations missed | 3 |
+    | target not reachable or doubtful in the benchmark | 4 |
+
+  - **Two targets cannot be reached.** In human_benchmark-d0fbdb3af30b75d7 the target holds a
+    pentanal where the start has butanal. In human_benchmark-8fe1e8c8b38412cd the target holds
+    AlCl3, which the start lacks. Over the whole benchmark, 3 of 350 pathways have a step
+    target with heavy atoms the start does not hold.
+  - **What is wrong is often confident.** p > 0.8 for the top step in most of the genuine
+    chemistry errors. There is no energy anywhere in the score.
+  - **Headroom.** First-step top-1 is about 69% against top-5 at 88-90%, so the ranking
+    leaves about 20 points. The target is absent from the beam in about 10-12% of cases.
+- **The benchmark becomes a development set.** 42 of its pathways were read by hand to choose
+  these tests. From now on:
+  - `scripts/benchmark_halves.py` freezes `human_benchmark/halves.json` once
+    (`network.benchmarks.freeze_halves`). The 42 inspected pathways all go to `dev`; every
+    other pathway goes to `dev` if sha256(pathway_id) is even and to `test` if it is odd.
+  - Design work reads `dev`. Each configuration that is adopted is read once on `test`.
+  - `ksmech-network evaluate --half dev|test` reads one half.
+- **Test 1, the backward model as a reranker** (`eval.roundtrip`; `network.rerank` in the
+  walk).
+  - The forward runs are fullrm_e_s0 and s1 (`pmechdb+reactmech`). The backward run is
+    pmechdb/bwd_s0 (PMechDB only, 2026-11-10), read with the new `--backward-run-source`.
+  - The rerank covers the first 5 completions (the beam) or the first 5 distinct children
+    (the walk). A completion without a score keeps its place, as in the round-trip check.
+  - Lambda is chosen on PMechDB closed_base val with `ksmech-eval roundtrip`: the own top-1
+    averaged over the two forward seeds, over the grid 0.25, 0.5, 1, 2, 4. Ties go to the
+    smaller lambda, and 0 wins if nothing beats it.
+  - The chosen lambda is then read on the dev half's first step (`evaluate --walk --rerank
+    backward`).
+- **Test 2, the energy of the child** (`network.rerank.EnergyScorer`; `ksmech-eval roundtrip
+  --energy`, `evaluate --walk --rerank energy`).
+  - The score is s = -E(child) / RT, with E the sum of the GFN2 total energies of the child's
+    fragments from their QM records (ALPB water, no thermal term). The children of one pool
+    hold the same atoms, so this ranks by the step's dE.
+  - The same protocol as test 1, with the grid 0.01, 0.03, 0.1, 0.3, 1. The forward
+    alternatives sit below log P -10, so about 10 kT is needed to move a top-1.
+- **Test 3, the product known** (`evaluate` without `--walk`).
+  - The search towards the final product runs with the default budget (50 expansions, depth
+    6, k 5) on the dev half, with fullrm_e_s0 and s1. `first_step_hit` asks whether the best
+    pathway's first child holds the first recorded target; a case with no pathway is a miss.
+  - It is compared with the walk's first-step top-1 on the same cases.
+  - This is an upper bound on what a prior on the outcome could give the first step, within
+    the search's budget. It is not the walk's number. Expansions without tokens fail and are
+    counted (no `--build-missing`).
+- **The QM it needs.** Two sets of child species without tokens get a QM batch, `bond-index`
+  and `ksmech-orbitals build --species-from` before the reads:
+  - those of the first 5 completions of PMechDB closed_base val (`roundtrip --species-file`,
+    both forward seeds);
+  - those of the dev half's first 5 children of the first pool.
+- **The read, registered before the runs.**
+  - The measure is first-step top-1 on the dev half: lambda* (or the search) against lambda
+    0 (the walk). Hits are summed over the two seeds, with the exact two-sided sign test over
+    cases.
+  - A test helps when p < 0.05 and the mean gain is at least 2 points. The fully scored
+    subset and the coverage are reported beside it.
+  - A test that helps is then read once on the test half. The redesign it supports (a learned
+    energy head; an outcome prior with the search) goes back to the user.

@@ -116,6 +116,17 @@ def _evaluate_parser(sub) -> None:
         help="no search: each recorded step target "
         "ranked among the children of the pool the walk has reached (network.walk)",
     )
+    e.add_argument("--half", choices=["dev", "test"], help="human_benchmark only: the cases of "
+                   "one frozen half (<processed-dir>/human_benchmark/halves.json)")  # fmt: skip
+    e.add_argument(
+        "--rerank",
+        choices=["backward", "energy"],
+        help="--walk only: rerank "
+        "the first --rerank-top children by log P_f + lambda s (network.rerank)",
+    )
+    e.add_argument("--rerank-lambdas", nargs="+", type=float, default=[0.25, 0.5, 1.0, 2.0],
+                   help="the weights of the rerank score; 0 is always added")  # fmt: skip
+    e.add_argument("--rerank-top", type=int, default=5, help="children rescored, best first")
     e.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     e.add_argument("--out", type=Path, help="the result (JSON)")
 
@@ -213,9 +224,17 @@ def _expander(args):
 
 
 def _cases(args, counts):
-    from ksmech.network.benchmarks import load_cases
+    from ksmech.network.benchmarks import load_cases, load_half
 
-    return load_cases(args.set, args.processed_dir, args.split, args.part, args.limit, counts)
+    half = getattr(args, "half", None)
+    if half is None:
+        return load_cases(args.set, args.processed_dir, args.split, args.part, args.limit, counts)
+    if args.set != "human_benchmark":
+        raise ValueError("--half: human_benchmark only")
+    keep = load_half(args.processed_dir, half)
+    cases = [c for c in load_cases(args.set, args.processed_dir, args.split, args.part,
+                                   None, counts) if c.case_id in keep]  # fmt: skip
+    return cases[: args.limit] if args.limit is not None else cases
 
 
 def cmd_evaluate(args, console: Console) -> int:
@@ -229,7 +248,10 @@ def cmd_evaluate(args, console: Console) -> int:
     ckpt, expander, cfg = _expander(args)
     keys = ("set", "run", "run_source", "checkpoint", "split", "part", "limit", *SEARCH_KEYS)
     if args.walk:
-        return _walk(args, console, ckpt, expander, cases, counts)
+        return _walk(args, console, ckpt, expander, cases, counts, _rerank(args, ckpt, cfg))
+    if args.rerank:
+        console.print("[red]--rerank needs --walk[/red]")
+        return 2
     if args.backward_run:
         return bidirectional_cli.cmd_evaluate(args, console, ckpt, expander, cfg, cases, counts,
                                               keys)  # fmt: skip
@@ -243,23 +265,48 @@ def cmd_evaluate(args, console: Console) -> int:
                       f"rank {r.get('recorded_rank')}, {r.get('expanded')} expanded")  # fmt: skip
     report = summary(rows, args.k) | {"cases_skipped": dict(counts)}
     console.print(report)
-    header = prov.stamp("network_evaluate", SEARCH_VERSION, prov.file_input(ckpt),
-                        {k: getattr(args, k) for k in keys})  # fmt: skip
-    tag = args.set + (f"_{args.part}" if args.part != "all" else "")
-    tag += f"_n{args.limit}" if args.limit is not None else ""
-    out = args.out or ckpt.parent / f"network_eval_{tag}.json"
+    config = {k: getattr(args, k) for k in keys} | ({"half": args.half} if args.half else {})
+    header = prov.stamp("network_evaluate", SEARCH_VERSION, prov.file_input(ckpt), config)
+    out = args.out or ckpt.parent / f"network_eval_{_walk_tag(args)}.json"
     prov.write_json(out, {"summary": report, "cases": rows}, header)
     console.print(f"wrote {out}")
     return 0
 
 
-def _walk(args, console: Console, ckpt, expander, cases, counts) -> int:
+def _rerank(args, ckpt, cfg):
+    """The walk's `network.rerank.Rerank` of `--rerank`, or None."""
+    from ksmech.network import rerank
+
+    if args.rerank is None:
+        return None
+    if args.rerank == "energy":
+        score = rerank.energy_score(rerank.EnergyScorer())
+    else:
+        if not args.backward_run:
+            raise ValueError("--rerank backward needs --backward-run")
+        _, backward = bidirectional_cli.backward_expander(args, ckpt, cfg)
+        score = rerank.backward_score(backward)
+    return rerank.Rerank(score, tuple(args.rerank_lambdas), args.rerank_top)
+
+
+def _walk_tag(args) -> str:
+    tag = args.set + (f"_{args.part}" if args.part != "all" else "")
+    tag += f"_{args.half}" if getattr(args, "half", None) else ""
+    tag += f"_n{args.limit}" if args.limit is not None else ""
+    if getattr(args, "rerank", None) == "energy":
+        tag += "_rerank-energy"
+    elif getattr(args, "rerank", None) == "backward":
+        tag += f"_rerank-{args.backward_run}"
+    return tag
+
+
+def _walk(args, console: Console, ckpt, expander, cases, counts, rerank=None) -> int:
     """`evaluate --walk`: `network.walk` over the cases, `network_walk_<tag>.json`."""
     from ksmech.network.walk import walk_case, walk_summary
 
     rows = []
     for i, case in enumerate(cases, start=1):
-        rows.append(walk_case(expander, case))
+        rows.append(walk_case(expander, case, rerank))
         ranks = [s["rank"] for s in rows[-1].get("steps", [])]
         console.print(f"case {i} / {len(cases)} {case.case_id}: ranks {ranks}, "
                       f"stop {rows[-1].get('stop')}")  # fmt: skip
@@ -267,11 +314,19 @@ def _walk(args, console: Console, ckpt, expander, cases, counts) -> int:
     console.print(report)
     keys = ("set", "run", "run_source", "checkpoint", "split", "part", "limit", "beam",
             "build_missing")  # fmt: skip
-    header = prov.stamp("network_walk", SEARCH_VERSION, prov.file_input(ckpt),
-                        {k: getattr(args, k) for k in keys})  # fmt: skip
-    tag = args.set + (f"_{args.part}" if args.part != "all" else "")
-    tag += f"_n{args.limit}" if args.limit is not None else ""
-    out = args.out or ckpt.parent / f"network_walk_{tag}.json"
+    config = {k: getattr(args, k) for k in keys}
+    if getattr(args, "half", None):
+        config["half"] = args.half
+    if rerank is not None:
+        config["rerank"] = {"kind": args.rerank, "lambdas": list(rerank.lambdas),
+                            "top": rerank.top}  # fmt: skip
+        if args.rerank == "backward":
+            config["rerank"] |= {
+                k: getattr(args, k)
+                for k in ("backward_run", "backward_run_source", "backward_checkpoint")
+            }
+    header = prov.stamp("network_walk", SEARCH_VERSION, prov.file_input(ckpt), config)
+    out = args.out or ckpt.parent / f"network_walk_{_walk_tag(args)}.json"
     prov.write_json(out, {"summary": report, "cases": rows}, header)
     console.print(f"wrote {out}")
     return 0
