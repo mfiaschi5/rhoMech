@@ -11157,11 +11157,13 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
 - **The runs.** `ksmech-network evaluate --set human_benchmark --half dev`, fullrm_e_s0 and s1,
   default budget (50 expansions, depth 6, k 5), no `--build-missing`, at a623aec (clean). The
   output is `network_eval_human_benchmark_dev.json` beside each checkpoint. The walk it is paired
-  with is the `--rerank target` walk at lambda 0 (the forward order) of the same commit's tokens.
+  with is the `--rerank target` walk at lambda 0 (the forward order), built at 2913e8f; the two
+  commits differ only in docs/decisions.md, and both read the same tokens.
 - **The search.** 182 cases each, none failed. Arrival (EXACT or SKELETON) 85.2% (s0) and 88.5%
   (s1); K_FOUND 137 / 130, EXHAUSTED 44 / 51, START_IS_GOAL 1. About 4,500 expansions per seed
-  failed on MISSING_TOKENS (species deeper than the first children have no tokens), so the
-  search is narrower than its budget.
+  failed on MISSING_TOKENS (species deeper than the first children have no tokens). A failed
+  node is counted once and spends one of the 50 expansions (`ImplicitGraph.edges` stores it with
+  no edges): 4,517 of 6,734 (s0) and 4,765 of 6,713 (s1), two in three of the budget.
 - **First-step top-1 against the walk, the same 175 cases:**
 
   | cases | s0 walk -> search | s1 walk -> search | pooled gained / lost, p |
@@ -11170,14 +11172,20 @@ changes are bit for bit and were not timed (the benchmark has no validation pass
   | two or more steps (158) | 59.5 -> 60.8 (17 / 15, p 0.86) | 58.9 -> 64.6 (19 / 10, p 0.14) | 36 / 25, p 0.20 |
   | one step (17) | 47.1 -> 64.7 | 64.7 -> 76.5 | 5 / 0, p 0.063 |
 
+- **By arrival (post hoc, after the read; it changes no verdict).** Every case the search
+  found no pathway for is a miss, so the walk's top-1s there are losses of the search, not the
+  product misleading it: 0 gained, 7 lost (s0) and 0 / 3 (s1), all on two or more steps. On the
+  cases with a pathway and two or more steps: s0 17 / 8 (p 0.11), s1 19 / 7 (p 0.029), pooled
+  36 / 15 (p 0.0046). This conditions on the search's own success and drops only its losses, so
+  it is an optimistic bound, not a test.
 - **Verdict: not shown to help.** The mean gain is 4.6 points over all cases, but the pooled p is
   0.064, above the registered 0.05; on the pathways of two or more steps it is 3.5 points, p 0.20.
   The direction is positive in both seeds and the size varies with the seed (1.3 against 5.7 points
   on the headline). The test half is not read.
 - **What it means.** Unlike the greedy proxy, which lost 13-15 points, a search that looks ahead
   to the product does not hurt the first step and may help a few points. That is not established
-  at this sample size, and it is a lower bound: the search ran with ~4,500 failed expansions per
-  seed. A real read of an outcome prior needs the missing species' tokens (a batch QM between
+  at this sample size, and it is a lower bound: two in three of the search's expansions failed
+  on missing tokens. A real read of an outcome prior needs the missing species' tokens (a batch QM between
   search rounds) and more cases than one dev half.
 - **The three cheap tests close with no positive result by the registered rules.** Neither an
   energy nor the backward model reranks the first step better; the product, used greedily, makes

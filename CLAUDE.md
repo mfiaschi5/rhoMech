@@ -540,10 +540,12 @@ Main CLI entry points are added phase by phase and listed here as they land:
   recorded step target ranked among the children of the pool the walk has reached, the walk
   moving to that child (`network.walk`: the first step's top-1/3/5, every step's, the pathways
   walked whole, the stop codes), `network_walk_<set>[...].json`; `--walk --rerank
-  backward|energy [--rerank-lambdas ...] [--rerank-top 5]`: each step's first children also
+  backward|energy|target [--rerank-lambdas ...] [--rerank-top 5]`: each step's first children also
   reranked by log P_f + lambda x the backward model's log P of -R (`--backward-run`,
-  `--backward-run-source`) or -E(child) / RT (`network.rerank`), the target's rank per lambda,
-  the first step's top-k per lambda in `first_step_rerank`, files tagged `_rerank-<BWD|energy>`)
+  `--backward-run-source`), -E(child) / RT, or -D(child), the map-free deficit of the final
+  product's bond and charged-atom inventory in the child (`network.rerank`; lambda `inf` ranks
+  by the score first, log P on ties; `distinct` counts the scores that differ), the target's rank per lambda,
+  the first step's top-k per lambda in `first_step_rerank`, files tagged `_rerank-<BWD|energy|target>`)
 
   With `--backward-run BWD [--backward-checkpoint best] [--roundtrip-lambda 1]`, `search` and
   `evaluate` search from both sides (item I1, `network.bidirectional`): the forward run from the
